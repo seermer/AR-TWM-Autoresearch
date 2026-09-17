@@ -1,0 +1,23 @@
+proxy subset: 40 of 289 cases (seed 20260913)
+ids: 2,25,47,63,66,70,78,84,89,90,91,96,109,114,133,136,139,142,145,164,167,172,177,178,180,188,195,200,204,206,215,237,242,246,247,248,260,272,284,289
+
+stratum quotas (interaction mix): navigation=18/149, subject_action=6/43, perspective_switch=4/30, event_edit+subject_action=4/30, event_edit=4/28, event_edit+navigation=2/6, navigation+subject_action=1/2, event_edit+navigation+perspective_switch+subject_action=1/1
+
+representativeness (full % -> subset %):
+  category Nature:31->32  Urban:21->20  Indoor:16->18  Workspace:14->12  Fantasy:10->10  Sports/Game:8->8
+  persp    first_person:62->60  third_person:38->40
+  subject  human:44->45  unknown:33->32  other:7->8  animal:6->5  robot:6->8  vehicle:5->2
+  style    photorealistic:52->52  styled:48->48
+  turns    3-4:65->68  1-2:24->22  5-6:8->8  8+:3->2
+  mask     True:65->65  False:35->35
+  spatial  False:79->80  True:21->20
+  navi     True:55->55  False:45->45
+
+applicable cases per runnable metric (full -> subset):
+  289 -> 40  aesthetic, imaging, flicker, dynamic, motion, hpsv3, background, segment, geometric, photometric
+  188 -> 26  subject_consistency, perspective_consistency
+  158 -> 22  navigation_trajectory
+   60 ->  8  spatial_consistency, gated_spatial
+
+turn buckets: {2: 9, 3: 7, 4: 20, 5: 2, 6: 1, 8: 1}; collective rollout rounds on 5 GPUs: 135 (~74 min + ~6 min load)
+navi videos needing MegaSAM: 22; total turns: 143

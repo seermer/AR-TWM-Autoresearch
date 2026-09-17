@@ -1,0 +1,147 @@
+{
+  "model": "alayaworld",
+  "n_cases": 40,
+  "n_navi": 22,
+  "full": {
+    "aesthetic_quality": {
+      "mean": 0.5751,
+      "n": 40
+    },
+    "background_consistency": {
+      "mean": 0.9054,
+      "n": 40
+    },
+    "dynamic_degree": {
+      "mean": 0.95,
+      "n": 40
+    },
+    "gated_spatial_consistency": {
+      "mean": 0.7755,
+      "n": 8
+    },
+    "geometric_consistency": {
+      "mean": 0.8898,
+      "n": 40
+    },
+    "hpsv3_quality": {
+      "mean": 0.5134,
+      "n": 40
+    },
+    "imaging_quality": {
+      "mean": 0.6357,
+      "n": 40
+    },
+    "motion_smoothness": {
+      "mean": 0.977,
+      "n": 40
+    },
+    "navigation_accuracy": {
+      "mean": 0.7903,
+      "n": 22
+    },
+    "navigation_consistency": {
+      "mean": 0.7166,
+      "n": 18
+    },
+    "perspective_consistency": {
+      "mean": 0.5549,
+      "n": 26
+    },
+    "photometric_consistency": {
+      "mean": 0.8053,
+      "n": 40
+    },
+    "segment_continuity": {
+      "mean": 0.9,
+      "n": 40
+    },
+    "spatial_consistency": {
+      "mean": 0.7776,
+      "n": 8
+    },
+    "subject_consistency": {
+      "mean": 0.853,
+      "n": 26
+    },
+    "temporal_flickering": {
+      "mean": 0.9433,
+      "n": 40
+    },
+    "navigation_trajectory": {
+      "mean": 0.7534,
+      "n": 22,
+      "n_consistency": 18
+    }
+  },
+  "navi": {
+    "aesthetic_quality": {
+      "mean": 0.5863,
+      "n": 22
+    },
+    "background_consistency": {
+      "mean": 0.908,
+      "n": 22
+    },
+    "dynamic_degree": {
+      "mean": 0.9545,
+      "n": 22
+    },
+    "gated_spatial_consistency": {
+      "mean": 0.7755,
+      "n": 8
+    },
+    "geometric_consistency": {
+      "mean": 0.8898,
+      "n": 22
+    },
+    "hpsv3_quality": {
+      "mean": 0.4979,
+      "n": 22
+    },
+    "imaging_quality": {
+      "mean": 0.6354,
+      "n": 22
+    },
+    "motion_smoothness": {
+      "mean": 0.9751,
+      "n": 22
+    },
+    "navigation_accuracy": {
+      "mean": 0.7903,
+      "n": 22
+    },
+    "navigation_consistency": {
+      "mean": 0.7166,
+      "n": 18
+    },
+    "perspective_consistency": {
+      "mean": 0.5994,
+      "n": 13
+    },
+    "photometric_consistency": {
+      "mean": 0.8063,
+      "n": 22
+    },
+    "segment_continuity": {
+      "mean": 0.9091,
+      "n": 22
+    },
+    "spatial_consistency": {
+      "mean": 0.7776,
+      "n": 8
+    },
+    "subject_consistency": {
+      "mean": 0.8676,
+      "n": 13
+    },
+    "temporal_flickering": {
+      "mean": 0.9343,
+      "n": 22
+    },
+    "navigation_trajectory": {
+      "mean": 0.7534,
+      "n": 22,
+      "n_consistency": 18
+    }
+  }
+}
