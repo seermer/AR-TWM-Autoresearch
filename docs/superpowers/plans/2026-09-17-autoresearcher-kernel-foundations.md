@@ -2426,7 +2426,7 @@ from ar_kernel.config import KernelConfig
 from ar_kernel.eval.score import DIMENSION_METRICS, resolve_metric_set, score_from_report, cleanup_eval
 
 CFG = KernelConfig.load()
-REPORT = json.loads((CFG.wbench / "work_dirs" / "alayaworld" / "evaluation" / "report.json").read_text())
+REPORT = json.loads((CFG.repo_root / "reference" / "wbench_alayaworld_proxy" / "report.json").read_text())
 
 def test_dimension_metrics_are_the_22_wbench_metrics():
     assert len(DIMENSION_METRICS) == 22
@@ -3073,7 +3073,8 @@ def test_base_model_reproduces_the_recorded_proxy_score():
     ctx = bootstrap_run(CFG, run_id="manual_root", env=os.environ)
     score, detail = score_node(CFG, ctx, "root", None, 64, 64)
     import json
-    reference = json.loads((CFG.wbench / "work_dirs" / "alayaworld" / "evaluation" / "report.json").read_text())
+    reference = json.loads(
+        (CFG.repo_root / "reference" / "wbench_alayaworld_proxy" / "report.json").read_text())
     for metric, value in detail["metrics"].items():
         if metric in reference["full"]:
             assert abs(value - reference["full"][metric]["mean"]) < 1e-3, metric
