@@ -1670,12 +1670,15 @@ def store(tmp_path):
     conn = open_db(tmp_path)
     ing = Ingestor(CFG, tmp_path, conn, Recorder(tmp_path))
     ids = []
-    for name in ("a", "b"):
+    # Durations must differ: clip_id is content-addressed, so byte-identical
+    # candidates collapse to one clip. Pose count tracks the real frame count (30 fps).
+    for name, seconds in (("a", 4.0), ("b", 5.0)):
         stage = tmp_path / "staging" / name
         ids.append(ing.ingest([Candidate(
-            video=make_mp4(stage / "v.mp4"), caption=write_caption(stage / "c.json"),
-            pose=write_poses(stage / "p.npz", n_frames=120), camera_motion="moving",
-            provenance=PROV)], node_id="n1")[0].clip_id)
+            video=make_mp4(stage / "v.mp4", seconds=seconds),
+            caption=write_caption(stage / "c.json"),
+            pose=write_poses(stage / "p.npz", n_frames=int(seconds * 30)),
+            camera_motion="moving", provenance=PROV)], node_id="n1")[0].clip_id)
     return CommitStore(conn, ing.blobs, ing.clips), ids, tmp_path
 
 def test_commit_is_content_addressed_and_stable(store):
