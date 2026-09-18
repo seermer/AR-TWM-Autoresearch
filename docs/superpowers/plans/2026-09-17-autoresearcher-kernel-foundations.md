@@ -2159,7 +2159,13 @@ class Gate:
         if [rank, alpha] not in [list(p) for p in self.cfg.get("train.lora_allowlist")]:
             failures.append(f"lora rank/alpha {rank}/{alpha} is not in train.lora_allowlist")
 
-        if parent_commit is not None and commit_id == parent_commit:
+        if parent_commit is not None and commit_id != parent_commit:
+            # Compare manifests, not ids: a commit id hashes the message too, so an
+            # identical dataset recommitted under a new message would slip through.
+            if self.commits.manifest(commit_id) == self.commits.manifest(parent_commit):
+                failures.append(
+                    "the data commit's manifest is identical to the parent's; every node must change data")
+        elif parent_commit is not None:
             failures.append("the data commit is identical to the parent's; every node must change data")
 
         n_gpus = len(gpus)
