@@ -1,0 +1,37 @@
+paths:
+  worldmodel: ../WorldModel
+  wbench: ../WBench
+  runs_dir: runs
+gpus:
+  default: "0,1,2,3"
+  min_count: 4
+retries:
+  edit_self: 3
+  improve_recipe: 3
+selection:
+  gamma: 0.5
+  lambda: 0.5
+  slope: 6
+  top_k_mid: 3
+  child_penalty_scale: 8
+  epsilon: 0.2
+ingest:
+  aspect_tolerance: 0.02
+leakage:
+  phash_max_distance: 4
+  min_ncc: 0.95
+  min_entropy: 4.0
+train:
+  resolution_allowlist: [[416, 736], [352, 608]]
+  lora_allowlist: [[16, 16], [32, 32], [64, 64]]
+eval:
+  free_ram_before_render_gb: 120
+  ram_wait_alert_min: 10
+  vp_weights: weights/qwen3vl-a3b-visual-plausibility
+disk:
+  merge_min_free_gb: 30
+  alert_below_gb: 50
+telemetry:
+  gpu_sample_sec: 5
+tools:
+  job_wait_max_s: 300
