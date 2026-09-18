@@ -58,6 +58,14 @@ def test_unchanged_data_commit_is_rejected(gate_env):
     result = gate.check({}, commit, commit, "n1", tmp_path / "n1", tmp_path, [0, 1, 2, 3])
     assert not result.ok and any("data commit" in f for f in result.failures)
 
+def test_recommitted_identical_data_is_rejected(gate_env):
+    gate, commit, tmp_path = gate_env
+    manifest = gate.commits.manifest(commit)["datasets"]
+    twin = gate.commits.commit(None, manifest, "same data, new message", node_id="n2")
+    assert twin != commit
+    result = gate.check({}, twin, commit, "n2", tmp_path / "n2", tmp_path, [0, 1, 2, 3])
+    assert not result.ok and any("identical to the parent" in f for f in result.failures)
+
 def test_zero_steps_per_epoch_is_rejected(gate_env):
     gate, commit, tmp_path = gate_env
     result = gate.check({"optimizer.grad_accum_steps": 4, "optimizer.max_steps": 10},
