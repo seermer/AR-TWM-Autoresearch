@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib, os, sqlite3, time
+import hashlib, shutil, sqlite3, time
 from pathlib import Path
 
 KINDS = {"video": ".mp4", "caption": ".json", "pose": ".npz"}
@@ -47,7 +47,10 @@ class BlobStore:
         if target.exists():
             path.unlink()
         else:
-            os.replace(path, target)
+            # shutil.move falls back to copy+unlink on EXDEV, unlike os.replace,
+            # which raises when path and target sit on different filesystems
+            # (the normal case when candidates come from a sibling repo checkout).
+            shutil.move(str(path), str(target))
             target.chmod(0o444)
 
         self.conn.execute(
