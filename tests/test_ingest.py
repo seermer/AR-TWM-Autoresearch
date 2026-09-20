@@ -61,3 +61,19 @@ def test_static_candidate_with_poses_is_rejected(tmp_path):
                        provenance=PROV)
     [result] = ing.ingest([static], node_id="n1")
     assert result.accepted is False and any("static" in r for r in result.reasons)
+
+def test_candidate_outside_run_dir_is_rejected(tmp_path, tmp_path_factory):
+    # BlobStore.put() moves/consumes its source file; ingest must refuse anything it does not
+    # own rather than silently deleting it (Task 14: this is what consumed WorldModel's real
+    # example clips before the guard existed).
+    ing = _ingestor(tmp_path)
+    outside = tmp_path_factory.mktemp("outside")
+    video = make_mp4(outside / "v.mp4")
+    caption = write_caption(outside / "c.json")
+    pose = write_poses(outside / "p.npz", n_frames=120)
+    candidate = Candidate(video=video, caption=caption, pose=pose, camera_motion="moving",
+                          provenance=PROV)
+    [result] = ing.ingest([candidate], node_id="n1")
+    assert result.accepted is False
+    assert any("outside the run directory" in r for r in result.reasons)
+    assert video.exists() and caption.exists() and pose.exists()

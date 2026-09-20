@@ -49,6 +49,13 @@ class Ingestor:
     def ingest(self, candidates: list[Candidate], node_id: str) -> list[IngestResult]:
         return [self._one(c, node_id) for c in candidates]
 
+    def _outside_run_dir(self, path: Path) -> bool:
+        try:
+            Path(path).resolve().relative_to(self.run_dir.resolve())
+            return False
+        except ValueError:
+            return True
+
     def _one(self, candidate: Candidate, node_id: str) -> IngestResult:
         reasons: list[str] = []
         if not candidate.provenance:
@@ -59,6 +66,16 @@ class Ingestor:
             reasons.append("static clips must not carry poses (video_caption_static uses identity poses)")
         if candidate.camera_motion == "moving" and candidate.pose is None:
             reasons.append("moving clips need poses/<id>.npz")
+        # BlobStore.put() moves/consumes its source file (tests/test_blobs.py asserts this
+        # intentionally). Ingest must never be handed a path outside the run's own directory,
+        # or it will silently delete files it does not own (see the Task 14 incident where the
+        # manual test's real WorldModel example clips were consumed this way).
+        for label, path in (("video", candidate.video), ("caption", candidate.caption),
+                            ("pose", candidate.pose)):
+            if path is not None and self._outside_run_dir(path):
+                reasons.append(
+                    f"{label} path {path} is outside the run directory {self.run_dir}; "
+                    "ingest only accepts files already staged inside the run")
         if reasons:
             self.recorder.event("ingest.rejected", node=node_id, phase="ingest",
                                 payload={"reasons": reasons})
