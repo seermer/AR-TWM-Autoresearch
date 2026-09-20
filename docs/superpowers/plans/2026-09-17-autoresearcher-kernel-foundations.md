@@ -2778,7 +2778,7 @@ git commit -m "feat(eval): merge with RAM guard, proxy render, WBench phases, sc
 
 **Interfaces:**
 - Consumes: everything above.
-- Produces: `preflight_metrics(cfg, env) -> tuple[list[str], list[str]]` (metric set, exclusions with reasons); `bootstrap_run(cfg, run_id: str | None, env) -> RunContext(run_dir, conn, recorder, gpus, metric_set, case_ids, versions)`; `score_node(ctx, node_id, checkpoint: Path | None, rank: int, alpha: int) -> tuple[float, dict]` running merge → render → WBench → score → cleanup; `main(argv=None) -> int` implementing `ar init-run`, `ar status`, `ar score-node`.
+- Produces: `preflight_metrics(cfg, env) -> tuple[list[str], list[str]]` (metric set, exclusions with reasons); `bootstrap_run(cfg, run_id: str | None, env) -> RunContext(run_dir, conn, recorder, gpus, metric_set, case_ids, versions)`; `score_node(cfg, ctx, node_id, checkpoint: Path | None, rank: int, alpha: int) -> tuple[float, dict]` running merge → render → WBench → score → cleanup; `main(argv=None) -> int` implementing `ar init-run`, `ar status`, `ar score-node`.
 
 - [ ] **Step 1: Write the failing test**
 
