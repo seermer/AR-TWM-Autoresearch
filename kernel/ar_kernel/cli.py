@@ -1,0 +1,50 @@
+from __future__ import annotations
+import argparse, json, os, sys
+from pathlib import Path
+
+from .archive.nodes import NodeStore
+from .config import KernelConfig
+from .run import bootstrap_run, score_node
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="ar")
+    sub = parser.add_subparsers(dest="command", required=True)
+    init = sub.add_parser("init-run", help="create a run directory and record versions")
+    init.add_argument("--run-id", default=None)
+    status = sub.add_parser("status", help="show nodes of a run")
+    status.add_argument("--run-id", required=True)
+    score = sub.add_parser("score-node", help="render and score one node on the proxy")
+    score.add_argument("--run-id", required=True)
+    score.add_argument("--node", required=True)
+    score.add_argument("--checkpoint", default=None, help="node checkpoint dir; omit for the base model")
+    score.add_argument("--lora-rank", type=int, default=64)
+    score.add_argument("--lora-alpha", type=int, default=64)
+    args = parser.parse_args(argv)
+
+    cfg = KernelConfig.load()
+    if args.command == "init-run":
+        ctx = bootstrap_run(cfg, args.run_id, os.environ)
+        print(ctx.run_dir)
+        return 0
+
+    ctx = bootstrap_run(cfg, args.run_id, os.environ)
+    nodes = NodeStore(ctx.conn)
+    if args.command == "status":
+        for node in nodes.all():
+            print(f"{node['node_id']:<12} {node['status']:<14} score={node['score']}")
+        return 0
+
+    if args.command == "score-node":
+        checkpoint = Path(args.checkpoint) if args.checkpoint else None
+        try:
+            nodes.get(args.node)
+        except KeyError:
+            nodes.create(args.node, None, 0)
+        score, detail = score_node(cfg, ctx, args.node, checkpoint, args.lora_rank, args.lora_alpha)
+        nodes.record_score(args.node, score, ctx.metric_set, detail["metrics"])
+        print(json.dumps({"node": args.node, "score": score}, indent=2))
+        return 0
+    return 1
+
+if __name__ == "__main__":
+    sys.exit(main())
