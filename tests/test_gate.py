@@ -17,11 +17,16 @@ def gate_env(tmp_path):
     ing = Ingestor(CFG, tmp_path, conn, rec)
     clip_ids = []
     for i in range(8):
+        # Distinct durations: byte-identical inputs collapse to ONE content-addressed
+        # clip, which is how this fixture used to hand the gate a single clip listed
+        # eight times and still pass the clips-vs-GPUs check.
+        seconds = 4.0 + 0.5 * i
         stage = tmp_path / "staging" / f"c{i}"
         clip_ids.append(ing.ingest([Candidate(
-            video=make_mp4(stage / "v.mp4", seconds=5.0), caption=write_caption(stage / "c.json"),
-            pose=write_poses(stage / "p.npz", n_frames=150), camera_motion="moving",
+            video=make_mp4(stage / "v.mp4", seconds=seconds), caption=write_caption(stage / "c.json"),
+            pose=write_poses(stage / "p.npz", n_frames=int(seconds * 30)), camera_motion="moving",
             provenance=PROV)], node_id="n1")[0].clip_id)
+    assert len(set(clip_ids)) == 8, "fixture must produce 8 distinct clips"
     commits = CommitStore(conn, ing.blobs, ing.clips)
     commit = commits.commit(None, {"cam": {"format": "video_caption_camera", "prompt_mode": None,
                                            "weight": 1.0, "clips": clip_ids}}, "v", node_id="n1")

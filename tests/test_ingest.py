@@ -75,5 +75,68 @@ def test_candidate_outside_run_dir_is_rejected(tmp_path, tmp_path_factory):
                           provenance=PROV)
     [result] = ing.ingest([candidate], node_id="n1")
     assert result.accepted is False
-    assert any("outside the run directory" in r for r in result.reasons)
+    assert any("outside the staging directory" in r for r in result.reasons)
     assert video.exists() and caption.exists() and pose.exists()
+
+
+def test_candidate_inside_run_dir_but_outside_staging_is_rejected(tmp_path):
+    """Review I1: the guard used to accept anything under run_dir, including a
+    blob in store/ or a hardlink in another node's view. Only staging/ is fair game."""
+    ing = _ingestor(tmp_path)
+    elsewhere = tmp_path / "nodes" / "n7" / "view" / "cam"
+    video = make_mp4(elsewhere / "v.mp4", seconds=4.0)
+    caption = write_caption(elsewhere / "c.json")
+    pose = write_poses(elsewhere / "p.npz", n_frames=120)
+    result = ing.ingest([Candidate(video=video, caption=caption, pose=pose,
+                                   camera_motion="moving", provenance=PROV)], node_id="n1")[0]
+    assert not result.accepted
+    assert any("staging" in r for r in result.reasons)
+    assert video.exists() and caption.exists() and pose.exists()
+
+
+def test_swapping_the_staged_file_mid_check_cannot_change_what_is_stored(tmp_path):
+    """Review I2: checks read candidate.video, then blobs.put re-read it later.
+    An agent process could swap the staged file after the leakage check and land
+    unchecked bytes in the store. Files are now quarantined before any check."""
+    ing = _ingestor(tmp_path)
+    cand = _candidate(tmp_path, "swap")
+    original = cand.video.read_bytes()
+    staged_path = cand.video
+    real_check = ing.leakage.check
+
+    def swap_then_check(video):
+        staged_path.parent.mkdir(parents=True, exist_ok=True)
+        staged_path.write_bytes(b"SWAPPED benchmark frame")   # the agent's swap
+        return real_check(video)
+
+    ing.leakage.check = swap_then_check
+    result = ing.ingest([cand], node_id="n1")[0]
+    assert result.accepted
+    clip = ing.clips.get(result.clip_id)
+    assert ing.blobs.path(clip["video_digest"], "video").read_bytes() == original
+
+
+def test_corrupt_video_is_rejected_and_the_batch_continues(tmp_path):
+    """Review I4: a non-video file raised out of ffprobe and aborted the batch,
+    with no ingest.rejected event and later candidates never processed."""
+    ing = _ingestor(tmp_path)
+    bad = _candidate(tmp_path, "bad")
+    bad.video.write_bytes(b"this is not an mp4")
+    good = _candidate(tmp_path, "good", seconds=5.0)
+    results = ing.ingest([bad, good], node_id="n1")
+    assert not results[0].accepted
+    assert any("could not read" in r for r in results[0].reasons)
+    assert results[1].accepted
+    events = [e for e in ing.recorder.read_events("n1") if e["type"] == "ingest.rejected"]
+    assert events, "a rejected candidate must leave an ingest.rejected event"
+
+
+def test_rejected_candidate_files_are_returned_to_staging(tmp_path):
+    """Quarantine is only for the duration of the checks; a rejected candidate's
+    files go back where the agent staged them so it can inspect or fix them."""
+    ing = _ingestor(tmp_path)
+    cand = _candidate(tmp_path, "narrow", width=640, height=480)
+    result = ing.ingest([cand], node_id="n1")[0]
+    assert not result.accepted
+    assert cand.video.exists() and cand.caption.exists()
+    assert not [p for p in (tmp_path / "quarantine").rglob("*") if p.is_file()]

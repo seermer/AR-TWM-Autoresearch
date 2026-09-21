@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib, json, shutil
+import hashlib, json, shutil, subprocess, uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -49,12 +49,14 @@ class Ingestor:
     def ingest(self, candidates: list[Candidate], node_id: str) -> list[IngestResult]:
         return [self._one(c, node_id) for c in candidates]
 
-    def _outside_run_dir(self, path: Path) -> bool:
-        try:
-            Path(path).resolve().relative_to(self.run_dir.resolve())
-            return False
-        except ValueError:
-            return True
+    def _outside_staging(self, path: Path) -> bool:
+        """Only files under <run_dir>/staging/ may be ingested.
+
+        The whole run dir was too wide: it includes store/ (a stored blob handed
+        back in would be unlinked as a duplicate source) and other nodes' views
+        (ingesting one removes that view's hardlink).
+        """
+        return not Path(path).resolve().is_relative_to((self.run_dir / "staging").resolve())
 
     def _one(self, candidate: Candidate, node_id: str) -> IngestResult:
         reasons: list[str] = []
@@ -72,32 +74,61 @@ class Ingestor:
         # manual test's real WorldModel example clips were consumed this way).
         for label, path in (("video", candidate.video), ("caption", candidate.caption),
                             ("pose", candidate.pose)):
-            if path is not None and self._outside_run_dir(path):
+            if path is not None and self._outside_staging(path):
                 reasons.append(
-                    f"{label} path {path} is outside the run directory {self.run_dir}; "
-                    "ingest only accepts files already staged inside the run")
+                    f"{label} path {path} is outside the staging directory "
+                    f"{self.run_dir / 'staging'}; ingest only accepts files staged there")
         if reasons:
             self.recorder.event("ingest.rejected", node=node_id, phase="ingest",
                                 payload={"reasons": reasons})
             return IngestResult(accepted=False, reasons=reasons)
 
-        info = probe_video(candidate.video)
+        # Quarantine before ANY check: every check and the store then act on the
+        # same bytes. Checking the staged path and re-reading it at put() time let
+        # an agent process swap the file after the leakage check (review I2).
+        # quarantine/ is kernel-private; agents only ever see staging/.
+        staged = {"video": candidate.video, "caption": candidate.caption, "pose": candidate.pose}
+        qdir = self.run_dir / "quarantine" / uuid.uuid4().hex
+        qdir.mkdir(parents=True)
+        held = {k: _move(v, qdir / f"{k}{Path(v).suffix}") for k, v in staged.items() if v is not None}
+        try:
+            try:
+                result = self._check_and_store(candidate, held, node_id)
+            except (subprocess.CalledProcessError, ValueError, IndexError, KeyError) as exc:
+                # A file ffprobe/decoding cannot read is the candidate's fault: record
+                # a rejection and carry on with the batch instead of crashing the node.
+                reasons = [f"could not read the candidate video: {type(exc).__name__}: {exc}"[:500]]
+                self.recorder.event("ingest.rejected", node=node_id, phase="ingest",
+                                    payload={"reasons": reasons})
+                result = IngestResult(accepted=False, reasons=reasons)
+        finally:
+            # Anything not consumed by the store goes back where the agent staged it.
+            for key, qpath in held.items():
+                if qpath.exists():
+                    _move(qpath, _free_path(Path(staged[key])))
+            shutil.rmtree(qdir, ignore_errors=True)
+        return result
+
+    def _check_and_store(self, candidate: Candidate, held: dict[str, Path],
+                         node_id: str) -> IngestResult:
+        video, caption, pose = held["video"], held["caption"], held.get("pose")
+        info = probe_video(video)
         if not aspect_ok(info, self.tolerance):
-            reasons.append(f"aspect ratio {info.width}/{info.height} is not within "
-                           f"{self.tolerance:.0%} of 16:9")
+            reasons = [f"aspect ratio {info.width}/{info.height} is not within "
+                       f"{self.tolerance:.0%} of 16:9"]
             self.recorder.event("ingest.rejected", node=node_id, phase="ingest",
                                 payload={"reasons": reasons})
             return IngestResult(accepted=False, reasons=reasons)
 
-        probe_root = self.run_dir / "tmp" / f"probe_{_digest(candidate.video)[:12]}"
+        probe_root = self.run_dir / "tmp" / f"probe_{_digest(video)[:12]}"
         shutil.rmtree(probe_root, ignore_errors=True)
         (probe_root / "videos").mkdir(parents=True)
         (probe_root / "captions").mkdir(parents=True)
-        shutil.copy2(candidate.video, probe_root / "videos" / "c.mp4")
-        shutil.copy2(candidate.caption, probe_root / "captions" / "c.json")
-        if candidate.pose is not None:
+        shutil.copy2(video, probe_root / "videos" / "c.mp4")
+        shutil.copy2(caption, probe_root / "captions" / "c.json")
+        if pose is not None:
             (probe_root / "poses").mkdir(parents=True)
-            shutil.copy2(candidate.pose, probe_root / "poses" / "c.npz")
+            shutil.copy2(pose, probe_root / "poses" / "c.npz")
         try:
             reports = check_clip_formats(self.cfg, probe_root, candidate.camera_motion,
                                          self.base_recipe, recorder=self.recorder, node=node_id)
@@ -112,7 +143,7 @@ class Ingestor:
                                 payload={"reasons": reasons, "reports": reports})
             return IngestResult(accepted=False, reasons=reasons)
 
-        verdict = self.leakage.check(candidate.video)
+        verdict = self.leakage.check(video)
         self.recorder.event("ingest.leakage", node=node_id, phase="ingest",
                             payload={"matches": verdict.matches, "near": verdict.near_matches})
         if verdict.rejected:
@@ -122,9 +153,9 @@ class Ingestor:
                                 payload={"reasons": reasons})
             return IngestResult(accepted=False, reasons=reasons)
 
-        video_digest = self.blobs.put(candidate.video, "video")
-        caption_digest = self.blobs.put(candidate.caption, "caption")
-        pose_digest = self.blobs.put(candidate.pose, "pose") if candidate.pose else None
+        video_digest = self.blobs.put(video, "video")
+        caption_digest = self.blobs.put(caption, "caption")
+        pose_digest = self.blobs.put(pose, "pose") if pose else None
         clip_id = hashlib.sha256(json.dumps(
             {"video": video_digest, "caption": caption_digest, "pose": pose_digest,
              "camera_motion": candidate.camera_motion}, sort_keys=True).encode()).hexdigest()
@@ -140,3 +171,18 @@ class Ingestor:
         self.recorder.event("ingest.accepted", node=node_id, phase="ingest",
                             payload={"clip_id": clip_id, "formats": formats, "warnings": warnings})
         return IngestResult(accepted=True, clip_id=clip_id, formats=formats, warnings=warnings)
+
+
+def _move(src: Path, dst: Path) -> Path:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    return Path(shutil.move(str(src), str(dst)))
+
+
+def _free_path(path: Path) -> Path:
+    """`path`, or a sibling name if the agent has since put something there."""
+    if not path.exists():
+        return path
+    n = 1
+    while (candidate := path.with_name(f"{path.stem}.returned{n}{path.suffix}")).exists():
+        n += 1
+    return candidate

@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib, json, os, re, sqlite3, time
+import hashlib, json, os, re, shutil, sqlite3, time
 from pathlib import Path
 
 FORMATS = {"video_caption_camera", "video_timed_prompts_camera", "video_caption_static"}
@@ -8,6 +8,8 @@ BUILTIN_NAMES = {"sekai_real_hq", "spatialvid_hq", "sekai_game_walking", "sekai_
                  "mugen_v2", "RealEstate10K", "spatialvid", "veo3", "OpenVid", "mp4_frame_game_3",
                  "sekai_real_mini"}
 NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+# Written into every view materialize() builds; the only directories it will replace.
+VIEW_MARKER = ".ar_view"
 
 class CommitError(ValueError):
     """The proposed data commit is invalid."""
@@ -41,6 +43,12 @@ class CommitStore:
             if weight < 0:
                 raise CommitError(f"{name}.weight must be >= 0")
             clip_ids = list(entry.get("clips") or [])
+            if len(set(clip_ids)) != len(clip_ids):
+                dupes = sorted({c for c in clip_ids if clip_ids.count(c) > 1})
+                # A repeated clip inflates the clip count the gate checks against the
+                # GPU count and silently reweights sampling; weights exist for that.
+                raise CommitError(f"{name}: clip listed more than once: {dupes}; "
+                                  f"use the dataset weight to upsample instead")
             key = fmt if mode is None else f"{fmt}:{mode}"
             for clip_id in clip_ids:
                 try:
@@ -82,7 +90,38 @@ class CommitStore:
         return json.loads(self.get(commit_id)["manifest"])
 
     def materialize(self, commit_id: str, dest: Path) -> dict[str, Path]:
+        """Build a hardlink view of `commit_id` at `dest`, REPLACING anything there.
+
+        The view is assembled in a sibling temp directory and swapped in, so the
+        result holds exactly the commit's clips. Adding into an existing view was
+        wrong: WorldModel's loader lists videos/ directly, so a clip dropped
+        between gate attempts stayed in the view and the node trained on data its
+        recorded commit did not contain.
+
+        Replacing deletes the old destination, so it only ever deletes a directory
+        carrying VIEW_MARKER (written here) -- never an arbitrary path. Removing a
+        view unlinks hardlinks only; the blob store keeps its own link.
+        """
         dest = Path(dest)
+        if dest.exists() and any(dest.iterdir()) and not (dest / VIEW_MARKER).is_file():
+            raise CommitError(f"{dest} exists and is not a kernel-built view; refusing to replace it")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        staging = dest.with_name(f".{dest.name}.building-{os.getpid()}")
+        if staging.exists():
+            shutil.rmtree(staging)
+        staging.mkdir()
+        (staging / VIEW_MARKER).write_text(commit_id + "\n")
+        roots = self._link_into(commit_id, staging)
+        if dest.exists():
+            retired = dest.with_name(f".{dest.name}.retired-{os.getpid()}")
+            dest.rename(retired)
+            staging.rename(dest)
+            shutil.rmtree(retired)
+        else:
+            staging.rename(dest)
+        return {name: dest / root.name for name, root in roots.items()}
+
+    def _link_into(self, commit_id: str, dest: Path) -> dict[str, Path]:
         roots: dict[str, Path] = {}
         for name, entry in self.manifest(commit_id)["datasets"].items():
             if entry["weight"] <= 0 or not entry["clips"]:
@@ -101,8 +140,6 @@ class CommitStore:
                     links.append((self.blobs.path(clip["pose_digest"], "pose"),
                                   root / "poses" / f"{clip_id}.npz"))
                 for source, target in links:
-                    if target.exists():
-                        target.unlink()
                     os.link(source, target)
             roots[name] = root
         return roots

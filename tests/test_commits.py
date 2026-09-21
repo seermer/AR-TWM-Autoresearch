@@ -78,3 +78,64 @@ def test_static_dataset_view_has_no_poses_dir(tmp_path):
                                         "weight": 1.0, "clips": [clip_id]}}, "v", node_id="n1")
     root = cs.materialize(commit, tmp_path / "view")["fixed"]
     assert not (root / "poses").exists()
+
+
+def _cam(ids):
+    return {"cam": {"format": "video_caption_camera", "prompt_mode": None,
+                    "weight": 1.0, "clips": list(ids)}}
+
+
+def test_rematerializing_a_smaller_commit_removes_stale_clips(store):
+    """Review C1: a gate retry reuses node_dir/view. A clip dropped between
+    attempts must not survive in the view, or the node trains on data its
+    recorded commit does not contain -- the loader lists videos/ directly."""
+    cs, ids, tmp = store
+    big = cs.commit(None, _cam(ids), "both clips", node_id="n1")
+    small = cs.commit(None, _cam(ids[:1]), "one clip", node_id="n1")
+    view = tmp / "node" / "view"
+    cs.materialize(big, view)
+    assert len(list((view / "cam" / "videos").iterdir())) == 2
+    cs.materialize(small, view)
+    videos = sorted(p.name for p in (view / "cam" / "videos").iterdir())
+    assert videos == [f"{ids[0]}.mp4"]
+    assert sorted(p.name for p in (view / "cam" / "captions").iterdir()) == [f"{ids[0]}.json"]
+
+
+def test_rematerializing_drops_a_dataset_absent_from_the_new_commit(store):
+    cs, ids, tmp = store
+    two = cs.commit(None, {**_cam(ids), "cam2": _cam(ids[1:])["cam"]}, "two sets", node_id="n1")
+    one = cs.commit(None, _cam(ids), "one set", node_id="n1")
+    view = tmp / "node" / "view"
+    cs.materialize(two, view)
+    cs.materialize(one, view)
+    assert sorted(p.name for p in view.iterdir() if not p.name.startswith(".")) == ["cam"]
+
+
+def test_materialize_refuses_to_replace_a_directory_it_did_not_build(store):
+    """The replace step deletes the old destination, so it must never touch a
+    directory that is not a kernel-built view."""
+    cs, ids, tmp = store
+    precious = tmp / "precious"
+    precious.mkdir()
+    (precious / "keep.txt").write_text("do not delete")
+    with pytest.raises(CommitError, match="not a kernel-built view"):
+        cs.materialize(cs.commit(None, _cam(ids), "x", node_id="n1"), precious)
+    assert (precious / "keep.txt").read_text() == "do not delete"
+
+
+def test_rematerialize_leaves_blobs_intact(store):
+    """Removing the old view unlinks hardlinks only; the blob store keeps its copy."""
+    cs, ids, tmp = store
+    view = tmp / "node" / "view"
+    cs.materialize(cs.commit(None, _cam(ids), "both", node_id="n1"), view)
+    cs.materialize(cs.commit(None, _cam(ids[:1]), "one", node_id="n1"), view)
+    clip = cs.clips.get(ids[1])
+    assert cs.blobs.path(clip["video_digest"], "video").exists()
+
+
+def test_duplicate_clip_in_a_dataset_is_rejected(store):
+    """A clip listed twice would inflate the clips-vs-GPUs count the gate checks
+    and silently reweight sampling. Upsampling is what dataset weights are for."""
+    cs, ids, _ = store
+    with pytest.raises(CommitError, match="more than once"):
+        cs.commit(None, _cam([ids[0], ids[0], ids[1]]), "dup", node_id="n1")
