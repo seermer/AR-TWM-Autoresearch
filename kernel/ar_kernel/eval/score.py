@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, shutil
+import json, math, shutil
 from pathlib import Path
 from typing import Mapping
 
@@ -29,12 +29,34 @@ def resolve_metric_set(cfg: KernelConfig, env: Mapping[str, str]) -> list[str]:
         metrics = [m for m in metrics if m != "visual_plausibility"]
     return metrics
 
-def score_from_report(report: dict, metric_set: list[str]) -> tuple[float, dict]:
+class ScoreError(ValueError):
+    """The report cannot yield a score comparable with the rest of the run."""
+
+
+def score_from_report(report: dict, metric_set: list[str],
+                      expected_n: dict[str, int] | None = None) -> tuple[float, dict]:
+    """Mean of the run's fixed metric set. Refuses, rather than scores, a report
+    that is incomplete, non-finite, or computed over the wrong cases.
+
+    `expected_n` maps metric -> case count. Per-metric counts are fixed by case
+    metadata on the proxy subset, so a smaller n means a precompute step silently
+    dropped cases (DA3 or SAM2 failing on some) and the mean is over a different
+    case set than every other node's.
+    """
     full = report["full"]
     missing = [m for m in metric_set if m not in full]
     if missing:
         raise KeyError(f"metrics missing from the report: {missing}")
     per_metric = {m: float(full[m]["mean"]) for m in metric_set}
+    bad = [m for m, v in per_metric.items() if not math.isfinite(v)]
+    if bad:
+        raise ScoreError(f"metric means not finite: {bad}")
+    if expected_n:
+        wrong = {m: (full[m].get("n"), expected_n[m]) for m in metric_set
+                 if m in expected_n and full[m].get("n") != expected_n[m]}
+        if wrong:
+            raise ScoreError("metrics computed over the wrong number of cases (got vs expected): "
+                             + ", ".join(f"{m} {got} vs {want}" for m, (got, want) in wrong.items()))
     return sum(per_metric.values()) / len(per_metric), per_metric
 
 def aggregates(cfg: KernelConfig, eval_dir: Path, case_ids: list[str]) -> dict:

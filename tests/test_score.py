@@ -37,3 +37,41 @@ def test_cleanup_removes_regenerable_dirs_only(tmp_path):
     removed = cleanup_eval(tmp_path / "work_dirs", "m")
     assert sorted(removed) == ["_navi_videos_tmp", "da3_cache", "masks", "megasam"]
     assert (model_dir / "videos").exists() and (model_dir / "evaluation").exists()
+
+
+def _report(**metrics):
+    return {"full": {m: {"mean": mean, "n": n} for m, (mean, n) in metrics.items()}}
+
+
+def test_metric_computed_on_fewer_cases_than_expected_is_refused():
+    """Review I5: if DA3 failed on 10 of 40 cases, geometric consistency was
+    averaged over 30 and the node scored normally on a different case set --
+    a wrong result that looks clean."""
+    import pytest
+    from ar_kernel.eval.score import ScoreError
+    report = _report(geometric_consistency=(0.88, 30), aesthetic_quality=(0.57, 40))
+    with pytest.raises(ScoreError, match="geometric_consistency.*30.*40"):
+        score_from_report(report, ["geometric_consistency", "aesthetic_quality"],
+                          expected_n={"geometric_consistency": 40, "aesthetic_quality": 40})
+
+
+def test_matching_case_counts_score_normally():
+    report = _report(geometric_consistency=(0.8, 40), spatial_consistency=(0.6, 8))
+    score, per = score_from_report(report, ["geometric_consistency", "spatial_consistency"],
+                                   expected_n={"geometric_consistency": 40, "spatial_consistency": 8})
+    assert abs(score - 0.7) < 1e-9
+
+
+def test_metric_without_an_expectation_is_not_count_checked():
+    """VLM metrics are absent from the GPU-only reference; no n to compare against."""
+    score, _ = score_from_report(_report(scene_adherence=(0.5, 40)), ["scene_adherence"],
+                                 expected_n={})
+    assert score == 0.5
+
+
+def test_nan_metric_mean_is_refused():
+    """A NaN mean passed through, and sqlite stored the NaN score as NULL."""
+    import pytest
+    from ar_kernel.eval.score import ScoreError
+    with pytest.raises(ScoreError, match="not finite"):
+        score_from_report(_report(aesthetic_quality=(float("nan"), 40)), ["aesthetic_quality"])

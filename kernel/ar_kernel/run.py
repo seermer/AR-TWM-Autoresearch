@@ -1,7 +1,7 @@
 from __future__ import annotations
 import datetime as dt
 import json, shutil, subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
@@ -23,6 +23,7 @@ class RunContext:
     metric_set: list[str]
     case_ids: list[str]
     versions: dict
+    expected_n: dict = field(default_factory=dict)   # metric -> case count on the proxy
 
 def preflight_metrics(cfg: KernelConfig, env: Mapping[str, str]) -> tuple[list[str], list[str]]:
     """The run's metric set plus one human-readable reason per exclusion."""
@@ -83,10 +84,11 @@ def bootstrap_run(cfg: KernelConfig, run_id: str | None, env: Mapping[str, str])
     (run_dir / "config" / "versions.json").write_text(json.dumps(versions, indent=2))
     metric_set, excluded = preflight_metrics(cfg, env)
     case_ids = (run_dir / "config" / "proxy_cases.txt").read_text().strip().split(",")
+    expected_n = _expected_case_counts(cfg, metric_set, recorder)
     # run.json is written last: its presence is what marks the run as created.
     (run_dir / "config" / "run.json").write_text(json.dumps(
         {"run_id": run_id, "metric_set": metric_set, "excluded_metrics": excluded,
-         "case_ids": case_ids, "versions": versions}, indent=2))
+         "case_ids": case_ids, "versions": versions, "expected_n": expected_n}, indent=2))
     recorder.event("run.start", payload={"gpus": gpus, "metric_set": metric_set,
                                          "excluded_metrics": excluded, "versions": versions,
                                          "case_ids": case_ids})
@@ -94,7 +96,27 @@ def bootstrap_run(cfg: KernelConfig, run_id: str | None, env: Mapping[str, str])
         recorder.event("run.warning", payload={"message": "sibling repo has uncommitted changes",
                                                "worldmodel_dirty": wm_dirty, "wbench_dirty": wb_dirty})
     return RunContext(run_dir=run_dir, conn=open_db(run_dir), recorder=recorder, gpus=gpus,
-                      metric_set=metric_set, case_ids=case_ids, versions=versions)
+                      metric_set=metric_set, case_ids=case_ids, versions=versions,
+                      expected_n=expected_n)
+
+
+REFERENCE_REPORT = Path("reference") / "wbench_alayaworld_proxy" / "report.json"
+
+
+def _expected_case_counts(cfg: KernelConfig, metric_set: list[str], recorder) -> dict:
+    """Per-metric case counts on the proxy subset, from the reference report.
+
+    Counts are fixed by case metadata, so every node must match them; a smaller
+    count means a precompute step dropped cases. Metrics the reference lacks (the
+    VLM ones) get no expectation.
+    """
+    path = cfg.repo_root / REFERENCE_REPORT
+    if not path.exists():
+        recorder.event("run.warning", payload={
+            "message": f"no reference report at {path}; per-metric case counts will not be checked"})
+        return {}
+    full = json.loads(path.read_text())["full"]
+    return {m: int(full[m]["n"]) for m in metric_set if m in full and "n" in full[m]}
 
 
 def attach_run(cfg: KernelConfig, run_id: str, env: Mapping[str, str]) -> RunContext:
@@ -110,7 +132,8 @@ def attach_run(cfg: KernelConfig, run_id: str, env: Mapping[str, str]) -> RunCon
     meta = json.loads(meta_path.read_text())
     return RunContext(run_dir=run_dir, conn=open_db(run_dir), recorder=_recorder(run_dir, env),
                       gpus=resolve_gpus(cfg, env), metric_set=meta["metric_set"],
-                      case_ids=meta["case_ids"], versions=meta["versions"])
+                      case_ids=meta["case_ids"], versions=meta["versions"],
+                      expected_n=meta.get("expected_n", {}))
 
 
 def score_node(cfg: KernelConfig, ctx: RunContext, node_id: str, checkpoint: Path | None,
@@ -127,7 +150,7 @@ def score_node(cfg: KernelConfig, ctx: RunContext, node_id: str, checkpoint: Pat
     render_config = build_render_config(cfg, merged, history, videos_dir, ctx.case_ids, node_dir)
     render_proxy(cfg, render_config, ctx.gpus, node_id, ctx.recorder, ctx.case_ids)
     report = run_wbench_phases(cfg, work_dir, model, ctx.gpus, ctx.metric_set, ctx.recorder, node_id)
-    score, per_metric = score_from_report(report, ctx.metric_set)
+    score, per_metric = score_from_report(report, ctx.metric_set, ctx.expected_n)
     strata = aggregates(cfg, work_dir / model / "evaluation", ctx.case_ids)
     ctx.recorder.event("eval.scored", node=node_id, phase="eval",
                        payload={"score": score, "metrics": per_metric, "strata": strata})

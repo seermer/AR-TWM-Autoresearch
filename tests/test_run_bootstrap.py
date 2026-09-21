@@ -93,3 +93,12 @@ def test_bootstrap_refuses_to_start_when_wbench_weights_are_broken(tmp_path, mon
     with pytest.raises(run_mod.PreflightError, match="MegaSAM"):
         bootstrap_run(CFG, run_id="broken", env=ENV4)
     assert not (tmp_path / "broken" / "config" / "run.json").exists()
+
+
+def test_bootstrap_records_expected_case_counts_from_the_reference(tmp_path, monkeypatch):
+    _runs(tmp_path, monkeypatch)
+    ctx = bootstrap_run(CFG, run_id="r_n", env=ENV4)
+    assert ctx.expected_n.get("geometric_consistency") == 40
+    assert ctx.expected_n.get("spatial_consistency") == 8
+    from ar_kernel.run import attach_run
+    assert attach_run(CFG, "r_n", ENV4).expected_n == ctx.expected_n
