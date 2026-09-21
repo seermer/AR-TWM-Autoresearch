@@ -554,7 +554,10 @@ artifacts.
 | `/ar_contract` | ro | Contract package |
 
 - Not mounted: `WorldModel/`, `WBench/`, `AutoResearcher/kernel`, `.env`, weights.
-- Network: a dedicated Docker network reaching only the gateway and the tool server.
+- Network: **none** (`--network none`). The gateway and the tool server are reached over Unix
+  domain sockets in a per-run socket directory mounted at `/run/ar`. *(Amended 2026-09-21, Plan 2:
+  a Docker `--internal` network was tested and still exposes host services on the bridge IP; SSH
+  was reachable from inside the sandbox.)*
 - Limits: CPU and memory caps from `kernel.yaml`; no GPU. The image ships `ffmpeg`/
   `ffprobe`, `numpy`, `opencv-python-headless` and `Pillow`, which is what captioning
   (frame extraction + a vision model through the gateway), cropping to 16:9, trimming and
@@ -565,6 +568,11 @@ artifacts.
 ---
 
 ## 10. Kernel tools (MCP)
+
+*(Amended 2026-09-21, Plan 2: tools are registered with underscores, e.g. `data_ingest`,
+`hf_search`, `job_wait`, `recipe_check`, because OpenAI function names must match
+`^[a-zA-Z0-9_-]+$` and the Agents SDK forwards MCP tool names as function names. The dotted
+names below are the spec's logical names.)*
 
 Only operations that need privileges live in the kernel; all other logic (format
 conversion, cropping, trimming, captioning, prompt timing) is agent code.
