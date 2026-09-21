@@ -17,3 +17,18 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
         recorder.event("subproc.end", node=node, phase=phase, returncode=proc.returncode,
                        payload={"stdout": proc.stdout, "stderr": proc.stderr})
     return proc
+
+
+def _tail(proc, limit: int = 4000) -> str:
+    """Last `limit` chars of stdout AND stderr.
+
+    Tracebacks go to stderr, so an error message built from stdout alone hides
+    the actual cause -- a render that died in a ValueError reported only the
+    progress banner it had printed before failing.
+    """
+    parts = []
+    for name in ("stdout", "stderr"):
+        text = (getattr(proc, name, "") or "").strip()
+        if text:
+            parts.append(f"--- {name} (last {limit}) ---\n{text[-limit:]}")
+    return "\n".join(parts) if parts else "(no output captured)"

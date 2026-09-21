@@ -5,7 +5,7 @@ from pathlib import Path
 import yaml
 
 from ..config import KernelConfig
-from ..subproc import run_in_env
+from ..subproc import run_in_env, _tail
 from .recipe import TUNABLE_KEYS, steps_per_epoch, write_resolved_config
 
 @dataclass
@@ -86,7 +86,7 @@ class Gate:
                               extra_env={"CUDA_VISIBLE_DEVICES": gpu_list, **extra},
                               timeout=3600, recorder=self.recorder, node=node_id, phase="gate")
             if proc.returncode != 0:
-                failures.append(f"{label} failed (rc={proc.returncode}): {proc.stdout[-2000:]}")
+                failures.append(f"{label} failed (rc={proc.returncode}): {_tail(proc, 2000)}")
 
         describe = run_in_env(
             "alayaworld", ["bash", "scripts/finetune/lowcompute_4x4090.sh"],

@@ -4,7 +4,7 @@ from pathlib import Path
 import yaml
 
 from ..config import KernelConfig
-from ..subproc import run_in_env
+from ..subproc import run_in_env, _tail
 
 def build_render_config(cfg: KernelConfig, merged: Path | None, history_encoder: Path,
                         videos_dir: Path, case_ids: list[str], node_dir: Path) -> Path:
@@ -38,7 +38,7 @@ def render_proxy(cfg: KernelConfig, render_config: Path, gpus: list[int], node_i
             cwd=cfg.worldmodel, timeout=int(12 * 3600), recorder=recorder, node=node_id,
             phase="render")
     if proc.returncode != 0:
-        raise RuntimeError(f"render failed (rc={proc.returncode}): {proc.stdout[-4000:]}")
+        raise RuntimeError(f"render failed (rc={proc.returncode}): {_tail(proc)}")
     rendered = sorted(videos_dir.glob("case_*_combined.mp4"))
     if len(rendered) != len(case_ids):
         raise RuntimeError(f"rendered {len(rendered)} of {len(case_ids)} proxy cases")

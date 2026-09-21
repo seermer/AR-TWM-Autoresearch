@@ -3,7 +3,7 @@ import shutil, subprocess, time
 from pathlib import Path
 
 from ..config import KernelConfig
-from ..subproc import run_in_env
+from ..subproc import run_in_env, _tail
 
 def available_ram_gb() -> float:
     for line in Path("/proc/meminfo").read_text().splitlines():
@@ -45,6 +45,6 @@ def merge_lora(cfg: KernelConfig, checkpoint: Path, rank: int, alpha: int, run_d
              "--output", str(slot), "--lora_rank", str(rank), "--lora_alpha", str(alpha)],
             cwd=cfg.worldmodel, timeout=7200, recorder=recorder, node=node_id, phase="eval")
     if proc.returncode != 0:
-        raise RuntimeError(f"merge failed (rc={proc.returncode}): {proc.stdout[-4000:]}")
+        raise RuntimeError(f"merge failed (rc={proc.returncode}): {_tail(proc)}")
     wait_for_ram(cfg, recorder, node_id)
     return slot

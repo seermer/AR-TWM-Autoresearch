@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 from ..config import KernelConfig
-from ..subproc import run_in_env
+from ..subproc import run_in_env, _tail
 from .score import VLM_METRICS
 
 def run_wbench_phases(cfg: KernelConfig, work_dir: Path, model: str, gpus: list[int],
@@ -22,7 +22,7 @@ def run_wbench_phases(cfg: KernelConfig, work_dir: Path, model: str, gpus: list[
                 cwd=cfg.wbench, timeout=int(12 * 3600), recorder=recorder, node=node_id,
                 phase="eval")
         if proc.returncode != 0:
-            raise RuntimeError(f"wbench {phase} failed (rc={proc.returncode}): {proc.stdout[-4000:]}")
+            raise RuntimeError(f"wbench {phase} failed (rc={proc.returncode}): {_tail(proc)}")
     if "visual_plausibility" in metric_set:
         with recorder.span("wbench.visual_plausibility", node=node_id, phase="eval"):
             proc = run_in_env(
@@ -33,7 +33,7 @@ def run_wbench_phases(cfg: KernelConfig, work_dir: Path, model: str, gpus: list[
                 cwd=cfg.wbench, extra_env={"CUDA_VISIBLE_DEVICES": gpu_arg},
                 timeout=int(12 * 3600), recorder=recorder, node=node_id, phase="eval")
         if proc.returncode != 0:
-            raise RuntimeError(f"visual_plausibility failed (rc={proc.returncode}): {proc.stdout[-4000:]}")
+            raise RuntimeError(f"visual_plausibility failed (rc={proc.returncode}): {_tail(proc)}")
         with recorder.span("wbench.report2", node=node_id, phase="eval"):
             run_in_env("wbench-main",
                        ["python", "main.py", "--model", model, "--work_dir", str(work_dir),
