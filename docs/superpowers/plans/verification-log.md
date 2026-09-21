@@ -3,11 +3,17 @@
 Task 14 of `2026-09-17-autoresearcher-kernel-foundations`. Everything below was run
 on the actual box against the actual repos; nothing here is inferred from unit tests.
 
-**Why this document exists.** The unit suite was green at 79/79 while five real
+**Why this document exists.** The unit suite was green at 79/79 while six real
 defects sat in the kernel and the two upstream repos. Every one of them was
-invisible to tests that used synthetic fixtures and temporary directories, and
-one destroyed real data before it was caught. This log records what was proven,
-how, and what the misses imply for the loop.
+invisible to tests that used synthetic fixtures and temporary directories. One
+destroyed real data before it was caught; another silently deleted five metrics
+from a benchmark report and still looked like a clean run. This log records what
+was proven, how, and what the misses imply for the loop.
+
+**Outcome: all eight steps passed.** The render path reproduces the 2026-09-13
+reference, training writes a checkpoint from the released base with the step
+counter reset, the configured resolution allowlist fits in 24 GB, and the
+ingest guard is proven against the incident that motivated it.
 
 ---
 
@@ -39,6 +45,9 @@ the caller's cwd — goes on `sys.path[0]`.
 | WorldModel | `2d99676` | `init_process_group(device_id=)` binds rank to GPU |
 | WorldModel | `dc577e9` | `run_wbench` accepts a generated config outside the repo |
 | WBench | `606f0b8` | visual plausibility takes `--work_dir` (U1) |
+| WBench | `cf71da5` | MegaSAM: repair stale weight symlinks, stop failing silently |
+| WBench | `737549b` | seed the reconstruction point subsample |
+| AutoResearcher | `f4f0aaf` | `ar doctor`, portability doc, measured tolerances |
 
 All pushed to the project forks (`seermer/{AR,AlayaWorld,WBench}-TWM-Autoresearch`).
 
@@ -223,6 +232,38 @@ archive, leaving the meta-agent to reason about failures whose reasons were
 discarded at the point of capture. Telemetry already stored both streams, so only
 the surfaced message was lossy — but the surfaced message is what an agent sees.
 
+### 4.6 A moved checkout silently deleted five metrics — `cf71da5` (WBench)
+
+The highest-consequence defect found, and a **portability** failure.
+
+`WBench/weights/hub/torchhub` and `.../hub/checkpoints` were symlinks still
+pointing at a previous checkout location (`/home/...`) after this tree moved to
+`/mnt/biometrics`. `Path.exists()` follows symlinks and returns `False` for a
+dangling one, so `run_megasam.py::setup_env` believed the links were missing,
+tried to create them, and raised `FileExistsError`. Because `setup_env` runs per
+case, this failed **every** case: 0/22 navigation cases produced poses.
+
+It then failed quietly at three further levels:
+
+| level | fault |
+|---|---|
+| worker | counted failures, exited 0 regardless |
+| `run_megasam.main()` | joined workers without inspecting `exitcode` |
+| WBench `main.py` | ran each precompute tool with a bare `subprocess.run()`, ignoring rc |
+
+So the phase printed `MegaSAM done in 0s`, the run continued, and the report came
+out missing `spatial_consistency`, `gated_spatial_consistency`,
+`navigation_trajectory`, `navigation_accuracy` and `navigation_consistency` — a
+wrong result indistinguishable from a clean one.
+
+All four are fixed: `_ensure_symlink()` repairs a stale or dangling link in place
+(and leaves a real file or directory alone), and failures now propagate at each
+level. Verified: 0/22 → 22/22 poses produced.
+
+**This is why `ar doctor` exists** (see `docs/PORTABILITY.md`). Broken symlinks
+anywhere in the three repos are now a checked, reported failure, because this is
+how moving the tree breaks it.
+
 ---
 
 ## 5. Step results
@@ -261,19 +302,103 @@ load. A near-idle snapshot during serial rank loading was misread as "the run
 died"; the run was healthy. Phase-timeout logic must key off log progress markers
 (`[Setup] rank N/4`, `[Train] step=`), not device activity.
 
-### Step 5 — proxy score reproduction
+### Step 5 — proxy score reproduction: PASSED, after two upstream fixes
 
-PENDING — results appended on completion.
+The first attempt died in 1.46 s (§4.4). The second ran the full 1:39:45, rendered
+40/40 videos, and then failed at scoring with
 
-### Step 6 — allowlist preflight and peak memory
+```
+KeyError: metrics missing from the report:
+  ['spatial_consistency', 'gated_spatial_consistency', 'navigation_trajectory']
+```
 
-PENDING — results appended on completion.
+**That was the kernel behaving correctly** — `score_from_report` refuses to score
+an incomplete report rather than quietly averaging 12 metrics instead of 17. The
+defect was in WBench (§4.6). After fixing it, the metrics were recomputed on the
+existing 40 videos; no re-render was needed.
 
-Scope caveat, fixed in advance: the preflight measures only the **largest**
-`lora_allowlist` pair against each resolution. Smaller ranks are covered by a
-fits-by-dominance argument, **not** by measurement, and this log will say which
-pairs actually ran. Peak alloc/reserved is recorded for every pair including
-passing ones, as headroom evidence for the loop's scheduling.
+**Result: all 17 reference metrics present, every case count identical.**
+
+| class | metrics | max \|delta\| | cause of spread |
+|---|---|---|---|
+| deterministic | 10 | 0.0007 | GPU float noise |
+| subsampled | 2 | 0.0015 | unseeded `torch.randperm` (now fixed) |
+| pose-derived | 5 | 0.0084 | MegaSAM solver, irreducible |
+| **aggregate score** | 17 | **0.00044** | — |
+
+Reference aggregate 0.783312, reproduced 0.783747. The 10 deterministic metrics
+agree to **+0.00001** in aggregate, six of them bit-identical — **the render path
+is verified**.
+
+#### Why the original blanket 1e-3 tolerance was unachievable
+
+Two stochastic inputs, both demonstrated rather than assumed.
+
+**1. MegaSAM is non-deterministic, and cannot be seeded.** Two independent runs
+over the *same* videos were compared directly: `cam_c2w` differed by up to
+6.8e-3 and the estimated focal length by 0.92 px. The cause is not an RNG —
+DROID-SLAM's CUDA kernels accumulate with `atomicAdd` on floats
+(`base/src/droid_kernels.cu:1488`, `altcorr_kernel.cu:265`). Float addition is
+not associative, so the result depends on thread completion order. No seed
+changes this; only deterministic kernels would.
+
+**2. Unseeded point subsampling — fixed** (WBench `737549b`).
+`reconstruction_consistency.py:154` drew points with a bare `torch.randperm`.
+Now seeded per (video, frame) from a SHA-1 of the case name: stable across
+machines, independent of worker/GPU assignment. Negative control, three runs
+each on one case:
+
+| | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| unseeded | psnr 22.72 | 22.75 | 22.68 |
+| seeded | 22.69 | 22.69 | 22.69 |
+
+This does not bias the metric — the subsample is still uniform, so the estimator
+is unchanged; seeding fixes *which* draw is taken, not the distribution. It also
+makes any two models a paired comparison on identical points.
+
+#### Tolerances
+
+Set from the measured spread with headroom, **not** loosened until the test
+passed: deterministic 2e-3, subsampled 5e-3, pose-derived 2e-2, aggregate 2e-3.
+The deterministic band is deliberately tight — it is what would catch a real
+regression in the render path. The test also asserts that no metric the
+reference recorded has gone missing, which is the failure mode that started this.
+
+**Open item:** the reference's `geometric`/`photometric` values were produced
+with the unseeded code, so comparing seeded results to them carries a one-time
+offset inside the old noise. Regenerating the reference under the seeded code
+(~105 min) would remove it. Current tolerances cover it either way.
+
+### Step 6 — allowlist preflight and peak memory: PASSED
+
+Each resolution in `train.resolution_allowlist` run as a fresh 10-step training
+through the manual path (ingest -> commit -> gate -> precache -> train), against
+the largest `lora_allowlist` pair, on 4x24 GB.
+
+| resolution | lora rank/alpha | failure | peak alloc | peak reserved | checkpoint |
+|---|---|---|---|---|---|
+| 416 x 736 | 64 / 64 | none | 18.48 GB | 22.93 GB | `checkpoint-10` |
+| 352 x 608 | 64 / 64 | none | 18.25 GB | 22.96 GB | `checkpoint-10` |
+
+Neither OOM'd, so **nothing was pruned from `configs/kernel.yaml`** — the
+allowlist stands as configured.
+
+**What was actually measured.** Only the largest LoRA pair (64/64) was run
+against each resolution. The remaining pairs — (16, 16) and (32, 32) — are
+covered by a fits-by-dominance argument (a smaller rank trains strictly fewer
+parameters at the same resolution), **not** by measurement. Two of the six
+combinations were executed.
+
+**Reserved is not a useful headroom signal here.** Peak *reserved* is effectively
+identical for both resolutions (22.93 vs 22.96 GB) while peak *allocated* differs
+by 0.23 GB: PyTorch's caching allocator grows toward capacity regardless of what
+is live. Scheduling decisions in the loop should key off allocated, and treat
+reserved as "approximately all of the card". Headroom on 24 GB cards is roughly
+5.5 GB on allocation, which is what a larger resolution or batch would consume.
+
+Both runs also reconfirm §5/Step 4's checkpoint isolation: each started from the
+released base with `step reset to 0`.
 
 ---
 
@@ -290,7 +415,33 @@ passing ones, as headroom evidence for the loop's scheduling.
    only in a pre-merge gate. All five defects here were invisible to a green unit
    suite; a long autonomous run that only ever exercises unit-tested paths will
    accumulate the same class of blind spot.
-4. **Fixes belong upstream when the defect is upstream.** Two of the five
+4. **Fixes belong upstream when the defect is upstream.** Two of the six
    (§4.3, §4.4) were initially handled, or nearly handled, by working around
    WorldModel from inside the kernel. Both were better fixed at the source, and
    §4.3's kernel-side filter was masking a genuine hang risk.
+5. **The proxy score has a noise floor of ~4.4e-4 on the aggregate** (§5, Step 5),
+   now entirely from MegaSAM's irreducible pose noise. **A node whose score
+   improves by less than that is indistinguishable from metric noise.** Parent
+   selection must either require a minimum meaningful delta or evaluate promising
+   nodes more than once; otherwise the tree will chase noise and reward nothing.
+   The figure is from a single re-run — a proper standard deviation needs several
+   repeats of the same checkpoint, which is worth doing before the loop runs
+   unattended.
+6. **Phase termination must kill the process group and confirm GPU memory is
+   released.** `pkill -f run_megasam` did not match its multiprocessing workers,
+   whose command line is `from multiprocessing.spawn import spawn_main`. Two
+   survived 35 minutes reparented to init holding ~19 GB, and caused the OOM that
+   lost 3 of 22 MegaSAM cases. In the loop, a killed phase that leaks orphans
+   makes the **next** node fail with an OOM that looks like a bad recipe — the
+   agent would be penalized for a scheduling artifact it did not cause.
+7. **Portability is a runtime property, not a source property** (§4.6,
+   `docs/PORTABILITY.md`). Tracked source was already clean; what broke was
+   untracked state — symlinks left pointing at the previous checkout. `ar doctor`
+   now checks this, and its tests build the broken tree rather than only asserting
+   the healthy one.
+8. **Run the negative control.** Two verifications in this task passed *before*
+   the fix was applied and so proved nothing: the `device_id` check (the warning
+   fires on the first collective, not at `init_process_group`) and the seeding
+   check (compared the 4-dp rounded score instead of `details.photometric_psnr`).
+   Both looked like confirmation. A verification that passes against the unfixed
+   code is not evidence.
