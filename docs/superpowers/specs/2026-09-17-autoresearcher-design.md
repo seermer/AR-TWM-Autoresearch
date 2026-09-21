@@ -45,8 +45,12 @@ HGM `hgm.py`, `tree.py`, `hgm_utils.py`, `self_improve_step.py`; HyperAgents
    manual command, never triggered by the loop.
 8. **Telemetry is the most critical component.** Every input/output that could be useful
    is recorded, at choke points agents cannot reach.
-9. **Frameworks.** LangGraph is the multi-agent framework; the OpenAI Agents SDK is the
-   harness of each individual agent. Agent LLMs are OpenAI models only.
+9. **Frameworks.** The single-agent harness is an explicit LangGraph ReAct graph in the
+   agent's own code: it reproduces `langchain.agents.create_agent` (no middleware), plus two
+   additions: tool errors are reported to the model, and Claude-Code-style auto-compaction
+   (§9.1.2). Multi-agent orchestration is plain Python. Both are agent code, so
+   self-improvement can change them. Agent LLMs are OpenAI models only, reached through
+   `langchain-openai`'s `ChatOpenAI` (Responses API) pointed at the gateway. *(Amended 2026-09-21, Plan 2 revision: the OpenAI Agents SDK is dropped.)*
 
 ### 1.2 Non-goals
 
@@ -147,8 +151,8 @@ license). Wan 2.2 is Apache-2.0 with no output restrictions.
                           ┌───────┴──────────────────────────┴──────┐
                           │  AGENT CONTAINER (Docker, CPU-only)       │
                           │  ar_contract runner (read-only)           │
-                          │  /agent: LangGraph graphs + Agents SDK    │
-                          │  agents, prompts, tools, memory (editable)│
+                          │  /agent: orchestration + ReAct harness    │
+                          │  prompts, tools, knowledge, memory (edit) │
                           └──────────────────────────────────────────┘
 ```
 
@@ -491,45 +495,97 @@ so near-pure hyperparameter changes are visible in analysis.
 
 ### 9.1 Seed agent repo (`seed_agent/`, fully editable by agents)
 
+*(Amended 2026-09-21, Plan 2 revision: the OpenAI Agents SDK is dropped.)*
+
 ```
 agent/
   entry.py            # def edit_self(ctx) -> EditResult ; def improve_recipe(ctx) -> RecipeResult
   requirements.txt
-  graphs/meta.py      # LangGraph StateGraph behind edit_self
-  graphs/task.py      # LangGraph StateGraph behind improve_recipe
-  agents/             # OpenAI Agents SDK Agent definitions (instructions, tools, handoffs, model)
-  prompts/
-  tools/              # agent-local function tools (file edit, bash, python, ffmpeg/ffprobe,
+  settings.py         # model, context window, compaction threshold, round limits
+  harness/            # single-agent inner loop (§9.1.2): react.py (explicit LangGraph ReAct
+                      #   graph), compact.py (auto-compaction)
+  orchestration/      # multi-agent workflow in plain Python: roles.py (a role = system prompt
+                      #   + knowledge + tools, run on the harness), task.py (improve_recipe),
+                      #   meta.py (edit_self)
+  prompts/            # one Markdown system prompt per role, plus compact.md
+  tools/              # agent-local tools (file read/list/write/edit, bash, ffmpeg/ffprobe;
                       #   caption_clip: sample frames with ffmpeg and caption them with a
                       #   vision model through the gateway; timed-prompt helper that snaps
-                      #   segment boundaries to round boundaries)
+                      #   segment boundaries to round boundaries), the MCP -> LangChain adapter
+                      #   for kernel tools, and submit_* result tools
+  knowledge/          # reference material that roles read (formats, conversion recipes)
   memory/             # agent-owned notes (in the code repo, inherited by children)
 ```
 
-**Seed graphs:**
-- **meta** (`edit_self`): analyze history → plan edits → implement (coding agent with
-  file/bash tools on `/agent`) → self-test in container → finalize.
-- **task** (`improve_recipe`): diagnose from aggregates → data hypotheses → search HF /
-  request rollouts → convert to a standard format (crop to 16:9, trim, caption, timed
-  prompts on round boundaries, poses via `annotate.camera`) → ingest → commit (repeatable)
-  → write recipe → `recipe.check` → self-review (can loop back).
+**Roles and results.** Each LLM step is a role run on the harness. A role returns its result
+by calling a `submit_<x>` tool whose arguments are validated against a schema; invalid
+arguments come back to the model as a tool error it can fix. A role that stops without
+submitting gets one reminder, then fails the attempt.
 
-Graph checkpoints are written to SQLite under `/workspace/langgraph.db` and kept as run
-artifacts.
+**Seed orchestration:**
+- **meta** (`edit_self`): an edit planner reads the code (read-only tools) and the history,
+  and submits a plan for exactly one component (§9.1.1) → a coder implements it (file/bash
+  tools on `/agent`) → self-test in the container (static + import) → fix if needed → finalize.
+- **task** (`improve_recipe`): diagnose from aggregates and plan data hypotheses → build data
+  (search HF / request rollouts → convert to a standard format: crop to 16:9, trim, caption,
+  timed prompts on round boundaries, poses via `annotate.camera` → ingest → commit, repeatable)
+  → write the recipe → `recipe.check` → loop back on failures.
+
+There are no framework checkpoints: the kernel retries a failed attempt from its workspace
+(§7.2), and the gateway records every model call.
+
+#### 9.1.1 Edit components
+
+An agent version has five components. Every `edit_self` plan names exactly one, with one
+focused change, so the next node's score can be attributed to it:
+
+| Component | Where (seed layout) | What changes |
+|---|---|---|
+| `prompts` | `agent/prompts/` | The system prompt of any role |
+| `tools` | `agent/tools/` | Agent-local tools and the kernel-tool adapter (never the kernel tools themselves) |
+| `harness` | `agent/harness/` | The single-agent inner loop: graph, tool execution, context management |
+| `orchestration` | `agent/orchestration/` | Which roles run, in what order, with which tools and context |
+| `knowledge` | `agent/knowledge/` | Reference material roles read |
+
+The choice is returned as `EditResult.component`, stored with the node and shown in the
+lineage the next planner sees. It is **not enforced**: the kernel never rejects a diff that
+touches other components. Notes in `memory/` are bookkeeping and may be written by any edit.
+
+#### 9.1.2 Seed harness
+
+`build_react_agent(model, tools, system_prompt, *, context_window, compact_at)` behaves
+exactly like `create_agent(model, tools, system_prompt=...)` from `langchain` 1.4.2 with no
+middleware and no `response_format`: START → model → END if the last AI message has no tool
+calls, otherwise one parallel `Send("tools", [call])` per call → model; tools are bound on
+every model call; unknown tools and invalid arguments get `ToolNode`'s messages; recursion
+limit 9999. A test compares both message for message and prompt for prompt. It differs in
+exactly two ways:
+
+1. **Tool errors.** A tool that raises is reported to the model as an error `ToolMessage`
+   (`ToolNode`'s `handle_tool_errors=True` text) instead of ending the run.
+2. **Auto-compaction.** Before every model call the harness estimates the context: the last
+   reply's reported `usage.total_tokens` plus about 4 characters per token for the messages
+   after it. Below `compact_at × context_window` (`agents.compact_at`, default 0.85, and
+   `agents.context_window_tokens`, passed to the container) messages append linearly. At or
+   above it, a dedicated summarizer call (same system prompt, tools and history,
+   `tool_choice="none"`, the instruction in `prompts/compact.md`) writes a structured
+   summary, and the history is replaced by one user message: a continuation preamble plus
+   the summary.
 
 ### 9.2 Fixed contract package (`ar_contract`, kernel-owned, read-only)
 
 - Pydantic models: `EditContext`, `EditResult`, `RecipeContext`, `RecipeResult`.
-- Client helpers: gateway base URL + per-container token, MCP server URL, mount paths.
-- Runner: `python -m ar_contract.run <edit_self|improve_recipe>`. It installs a
-  supplementary Agents SDK trace processor, imports `agent.entry`, calls the function,
-  validates the result against the schema, and writes `/workspace/result.json`.
+- Client helpers: `chat_model()` (a `ChatOpenAI` bound to the gateway socket with the
+  per-container token) and `mcp_session()` (an MCP client session on the tool server socket).
+- Runner: `python -m ar_contract.run <edit_self|improve_recipe>`. It imports `agent.entry`,
+  calls the function, validates the result against the schema, and writes
+  `/workspace/result.json`.
 
 ### 9.3 Contexts and results
 
 | | Receives | Returns |
 |---|---|---|
-| `EditContext` | `agent_dir=/agent` (rw copy of own code); lineage history (per ancestor: code diff, recipe diff, data manifest stats, score, per-metric and per-stratum aggregates, rationale); archive-wide aggregates (tree shape, scores, subtree values, recipes; no clips); `nodes_remaining`; `attempt`, `max_attempts`, `retry` report; `dry_run` flag | `EditResult{summary}` (the kernel computes the diff) |
+| `EditContext` | `agent_dir=/agent` (rw copy of own code); lineage history (per ancestor: code diff, recipe diff, data manifest stats, score, per-metric and per-stratum aggregates, rationale); archive-wide aggregates (tree shape, scores, subtree values, recipes; no clips); `nodes_remaining`; `attempt`, `max_attempts`, `retry` report; `dry_run` flag | `EditResult{summary, component}` (`component`: the one edit component the plan chose, optional, recorded and never enforced, §9.1.1; the kernel computes the diff) |
 | `RecipeContext` | `workspace=/workspace`; archive-wide clip pool summary (per clip: provenance, license, metadata, eligible formats, ingesting node, scores of nodes that trained on it); parent's data commit and recipe; base recipe; the tunable-key schema and allowlists (§8); the standard-format rules (§6); GPU count; the same aggregates; `nodes_remaining`; attempt/retry info; `dry_run` flag | `RecipeResult{data_commit, recipe (dict of tunable keys), rationale}` |
 
 ### 9.4 Contract verification (step 4, fresh container from the child commit)
@@ -571,7 +627,7 @@ artifacts.
 
 *(Amended 2026-09-21, Plan 2: tools are registered with underscores, e.g. `data_ingest`,
 `hf_search`, `job_wait`, `recipe_check`, because OpenAI function names must match
-`^[a-zA-Z0-9_-]+$` and the Agents SDK forwards MCP tool names as function names. The dotted
+`^[a-zA-Z0-9_-]+$` and LangChain passes tool names through as function names. The dotted
 names below are the spec's logical names.)*
 
 Only operations that need privileges live in the kernel; all other logic (format
@@ -726,15 +782,15 @@ root is chosen with P=1; tied values receive equal probability; all probabilitie
   (+ `run.jsonl` for run-level events), flushed per line.
 - Large payloads: `runs/<run>/telemetry/payloads/<sha256>.json.zst`, referenced by hash.
 - Query index: `runs/<run>/telemetry/index.db` (SQLite, WAL), rebuildable from JSONL.
-- Nothing is uploaded; the Agents SDK default OpenAI trace export is disabled.
+- Nothing is uploaded (containers have no network; LangSmith tracing is never enabled).
 
 ### 13.3 Captured data
 
 | Area | Recorded |
 |---|---|
 | LLM calls | Full request (all messages incl. system/developer/user, tool schemas, model, params) and full response (output items, tool calls, usage incl. cached tokens), latency, HTTP status, retries, cost; per-container token → node/phase/attempt; `conversation_id`, `turn_index`, `parent_call_id` (from `previous_response_id`/`conversation` when present, else by matching the request's message prefix to a prior call's request+response). Both `/v1/responses` and `/v1/chat/completions` are supported. |
-| Tool calls | Kernel tools: args, result, duration, errors, side effects (bytes, files, GPU job ids, GPU-seconds). Agent-local tools: reconstructed from function-call/output pairs in LLM traffic; supplementary SDK spans from the runner (agent name, handoffs, guardrails). |
-| Agent execution | `/context` bundle (hashed), container image hash, command, limits, stdout/stderr, exit code, `docker stats` samples, filesystem diff of `/agent` and `/workspace`, LangGraph checkpoint DB, result JSON. |
+| Tool calls | Kernel tools: args, result, duration, errors, side effects (bytes, files, GPU job ids, GPU-seconds). Agent-local tools: reconstructed from function-call/output pairs in LLM traffic. Auto-compactions appear as the summarizer calls that precede a new conversation. |
+| Agent execution | `/context` bundle (hashed), container image hash, command, limits, stdout/stderr, exit code, `docker stats` samples, filesystem diff of `/agent` and `/workspace`, result JSON. |
 | Code | Every attempt commit; diff stats; contract step logs and verdicts. |
 | Data | HF searches/downloads; rollout jobs (inputs, seeds, GPU time, outputs); ingest decisions with per-format checker reports, aspect ratio and leakage distances; data commits (manifest, parent, message, per-dataset stats); view materialization stats. |
 | Recipe | Agent recipe; resolved config; diffs vs. parent and base; each gate check result with full tool output. |
@@ -947,6 +1003,7 @@ Three real nodes with small recipes before the first long run.
 | `train.lora_allowlist` | `[[16,16],[32,32],[64,64]]` |
 | `disk.merge_min_free_gb` / `disk.alert_below_gb` | 30 / 50 |
 | `telemetry.gpu_sample_sec` | 5 |
+| `agents.context_window_tokens` / `agents.compact_at` | 128000 (set to the agent model's window) / 0.85 |
 | `alerts.stall_min` / `gateway_error_rate` | 30 / 0.2 |
 | `generators` | `alayaworld: {dmd4, ar30}`, `ltx25: {dev, distilled}`, `wan22: {ti2v-5b}`, each `enabled` per §16.3 item 5 |
 
@@ -956,6 +1013,6 @@ All values are snapshotted into `runs/<run>/config/` at run start and logged.
 
 ## 18. Package versions (at design time)
 
-`openai-agents` 0.22.2, `langgraph` 1.2.11, `langgraph-checkpoint-sqlite` 3.1.1, Python 3.12
-for the kernel and agent image; the `alayaworld` env (Python 3.10, torch 2.7.1,
+`langgraph` 1.2.11, `langchain-core` 1.6.3, `langchain-openai` 1.6.2, `mcp` 2.2.0, Python 3.12
+for the kernel and agent image (`langchain` 1.4.2 in the kernel env for tests only); the `alayaworld` env (Python 3.10, torch 2.7.1,
 `transformers<5`) for data checks, training, rendering and rollouts.

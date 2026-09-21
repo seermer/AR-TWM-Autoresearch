@@ -4,9 +4,9 @@
 
 **Goal:** Run an agent version in a sandbox, where it talks to an LLM only through a recording gateway and to the kernel only through privileged MCP tools, produces data commits and a recipe, and is verified against the fixed `edit_self` / `improve_recipe` contract. Every step is recorded.
 
-**Architecture:** The kernel starts two HTTP services on Unix domain sockets in a per-run socket directory: a recording OpenAI-compatible **gateway** and an MCP **tool server**. Each agent call runs in a fresh Docker container with **no network** (`--network none`), running as the host user, with the socket directory mounted. The fixed `ar_contract` package (mounted read-only) gives agent code preconfigured clients and runs the entry point. Agent code lives in a per-run git repo (`agents.git`). The seed agent is built on LangGraph plus the OpenAI Agents SDK.
+**Architecture:** The kernel starts two HTTP services on Unix domain sockets in a per-run socket directory: a recording OpenAI-compatible **gateway** and an MCP **tool server**. Each agent call runs in a fresh Docker container with **no network** (`--network none`), running as the host user, with the socket directory mounted. The fixed `ar_contract` package (mounted read-only) gives agent code preconfigured clients and runs the entry point. Agent code lives in a per-run git repo (`agents.git`). The seed agent's single-agent harness is an explicit LangGraph ReAct graph in the agent's own code: it reproduces `langchain.agents.create_agent` exactly, then adds reported tool errors and Claude-Code-style auto-compaction. Its multi-agent orchestration is plain async Python. Both are agent code, so self-improvement can change them.
 
-**Tech Stack:** Python 3.12 (`autoresearcher` env); FastAPI and uvicorn (UDS); `mcp==2.2.0` (`MCPServer`, `httpx2` client transport); `openai-agents==0.22.3`; `langgraph==1.2.11` and `langgraph-checkpoint-sqlite==3.1.1`; `huggingface_hub`; `zstandard`; the Docker 27.3.1 CLI (no Python Docker library); the git CLI.
+**Tech Stack:** Python 3.12 (`autoresearcher` env); FastAPI and uvicorn (UDS); `mcp==2.2.0` (`MCPServer`, `httpx2` client transport); `langgraph==1.2.11`, `langchain-core==1.6.3` and `langchain-openai==1.6.2` (`langchain==1.4.2` in tests only, as the reference for the harness); `huggingface_hub`; `zstandard`; the Docker 27.3.1 CLI (no Python Docker library); the git CLI.
 
 **Spec:** `docs/superpowers/specs/2026-09-17-autoresearcher-design.md`. Sections implemented: §4.1–4.2 (gateway, tools, sandbox, contract components), §5.2, §5.5 (aspect check), §9, §10 (except the GPU generator backends, see Plan 3), §13.1–13.3 (gateway and tool-call capture), §14.2 rows for `edit_self` / contract / `improve_recipe` / kernel tools / gateway, §16.1 (gateway, contract, GPU job API), §16.3 item 4. Also read `docs/superpowers/plans/verification-log.md`: its findings 1–9 bind this plan wherever it launches or kills processes.
 
@@ -26,23 +26,27 @@
 - The default unit suite uses no GPU and no network. Tests that need Docker are marked `docker`, and are selected explicitly like `gpu` and `manual`.
 - Portability: no absolute paths in tracked code or config; everything resolves from `KernelConfig` (`docs/PORTABILITY.md`).
 
-## Verified facts this plan relies on (pre-plan spikes, 2026-09-21)
+## Verified facts this plan relies on (pre-plan spikes, 2026-09-21; revised the same day for the harness)
 
 Each of these was checked on this machine before the plan was written. Several differ from what the library documentation or older versions suggest, so do not "fix" them back.
 
 1. **MCP 2.x** renamed `FastMCP` to `mcp.server.mcpserver.MCPServer`. The server app is `MCPServer.streamable_http_app(...)`.
-2. **The MCP 2.x client uses `httpx2`, not `httpx`.** The Agents SDK's `MCPServerStreamableHttp(params={"httpx_client_factory": f})` requires `f(headers, timeout, auth)` to return an `httpx2.AsyncClient`. It raises `UserError: MCP Python SDK v2 requires httpx_client_factory to return an httpx2.AsyncClient` otherwise.
+2. **The MCP 2.x client uses `httpx2`, not `httpx`.** `mcp.client.streamable_http.streamable_http_client(url, http_client=httpx2.AsyncClient(transport=httpx2.AsyncHTTPTransport(uds=...)))` yields `(read, write)` for `mcp.ClientSession(read, write, read_timeout_seconds=...)`. Verified end to end over a Unix socket.
 3. **Host header over UDS.** The MCP server's DNS-rebinding guard rejects `Host: localhost` (no port) with **421**. Pass `transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=True, allowed_hosts=["localhost"], allowed_origins=[])`, and address both services as `http://localhost/...` over the socket.
 4. **Session idle timeout.** `streamable_http_app` defaults to `session_idle_timeout=1800`, which silently kills the session of an agent that makes no tool call for 30 min. Use `session_idle_timeout=None`.
-5. **Client timeout.** `MCPServerStreamableHttp` defaults to `client_session_timeout_seconds=5`, but `data.ingest` runs WorldModel's checker per clip and takes longer. The contract client sets 900 s.
-6. **Mock Responses API.** A scripted `/v1/responses` server works with the Agents SDK when each response carries `id, object="response", created_at, status="completed", model, output, parallel_tool_calls, tool_choice, tools, usage{input_tokens, output_tokens, total_tokens, input_tokens_details{cached_tokens}, output_tokens_details{reasoning_tokens}}`. A tool call is an output item `{"type":"function_call","id","call_id","name","arguments","status":"completed"}`. The next request's `input` then contains a `function_call_output` item.
+5. **Client timeout.** `data_ingest` runs WorldModel's checker per clip and takes minutes. `ar_contract.client.mcp_session` sets `read_timeout_seconds=900` and a 900 s `httpx2` timeout.
+6. **Mock Responses API.** A scripted `/v1/responses` server works with `langchain-openai`'s `ChatOpenAI(use_responses_api=True)` when each response carries `id, object="response", created_at, status="completed", model, output, parallel_tool_calls, tool_choice, tools, usage{input_tokens, output_tokens, total_tokens, input_tokens_details{cached_tokens}, output_tokens_details{reasoning_tokens}}`. A tool call is an output item `{"type":"function_call","id","call_id","name","arguments","status":"completed"}`. `ChatOpenAI` turns these into `tool_calls`, sends `function_call_output` items on the next request, reports `usage` as `usage_metadata`, and sends `stream: false`, so the gateway needs no streaming. `bind_tools(tools, tool_choice="none")` sends `tool_choice: "none"`, and `image_url` content blocks become `input_image` items. Its resent history equals the previous request plus response under the gateway's prefix normalization (Task 4), checked for tool-call and text turns, so conversation linking works; after an auto-compaction the history loses that prefix and a new conversation starts.
 7. **Sandbox networking.** A Docker `--internal` network blocks the internet and DNS, **but the host stays reachable at the bridge IP**: SSH on 22 and another host service were open from inside. `--network none` plus the UDS socket directory gives complete isolation. Verified: the agent loop completes, host ports are unreachable, the internet is blocked, and files are owned by the host uid.
 8. **ffmpeg 6.1.1** writes rotation with `ffmpeg -display_rotation 90 -i in.mp4 -c copy out.mp4`, and ffprobe reports it as `side_data_list:[{"rotation":90}]`. A 552x414 clip with `sample_aspect_ratio` `4:3` displays at 16:9.
-9. **Packages.** None of the agent-layer packages were installed; `pip check` is clean after installing the pinned set (Task 1). `openai-agents` requires `mcp<3,>=1.19`.
+9. **Packages.** The agent layer is `langgraph` 1.2.11 (with `langgraph-prebuilt` 1.1.0), `langchain-core` 1.6.3, `langchain-openai` 1.6.2, `mcp` 2.2.0 and `httpx2` 2.13.0; `pip check` is clean. `langchain` 1.4.2 is installed for tests only. `openai-agents` and `langgraph-checkpoint-sqlite` were installed by the first spike and are no longer used (Task 1 removes them).
 10. **Caller identity in a tool.** A tool that declares `ctx: Context` reads the caller's header as `ctx.request_context.request.headers["authorization"]`. Verified end to end over streamable HTTP.
-11. **Tool names.** OpenAI function names must match `^[a-zA-Z0-9_-]+$`, and the Agents SDK forwards MCP tool names as function names. The spec's dotted names (`data.ingest`) would be rejected upstream, so tools are registered as `data_ingest` and so on.
+11. **Tool names.** OpenAI function names must match `^[a-zA-Z0-9_-]+$`, and LangChain passes tool names through as function names. The spec's dotted names (`data.ingest`) would be rejected upstream, so tools are registered as `data_ingest` and so on.
 12. **Socket path length.** `AF_UNIX` paths are capped at 107 bytes. A socket under `runs/<run_id>/sock/` is 125 bytes, and `bind` fails with "AF_UNIX path too long". Sockets live in a short per-run directory under the system temp dir.
-13. **Async graphs.** One MCP connection has to live inside one event loop, so the seed graphs are async. `langgraph.checkpoint.sqlite.aio.AsyncSqliteSaver` (with `aiosqlite` 0.22.1) checkpoints an async `StateGraph` correctly; the sync `SqliteSaver` refuses async calls.
+13. **One event loop.** One MCP session lives inside one event loop, so the harness, the roles and the orchestration are all async and share one `mcp_session()` per entry-point call.
+14. **The `create_agent` reference.** The installed `langchain` 1.4.2 `agents/factory.py` is byte-identical to commit 4af7ab8. With no middleware and no `response_format`, its graph is START → model → (END, or one `Send("tools", [call])` per tool call) → model, with `recursion_limit` 9999, and it binds the tools on every model call. The Task 16 graph matches it message for message on 17 scenarios, and each of 5 mutations breaks the comparison.
+15. **Tool errors in `create_agent`.** Its default `ToolNode` handler turns only invalid arguments (`ToolInvocationError`) into a message; any other tool exception is re-raised and ends the run. An unknown tool name gets `Error: <name> is not a valid tool, try one of [...]`.
+16. **MCP 2.x attributes are snake_case**: `CallToolResult.is_error`, `.structured_content`, `Tool.input_schema`. `isError` and `inputSchema` exist only as JSON aliases, not as Python attributes. The first draft of this plan used `.isError`, which raises `AttributeError`.
+17. **No tokenizer offline.** `tiktoken` downloads its encodings on first use and containers have no network, so the harness estimates context size from the last reply's `usage_metadata` plus about 4 characters per token for the messages after it.
 
 ## Plan sequence (revised)
 
@@ -61,7 +65,9 @@ The GPU generators were split out because they are independent of the runtime, n
 - **§10 tool names:** registered with underscores (`data_ingest`), because OpenAI function names forbid dots (fact 11).
 - Not an amendment: §13.2 already specifies `.json.zst` payloads. Plan 1 stored plain `.json`; Task 1 brings the code into line and keeps old payloads readable.
 
-Both amendments are applied to the spec in the same commit as this plan.
+- **§1.1 item 9, §9.1–9.3 (frameworks, revised the same day):** the single-agent harness is an explicit LangGraph ReAct graph in agent code, reproducing `create_agent` plus reported tool errors and auto-compaction; multi-agent orchestration is plain Python; the OpenAI Agents SDK is dropped. New §9.1.1 (edit components: each `edit_self` plans exactly one of prompts, tools, harness, orchestration or knowledge, recorded in `EditResult.component`, not enforced) and §9.1.2 (harness behaviour). §9.2 loses the SDK trace processor; §13.2, §13.3, §17 (`agents.*`) and §18 follow.
+
+All amendments are applied to the spec in the same commits as this plan.
 
 ## File structure
 
@@ -90,12 +96,14 @@ kernel/ar_kernel/
   contract/verify.py           CREATE  static, import, smoke run (mock gateway + tools)
   agent_phase.py               CREATE  run_edit_self / run_improve_recipe (Plan 4's entry points)
 contract/ar_contract/          CREATE  kernel-owned, mounted read-only into containers
-  __init__.py  models.py  client.py  run.py  tracing.py
+  __init__.py  models.py  client.py  run.py
 seed_agent/agent/              CREATE  initial agent code (the root node's commit)
-  entry.py  requirements.txt  graphs/meta.py  graphs/task.py  agents/*.py
-  prompts/*.md  tools/*.py  memory/README.md
+  entry.py  settings.py  requirements.txt
+  harness/react.py  harness/compact.py          single-agent inner loop (Task 16)
+  orchestration/roles.py  task.py  meta.py      multi-agent workflow, plain Python (Task 17)
+  prompts/*.md  tools/*.py  knowledge/*.md  memory/README.md
 docker/agent.Dockerfile        CREATE
-configs/kernel.yaml            MODIFY  gateway, tools, sandbox, timeouts, generators blocks
+configs/kernel.yaml            MODIFY  gateway, agents, tools, sandbox, timeouts, generators blocks
 tests/                         CREATE  one test file per component (named per task)
 ```
 
@@ -119,7 +127,7 @@ Every later task imports these packages, reads these config keys, and emits even
   - `Recorder.add_redaction(secret: str) -> None`. Used for container tokens issued after the recorder exists.
   - `Recorder.store_payload(obj) -> str` writes `payloads/<sha256>.json.zst`. The digest is of the *uncompressed* JSON bytes.
   - `Recorder.load_payload(digest) -> dict` reads `.json.zst`, falling back to legacy `.json`.
-  - Config keys: `gateway.*`, `sandbox.*`, `timeouts.*`, `generators.*`, `tools.hf_download_max_bytes`.
+  - Config keys: `gateway.*`, `agents.*`, `sandbox.*`, `timeouts.*`, `generators.*`, `tools.hf_download_max_bytes`.
 
 - [ ] **Step 1: Pin the dependencies and make `ar_contract` importable**
 
@@ -129,8 +137,8 @@ In `pyproject.toml`, replace the `dependencies` line and the package-find block:
 dependencies = [
     "pyyaml>=6.0", "numpy>=1.26", "pillow>=10.0", "imagehash>=4.3",
     "fastapi>=0.141", "uvicorn>=0.53", "httpx>=0.28", "pydantic>=2.12",
-    "mcp==2.2.0", "openai>=3.0,<4", "openai-agents==0.22.3",
-    "langgraph==1.2.11", "langgraph-checkpoint-sqlite==3.1.1",
+    "mcp==2.2.0", "openai>=3.0,<4",
+    "langgraph==1.2.11", "langchain-core==1.6.3", "langchain-openai==1.6.2",
     "huggingface_hub>=1.32", "zstandard>=0.25",
 ]
 ```
@@ -138,6 +146,13 @@ dependencies = [
 ```toml
 [tool.setuptools.packages.find]
 where = ["kernel", "contract"]
+```
+
+and the test extra (`langchain` is the reference `create_agent` for `tests/test_seed_harness.py`; it is not in the agent image):
+
+```toml
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "langchain==1.4.2"]
 ```
 
 Register the `docker` marker and deselect it by default:
@@ -151,7 +166,7 @@ markers = [
 addopts = "-q -m 'not manual and not gpu and not docker'"
 ```
 
-Run: `conda run --no-capture-output -n autoresearcher python -m pip install -e . && conda run --no-capture-output -n autoresearcher python -m pip check`
+Run: `conda run --no-capture-output -n autoresearcher python -m pip uninstall -y openai-agents langgraph-checkpoint-sqlite && conda run --no-capture-output -n autoresearcher python -m pip install -e '.[dev]' && conda run --no-capture-output -n autoresearcher python -m pip check`
 Expected: `No broken requirements found.`
 
 - [ ] **Step 2: Add the config blocks**
@@ -164,6 +179,9 @@ gateway:
   upstream_timeout_s: 600
   upstream_retries: 5            # 429/5xx, exponential backoff 1, 2, 4, ... s
   upstream_outage_pause_min: 15
+agents:                          # passed to agent containers as AR_CONTEXT_WINDOW / AR_COMPACT_AT
+  context_window_tokens: 128000  # set to the agent model's context window
+  compact_at: 0.85               # the harness auto-compacts at this fraction of the window
 sandbox:
   image: ar-agent
   cpus: 16
@@ -531,18 +549,17 @@ git commit -m "fix(ingest): check display aspect and reject rotated video before
 
 ### Task 3: The `ar_contract` package
 
-Kernel-owned and mounted read-only at `/ar_contract` in every container (spec §9.2). It holds the schemas the kernel validates results against, clients preconfigured for the sockets (facts 2–5), and the runner. This is the only way agent code gets a correctly configured LLM client and MCP connection, so the socket details live here once.
+Kernel-owned and mounted read-only at `/ar_contract` in every container (spec §9.2). It holds the schemas the kernel validates results against, clients preconfigured for the sockets (facts 2–6), and the runner. This is the only way agent code gets a correctly configured LLM client and MCP connection, so the socket details live here once.
 
 **Files:**
-- Create: `contract/ar_contract/__init__.py`, `models.py`, `client.py`, `tracing.py`, `run.py`
+- Create: `contract/ar_contract/__init__.py`, `models.py`, `client.py`, `run.py`
 - Test: `tests/test_contract_package.py`
 
 **Interfaces:**
 - Produces (imported by agent code, the kernel's context builder and contract verification):
-  - `ar_contract.models`: `EditContext`, `EditResult`, `RecipeContext`, `RecipeResult` (pydantic v2), and `CONTEXT_MODELS = {"edit_self": EditContext, "improve_recipe": RecipeContext}`, `RESULT_MODELS = {"edit_self": EditResult, "improve_recipe": RecipeResult}`.
-  - `ar_contract.client`: `SOCKET_DIR` (env `AR_SOCKET_DIR`, default `/run/ar`), `token() -> str` (env `AR_TOKEN`), `openai_client() -> openai.AsyncOpenAI`, `configure_agents_sdk() -> None`, `mcp_tools() -> agents.mcp.MCPServerStreamableHttp`.
+  - `ar_contract.models`: `EditContext`, `EditResult` (`summary`, optional `component`), `RecipeContext`, `RecipeResult` (pydantic v2), `EDIT_COMPONENTS = ("prompts", "tools", "harness", "orchestration", "knowledge")`, and `CONTEXT_MODELS = {"edit_self": EditContext, "improve_recipe": RecipeContext}`, `RESULT_MODELS = {"edit_self": EditResult, "improve_recipe": RecipeResult}`.
+  - `ar_contract.client`: `socket_dir() -> str` (env `AR_SOCKET_DIR`, default `/run/ar`), `token() -> str` (env `AR_TOKEN`), `default_model() -> str` (env `AR_DEFAULT_MODEL`), `chat_model(model=None, **kwargs) -> langchain_openai.ChatOpenAI` (gateway socket, Responses API, `max_retries=0`), and `mcp_session(sockets=None, auth_token=None)`, an async context manager yielding an initialized `mcp.ClientSession` on the tool server. Both read the environment when called.
   - `ar_contract.run.main(argv) -> int`, run as `python -m ar_contract.run <edit_self|improve_recipe>`. It reads `$AR_CONTEXT_DIR/context.json` (default `/context`), imports `agent.entry` from `$AR_AGENT_DIR` (default `/agent`), calls the entry point (sync or async), validates the result, and writes `$AR_WORKSPACE/result.json` (default `/workspace`) as `{"ok": true, "result": {...}}` or `{"ok": false, "error": "...", "traceback": "..."}`. Exit code 0 means ok.
-  - `ar_contract.tracing.JsonlTraceProcessor(path)`: appends exported Agents SDK traces/spans to `$AR_WORKSPACE/trace.jsonl`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -582,7 +599,6 @@ def env(tmp_path, monkeypatch):
         monkeypatch.setenv("AR_AGENT_DIR", str(agent))
         monkeypatch.setenv("AR_CONTEXT_DIR", str(tmp_path / "context"))
         monkeypatch.setenv("AR_WORKSPACE", str(tmp_path / "workspace"))
-        monkeypatch.setenv("AR_SKIP_SDK_SETUP", "1")   # no sockets in unit tests
         monkeypatch.delitem(__import__("sys").modules, "agent.entry", raising=False)
         monkeypatch.delitem(__import__("sys").modules, "agent", raising=False)
         return tmp_path / "workspace" / "result.json"
@@ -601,7 +617,7 @@ def improve_recipe(ctx):
 def test_good_edit_self_writes_ok_result(env):
     out = env(GOOD, _edit_ctx())
     assert main(["edit_self"]) == 0
-    assert json.loads(out.read_text()) == {"ok": True, "result": {"summary": "attempt 1"}}
+    assert json.loads(out.read_text()) == {"ok": True, "result": {"summary": "attempt 1", "component": None}}
 
 
 def test_async_entry_points_are_supported(env):
@@ -662,23 +678,28 @@ def test_recipe_result_requires_commit_recipe_and_rationale():
     assert ok.recipe["optimizer.lr"] == 1e-5
 
 
+def test_edit_result_component_is_optional_and_checked():
+    assert models.EDIT_COMPONENTS == ("prompts", "tools", "harness", "orchestration", "knowledge")
+    assert models.EditResult(summary="s").component is None
+    assert models.EditResult(summary="s", component="harness").component == "harness"
+    with pytest.raises(Exception):
+        models.EditResult(summary="s", component="everything")
+
+
 def test_clients_speak_over_the_socket_directory(monkeypatch, tmp_path):
-    """Facts 2-5: gateway via httpx over UDS, MCP via an httpx2 UDS client, localhost host,
-    long timeouts. Built without connecting."""
+    """Facts 2-6: the chat model talks to the gateway socket (Responses API, no client-side
+    retries); the MCP session is an async context manager. Built without connecting; Task 6
+    and Task 17 exercise both over real sockets."""
     monkeypatch.setenv("AR_SOCKET_DIR", str(tmp_path))
     monkeypatch.setenv("AR_TOKEN", "tok-abc")
-    from importlib import reload
-    import ar_contract.client as client
-    reload(client)
-    oc = client.openai_client()
-    assert str(oc.base_url).startswith("http://localhost/v1")
-    assert oc.api_key == "tok-abc"
-    server = client.mcp_tools()
-    assert server.params["url"] == "http://localhost/mcp"
-    assert server.params["headers"]["Authorization"] == "Bearer tok-abc"
-    httpx2_client = server.params["httpx_client_factory"]()
-    assert type(httpx2_client).__module__.startswith("httpx2")
-    assert server.client_session_timeout_seconds >= 900
+    monkeypatch.setenv("AR_DEFAULT_MODEL", "gpt-x")
+    import inspect
+    from ar_contract import client
+    model = client.chat_model()
+    assert model.model_name == "gpt-x" and model.openai_api_base == "http://localhost/v1"
+    assert model.openai_api_key.get_secret_value() == "tok-abc"
+    assert model.use_responses_api is True and model.max_retries == 0
+    assert inspect.isasyncgenfunction(client.mcp_session.__wrapped__)
 ```
 
 - [ ] **Step 2: Run to confirm they fail**
@@ -698,9 +719,12 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'ar_contract'`.
 """Schemas the kernel validates every agent call against (spec 9.3)."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+# The five parts of an agent version an edit_self plan picks from (spec 9.1.1).
+EDIT_COMPONENTS = ("prompts", "tools", "harness", "orchestration", "knowledge")
 
 
 class _Ctx(BaseModel):
@@ -734,6 +758,8 @@ class RecipeContext(_Ctx):
 
 class EditResult(BaseModel):
     summary: str = Field(min_length=1)
+    # The component the edit plan chose. Recorded with the node, never enforced.
+    component: Literal["prompts", "tools", "harness", "orchestration", "knowledge"] | None = None
 
 
 class RecipeResult(BaseModel):
@@ -754,108 +780,63 @@ RESULT_MODELS = {"edit_self": EditResult, "improve_recipe": RecipeResult}
 
 The container has no network. The gateway and tool server listen on sockets in
 SOCKET_DIR. Details verified on this stack (see the Plan 2 facts):
-- the OpenAI client uses httpx; the MCP 2.x client REQUIRES an httpx2 client;
+- the chat model uses httpx over the gateway socket; the MCP 2.x client REQUIRES httpx2;
 - the host is 'localhost' (the MCP server's rebinding guard rejects anything else);
-- MCP calls such as data.ingest run the dataset checker and take far longer than
-  the SDK's 5 s default session timeout.
+- MCP calls such as data_ingest run the dataset checker and take minutes, so the
+  session read timeout is long;
+- the gateway owns upstream retries, so clients never retry.
 """
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 import httpx2
 
-SOCKET_DIR = os.environ.get("AR_SOCKET_DIR", "/run/ar")
 MCP_TIMEOUT_S = 900.0
+LLM_TIMEOUT_S = 900.0
+
+
+def socket_dir() -> str:
+    return os.environ.get("AR_SOCKET_DIR", "/run/ar")
 
 
 def token() -> str:
     return os.environ.get("AR_TOKEN", "")
 
 
-def openai_client():
-    from openai import AsyncOpenAI
-    transport = httpx.AsyncHTTPTransport(uds=os.path.join(SOCKET_DIR, "gateway.sock"))
-    return AsyncOpenAI(base_url="http://localhost/v1", api_key=token(),
-                       http_client=httpx.AsyncClient(transport=transport, timeout=900.0),
-                       max_retries=0)        # the gateway owns upstream retries
+def default_model() -> str:
+    return os.environ.get("AR_DEFAULT_MODEL", "mock-model")
 
 
-def _httpx2_factory(headers=None, timeout=None, auth=None):
-    transport = httpx2.AsyncHTTPTransport(uds=os.path.join(SOCKET_DIR, "tools.sock"))
-    return httpx2.AsyncClient(transport=transport, headers=headers,
-                              timeout=timeout if timeout is not None else MCP_TIMEOUT_S, auth=auth)
+def chat_model(model: str | None = None, **kwargs):
+    """A LangChain ChatOpenAI bound to the gateway (Responses API, non-streaming)."""
+    from langchain_openai import ChatOpenAI
+    transport = httpx.AsyncHTTPTransport(uds=os.path.join(socket_dir(), "gateway.sock"))
+    return ChatOpenAI(model=model or default_model(), base_url="http://localhost/v1", api_key=token(),
+                      use_responses_api=True, max_retries=0,
+                      http_async_client=httpx.AsyncClient(transport=transport, timeout=LLM_TIMEOUT_S),
+                      **kwargs)
 
 
-def mcp_tools():
-    from agents.mcp import MCPServerStreamableHttp
-    return MCPServerStreamableHttp(
-        params={"url": "http://localhost/mcp",
-                "headers": {"Authorization": f"Bearer {token()}"},
-                "timeout": MCP_TIMEOUT_S,
-                "httpx_client_factory": _httpx2_factory},
-        name="ar-kernel-tools",
-        client_session_timeout_seconds=MCP_TIMEOUT_S,
-        cache_tools_list=True,
-    )
-
-
-def configure_agents_sdk() -> None:
-    """Route every Agents SDK call through the gateway and keep traces local."""
-    from agents import set_default_openai_api, set_default_openai_client, set_trace_processors
-    from .tracing import JsonlTraceProcessor
-    set_default_openai_client(openai_client(), use_for_tracing=False)
-    set_default_openai_api("responses")
-    # Replaces the default processor, which would upload traces to OpenAI (spec 13.2).
-    workspace = os.environ.get("AR_WORKSPACE", "/workspace")
-    set_trace_processors([JsonlTraceProcessor(os.path.join(workspace, "trace.jsonl"))])
+@asynccontextmanager
+async def mcp_session(sockets: str | Path | None = None, auth_token: str | None = None):
+    """An initialized MCP ClientSession on the kernel tool server."""
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+    sock = os.path.join(str(sockets or socket_dir()), "tools.sock")
+    client = httpx2.AsyncClient(transport=httpx2.AsyncHTTPTransport(uds=sock),
+                                headers={"Authorization": f"Bearer {auth_token or token()}"},
+                                timeout=MCP_TIMEOUT_S)
+    async with client, streamable_http_client("http://localhost/mcp", http_client=client) as (read, write):
+        async with ClientSession(read, write, read_timeout_seconds=MCP_TIMEOUT_S) as session:
+            await session.initialize()
+            yield session
 ```
 
-- [ ] **Step 5: Implement tracing and the runner**
-
-```python
-# contract/ar_contract/tracing.py
-"""Supplementary Agents SDK spans (agent names, handoffs, guardrails), written locally.
-The kernel's gateway already records every LLM call; this adds SDK structure."""
-from __future__ import annotations
-
-import json
-import threading
-
-from agents.tracing import TracingProcessor
-
-
-class JsonlTraceProcessor(TracingProcessor):
-    def __init__(self, path: str) -> None:
-        self._path = path
-        self._lock = threading.Lock()
-
-    def _write(self, kind: str, item) -> None:
-        exported = item.export() if hasattr(item, "export") else None
-        if exported is None:
-            return
-        with self._lock, open(self._path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"kind": kind, **exported}, default=str) + "\n")
-
-    def on_trace_start(self, trace) -> None:
-        self._write("trace_start", trace)
-
-    def on_trace_end(self, trace) -> None:
-        self._write("trace_end", trace)
-
-    def on_span_start(self, span) -> None:
-        pass                                   # spans are complete only at the end
-
-    def on_span_end(self, span) -> None:
-        self._write("span", span)
-
-    def shutdown(self) -> None:
-        pass
-
-    def force_flush(self) -> None:
-        pass
-```
+- [ ] **Step 5: Implement the runner**
 
 ```python
 # contract/ar_contract/run.py
@@ -892,9 +873,6 @@ def main(argv: list[str] | None = None) -> int:
         context_dir = os.environ.get("AR_CONTEXT_DIR", "/context")
         with open(os.path.join(context_dir, "context.json"), encoding="utf-8") as handle:
             ctx = CONTEXT_MODELS[kind].model_validate(json.load(handle))
-        if not os.environ.get("AR_SKIP_SDK_SETUP"):
-            from .client import configure_agents_sdk
-            configure_agents_sdk()
         sys.path.insert(0, os.environ.get("AR_AGENT_DIR", "/agent"))
         entry = importlib.import_module("agent.entry")
         value = getattr(entry, kind)(ctx)
@@ -920,7 +898,7 @@ if __name__ == "__main__":
 - [ ] **Step 6: Run the tests**
 
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_contract_package.py -p no:cacheprovider`
-Expected: PASS (8 tests).
+Expected: PASS (9 tests).
 
 - [ ] **Step 7: Commit**
 
@@ -1199,8 +1177,8 @@ def test_previous_response_id_links_the_conversation(env):
 
 
 def test_resent_history_links_by_prefix(env):
-    """How the Agents SDK actually continues a run: it resends the prior input and
-    output items, plus the tool output (verified fact 6)."""
+    """How a Responses client continues a run (verified for ChatOpenAI, fact 6): it resends
+    the prior input and output items, plus the tool output."""
     _, store, caller = env
     m1 = store.begin(caller, "/v1/responses", {"model": "m", "input": FIRST_INPUT})
     store.end(m1, caller, status=200, body=_resp("r1", FIRST_OUTPUT), latency_s=0, attempts=1)
@@ -1254,7 +1232,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'ar_kernel.gateway'`.
 
 Linking, in order: an explicit previous_response_id; a Responses API conversation
 id; otherwise the request's history begins with a prior call's request + response
-(how the Agents SDK continues a run). Prefix matching only looks at calls from the
+(how ChatOpenAI continues a run, fact 6). Prefix matching only looks at calls from the
 same container token.
 """
 from __future__ import annotations
@@ -1383,7 +1361,7 @@ An OpenAI-compatible HTTP service. It is the only route from a container to an L
   - `gateway.app.Upstream(base_url, api_key, *, timeout_s, retries, transport=None, sleep=asyncio.sleep)`: `await .post(path, body) -> (status, body, attempts)`.
   - `gateway.app.create_gateway_app(*, registry, store, allowed_models: set[str], upstream: Upstream | None, mocks: MockBook) -> FastAPI`. It serves `POST /v1/responses` and `POST /v1/chat/completions`.
 
-Behavior, per request: token → Caller, else **401** · `stream: true` → **400** (the gateway records complete responses; agent code uses `Runner.run`, not streaming) · model not allowed → **403** · `store.begin` (a `TelemetryError` → **500**, nothing forwarded) · mock if `caller.mock_script` or `upstream is None`, else upstream · `store.end` (a `TelemetryError` → **500**) · return the upstream status and body.
+Behavior, per request: token → Caller, else **401** · `stream: true` → **400** (the gateway records complete responses; `ChatOpenAI.ainvoke` sends `stream: false`, fact 6) · model not allowed → **403** · `store.begin` (a `TelemetryError` → **500**, nothing forwarded) · mock if `caller.mock_script` or `upstream is None`, else upstream · `store.end` (a `TelemetryError` → **500**) · return the upstream status and body.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1531,7 +1509,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'ar_kernel.gateway.app
 
 ```python
 # kernel/ar_kernel/gateway/mock.py
-"""Scripted Responses API outputs. The envelope is the minimum the Agents SDK
+"""Scripted Responses API outputs. The envelope is the minimum ChatOpenAI
 accepts (verified fact 6 in the Plan 2 document)."""
 from __future__ import annotations
 
@@ -1653,7 +1631,7 @@ def create_gateway_app(*, registry, store: CallStore, allowed_models: set[str],
         body = await request.json()
         if body.get("stream"):
             return JSONResponse({"error": {"message": "streaming is not supported by the gateway; "
-                                                      "use non-streaming calls (Runner.run)"}},
+                                                      "use non-streaming calls"}},
                                 status_code=400)
         if body.get("model") not in allowed_models:
             return JSONResponse({"error": {"message": f"model {body.get('model')!r} is not in the "
@@ -1719,7 +1697,7 @@ The MCP server factory that every kernel tool registers on, plus starting and st
   - `services.socket_dir_for(run_dir: Path) -> Path`, a short per-run directory under the system temp dir (fact 12: Unix socket paths are capped at 107 bytes).
   - `services.RunServices`: `.start(gateway_app, tools_app) -> None`, `.stop() -> None`, `.socket_dir: Path`. It binds `gateway.sock` and `tools.sock` with mode 0600, in a directory with mode 0700.
 
-Tool names use underscores: OpenAI function names must match `^[a-zA-Z0-9_-]+$`, and the SDK forwards MCP tool names as function names. So spec §10's `data.ingest` is registered as `data_ingest`, and so on.
+Tool names use underscores: OpenAI function names must match `^[a-zA-Z0-9_-]+$`, and LangChain passes tool names through as function names. So spec §10's `data.ingest` is registered as `data_ingest`, and so on.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1731,7 +1709,6 @@ import asyncio
 import json
 import os
 
-import httpx2
 import pytest
 from mcp.server.mcpserver import Context
 
@@ -1766,14 +1743,9 @@ def _server(tmp_path):
 
 
 async def _call(sock_dir, token, tool, args):
-    from agents.mcp import MCPServerStreamableHttp
-    def factory(headers=None, timeout=None, auth=None):
-        return httpx2.AsyncClient(transport=httpx2.AsyncHTTPTransport(uds=str(sock_dir / "tools.sock")),
-                                  headers=headers, timeout=timeout, auth=auth)
-    async with MCPServerStreamableHttp(
-            params={"url": "http://localhost/mcp", "headers": {"Authorization": f"Bearer {token}"},
-                    "httpx_client_factory": factory}, client_session_timeout_seconds=30) as s:
-        return await s.call_tool(tool, args)
+    from ar_contract.client import mcp_session
+    async with mcp_session(sock_dir, token) as session:
+        return await session.call_tool(tool, args)
 
 
 @pytest.fixture
@@ -1797,7 +1769,7 @@ def test_socket_dir_is_short_and_private(tmp_path):
 def test_tool_sees_its_caller_over_the_socket(live):
     rec, _, services, caller = live
     result = asyncio.run(_call(services.socket_dir, caller.token, "echo_caller", {"word": "hi"}))
-    assert not result.isError
+    assert not result.is_error
     assert json.loads(result.content[0].text) == {"node": "n7", "word": "hi"}
     kinds = [e["type"] for e in rec.read_events("n7")]
     assert kinds == ["tool.call", "tool.result"]
@@ -1807,7 +1779,7 @@ def test_tool_sees_its_caller_over_the_socket(live):
 def test_tool_error_reaches_the_agent_as_an_error_result(live):
     rec, _, services, caller = live
     result = asyncio.run(_call(services.socket_dir, caller.token, "always_fails", {}))
-    assert result.isError and "too large" in result.content[0].text
+    assert result.is_error and "too large" in result.content[0].text
     assert [e["type"] for e in rec.read_events("n7")][-1] == "tool.error"
 
 
@@ -1815,17 +1787,17 @@ def test_unexpected_kernel_exception_is_contained(live):
     """A bug in a tool must come back as a tool error, never take the server down."""
     rec, _, services, caller = live
     result = asyncio.run(_call(services.socket_dir, caller.token, "kernel_bug", {}))
-    assert result.isError and "ZeroDivisionError" in result.content[0].text
+    assert result.is_error and "ZeroDivisionError" in result.content[0].text
     err = [e for e in rec.read_events("n7") if e["type"] == "tool.error"][0]
     assert "Traceback" in rec.load_payload(err["payload"])["traceback"]
     # the server still answers afterwards
-    assert not asyncio.run(_call(services.socket_dir, caller.token, "echo_caller", {"word": "x"})).isError
+    assert not asyncio.run(_call(services.socket_dir, caller.token, "echo_caller", {"word": "x"})).is_error
 
 
 def test_unknown_token_is_refused(live):
     _, _, services, _ = live
     result = asyncio.run(_call(services.socket_dir, "ar-forged", "echo_caller", {"word": "hi"}))
-    assert result.isError and "token" in result.content[0].text
+    assert result.is_error and "token" in result.content[0].text
 
 
 def test_sockets_are_owner_only(live):
@@ -2967,8 +2939,8 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir \
-      "openai-agents==0.22.3" "mcp==2.2.0" "httpx==0.28.1" \
-      "langgraph==1.2.11" "langgraph-checkpoint-sqlite==3.1.1" \
+      "langgraph==1.2.11" "langchain-core==1.6.3" "langchain-openai==1.6.2" \
+      "mcp==2.2.0" "httpx==0.28.1" "httpx2==2.13.0" \
       "pydantic>=2.12,<3" "numpy>=1.26" "opencv-python-headless>=4.9" "Pillow>=10"
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 ```
@@ -3002,8 +2974,8 @@ def test_built_image_has_the_runtime_stack_and_no_network_needed():
     tag = ensure_image(CFG, "")
     out = subprocess.run(
         ["docker", "run", "--rm", "--network", "none", tag, "python", "-c",
-         "import agents, mcp, httpx, httpx2, langgraph, cv2, numpy, PIL; "
-         "from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver; print('ok')"],
+         "import mcp, httpx, httpx2, langgraph, langchain_core, langchain_openai, cv2, numpy, PIL; "
+         "from langgraph.types import Send; print('ok')"],
         capture_output=True, text=True, timeout=300)
     assert out.returncode == 0, out.stderr
     ff = subprocess.run(["docker", "run", "--rm", "--network", "none", tag, "ffprobe", "-version"],
@@ -3570,7 +3542,8 @@ Build the `EditContext` / `RecipeContext` a container receives at `/context/cont
 
 Per-node artifact conventions (Plan 4 writes, this task reads; each is optional):
 `runs/<run>/nodes/<n>/recipe.yaml` (the agent's recipe),
-`runs/<run>/nodes/<n>/rationale.md`, and
+`runs/<run>/nodes/<n>/rationale.md`,
+`runs/<run>/nodes/<n>/edit.json` (the passing `edit_self` result: `summary` and `component`), and
 `runs/<run>/nodes/<n>/eval/aggregates.json` (the `aggregates()` output).
 
 **Files:**
@@ -3580,7 +3553,7 @@ Per-node artifact conventions (Plan 4 writes, this task reads; each is optional)
 **Interfaces:**
 - Consumes: `NodeStore`, `CommitStore`, `ClipStore`, `BlobStore`, `open_db`; `AgentsRepo.diff_stats` (Task 12); `TUNABLE_KEYS`, `RECIPE_RULES` (Plan 1 review); `ar_contract.models` (Task 3); `data_tools.scores_by_clip` (Task 7).
 - Produces:
-  - `context_bundle.lineage(conn, run_dir, repo, node_id) -> list[dict]`: root first, ending at `node_id`. Each entry has `node_id, status, score, metrics, data (per-dataset format/weight/clip count), recipe, rationale, aggregates, code_diff_stats`.
+  - `context_bundle.lineage(conn, run_dir, repo, node_id) -> list[dict]`: root first, ending at `node_id`. Each entry has `node_id, status, score, metrics, data (per-dataset format/weight/clip count), recipe, rationale, edit (summary and component, or None), aggregates, code_diff_stats`.
   - `context_bundle.archive_summary(conn) -> dict`: `nodes` (id, parent, status, score, subtree_value, depth), `n_scored`, `best`.
   - `context_bundle.clip_pool_summary(conn, cap=2000) -> list[dict]`.
   - `context_bundle.build_edit_context(*, conn, run_dir, repo, parent_id, attempt, max_attempts, retry, nodes_remaining, dry_run=False) -> EditContext`.
@@ -3624,6 +3597,7 @@ def world(tmp_path):
     (tmp_path / "nodes" / "root" / "eval" / "aggregates.json").write_text(
         json.dumps({"category": {"Nature": 0.8}}))
     (tmp_path / "nodes" / "root" / "rationale.md").write_text("released checkpoint")
+    (tmp_path / "nodes" / "root" / "edit.json").write_text(json.dumps({"summary": "s", "component": "tools"}))
     return conn, repo, tmp_path
 
 
@@ -3633,6 +3607,7 @@ def test_lineage_is_root_first_and_carries_artifacts(world):
     assert [e["node_id"] for e in lin] == ["root"]
     assert lin[0]["score"] == 0.78 and lin[0]["aggregates"] == {"category": {"Nature": 0.8}}
     assert lin[0]["rationale"] == "released checkpoint"
+    assert lin[0]["edit"] == {"summary": "s", "component": "tools"}
 
 
 def test_archive_summary_names_the_best_node(world):
@@ -3753,6 +3728,7 @@ def lineage(conn, run_dir: Path, repo, node_id: str) -> list[dict]:
             "metrics": node["metrics"], "data": _data_stats(conn, node["data_commit"]),
             "recipe": yaml.safe_load(recipe_path.read_text()) if recipe_path.exists() else None,
             "rationale": rationale.read_text() if rationale.exists() else None,
+            "edit": _read_json(_node_file(run_dir, node["node_id"], "edit.json")),
             "aggregates": _read_json(_node_file(run_dir, node["node_id"], "eval/aggregates.json")),
             "code_diff_stats": (repo.diff_stats(parent_commit, node["agent_commit"])
                                 if parent_commit and node["agent_commit"] else []),
@@ -4167,7 +4143,9 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
                             mounts=Mounts(agent=code, workspace=ws, staging=staging, context=ctx_dir,
                                           store=Path(run_dir) / "store", contract=cfg.repo_root / "contract",
                                           sockets=harness.socket_dir, agent_readonly=True),
-                            command=command, env={"AR_TOKEN": caller.token, "AR_DEFAULT_MODEL": MOCK_MODEL},
+                            command=command, env={"AR_TOKEN": caller.token, "AR_DEFAULT_MODEL": MOCK_MODEL,
+                                                  "AR_CONTEXT_WINDOW": str(cfg.get("agents.context_window_tokens")),
+                                                  "AR_COMPACT_AT": str(cfg.get("agents.compact_at"))},
                             cpus=4, memory_gb=8, timeout_s=timeout_s, recorder=recorder,
                             node=node, phase="contract", attempt=attempt)
         finally:
@@ -4464,7 +4442,9 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
                           agent_readonly=agent_readonly),
             command=["python", "-m", "ar_contract.run", phase],
             env={"AR_TOKEN": caller.token, "AR_DEFAULT_MODEL": env.default_model, "AR_NODE": node,
-                 "AR_PHASE": phase, "AR_ATTEMPT": str(attempt)},
+                 "AR_PHASE": phase, "AR_ATTEMPT": str(attempt),
+                 "AR_CONTEXT_WINDOW": str(env.cfg.get("agents.context_window_tokens")),
+                 "AR_COMPACT_AT": str(env.cfg.get("agents.compact_at"))},
             cpus=env.cfg.get("sandbox.cpus"), memory_gb=env.cfg.get("sandbox.memory_gb"),
             timeout_s=4 * soft,                 # hard cap (spec 14.5); liveness is Plan 4
             recorder=env.recorder, node=node, phase=phase, attempt=attempt)
@@ -4547,7 +4527,7 @@ Create the fixture agent `tests/fixtures/agents/tool_user/agent/entry.py`:
 import asyncio
 import json
 
-from ar_contract.client import mcp_tools
+from ar_contract.client import mcp_session
 from ar_contract.models import EditResult, RecipeResult
 
 
@@ -4556,7 +4536,7 @@ def edit_self(ctx):
 
 
 async def improve_recipe(ctx):
-    async with mcp_tools() as tools:
+    async with mcp_session() as tools:
         pool = json.loads((await tools.call_tool("data_query",
                                                   {"filter": {"format": "video_caption_camera"}})).content[0].text)
         ids = [c["clip_id"] for c in pool["clips"]][:4]
@@ -4632,37 +4612,701 @@ git commit -m "feat(kernel): agent phase runner -- attempt dirs, real services, 
 ```
 
 ---
-### Task 16: The seed agent
+### Task 16: The seed harness (single-agent inner loop)
 
-The root node's code (spec 9.1): the agent every later version descends from. `improve_recipe` runs an async LangGraph **task** graph (plan → build data → write recipe → `recipe_check` → revise, ≤ 3 rounds). `edit_self` runs a **meta** graph (analyze lineage → implement edits with file tools → self-test → finalize, ≤ 2 rounds). Each LLM step is an OpenAI Agents SDK `Agent`. Everything runs in one event loop with one MCP connection (verified fact 13: async graphs with `AsyncSqliteSaver`).
+The inner loop every seed role runs on. It is agent code (`seed_agent/agent/harness/`), so `edit_self` can change it like any other component. It is an explicit LangGraph ReAct graph that reproduces `langchain.agents.create_agent` exactly (fact 14), built in three commits: first the **exact** reproduction, proven equal to `create_agent` by a comparison test and mutation controls; then the two deliberate additions, each test-first:
 
-The seed's job is to be a **correct, working starting point**, not a strong researcher. The loop improves it. Keep it simple, deterministic where it can be (the recipe check and the self-test are code, not LLM calls), and honest about limits in its prompts.
+1. **Tool errors are reported, not raised.** `create_agent`'s default tool node re-raises any tool exception and ends the run (fact 15). The harness returns it to the model as an error `ToolMessage` using `ToolNode`'s `handle_tool_errors=True` text: `Error: <repr>\n Please fix your mistakes.`
+2. **Auto-compact, Claude Code style.** Before every model call, the harness estimates the context size: the last reply's reported `usage.total_tokens` plus about 4 characters per token for the messages after it (no tokenizer offline, fact 17). Below `compact_at × context_window` nothing happens and messages append linearly. At or above it, a dedicated summarizer call (same system prompt, tools and history; `tool_choice="none"`; the instruction in `prompts/compact.md`) condenses the history, and the history is replaced by one user message: a continuation preamble plus the summary.
+
+The comparison test stays in the suite for good. `create_agent` is the reference whenever no tool raises and the context stays below the threshold.
 
 **Files:**
-- Create: `seed_agent/.gitignore`, `seed_agent/agent/__init__.py` (empty), `seed_agent/agent/requirements.txt`, `seed_agent/agent/settings.py`, `seed_agent/agent/entry.py`
-- Create: `seed_agent/agent/tools/__init__.py` (empty), `seed_agent/agent/tools/files.py`, `seed_agent/agent/tools/media.py`
-- Create: `seed_agent/agent/agents/__init__.py` (empty), `seed_agent/agent/agents/definitions.py`
-- Create: `seed_agent/agent/graphs/__init__.py` (empty), `seed_agent/agent/graphs/task.py`, `seed_agent/agent/graphs/meta.py`
-- Create: `seed_agent/agent/prompts/{planner,data_builder,recipe_writer,analyst,coder}.md`
-- Create: `seed_agent/agent/memory/README.md`
-- Test: `tests/test_seed_agent.py`
+- Create: `seed_agent/.gitignore`, `seed_agent/agent/__init__.py` (empty), `seed_agent/agent/harness/__init__.py` (empty)
+- Create: `seed_agent/agent/harness/react.py`, `seed_agent/agent/harness/compact.py`, `seed_agent/agent/prompts/compact.md`
+- Test: `tests/test_seed_harness.py`
 
 **Interfaces:**
-- Consumes (inside the container): `ar_contract.client.mcp_tools`, `ar_contract.client.openai_client`, `ar_contract.models.*` (Task 3); the kernel tools by name (Tasks 7–9).
-- Produces: `agent.entry.edit_self(ctx) -> EditResult` and `agent.entry.improve_recipe(ctx) -> RecipeResult`, both `async`. It also exposes pure helpers for tests: `agent.tools.media.snap_segments(segments, duration)` and `agent.tools.files.resolve_inside(root, path)`.
+- Consumes: `langgraph` 1.2.11, `langchain-core` 1.6.3; `langchain` 1.4.2 in tests only (the reference).
+- Produces (used by Task 17's roles):
+  - `agent.harness.react.build_react_agent(model: BaseChatModel, tools: list[BaseTool], system_prompt: str | None = None, *, context_window: int, compact_at: float = 0.85, compact_prompt: str | None = None)` returns a compiled graph. Call it as `await graph.ainvoke({"messages": [...]})`; the result's `"messages"` is the full history. `compact_prompt=None` reads `agent/prompts/compact.md`.
+  - `agent.harness.react.run_tool(tools_by_name, call) -> ToolMessage`, plus the constants `RECURSION_LIMIT = 9999`, `COMPACT_AT = 0.85` and `COMPACT_PROMPT` (a `Path`).
+  - `agent.harness.compact.estimate_tokens(messages, system_prompt=None) -> int`, `needs_compaction(messages, system_prompt, context_window, compact_at) -> bool`, `summarize(model, tools, system_prompt, messages, instruction) -> str`, and `CONTINUATION` (a format string with `{summary}`).
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Scaffolding**
+
+```gitignore
+# seed_agent/.gitignore
+__pycache__/
+*.pyc
+```
+
+Create the empty `seed_agent/agent/__init__.py` and `seed_agent/agent/harness/__init__.py`.
+
+- [ ] **Step 2: Write the comparison test (exact behaviour)**
+
+The scripted model replays fixed `AIMessage`s and records every prompt it receives and every `bind_tools` call. Each scenario runs through our graph and through `create_agent`, and the test requires identical final message lists **and** identical prompts and tool bindings. The scenarios cover: a plain answer, one tool call, parallel calls that finish out of order, an unknown tool, invalid arguments, dict and list outputs, and a multi-step run. Each runs with and without a system prompt, plus a no-tools case and a raising tool.
 
 ```python
-# tests/test_seed_agent.py
-import json
-import os
+"""The seed harness (agent/harness) against langchain.agents.create_agent.
+
+create_agent (langchain 1.4.2, factory.py @ 4af7ab8) is the reference: both must
+produce identical message lists AND show the model identical prompts and tool bindings."""
+import asyncio
 import sys
 from pathlib import Path
 
 import pytest
+from langchain.agents import create_agent
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.tools import tool
+from langchain_core.utils.function_calling import convert_to_openai_tool
 
 SEED = Path(__file__).resolve().parents[1] / "seed_agent"
+sys.path.insert(0, str(SEED))
+
+from agent.harness.react import build_react_agent  # noqa: E402
+
+
+class Scripted(BaseChatModel):
+    """Replays AIMessages in order; records every prompt and every bind_tools call."""
+    script: list
+    log: dict
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted"
+
+    def bind_tools(self, tools, **kwargs):
+        self.log["bind"].append(([convert_to_openai_tool(t) for t in tools], kwargs))
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.log["prompts"].append([_norm(m) for m in messages])
+        reply = self.script[len(self.log["prompts"]) - 1].model_copy(deep=True)
+        return ChatResult(generations=[ChatGeneration(message=reply)])
+
+
+def _norm(m: BaseMessage) -> dict:
+    d = m.model_dump()
+    d.pop("id", None)                    # message ids are random per run
+    d.pop("response_metadata", None)     # carries the model run id
+    return d
+
+
+def _ai(text="", calls=(), total=None):
+    m = AIMessage(content=text, tool_calls=[{"name": n, "args": a, "id": i, "type": "tool_call"}
+                                            for n, a, i in calls])
+    if total is not None:
+        m.usage_metadata = {"input_tokens": total - 10, "output_tokens": 10, "total_tokens": total}
+    return m
+
+
+@tool
+async def add(a: int, b: int) -> int:
+    """Add two integers."""
+    return a + b
+
+
+@tool
+async def slow_echo(text: str, delay: float) -> str:
+    """Echo text after a delay."""
+    await asyncio.sleep(delay)
+    return text
+
+
+@tool
+async def as_dict(key: str) -> dict:
+    """Return a dict."""
+    return {"key": key, "n": [1, 2]}
+
+
+@tool
+async def strings(n: int) -> list:
+    """Return a list of strings (content the tool node re-serializes)."""
+    return ["plain", f"n={n}"]
+
+
+@tool
+async def boom(x: int) -> str:
+    """Always fails."""
+    raise RuntimeError(f"boom {x}")
+
+
+TOOLS = [add, slow_echo, as_dict, strings, boom]
+
+SCENARIOS = {
+    "plain_answer": [_ai("hello")],
+    "one_call": [_ai("", [("add", {"a": 1, "b": 2}, "c1")]), _ai("3")],
+    "parallel_calls_finish_out_of_order": [
+        _ai("", [("slow_echo", {"text": "a", "delay": 0.3}, "c1"),
+                 ("slow_echo", {"text": "b", "delay": 0.0}, "c2"),
+                 ("add", {"a": 5, "b": 6}, "c3")]), _ai("done")],
+    "unknown_tool": [_ai("", [("nope", {"q": 1}, "c1")]), _ai("sorry")],
+    "bad_args": [_ai("", [("add", {"a": "x"}, "c1")]), _ai("fixed")],
+    "dict_output": [_ai("", [("as_dict", {"key": "k"}, "c1")]), _ai("ok")],
+    "list_output": [_ai("", [("strings", {"n": 3}, "c1")]), _ai("ok")],
+    "multi_step": [_ai("", [("add", {"a": 1, "b": 1}, "c1")]),
+                   _ai("thinking", [("add", {"a": 2, "b": 2}, "c2"), ("nope", {}, "c3")]),
+                   _ai("", [("as_dict", {"key": "z"}, "c4")]), _ai("final")],
+}
+
+
+async def _run(builder, script, tools, system, history):
+    log = {"bind": [], "prompts": []}
+    agent = builder(Scripted(script=script, log=log), tools, system)
+    out = await agent.ainvoke({"messages": history})
+    return [_norm(m) for m in out["messages"]], log
+
+
+def _ours(model, tools, system):
+    return build_react_agent(model, tools, system)
+
+
+def _theirs(model, tools, system):
+    return create_agent(model, tools, system_prompt=system)
+
+
+@pytest.mark.parametrize("system", [None, "You are careful."])
+@pytest.mark.parametrize("name", list(SCENARIOS))
+def test_matches_create_agent(name, system):
+    history = [HumanMessage("earlier"), AIMessage("earlier reply"), HumanMessage("go")]
+    ours = asyncio.run(_run(_ours, SCENARIOS[name], TOOLS, system, history))
+    theirs = asyncio.run(_run(_theirs, SCENARIOS[name], TOOLS, system, history))
+    assert ours[0] == theirs[0]          # the final message list
+    assert ours[1] == theirs[1]          # every prompt the model saw, and every tool binding
+
+
+def test_no_tools_matches_create_agent():
+    script = [_ai("", [("add", {"a": 1, "b": 2}, "c1")])]    # a tool call with no tools ends the loop
+    assert (asyncio.run(_run(_ours, script, [], "s", [HumanMessage("x")]))
+            == asyncio.run(_run(_theirs, script, [], "s", [HumanMessage("x")])))
+
+
+def test_a_raising_tool_propagates_in_both():
+    script = [_ai("", [("boom", {"x": 1}, "c1")]), _ai("unreachable")]
+    for builder in (_ours, _theirs):
+        with pytest.raises(RuntimeError, match="boom 1"):
+            asyncio.run(_run(builder, script, TOOLS, None, [HumanMessage("x")]))
+```
+
+- [ ] **Step 3: Run it to confirm it fails**
+
+Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_seed_harness.py -p no:cacheprovider`
+Expected: FAIL (`ModuleNotFoundError: No module named 'agent.harness.react'`).
+
+- [ ] **Step 4: Implement the exact reproduction**
+
+```python
+# seed_agent/agent/harness/react.py
+"""Single-agent inner loop: an explicit ReAct graph.
+
+Reproduces langchain.agents.create_agent (langchain 1.4.2, factory.py @ 4af7ab8)
+with no middleware, no response_format and async tools:
+  START -> model; model -> END if the last AI message has no tool calls,
+  else one Send("tools", [call]) per tool call (parallel); tools -> model.
+Tool execution follows langgraph.prebuilt.ToolNode's default error handling.
+"""
+from __future__ import annotations
+
+import json
+from typing import Annotated, Any, TypedDict
+
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, AnyMessage, SystemMessage, ToolMessage
+from langchain_core.messages.tool import ToolCall
+from langchain_core.tools import BaseTool
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
+from langgraph.types import Send
+from pydantic import ValidationError
+
+RECURSION_LIMIT = 9_999
+INVALID_TOOL = "Error: {name} is not a valid tool, try one of [{names}]."
+INVALID_ARGS = ("Error invoking tool '{name}' with kwargs {args} with error:\n"
+                " {error}\n Please fix the error and try again.")
+TOOL_BLOCK_TYPES = {"text", "image_url", "image", "json", "search_result", "custom_tool_call_output",
+                    "document", "file"}
+
+
+class ReactState(TypedDict):
+    messages: Annotated[list[AnyMessage], add_messages]
+
+
+def _content(output: Any) -> str | list:
+    if isinstance(output, str) or (isinstance(output, list) and all(
+            isinstance(x, dict) and x.get("type") in TOOL_BLOCK_TYPES for x in output)):
+        return output
+    try:
+        return json.dumps(output, ensure_ascii=False)
+    except Exception:  # noqa: BLE001
+        return str(output)
+
+
+async def run_tool(tools: dict[str, BaseTool], call: ToolCall) -> ToolMessage:
+    tool = tools.get(call["name"])
+    if tool is None:
+        return ToolMessage(INVALID_TOOL.format(name=call["name"], names=", ".join(tools)),
+                           name=call["name"], tool_call_id=call["id"], status="error")
+    try:
+        message = await tool.ainvoke({**call, "type": "tool_call"})
+    except ValidationError as exc:
+        error = "\n".join(f"{'.'.join(str(p) for p in e.get('loc', ()))}: {e.get('msg', 'Unknown error')}"
+                          for e in exc.errors())
+        return ToolMessage(INVALID_ARGS.format(name=call["name"], args=call["args"], error=error),
+                           name=call["name"], tool_call_id=call["id"], status="error")
+    message.content = _content(message.content)
+    return message
+
+
+def build_react_agent(model: BaseChatModel, tools: list[BaseTool], system_prompt: str | None = None):
+    by_name = {t.name: t for t in tools}
+    system = [SystemMessage(content=system_prompt)] if system_prompt is not None else []
+
+    async def call_model(state: ReactState) -> dict:
+        bound = model.bind_tools(tools, tool_choice=None) if tools else model.bind()
+        return {"messages": [await bound.ainvoke([*system, *state["messages"]])]}
+
+    async def call_tool(calls: list[ToolCall]) -> dict:
+        return {"messages": [await run_tool(by_name, call) for call in calls]}
+
+    def after_model(state: ReactState):
+        last = state["messages"][-1]
+        if not tools or not isinstance(last, AIMessage) or not last.tool_calls:
+            return END
+        return [Send("tools", [call]) for call in last.tool_calls]
+
+    graph = StateGraph(ReactState)
+    graph.add_node("model", call_model)
+    graph.add_edge(START, "model")
+    if tools:
+        graph.add_node("tools", call_tool)
+        graph.add_conditional_edges("model", after_model, ["tools", END])
+        graph.add_edge("tools", "model")
+    else:
+        graph.add_edge("model", END)
+    return graph.compile().with_config({"recursion_limit": RECURSION_LIMIT})
+```
+
+Two details are easy to get wrong, and the test catches both:
+- `create_agent` re-binds the tools on every model call, so `bind_tools` goes inside the model node.
+- The tool node re-serializes a list of plain strings as JSON (`_content`); `BaseTool` alone would pass it through.
+
+- [ ] **Step 5: Run the test**
+
+Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_seed_harness.py -p no:cacheprovider`
+Expected: PASS (18 tests).
+
+- [ ] **Step 6: Mutation controls (the comparison test must be able to fail)**
+
+A comparison that passes against a broken copy proves nothing (verification-log finding 8). Apply each mutation to `react.py`, run the test, record the failure count, and restore the file:
+
+```bash
+H=seed_agent/agent/harness/react.py; ORIG=$(mktemp); cp $H $ORIG
+for expr in 's/try one of \[/try one of  [/' \
+            's/return \[Send("tools", \[call\]) for call in last.tool_calls\]/return [Send("tools", list(reversed(last.tool_calls)))]/' \
+            's/\[\*system, \*state\["messages"\]\]/[*state["messages"], *system]/' \
+            's/message.content = _content(message.content)/pass/' \
+            's/with error:\\n"/with error: "/'; do
+  cp $ORIG $H; sed -i "$expr" $H
+  cmp -s $H $ORIG && echo "MUTATION DID NOT APPLY: $expr" && continue
+  conda run --no-capture-output -n autoresearcher python -m pytest tests/test_seed_harness.py -p no:cacheprovider 2>&1 | grep -E '^[0-9]+ (passed|failed)|[0-9]+ failed'
+done
+cp $ORIG $H && rm $ORIG
+```
+
+Expected, in order: 4, 4, 9, 2 and 2 failed (the invalid-tool text; sequential calls in reverse; the system prompt after the history; no content normalisation; the invalid-argument text). The restored file passes all 18 again. Keep these counts for the Task 18 log.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add seed_agent/.gitignore seed_agent/agent/__init__.py seed_agent/agent/harness tests/test_seed_harness.py
+git commit -m "feat(seed): explicit ReAct harness reproducing create_agent, with a comparison test"
+```
+
+- [ ] **Step 8: Tool errors are reported (test first)**
+
+In `tests/test_seed_harness.py`, replace `test_a_raising_tool_propagates_in_both` with:
+
+```python
+def test_tool_exception_is_reported_where_create_agent_raises():
+    script = [_ai("", [("boom", {"x": 1}, "c1")]), _ai("recovered")]
+    with pytest.raises(RuntimeError, match="boom 1"):
+        asyncio.run(_run(_theirs, script, TOOLS, None, [HumanMessage("x")]))
+    messages, _ = asyncio.run(_run(_ours, script, TOOLS, None, [HumanMessage("x")]))
+    err = messages[2]
+    assert err["type"] == "tool" and err["status"] == "error" and err["tool_call_id"] == "c1"
+    assert err["content"] == "Error: RuntimeError('boom 1')\n Please fix your mistakes."
+    assert messages[-1]["content"] == "recovered"
+```
+
+Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_seed_harness.py -p no:cacheprovider`
+Expected: FAIL (1 test: `RuntimeError: boom 1` escapes our graph).
+
+In `react.py`, add the template after `INVALID_ARGS`:
+
+```python
+TOOL_ERROR = "Error: {error}\n Please fix your mistakes."   # ToolNode's handle_tool_errors=True text
+```
+
+and a second handler in `run_tool`, after the `ValidationError` handler:
+
+```python
+    except Exception as exc:  # noqa: BLE001 -- difference 1: report, do not crash
+        return ToolMessage(TOOL_ERROR.format(error=repr(exc)), name=call["name"],
+                           tool_call_id=call["id"], status="error")
+```
+
+Also update the module docstring to name the difference.
+
+Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_seed_harness.py -p no:cacheprovider`
+Expected: PASS (18 tests).
+
+```bash
+git add seed_agent/agent/harness/react.py tests/test_seed_harness.py
+git commit -m "feat(seed): harness reports tool errors to the model instead of ending the run"
+```
+
+- [ ] **Step 9: Auto-compact (test first)**
+
+In `tests/test_seed_harness.py`:
+- Change the import line to `from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage`.
+- Add `from agent.harness.compact import CONTINUATION, estimate_tokens, needs_compaction  # noqa: E402` above the `react` import.
+- Add `BIG = 10 ** 9      # a context window compaction never reaches` below the imports.
+- Make `_ours` build with `build_react_agent(model, tools, system, context_window=BIG)`.
+- Append these tests:
+
+```python
+def test_estimate_uses_last_reported_usage_plus_tail():
+    msgs = [HumanMessage("x" * 400), _ai("hi", total=1000), ToolMessage("y" * 80, tool_call_id="c")]
+    assert estimate_tokens(msgs) == 1000 + 20
+    assert estimate_tokens([HumanMessage("x" * 400)], system_prompt="s" * 40) == 110
+
+
+def test_a_single_message_is_never_compacted():
+    assert not needs_compaction([HumanMessage("x" * 10 ** 6)], None, 1000, 0.85)
+
+
+def test_compaction_replaces_history_and_continues():
+    # call 1 asks for a tool and reports 900 tokens >= 0.85 * 1000, so the harness compacts
+    # before call 2 (the summarizer); call 3 continues from the summary alone.
+    script = [_ai("", [("add", {"a": 1, "b": 2}, "c1")], total=900), _ai("SUMMARY TEXT"),
+              _ai("done", total=50)]
+    log = {"bind": [], "prompts": []}
+    agent = build_react_agent(Scripted(script=script, log=log), TOOLS, "sys", context_window=1000,
+                              compact_prompt="COMPACT NOW")
+    out = asyncio.run(agent.ainvoke({"messages": [HumanMessage("task")]}))
+    summarizer = log["prompts"][1]
+    assert [m["type"] for m in summarizer] == ["system", "human", "ai", "tool", "human"]
+    assert summarizer[0]["content"] == "sys" and summarizer[-1]["content"] == "COMPACT NOW"
+    assert log["bind"][1][1] == {"tool_choice": "none"}        # the summarizer only writes text
+    continuation = CONTINUATION.format(summary="SUMMARY TEXT")
+    assert [m.type for m in out["messages"]] == ["human", "ai"]
+    assert out["messages"][0].content == continuation and log["prompts"][2][1]["content"] == continuation
+    assert out["messages"][-1].content == "done"
+
+
+def test_below_the_threshold_messages_append_linearly():
+    script = [_ai("", [("add", {"a": 1, "b": 2}, "c1")], total=800), _ai("done", total=820)]
+    log = {"bind": [], "prompts": []}
+    agent = build_react_agent(Scripted(script=script, log=log), TOOLS, "sys", context_window=1000)
+    out = asyncio.run(agent.ainvoke({"messages": [HumanMessage("task")]}))
+    assert [m.type for m in out["messages"]] == ["human", "ai", "tool", "ai"] and len(log["prompts"]) == 2
+
+
+def test_the_default_compaction_prompt_is_the_seed_prompt_file():
+    from agent.harness.react import COMPACT_PROMPT
+    assert COMPACT_PROMPT.is_file() and "Next step" in COMPACT_PROMPT.read_text()
+```
+
+Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_seed_harness.py -p no:cacheprovider`
+Expected: FAIL (`ModuleNotFoundError: No module named 'agent.harness.compact'`).
+
+- [ ] **Step 10: Implement auto-compact**
+
+```python
+# seed_agent/agent/harness/compact.py
+"""Auto-compact, in the style of Claude Code.
+
+Before every model call the harness estimates the context size. Below the threshold
+nothing happens and messages are appended linearly. At or above it, a dedicated
+summarizer call condenses the whole history, and the history is replaced by one
+user message carrying that summary.
+"""
+from __future__ import annotations
+
+import json
+
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
+from langchain_core.tools import BaseTool
+
+CHARS_PER_TOKEN = 4          # no tokenizer offline (tiktoken downloads its encodings)
+CONTINUATION = (
+    "This session is being continued from a previous conversation that ran out of context. "
+    "The summary below covers the earlier portion of the conversation.\n\n"
+    "Summary:\n{summary}\n\n"
+    "Continue the work from where it left off without asking any further questions. "
+    "Resume directly: do not acknowledge the summary or recap what was happening."
+)
+
+
+def _chars(message: AnyMessage) -> int:
+    content = message.content if isinstance(message.content, str) else json.dumps(message.content, default=str)
+    calls = getattr(message, "tool_calls", None) or []
+    return len(content) + (len(json.dumps(calls, default=str)) if calls else 0)
+
+
+def estimate_tokens(messages: list[AnyMessage], system_prompt: str | None = None) -> int:
+    """The last reply's reported usage (input + output) plus an estimate for what came after.
+    Without a reported usage (first call, or right after compaction), estimate everything."""
+    for i in range(len(messages) - 1, -1, -1):
+        message = messages[i]
+        if isinstance(message, AIMessage) and message.usage_metadata:
+            tail = sum(_chars(m) for m in messages[i + 1:])
+            return message.usage_metadata["total_tokens"] + tail // CHARS_PER_TOKEN
+    head = len(system_prompt or "")
+    return (head + sum(_chars(m) for m in messages)) // CHARS_PER_TOKEN
+
+
+def needs_compaction(messages: list[AnyMessage], system_prompt: str | None, context_window: int,
+                     compact_at: float) -> bool:
+    # One message cannot be condensed further; let the model call fail loudly instead of looping.
+    return len(messages) > 1 and estimate_tokens(messages, system_prompt) >= compact_at * context_window
+
+
+async def summarize(model: BaseChatModel, tools: list[BaseTool], system_prompt: str | None,
+                    messages: list[AnyMessage], instruction: str) -> str:
+    """The summarizer sees the same system prompt, tools and history as the agent, plus the
+    compaction instruction; tool_choice='none' keeps it to writing text."""
+    bound = model.bind_tools(tools, tool_choice="none") if tools else model.bind()
+    system = [SystemMessage(content=system_prompt)] if system_prompt is not None else []
+    reply = await bound.ainvoke([*system, *messages, HumanMessage(content=instruction)])
+    return reply.text.strip()
+```
+
+The final `react.py`:
+
+```python
+# seed_agent/agent/harness/react.py
+"""Single-agent inner loop: an explicit ReAct graph.
+
+Reproduces langchain.agents.create_agent (langchain 1.4.2, factory.py @ 4af7ab8)
+with no middleware, no response_format and async tools:
+  START -> model; model -> END if the last AI message has no tool calls,
+  else one Send("tools", [call]) per tool call (parallel); tools -> model.
+Tool execution follows langgraph.prebuilt.ToolNode's default messages.
+
+Two deliberate differences from create_agent's default:
+  1. A tool that raises is reported to the model as an error ToolMessage
+     (create_agent re-raises and ends the run).
+  2. Auto-compact: before each model call, if the context estimate reaches
+     compact_at * context_window, the history is summarized and replaced
+     (compact.py). Below the threshold, messages are appended linearly.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Annotated, Any, TypedDict
+
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import (AIMessage, AnyMessage, HumanMessage, RemoveMessage,
+                                     SystemMessage, ToolMessage)
+from langchain_core.messages.tool import ToolCall
+from langchain_core.tools import BaseTool
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
+from langgraph.types import Send
+from pydantic import ValidationError
+
+from .compact import CONTINUATION, needs_compaction, summarize
+
+RECURSION_LIMIT = 9_999
+COMPACT_AT = 0.85
+COMPACT_PROMPT = Path(__file__).resolve().parents[1] / "prompts" / "compact.md"
+INVALID_TOOL = "Error: {name} is not a valid tool, try one of [{names}]."
+INVALID_ARGS = ("Error invoking tool '{name}' with kwargs {args} with error:\n"
+                " {error}\n Please fix the error and try again.")
+TOOL_ERROR = "Error: {error}\n Please fix your mistakes."   # ToolNode's handle_tool_errors=True text
+TOOL_BLOCK_TYPES = {"text", "image_url", "image", "json", "search_result", "custom_tool_call_output",
+                    "document", "file"}
+
+
+class ReactState(TypedDict):
+    messages: Annotated[list[AnyMessage], add_messages]
+
+
+def _content(output: Any) -> str | list:
+    if isinstance(output, str) or (isinstance(output, list) and all(
+            isinstance(x, dict) and x.get("type") in TOOL_BLOCK_TYPES for x in output)):
+        return output
+    try:
+        return json.dumps(output, ensure_ascii=False)
+    except Exception:  # noqa: BLE001
+        return str(output)
+
+
+async def run_tool(tools: dict[str, BaseTool], call: ToolCall) -> ToolMessage:
+    tool = tools.get(call["name"])
+    if tool is None:
+        return ToolMessage(INVALID_TOOL.format(name=call["name"], names=", ".join(tools)),
+                           name=call["name"], tool_call_id=call["id"], status="error")
+    try:
+        message = await tool.ainvoke({**call, "type": "tool_call"})
+    except ValidationError as exc:
+        error = "\n".join(f"{'.'.join(str(p) for p in e.get('loc', ()))}: {e.get('msg', 'Unknown error')}"
+                          for e in exc.errors())
+        return ToolMessage(INVALID_ARGS.format(name=call["name"], args=call["args"], error=error),
+                           name=call["name"], tool_call_id=call["id"], status="error")
+    except Exception as exc:  # noqa: BLE001 -- difference 1: report, do not crash
+        return ToolMessage(TOOL_ERROR.format(error=repr(exc)), name=call["name"],
+                           tool_call_id=call["id"], status="error")
+    message.content = _content(message.content)
+    return message
+
+
+def build_react_agent(model: BaseChatModel, tools: list[BaseTool], system_prompt: str | None = None, *,
+                      context_window: int, compact_at: float = COMPACT_AT,
+                      compact_prompt: str | None = None):
+    by_name = {t.name: t for t in tools}
+    system = [SystemMessage(content=system_prompt)] if system_prompt is not None else []
+
+    async def call_model(state: ReactState) -> dict:
+        bound = model.bind_tools(tools, tool_choice=None) if tools else model.bind()
+        return {"messages": [await bound.ainvoke([*system, *state["messages"]])]}
+
+    async def call_tool(calls: list[ToolCall]) -> dict:
+        return {"messages": [await run_tool(by_name, call) for call in calls]}
+
+    async def compact(state: ReactState) -> dict:
+        instruction = compact_prompt if compact_prompt is not None else COMPACT_PROMPT.read_text()
+        summary = await summarize(model, tools, system_prompt, state["messages"], instruction)
+        return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES),
+                             HumanMessage(content=CONTINUATION.format(summary=summary))]}
+
+    def before_model(state: ReactState) -> str:
+        over = needs_compaction(state["messages"], system_prompt, context_window, compact_at)
+        return "compact" if over else "model"
+
+    def after_model(state: ReactState):
+        last = state["messages"][-1]
+        if not tools or not isinstance(last, AIMessage) or not last.tool_calls:
+            return END
+        return [Send("tools", [call]) for call in last.tool_calls]
+
+    graph = StateGraph(ReactState)
+    graph.add_node("compact", compact)
+    graph.add_node("model", call_model)
+    graph.add_conditional_edges(START, before_model, ["compact", "model"])
+    graph.add_edge("compact", "model")
+    if tools:
+        graph.add_node("tools", call_tool)
+        graph.add_conditional_edges("model", after_model, ["tools", END])
+        graph.add_conditional_edges("tools", before_model, ["compact", "model"])
+    else:
+        graph.add_edge("model", END)
+    return graph.compile().with_config({"recursion_limit": RECURSION_LIMIT})
+```
+
+`seed_agent/agent/prompts/compact.md`:
+```markdown
+Your task is to write a detailed summary of the conversation so far. The summary will
+replace the conversation: the work continues from it alone, so it must keep everything
+needed to carry on without losing context. Do not call any tools.
+
+Go through the conversation in order: the task you were given, each step you took, what
+each tool returned, and what you decided. Pay particular attention to exact values
+(clip ids, commit ids, dataset names, file paths, numbers, error messages) and to any
+instruction that changed during the work.
+
+Write the summary with these sections:
+
+1. Task and constraints: the task you were given, in full, with every requirement and
+   constraint. Quote the original task message verbatim where it matters.
+2. Key facts learned: tool results, dataset and clip details, ids, paths and numbers you
+   will need again.
+3. Files and artifacts: every file you created, changed or relied on, with its path and why
+   it matters; include short snippets where the exact content matters.
+4. Errors and fixes: every error, rejected candidate or failed check, and how you resolved
+   it (or that you did not).
+5. Progress: what is done and what worked or did not.
+6. Pending work: everything that remains to be done for the task.
+7. Current work: exactly what you were doing immediately before this summary.
+8. Next step: the single next action, directly in line with the task and the most recent
+   work. If there is no next step, say so.
+
+Output only the summary.
+```
+
+- [ ] **Step 11: Run the tests**
+
+Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_seed_harness.py -p no:cacheprovider`
+Expected: PASS (23 tests; the comparison scenarios still match `create_agent`).
+
+- [ ] **Step 12: Commit**
+
+```bash
+git add seed_agent/agent/harness seed_agent/agent/prompts/compact.md tests/test_seed_harness.py
+git commit -m "feat(seed): Claude-Code-style auto-compaction in the harness"
+```
+
+---
+
+### Task 17: The seed agent (orchestration, roles, tools, prompts, knowledge)
+
+The root node's code (spec 9.1): the agent every later version descends from. The orchestration is plain async Python. Each LLM step is a **role**: a system prompt, optionally extended with reference documents from `knowledge/`, plus a tool list, run on the Task 16 harness. A role returns its result by calling a `submit_<x>` tool whose arguments are validated against a pydantic schema. Invalid arguments come back to the model as a tool error it can fix, so the harness needs no structured-output mode. A role that stops without submitting gets one reminder, then fails the attempt.
+
+- `improve_recipe`: planner → (data builder → recipe writer → `recipe_check`, at most `CHECK_ROUNDS` = 3 times).
+- `edit_self`: an edit planner reads the code (read-only tools) and submits an `EditPlan` naming **exactly one component**: prompts, tools, harness, orchestration or knowledge (spec 9.1.1). A coder implements it, then a self-test runs; if it fails, the coder fixes it (at most `SELFTEST_ROUNDS` = 2 rounds). The chosen component is returned in `EditResult.component` and in the summary. It is **not enforced**: nothing rejects a diff that touches other components. The plan is saved to `/workspace/edit_plan.json`, so a contract retry (which inherits the workspace, Task 15) stays with the same component.
+
+The seed's job is to be a **correct, working starting point**, not a strong researcher. The loop improves it. Keep it simple, deterministic where it can be (the recipe check and the self-test are code, not LLM calls), and honest about limits in its prompts.
+
+**Files:**
+- Create: `seed_agent/agent/requirements.txt`, `seed_agent/agent/settings.py`, `seed_agent/agent/entry.py`
+- Create: `seed_agent/agent/tools/__init__.py` (empty), `files.py`, `media.py`, `kernel.py`, `submit.py`
+- Create: `seed_agent/agent/orchestration/__init__.py` (empty), `roles.py`, `task.py`, `meta.py`
+- Create: `seed_agent/agent/prompts/{planner,data_builder,recipe_writer,edit_planner,coder}.md`
+- Create: `seed_agent/agent/knowledge/README.md`, `seed_agent/agent/knowledge/data_building.md`, `seed_agent/agent/memory/README.md`
+- Test: `tests/test_seed_agent.py`
+
+**Interfaces:**
+- Consumes (inside the container): `ar_contract.client.chat_model`, `ar_contract.client.mcp_session`, `ar_contract.models.*` including `EDIT_COMPONENTS` (Task 3); `build_react_agent` (Task 16); the kernel tools by name (Tasks 7–9); the environment variables `AR_DEFAULT_MODEL`, `AR_CONTEXT_WINDOW`, `AR_COMPACT_AT`, `AR_AGENT_DIR` and `AR_WORKSPACE`, which the kernel sets (Tasks 14–15).
+- Produces:
+  - `agent.entry.edit_self(ctx) -> EditResult` and `agent.entry.improve_recipe(ctx) -> RecipeResult`, both `async`.
+  - Pure helpers for tests: `agent.tools.media.snap_segments(segments, duration)`, `agent.tools.files.resolve_inside(root, path)`, `agent.tools.files.replace_once(text, old, new)`, `agent.tools.submit.submit_tool(name, description, schema) -> (StructuredTool, Submission)`, `agent.orchestration.meta.selftest(root) -> list[str]`, and `agent.orchestration.meta.COMPONENTS` / `EditPlan`.
+
+- [ ] **Step 1: Write the failing tests**
+
+The end-to-end tests run each entry point exactly as a container does (`python -m ar_contract.run` in a subprocess). They use the kernel's real gateway in mock mode, with scripts registered on its `MockBook`, and the real tool server with Task 14's canned tool objects. The scripts deliberately include:
+- an invalid `submit_plan` (missing `actions`) and an invalid `submit_edit_plan` (unknown component), which must come back as argument errors;
+- a call to a tool that does not exist;
+- a kernel tool that fails server-side (`hf_download`, disabled in the mock).
+
+All of these must reach the model as tool errors, and the run must still succeed.
+
+```python
+# tests/test_seed_agent.py
+"""The seed agent: pure helpers in-process, then both entry points run the way a
+container runs them (python -m ar_contract.run in a subprocess) against the kernel's
+real gateway (scripted mock mode) and the Task 14 mock tool server, over Unix sockets."""
+import asyncio
+import json
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import typing
+import uuid
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parents[1]
+SEED = REPO / "seed_agent"
 sys.path.insert(0, str(SEED))
 
 
@@ -4681,8 +5325,7 @@ def test_snap_segments_drops_segments_that_collapse():
     from agent.tools.media import snap_segments
     segs = [{"time_range_s": [0.0, 1.0], "prompt": "a"}, {"time_range_s": [1.0, 1.1], "prompt": "b"},
             {"time_range_s": [1.1, 6.0], "prompt": "c"}]
-    out = snap_segments(segs, duration=6.0)
-    assert [s["prompt"] for s in out] == ["a", "c"]
+    assert [s["prompt"] for s in snap_segments(segs, duration=6.0)] == ["a", "c"]
 
 
 @pytest.mark.parametrize("bad", ["../../etc/passwd", "/etc/passwd", "sub/../../x"])
@@ -4697,77 +5340,218 @@ def test_file_tools_accept_paths_inside(tmp_path):
     assert resolve_inside(str(tmp_path), "a/b.txt") == tmp_path / "a" / "b.txt"
 
 
-def test_graphs_compile_without_a_model():
-    from agent.graphs.meta import build_meta_graph
-    from agent.graphs.task import build_task_graph
-    assert build_task_graph(None, None, None).compile() is not None
-    assert build_meta_graph(None, None).compile() is not None
+def test_edit_file_needs_exactly_one_match():
+    from agent.tools.files import replace_once
+    assert replace_once("a b a", "b", "c") == "a c a"
+    with pytest.raises(ValueError, match="found 2"):
+        replace_once("a b a", "a", "c")
+    with pytest.raises(ValueError, match="found 0"):
+        replace_once("a", "z", "c")
 
 
-@pytest.fixture
-def harness(tmp_path):
-    from ar_kernel.config import KernelConfig
-    from ar_kernel.contract.verify import ContractHarness
+def test_read_only_file_tools_cannot_write(tmp_path):
+    from agent.tools.files import make_file_tools
+    assert {t.name for t in make_file_tools(str(tmp_path), writable=False)} == {"read_file", "list_dir"}
+
+
+def test_submit_tool_validates_then_captures():
+    from pydantic import ValidationError
+    from agent.orchestration.meta import EditPlan
+    from agent.tools.submit import submit_tool
+    tool, box = submit_tool("submit_edit_plan", "d", EditPlan)
+    plan = {"component": "everything", "change": "x", "files": [], "rationale": "r", "expected_effect": "e"}
+    with pytest.raises(ValidationError):
+        asyncio.run(tool.ainvoke(plan))
+    assert box.value is None
+    asyncio.run(tool.ainvoke({**plan, "component": "tools"}))
+    assert box.value.component == "tools"
+
+
+def test_edit_components_match_the_contract():
+    from ar_contract.models import EDIT_COMPONENTS
+    from agent.orchestration.meta import COMPONENTS, EditPlan
+    assert tuple(COMPONENTS) == EDIT_COMPONENTS
+    assert set(typing.get_args(EditPlan.model_fields["component"].annotation)) == set(EDIT_COMPONENTS)
+    for component, where in COMPONENTS.items():
+        assert (SEED / where.split(" ")[0].split("*")[0]).exists(), f"{component} -> {where}"
+
+
+def test_selftest_passes_on_the_seed_and_catches_a_broken_entry(tmp_path):
+    from agent.orchestration.meta import selftest
+    copy = tmp_path / "copy"
+    shutil.copytree(SEED, copy)
+    assert selftest(str(copy)) == []
+    (copy / "agent" / "entry.py").write_text("def edit_self(ctx, extra):\n    pass\n")
+    errors = selftest(str(copy))
+    assert any("edit_self" in e for e in errors) and any("improve_recipe" in e for e in errors)
+
+
+# ---- both entry points against the kernel services -------------------------------------------
+
+C0 = "0" * 64                                        # the Task 14 mock data_commit id
+
+
+def _call(name, args):
+    from ar_kernel.gateway.mock import function_call
+    return function_call(name, args, f"call_{uuid.uuid4().hex[:12]}")
+
+
+def _scripts():
+    from ar_kernel.gateway.mock import message
+    recipe = [
+        [_call("submit_plan", {"hypotheses": ["more walking clips"]})],            # invalid: no actions
+        [_call("submit_plan", {"hypotheses": ["more walking clips"], "actions": ["reuse the pool"]})],
+        [message("planned")],
+        [_call("data_query", {"filter": {"format": "video_caption_camera"}}), _call("no_such_tool", {}),
+         _call("hf_download", {"repo": "x/y", "revision": "main", "patterns": ["*.mp4"]})],
+        [_call("submit_data_commit", {"data_commit": C0, "notes": "pool clips"})],
+        [message("built")],
+        [_call("submit_recipe", {"recipe": {"optimizer.max_steps": 200.4, "optimizer.lr": 1e-5},
+                                 "rationale": "fits the data"})],
+        [message("recipe written")],
+    ]
+    edit = [
+        [_call("read_file", {"path": "agent/prompts/planner.md"})],
+        [_call("submit_edit_plan", {"component": "everything", "change": "x", "files": [],
+                                    "rationale": "r", "expected_effect": "e"})],   # invalid component
+        [_call("submit_edit_plan", {"component": "prompts", "change": "ask for posed clips first",
+                                    "files": ["agent/prompts/planner.md"], "rationale": "static-only clips",
+                                    "expected_effect": "more moving clips"})],
+        [message("planned")],
+        [_call("edit_file", {"path": "agent/prompts/planner.md", "old": "Finish by calling submit_plan.",
+                             "new": "Prefer clips with poses. Finish by calling submit_plan."})],
+        [message("Changed the planner prompt to prefer clips with poses.")],
+    ]
+    return {"recipe": recipe, "edit": edit}
+
+
+@pytest.fixture(scope="module")
+def kernel(tmp_path_factory):
+    from ar_kernel.contract.verify import _MockData, _MockHf
+    from ar_kernel.gateway.app import create_gateway_app
+    from ar_kernel.gateway.mock import MockBook
+    from ar_kernel.gateway.store import CallStore
+    from ar_kernel.services import RunServices, socket_dir_for
     from ar_kernel.telemetry.recorder import Recorder
-    h = ContractHarness(KernelConfig.load(), tmp_path / "run", Recorder(tmp_path / "run"))
-    h.start()
-    yield h
-    h.stop()
+    from ar_kernel.tools.context import TokenRegistry
+    from ar_kernel.tools.data_tools import register_data_tools
+    from ar_kernel.tools.hf_tools import register_hf_tools
+    from ar_kernel.tools.jobs import JobQueue, register_job_tools
+    from ar_kernel.tools.server import ToolKit, build_tool_app, new_mcp
+    run = tmp_path_factory.mktemp("run")
+    rec = Recorder(run)
+    registry, queue = TokenRegistry(rec), JobQueue(rec, threading.Lock(), wait_cap_s=5.0)
+    kit, mcp = ToolKit(registry, rec), new_mcp()
+    register_data_tools(mcp, kit, _MockData())
+    register_hf_tools(mcp, kit, _MockHf())
+    register_job_tools(mcp, kit, queue)
+    book = MockBook.default()
+    for name, script in _scripts().items():
+        book.add(name, script)
+    services = RunServices(socket_dir_for(run))
+    services.start(create_gateway_app(registry=registry, store=CallStore(rec), allowed_models={"mock-model"},
+                                      upstream=None, mocks=book), build_tool_app(mcp))
+    yield rec, registry, services
+    services.stop()
+    queue.shutdown()
+
+
+def _run(kernel, tmp_path, kind, script, node, ctx):
+    rec, registry, services = kernel
+    agent = tmp_path / "agent_copy"
+    shutil.copytree(SEED, agent)
+    ws, ctx_dir = tmp_path / "ws", tmp_path / "ctx"
+    ws.mkdir(), ctx_dir.mkdir()
+    (ctx_dir / "context.json").write_text(json.dumps(ctx))
+    caller = registry.issue(node=node, phase=kind, attempt=1, workspace_host=ws, staging_host=tmp_path,
+                            mock_script=script)
+    env = {**os.environ, "AR_SOCKET_DIR": str(services.socket_dir), "AR_TOKEN": caller.token,
+           "AR_DEFAULT_MODEL": "mock-model", "AR_WORKSPACE": str(ws), "AR_CONTEXT_DIR": str(ctx_dir),
+           "AR_AGENT_DIR": str(agent)}
+    proc = subprocess.run([sys.executable, "-m", "ar_contract.run", kind], env=env, cwd=REPO,
+                          capture_output=True, text=True, timeout=180)
+    registry.revoke(caller.token)
+    return proc, json.loads((ws / "result.json").read_text()), agent
+
+
+def _tool_outputs(rec, node) -> list[str]:
+    """Every function_call_output the agent sent back to the model, from gateway telemetry."""
+    out = []
+    for event in rec.read_events(node):
+        if event["type"] == "llm.request":
+            body = rec.load_payload(event["payload"])["body"]
+            out += [i.get("output", "") for i in body.get("input", [])
+                    if isinstance(i, dict) and i.get("type") == "function_call_output"]
+    return out
+
+
+BASE = {"nodes_remaining": 3, "attempt": 1, "max_attempts": 3}
 
 
 @pytest.mark.parametrize("kind", ["edit_self", "improve_recipe"])
-def test_dry_run_of_both_entry_points_against_mock_services(kind, harness, tmp_path, monkeypatch):
-    """The contract smoke run, in-process: real SDK, real MCP client, mock gateway and tools."""
-    from ar_contract.models import EditContext, RecipeContext
-    from ar_contract.run import main
-    ws, ctx_dir = tmp_path / "ws", tmp_path / "ctx"
-    ws.mkdir(), ctx_dir.mkdir()
-    ctx = (EditContext if kind == "edit_self" else RecipeContext)(
-        nodes_remaining=1, attempt=1, max_attempts=1, dry_run=True)
-    (ctx_dir / "context.json").write_text(ctx.model_dump_json())
-    caller = harness.registry.issue(node="n1", phase="contract", attempt=1, workspace_host=ws,
-                                    staging_host=tmp_path, mock_script="smoke")
-    for key, value in {"AR_SOCKET_DIR": str(harness.socket_dir), "AR_TOKEN": caller.token,
-                       "AR_DEFAULT_MODEL": "mock-model", "AR_WORKSPACE": str(ws),
-                       "AR_CONTEXT_DIR": str(ctx_dir), "AR_AGENT_DIR": str(SEED)}.items():
-        monkeypatch.setenv(key, value)
-    for mod in [m for m in sys.modules if m == "ar_contract.client"]:
-        del sys.modules[mod]                                  # re-read AR_SOCKET_DIR
-    assert main([kind]) == 0, (ws / "result.json").read_text()
-    assert json.loads((ws / "result.json").read_text())["ok"] is True
+def test_dry_run_against_the_kernel_services(kernel, tmp_path, kind):
+    proc, body, _ = _run(kernel, tmp_path, kind, "smoke", f"dry-{kind}", {**BASE, "dry_run": True})
+    assert proc.returncode == 0 and body["ok"], (body, proc.stderr[-2000:])
+
+
+def test_improve_recipe_full_flow(kernel, tmp_path):
+    rec = kernel[0]
+    ctx = {**BASE, "tunable_rules": {"optimizer.max_steps": {"type": "int"}, "optimizer.lr": {"type": "float"}}}
+    proc, body, _ = _run(kernel, tmp_path, "improve_recipe", "recipe", "n-recipe", ctx)
+    assert proc.returncode == 0 and body["ok"], (body, proc.stderr[-2000:])
+    assert body["result"]["data_commit"] == C0
+    assert body["result"]["recipe"] == {"optimizer.max_steps": 200, "optimizer.lr": 1e-5}   # int coerced
+    outputs = _tool_outputs(rec, "n-recipe")
+    assert any("Error invoking tool 'submit_plan'" in o and "actions" in o for o in outputs)   # bad args
+    assert any("no_such_tool is not a valid tool" in o for o in outputs)                       # unknown tool
+    assert any(o.startswith("Error: ToolException(") and "downloads are disabled" in o
+               for o in outputs)                                                 # kernel tool error reported
+    kinds = [e["type"] for e in rec.read_events("n-recipe")]
+    assert "tool.call" in kinds and "tool.error" in kinds                        # kernel-side records
+
+
+def test_edit_self_plans_exactly_one_component(kernel, tmp_path):
+    rec = kernel[0]
+    proc, body, agent = _run(kernel, tmp_path, "edit_self", "edit", "n-edit", BASE)
+    assert proc.returncode == 0 and body["ok"], (body, proc.stderr[-2000:])
+    assert body["result"]["component"] == "prompts"
+    assert body["result"]["summary"].startswith("[prompts] ask for posed clips first")
+    assert "Prefer clips with poses." in (agent / "agent" / "prompts" / "planner.md").read_text()
+    assert json.loads((tmp_path / "ws" / "edit_plan.json").read_text())["component"] == "prompts"
+    assert any("Error invoking tool 'submit_edit_plan'" in o and "component" in o
+               for o in _tool_outputs(rec, "n-edit"))
 
 
 @pytest.mark.docker
-def test_seed_agent_passes_contract_verification(tmp_path, harness):
+def test_seed_agent_passes_contract_verification(tmp_path):
     from ar_kernel.config import KernelConfig
-    from ar_kernel.contract.verify import verify_contract
+    from ar_kernel.contract.verify import ContractHarness, verify_contract
     from ar_kernel.telemetry.recorder import Recorder
     from ar_kernel.vcs.agents_repo import AgentsRepo
-    repo = AgentsRepo(tmp_path / "agents.git")
-    commit = repo.init(SEED)
-    report = verify_contract(cfg=KernelConfig.load(), run_dir=tmp_path / "run", run_id="seed", repo=repo,
-                             commit=commit, harness=harness, recorder=Recorder(tmp_path / "run"),
-                             node="root", attempt=1)
+    harness = ContractHarness(KernelConfig.load(), tmp_path / "run", Recorder(tmp_path / "run"))
+    harness.start()
+    try:
+        repo = AgentsRepo(tmp_path / "agents.git")
+        commit = repo.init(SEED)
+        report = verify_contract(cfg=KernelConfig.load(), run_dir=tmp_path / "run", run_id="seed", repo=repo,
+                                 commit=commit, harness=harness, recorder=Recorder(tmp_path / "run"),
+                                 node="root", attempt=1)
+    finally:
+        harness.stop()
     assert report.ok, report.to_retry()
 ```
 
 - [ ] **Step 2: Run to confirm they fail**
 
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_seed_agent.py -p no:cacheprovider`
-Expected: FAIL (`ModuleNotFoundError: No module named 'agent'`).
+Expected: FAIL (`ModuleNotFoundError: No module named 'agent.tools'`).
 
-- [ ] **Step 3: Scaffolding, settings, entry**
-
-```gitignore
-# seed_agent/.gitignore
-__pycache__/
-*.pyc
-```
+- [ ] **Step 3: Settings, entry, requirements, memory, knowledge**
 
 ```text
 # seed_agent/agent/requirements.txt
 # Extra runtime packages for this agent version. The base image already provides
-# openai-agents, mcp, httpx, langgraph (+ sqlite checkpointer), pydantic, numpy,
+# langgraph, langchain-core, langchain-openai, mcp, httpx, httpx2, pydantic, numpy,
 # opencv-python-headless, Pillow and ffmpeg. The container has no network, so
 # anything listed here is baked into the image at build time.
 ```
@@ -4777,12 +5561,13 @@ __pycache__/
 import os
 
 MODEL = os.environ.get("AR_DEFAULT_MODEL", "mock-model")
+CONTEXT_WINDOW = int(os.environ.get("AR_CONTEXT_WINDOW", "128000"))   # the model's window, in tokens
+COMPACT_AT = float(os.environ.get("AR_COMPACT_AT", "0.85"))           # auto-compact threshold
 AGENT_ROOT = os.environ.get("AR_AGENT_DIR", "/agent")
 WORKSPACE = os.environ.get("AR_WORKSPACE", "/workspace")
-TASK_MAX_TURNS = 80          # tool-using data builder
-META_MAX_TURNS = 60          # coding agent
-CHECK_ROUNDS = 3             # recipe_check -> revise loops inside one attempt
+CHECK_ROUNDS = 3             # build -> recipe -> recipe_check loops inside one attempt
 SELFTEST_ROUNDS = 2          # implement -> self-test loops inside one attempt
+BRIEF_CHARS = 60_000         # cap on the JSON context handed to a role
 ```
 
 ```python
@@ -4792,22 +5577,60 @@ from ar_contract.models import EditContext, EditResult, RecipeContext, RecipeRes
 
 
 async def edit_self(ctx: EditContext) -> EditResult:
-    from .graphs.meta import run_meta
+    from .orchestration.meta import run_meta
     return await run_meta(ctx)
 
 
 async def improve_recipe(ctx: RecipeContext) -> RecipeResult:
-    from .graphs.task import run_task
+    from .orchestration.task import run_task
     return await run_task(ctx)
 ```
 
+`seed_agent/agent/memory/README.md`:
 ```markdown
-<!-- seed_agent/agent/memory/README.md -->
 # Agent memory
 
 Notes written here during `edit_self` are committed with the code and inherited by
 every descendant. Use them to record what was tried, what the scores said, and
 which ideas to try next. `improve_recipe` sees this directory read-only.
+```
+
+`seed_agent/agent/knowledge/README.md`:
+```markdown
+# Agent knowledge
+
+Reference material that roles read: formats, conversion recipes, dataset notes. The
+orchestration appends the documents a role needs to that role's system prompt
+(`orchestration/roles.py`, `system_prompt(name, knowledge=...)`). Unlike `memory/`,
+which records what was tried, this directory holds what is known to be true.
+```
+
+`seed_agent/agent/knowledge/data_building.md`:
+```markdown
+## Converting clips to the standard formats
+
+- Probe first: `ffprobe -v error -select_streams v:0 -show_entries
+  stream=width,height,avg_frame_rate,nb_frames,sample_aspect_ratio:stream_side_data=rotation
+  -of json in.mp4`. Display aspect = width * SAR / height, with width and height swapped for
+  a 90 or 270 degree rotation.
+- Center-crop to 16:9 without stretching: `ffmpeg -i in.mp4 -vf
+  "crop='min(iw,ih*16/9)':'min(ih,iw*9/16)',setsar=1" -c:v libx264 -crf 18 -an out.mp4`.
+  Re-encoding also applies any display rotation.
+- Frame rate: keep the source rate if it is >= 24 fps; never raise it by duplicating frames.
+- Trimming changes the frame count: slice the pose array to the same frames (N poses for
+  N frames).
+
+## Camera poses
+
+- `poses/<id>.npz` holds `cam_c2w` with shape [N, 4, 4]: camera-to-world, OpenCV convention
+  (x right, y down, z forward).
+- From world-to-camera matrices, invert them. From OpenGL convention (y up, z backward),
+  flip the y and z axes of the camera frame: `c2w_cv = c2w_gl @ diag(1, -1, -1, 1)`.
+
+## Timed prompts
+
+- Segment boundaries must fall on round boundaries: 25/24 s, then every 32/24 s. Use
+  snap_timed_prompts after writing the segments.
 ```
 
 - [ ] **Step 4: Tools**
@@ -4820,9 +5643,10 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from agents import function_tool
+from langchain_core.tools import tool
 
 MAX_READ = 200_000
+MAX_OUTPUT = 8_000
 
 
 def resolve_inside(root: str, path: str) -> Path:
@@ -4833,37 +5657,53 @@ def resolve_inside(root: str, path: str) -> Path:
     return target
 
 
-def make_file_tools(root: str) -> list:
-    @function_tool
+def replace_once(text: str, old: str, new: str) -> str:
+    count = text.count(old)
+    if count != 1:
+        raise ValueError(f"old text must appear exactly once, found {count} matches")
+    return text.replace(old, new, 1)
+
+
+def make_file_tools(root: str, *, writable: bool = True) -> list:
+    @tool
     def read_file(path: str) -> str:
-        """Read a text file (relative to the tool root)."""
+        """Read a text file (path relative to the tool root)."""
         return resolve_inside(root, path).read_text(errors="replace")[:MAX_READ]
 
-    @function_tool
+    @tool
+    def list_dir(path: str = ".") -> list[str]:
+        """List a directory (path relative to the tool root); directories end with '/'."""
+        target = resolve_inside(root, path)
+        return sorted(p.name + ("/" if p.is_dir() else "") for p in target.iterdir())
+
+    @tool
     def write_file(path: str, content: str) -> str:
-        """Create or overwrite a text file (relative to the tool root)."""
+        """Create or overwrite a text file (path relative to the tool root)."""
         target = resolve_inside(root, path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
         return f"wrote {len(content)} chars to {path}"
 
-    @function_tool
-    def list_dir(path: str = ".") -> list[str]:
-        """List a directory (relative to the tool root)."""
+    @tool
+    def edit_file(path: str, old: str, new: str) -> str:
+        """Replace one exact occurrence of `old` with `new` in a text file. `old` must appear exactly once."""
         target = resolve_inside(root, path)
-        return sorted(p.name + ("/" if p.is_dir() else "") for p in target.iterdir())
+        target.write_text(replace_once(target.read_text(), old, new))
+        return f"edited {path}"
 
-    @function_tool
+    @tool
     def run_command(command: str, timeout_s: int = 600) -> str:
-        """Run a shell command in the tool root (ffmpeg, ffprobe, python, ...). Returns exit code and output tail."""
+        """Run a shell command in the tool root (ffmpeg, ffprobe, python, ...). Returns the exit code and the output tail."""
         try:
             r = subprocess.run(["bash", "-lc", command], cwd=root, capture_output=True, text=True,
                                timeout=min(int(timeout_s), 3600))
         except subprocess.TimeoutExpired:
             return f"timed out after {timeout_s}s"
-        return f"exit {r.returncode}\n{(r.stdout + r.stderr)[-8000:]}"
+        return f"exit {r.returncode}\n{(r.stdout + r.stderr)[-MAX_OUTPUT:]}"
 
-    return [read_file, write_file, list_dir, run_command]
+    if not writable:
+        return [read_file, list_dir]
+    return [read_file, list_dir, write_file, edit_file, run_command]
 ```
 
 ```python
@@ -4877,7 +5717,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from agents import function_tool
+from langchain_core.messages import HumanMessage
+from langchain_core.tools import tool
 
 FIRST_ROUND_END = 25 / 24          # the 25 history frames
 ROUND = 32 / 24                    # one rollout round
@@ -4908,104 +5749,328 @@ def snap_segments(segments: list[dict], duration: float) -> list[dict]:
     return out
 
 
-@function_tool
+@tool
 def snap_timed_prompts(segments_json: str, duration: float) -> str:
-    """Snap timed-prompt segment boundaries to rollout-round boundaries. Input and output: JSON list of
+    """Snap timed-prompt segment boundaries to rollout-round boundaries. Input and output: a JSON list of
     {"time_range_s": [start, end], "prompt": str}."""
     return json.dumps(snap_segments(json.loads(segments_json), duration))
 
 
-@function_tool
+@tool
 async def caption_clip(video_path: str, hint: str = "") -> str:
     """Caption a video: samples 4 frames with ffmpeg and asks a vision model (through the kernel
-    gateway) for one factual caption of the scene and camera motion."""
-    from ar_contract.client import openai_client
-    from ..settings import MODEL
+    gateway) for one factual caption of the scene and the camera motion."""
+    from ar_contract.client import chat_model
     duration = float(json.loads(subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", video_path],
         capture_output=True, text=True, check=True).stdout)["format"]["duration"])
-    images = []
+    content = [{"type": "text", "text": "Write one factual caption (1-3 sentences) describing the "
+                                        "scene and how the camera moves. " + hint}]
     with tempfile.TemporaryDirectory() as tmp:
         for i, frac in enumerate((0.1, 0.35, 0.6, 0.85)):
             frame = Path(tmp) / f"{i}.jpg"
             subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{duration * frac:.3f}",
                             "-i", video_path, "-frames:v", "1", "-vf", "scale=512:-2", str(frame)], check=True)
-            images.append(base64.b64encode(frame.read_bytes()).decode())
-    content = [{"type": "input_text", "text": "Write one factual caption (1-3 sentences) describing the "
-                                               "scene and how the camera moves. " + hint}]
-    content += [{"type": "input_image", "image_url": f"data:image/jpeg;base64,{b64}"} for b64 in images]
-    reply = await openai_client().responses.create(model=MODEL, input=[{"role": "user", "content": content}])
-    return reply.output_text.strip()
+            b64 = base64.b64encode(frame.read_bytes()).decode()
+            content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+    reply = await chat_model().ainvoke([HumanMessage(content=content)])
+    return reply.text.strip()
 ```
 
-- [ ] **Step 5: Agent definitions and prompts**
+The kernel-tool adapter. MCP 2.x results use snake_case attributes: `is_error`, `structured_content`, `input_schema` (fact 16). Each MCP tool becomes a `StructuredTool` whose `args_schema` is the tool's JSON schema, all on one MCP session. A failed kernel tool raises `ToolException`, which the harness reports to the model.
 
 ```python
-# seed_agent/agent/agents/definitions.py
-"""OpenAI Agents SDK agents used by the seed graphs."""
+# seed_agent/agent/tools/kernel.py
+"""Kernel tools (the MCP tool server) as LangChain tools, over one MCP session."""
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from langchain_core.tools import StructuredTool, ToolException
+
+
+def result_text(result) -> str:
+    return "\n".join(c.text for c in result.content if getattr(c, "type", "") == "text")
+
+
+def result_json(result) -> Any:
+    """A successful kernel tool result as Python data; a failed one raises ToolException."""
+    if result.is_error:
+        raise ToolException(result_text(result))
+    if result.structured_content is not None:
+        return result.structured_content
+    return json.loads(result_text(result))
+
+
+async def kernel_tools(session) -> list[StructuredTool]:
+    listed = await session.list_tools()
+    tools = []
+    for spec in listed.tools:
+        async def call(_name: str = spec.name, **kwargs: Any) -> str:
+            result = await session.call_tool(_name, kwargs)
+            if result.is_error:
+                raise ToolException(result_text(result))   # the harness reports it to the model
+            return result_text(result)
+        tools.append(StructuredTool(name=spec.name, description=spec.description or "",
+                                    args_schema=spec.input_schema, coroutine=call))
+    return tools
+```
+
+```python
+# seed_agent/agent/tools/submit.py
+"""Result tools: a role finishes by calling submit_<x> with arguments validated against a schema.
+Invalid arguments come back to the model as a tool error (the harness), so it can correct them."""
+from __future__ import annotations
+
+from pydantic import BaseModel
+from langchain_core.tools import StructuredTool
+
+
+class Submission:
+    def __init__(self) -> None:
+        self.value: BaseModel | None = None
+
+
+def submit_tool(name: str, description: str, schema: type[BaseModel]) -> tuple[StructuredTool, Submission]:
+    box = Submission()
+
+    async def submit(**kwargs) -> str:
+        box.value = schema.model_validate(kwargs)
+        return "submitted"
+
+    return StructuredTool(name=name, description=description, args_schema=schema, coroutine=submit), box
+```
+
+- [ ] **Step 5: Orchestration**
+
+```python
+# seed_agent/agent/orchestration/roles.py
+"""A role = a system prompt (+ reference knowledge) and a tool list, run on the harness."""
 from __future__ import annotations
 
 from pathlib import Path
 
-from agents import Agent
-from pydantic import BaseModel
+from langchain_core.messages import AnyMessage, HumanMessage
 
-from ..settings import AGENT_ROOT, MODEL, WORKSPACE
+from ..harness.react import build_react_agent
+from ..settings import COMPACT_AT, CONTEXT_WINDOW, MODEL
+from ..tools.submit import Submission
+
+AGENT_PKG = Path(__file__).resolve().parents[1]
+REMIND = ("You stopped without calling {tool}. Finish the task, then call {tool} with the result. "
+          "The work is only recorded through {tool}.")
+
+
+def system_prompt(name: str, knowledge: tuple[str, ...] = ()) -> str:
+    text = (AGENT_PKG / "prompts" / f"{name}.md").read_text()
+    for doc in knowledge:
+        text += f"\n\n# Reference: {doc}\n\n" + (AGENT_PKG / "knowledge" / doc).read_text()
+    return text
+
+
+def _model():
+    from ar_contract.client import chat_model
+    return chat_model(MODEL)
+
+
+async def run_role(system: str, tools: list, task: str, submission: Submission | None = None,
+                   submit_name: str = "", model=None) -> list[AnyMessage]:
+    """Run one role to completion. A role that must submit gets one reminder if it stops early."""
+    agent = build_react_agent(model or _model(), tools, system, context_window=CONTEXT_WINDOW,
+                              compact_at=COMPACT_AT)
+    state = await agent.ainvoke({"messages": [HumanMessage(content=task)]})
+    if submission is not None and submission.value is None:
+        state = await agent.ainvoke({"messages": [*state["messages"],
+                                                  HumanMessage(content=REMIND.format(tool=submit_name))]})
+    if submission is not None and submission.value is None:
+        raise RuntimeError(f"the role finished without calling {submit_name}")
+    return state["messages"]
+```
+
+```python
+# seed_agent/agent/orchestration/task.py
+"""improve_recipe: plan -> (build data -> write recipe -> recipe_check) x up to CHECK_ROUNDS."""
+from __future__ import annotations
+
+import json
+
+from ar_contract.client import mcp_session
+from ar_contract.models import RecipeContext, RecipeResult
+from pydantic import BaseModel, Field
+
+from ..settings import BRIEF_CHARS, CHECK_ROUNDS, WORKSPACE
 from ..tools.files import make_file_tools
+from ..tools.kernel import kernel_tools, result_json
 from ..tools.media import caption_clip, snap_timed_prompts
-
-PROMPTS = Path(__file__).resolve().parents[1] / "prompts"
-
-
-def _prompt(name: str) -> str:
-    return (PROMPTS / f"{name}.md").read_text()
+from ..tools.submit import submit_tool
+from .roles import run_role, system_prompt
 
 
 class DataPlan(BaseModel):
-    hypotheses: list[str]
-    actions: list[str]
+    hypotheses: list[str] = Field(min_length=1, description="1-3 testable data hypotheses")
+    actions: list[str] = Field(min_length=1, description="concrete steps that test them")
 
 
 class BuildOutcome(BaseModel):
-    data_commit: str
-    notes: str
-
-
-class RecipeEntry(BaseModel):
-    key: str
-    value: float
+    data_commit: str = Field(min_length=1, description="the data_commit id to train on")
+    notes: str = Field(description="what the commit contains and why")
 
 
 class RecipeDraft(BaseModel):
-    # A list of pairs, not a dict: strict structured outputs reject free-form object keys.
-    entries: list[RecipeEntry]
-    rationale: str
+    recipe: dict[str, float] = Field(description="tunable key -> value")
+    rationale: str = Field(min_length=1)
+
+
+def brief(ctx: RecipeContext) -> str:
+    return json.dumps({"lineage": ctx.lineage, "archive": ctx.archive, "n_gpus": ctx.n_gpus,
+                       "parent_data_commit": ctx.parent_data_commit, "parent_recipe": ctx.parent_recipe,
+                       "clip_pool_size": len(ctx.clip_pool), "tools": ctx.tools,
+                       "retry": ctx.retry, "format_rules": ctx.format_rules}, default=str)[:BRIEF_CHARS]
+
+
+def coerce(recipe: dict, rules: dict) -> dict:
+    return {key: int(round(value)) if rules.get(key, {}).get("type") == "int" else float(value)
+            for key, value in recipe.items()}
+
+
+async def run_task(ctx: RecipeContext) -> RecipeResult:
+    async with mcp_session() as session:
+        ktools = await kernel_tools(session)
+        if ctx.dry_run:                  # contract smoke run: prove the wiring, do no work
+            messages = await run_role("Reply with the single word ok.", [], "ping")
+            return RecipeResult(data_commit=ctx.parent_data_commit or "dry-run", recipe={},
+                                rationale=f"dry run: {len(ktools)} kernel tools, model said "
+                                          f"{messages[-1].text!r}")
+        context = brief(ctx)
+        plan_tool, plan = submit_tool("submit_plan", "Submit the data plan for this node.", DataPlan)
+        await run_role(system_prompt("planner"), [plan_tool], context, plan, "submit_plan")
+        failures: list = []
+        for _ in range(CHECK_ROUNDS):
+            build_tool, built = submit_tool("submit_data_commit", "Submit the data commit to train on.",
+                                            BuildOutcome)
+            task = f"PLAN:\n{plan.value.model_dump_json(indent=2)}\n\nCONTEXT:\n{context}"
+            if failures:
+                task += ("\n\nTHE LAST RECIPE CHECK FAILED. Fix the data if the failures are about data:\n"
+                         + json.dumps(failures))
+            await run_role(system_prompt("data_builder", knowledge=("data_building.md",)),
+                           [*ktools, *make_file_tools(WORKSPACE), caption_clip, snap_timed_prompts,
+                            build_tool], task, built, "submit_data_commit")
+            recipe_tool, draft = submit_tool("submit_recipe", "Submit the training recipe.", RecipeDraft)
+            await run_role(system_prompt("recipe_writer"), [recipe_tool], json.dumps(
+                {"rules": ctx.tunable_rules, "resolution_allowlist": ctx.resolution_allowlist,
+                 "lora_allowlist": ctx.lora_allowlist, "n_gpus": ctx.n_gpus, "data_notes": built.value.notes,
+                 "parent_recipe": ctx.parent_recipe, "previous_failures": failures}), draft, "submit_recipe")
+            recipe = coerce(draft.value.recipe, ctx.tunable_rules)
+            try:
+                check = result_json(await session.call_tool(
+                    "recipe_check", {"recipe": recipe, "data_commit": built.value.data_commit}))
+                failures = [] if check.get("ok") else check.get("failures", [])
+            except Exception as exc:  # noqa: BLE001 -- a failed check is a failure to fix
+                failures = [str(exc)]
+            if not failures:
+                break
+    rationale = draft.value.rationale
+    if failures:
+        rationale += f"\n\nUnresolved recipe_check failures: {failures}"
+    return RecipeResult(data_commit=built.value.data_commit, recipe=recipe,
+                        rationale=f"{rationale}\n\nPlan: {plan.value.model_dump_json()}\nData: {built.value.notes}")
+```
+
+```python
+# seed_agent/agent/orchestration/meta.py
+"""edit_self: plan ONE edit to ONE component -> implement -> self-test -> (fix | finish)."""
+from __future__ import annotations
+
+import ast
+import json
+import subprocess
+import sys
+from pathlib import Path
+from typing import Literal
+
+from ar_contract.models import EditContext, EditResult
+from pydantic import BaseModel, Field
+
+from ..settings import AGENT_ROOT, BRIEF_CHARS, SELFTEST_ROUNDS, WORKSPACE
+from ..tools.files import make_file_tools
+from ..tools.submit import submit_tool
+from .roles import run_role, system_prompt
+
+# Where each component lives in this agent (spec 9.1.1). The plan names one of them.
+COMPONENTS = {
+    "prompts": "agent/prompts/*.md -- the system prompt of each role",
+    "tools": "agent/tools/ -- agent-local tools and the kernel-tool adapter (not the kernel tools themselves)",
+    "harness": "agent/harness/ -- the single-agent inner loop: ReAct graph, tool execution, auto-compaction",
+    "orchestration": "agent/orchestration/ -- which roles run, in what order, with which tools and context",
+    "knowledge": "agent/knowledge/*.md -- reference material that roles read",
+}
 
 
 class EditPlan(BaseModel):
-    changes: list[str]
-    rationale: str
+    component: Literal["prompts", "tools", "harness", "orchestration", "knowledge"] = Field(
+        description="the ONE component this edit changes")
+    change: str = Field(min_length=1, description="the concrete change")
+    files: list[str] = Field(description="files you expect to change, relative to /agent")
+    rationale: str = Field(min_length=1, description="evidence from the lineage for this change")
+    expected_effect: str = Field(min_length=1, description="what should improve, and how you will know")
 
 
-def task_agents(tools) -> dict[str, Agent]:
-    return {
-        "planner": Agent(name="planner", model=MODEL, instructions=_prompt("planner"), output_type=DataPlan),
-        "builder": Agent(name="data_builder", model=MODEL, instructions=_prompt("data_builder"),
-                         mcp_servers=[tools] if tools else [],
-                         tools=[*make_file_tools(WORKSPACE), caption_clip, snap_timed_prompts],
-                         output_type=BuildOutcome),
-        "recipe": Agent(name="recipe_writer", model=MODEL, instructions=_prompt("recipe_writer"),
-                        output_type=RecipeDraft),
-    }
+def selftest(root: str) -> list[str]:
+    """The contract's static and import checks, run locally so the agent can fix itself."""
+    errors = []
+    try:
+        tree = ast.parse((Path(root) / "agent" / "entry.py").read_text())
+        top = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        for name in ("edit_self", "improve_recipe"):
+            fn = top.get(name)
+            if fn is None or len(fn.args.posonlyargs + fn.args.args) != 1 or fn.args.vararg or fn.args.kwarg:
+                errors.append(f"agent/entry.py needs top-level {name}(ctx) with exactly one parameter")
+    except (OSError, SyntaxError) as exc:
+        errors.append(f"agent/entry.py: {exc}")
+    r = subprocess.run([sys.executable, "-c", "import agent.entry"], cwd=root, capture_output=True,
+                       text=True, timeout=60)
+    if r.returncode != 0:
+        errors.append(r.stderr[-3000:])
+    return errors
 
 
-def meta_agents() -> dict[str, Agent]:
-    return {
-        "analyst": Agent(name="analyst", model=MODEL, instructions=_prompt("analyst"), output_type=EditPlan),
-        "coder": Agent(name="coder", model=MODEL, instructions=_prompt("coder"),
-                       tools=make_file_tools(AGENT_ROOT)),
-    }
+def brief(ctx: EditContext, previous_plan: dict | None) -> str:
+    return json.dumps({"components": COMPONENTS, "lineage": ctx.lineage, "archive": ctx.archive,
+                       "nodes_remaining": ctx.nodes_remaining, "retry": ctx.retry,
+                       "previous_attempt_plan": previous_plan}, default=str)[:BRIEF_CHARS]
+
+
+async def run_meta(ctx: EditContext) -> EditResult:
+    if ctx.dry_run:
+        messages = await run_role("Reply with the single word ok.", [], "ping")
+        return EditResult(summary=f"dry run: model said {messages[-1].text!r}")
+    plan_file = Path(WORKSPACE) / "edit_plan.json"          # carried to a retry with the workspace
+    previous = json.loads(plan_file.read_text()) if ctx.retry and plan_file.exists() else None
+    plan_tool, plan = submit_tool("submit_edit_plan",
+                                  "Submit the edit plan: exactly one component and one focused change.",
+                                  EditPlan)
+    await run_role(system_prompt("edit_planner"), [*make_file_tools(AGENT_ROOT, writable=False), plan_tool],
+                   brief(ctx, previous), plan, "submit_edit_plan")
+    p = plan.value
+    plan_file.write_text(p.model_dump_json(indent=2))
+    errors: list[str] = []
+    summary = ""
+    for _ in range(SELFTEST_ROUNDS):
+        task = f"EDIT PLAN (component: {p.component}):\n{p.model_dump_json(indent=2)}"
+        if errors:
+            task += "\n\nTHE SELF-TEST FAILED; fix these first:\n" + "\n".join(errors)
+        messages = await run_role(system_prompt("coder"), make_file_tools(AGENT_ROOT), task)
+        summary = messages[-1].text
+        errors = selftest(AGENT_ROOT)
+        if not errors:
+            break
+    note = f"\n\n(self-test still failing: {errors})" if errors else ""
+    return EditResult(summary=f"[{p.component}] {p.change}\n\n{summary or 'no summary'}{note}",
+                      component=p.component)
 ```
+
+- [ ] **Step 6: Prompts**
 
 `seed_agent/agent/prompts/planner.md`:
 ```markdown
@@ -5020,7 +6085,7 @@ Produce 1-3 concrete, testable data hypotheses (for example "more forward-walkin
 clips with accurate poses should raise navigation_trajectory") and the actions to test
 them: which clips from the pool to reuse or drop, what to fetch from Hugging Face, and how
 to convert it into a standard format. Prefer small, attributable changes over broad ones:
-one node is one experiment.
+one node is one experiment. Finish by calling submit_plan.
 ```
 
 `seed_agent/agent/prompts/data_builder.md`:
@@ -5030,8 +6095,8 @@ You build the training data for this node, using the kernel tools and local tool
 Kernel tools: data_query (the archive-wide clip pool), hf_search / hf_download (downloads land
 under /workspace/staging/hf/), video_probe, data_ingest (candidates must be under
 /workspace/staging/), data_commit, and job_status / job_wait / job_cancel for GPU jobs if any
-generator tool is listed. Local tools: read_file, write_file, list_dir, run_command (ffmpeg,
-ffprobe, python), caption_clip, snap_timed_prompts. Your working directory is /workspace.
+generator tool is listed. Local tools: read_file, list_dir, write_file, edit_file, run_command
+(ffmpeg, ffprobe, python), caption_clip, snap_timed_prompts. Your working directory is /workspace.
 
 Rules that the kernel enforces (read the format rules in the context):
 - Only the three standard formats. Video .mp4, >= 24 fps, >= 2.375 s, DISPLAY aspect 16:9
@@ -5044,9 +6109,10 @@ Rules that the kernel enforces (read the format rules in the context):
   "transform": "<what you did>"} and set derived_from.
 - Each dataset in a commit needs at least as many clips as training GPUs.
 
+A tool that fails returns an error message; read it and adjust instead of repeating the call.
 Work in small batches: fetch a little, convert, ingest, check the rejection reasons, adjust.
-When you have a data commit that tests the plan, stop and return its id with short notes
-on what it contains and why.
+When you have a data commit that tests the plan, call submit_data_commit with its id and
+short notes on what it contains and why.
 ```
 
 `seed_agent/agent/prompts/recipe_writer.md`:
@@ -5062,254 +6128,65 @@ Checks the kernel runs, so get them right the first time:
   be >= 1, and optimizer.epochs * steps_per_epoch >= optimizer.max_steps.
 - Training time grows with max_steps; a run over the wall-time limit fails.
 
-If you are given failures from a previous check, fix exactly those. Return the entries as
-key/value pairs and a short rationale tying the recipe to the data.
+If you are given failures from a previous check, fix exactly those. Call submit_recipe with
+the recipe (tunable key -> value) and a short rationale tying the recipe to the data.
 ```
 
-`seed_agent/agent/prompts/analyst.md`:
+`seed_agent/agent/prompts/edit_planner.md`:
 ```markdown
-You improve the agent's own code: the prompts, graphs and tools under /agent that decide
-how training data is built. You see the lineage (scores, per-metric results, code diffs,
-data and recipes of every ancestor) and the archive summary.
+You plan one improvement to this agent's own code. The agent builds training data for
+AlayaWorld; each node's score says how well the data it built worked. You see the lineage
+(scores, per-metric results, code diffs, edit components, data and recipes of every
+ancestor) and the archive summary. You can read the code under /agent with read_file and
+list_dir.
 
-Find the most likely reason the recent nodes did not improve (for example: rejected
-candidates wasted the attempt, poses were missing so clips became static-only, the recipe
-failed the step budget, the plan changed too many things at once) and propose 1-3 focused
-code or prompt changes that address it. Record what you learned in agent/memory/.
+An agent version has five components, listed in the context under "components":
+prompts, tools, harness, orchestration and knowledge. Choose exactly ONE component and one
+focused change to it. One edit is one experiment: a small change to one component can be
+attributed to the next score; a change spread over several cannot.
 
-Hard constraints: agent/entry.py must keep top-level edit_self(ctx) and improve_recipe(ctx),
-each taking exactly one parameter. Do not add packages the base image lacks unless you also
-list them in agent/requirements.txt.
+Find the most likely reason recent nodes did not improve (for example: rejected candidates
+wasted the attempt, poses were missing so clips became static-only, the recipe failed the
+step budget, the plan changed too many things at once, context was lost in long runs) and
+choose the component where a fix belongs. Look at which components ancestors already
+changed and what followed. If "retry" is set, a previous attempt failed verification: fix
+that failure, staying with the previous attempt's component unless that is impossible.
+
+Hard constraints for any change: agent/entry.py keeps top-level edit_self(ctx) and
+improve_recipe(ctx), each with exactly one parameter; packages the base image lacks must be
+listed in agent/requirements.txt.
+
+Finish by calling submit_edit_plan.
 ```
 
 `seed_agent/agent/prompts/coder.md`:
 ```markdown
-You implement the planned changes to the agent code in the current directory (/agent),
-using read_file, write_file, list_dir and run_command. Make the smallest correct change.
+You implement the edit plan you are given in the agent code under the current directory
+(/agent), using read_file, list_dir, write_file, edit_file and run_command. Change only what
+the plan needs, in the plan's component. Make the smallest correct change.
+
 After editing, run `python -c "import agent.entry"` to check that it imports, and fix any
-error before finishing. Finish with a one-paragraph summary of what you changed and why.
+error before finishing. Record in agent/memory/ what you changed, why, and what result would
+confirm or refute it. Finish with a one-paragraph summary of what you changed and why.
 ```
 
-- [ ] **Step 6: The task graph**
+- [ ] **Step 7: Run the tests**
 
-```python
-# seed_agent/agent/graphs/task.py
-"""improve_recipe: plan -> build -> recipe -> check -> (revise | finish)."""
-from __future__ import annotations
-
-import json
-from typing import TypedDict
-
-from agents import Agent, Runner
-from ar_contract.client import mcp_tools
-from ar_contract.models import RecipeContext, RecipeResult
-from langgraph.graph import END, START, StateGraph
-
-from ..settings import CHECK_ROUNDS, MODEL, TASK_MAX_TURNS, WORKSPACE
-
-
-class TaskState(TypedDict, total=False):
-    plan: str
-    data_commit: str
-    notes: str
-    recipe: dict
-    rationale: str
-    failures: list[str]
-    rounds: int
-
-
-def _summary(ctx: RecipeContext) -> str:
-    return json.dumps({"lineage": ctx.lineage, "archive": ctx.archive, "n_gpus": ctx.n_gpus,
-                       "parent_data_commit": ctx.parent_data_commit, "parent_recipe": ctx.parent_recipe,
-                       "clip_pool_size": len(ctx.clip_pool), "tools": ctx.tools,
-                       "retry": ctx.retry, "format_rules": ctx.format_rules}, default=str)[:60_000]
-
-
-def _coerce(entries, rules: dict) -> dict:
-    out = {}
-    for e in entries:
-        rule = rules.get(e.key, {})
-        out[e.key] = int(round(e.value)) if rule.get("type") == "int" else float(e.value)
-    return out
-
-
-def build_task_graph(agents: dict | None, tools, ctx: RecipeContext | None) -> StateGraph:
-    async def plan(state: TaskState) -> TaskState:
-        r = await Runner.run(agents["planner"], _summary(ctx))
-        return {"plan": json.dumps(r.final_output.model_dump())}
-
-    async def build(state: TaskState) -> TaskState:
-        prompt = f"PLAN:\n{state['plan']}\n\nCONTEXT:\n{_summary(ctx)}"
-        if state.get("failures"):
-            prompt += f"\n\nTHE LAST RECIPE CHECK FAILED; fix the data if the failures are about data:\n{state['failures']}"
-        r = await Runner.run(agents["builder"], prompt, max_turns=TASK_MAX_TURNS)
-        return {"data_commit": r.final_output.data_commit, "notes": r.final_output.notes}
-
-    async def recipe(state: TaskState) -> TaskState:
-        prompt = json.dumps({"rules": ctx.tunable_rules, "resolution_allowlist": ctx.resolution_allowlist,
-                             "lora_allowlist": ctx.lora_allowlist, "n_gpus": ctx.n_gpus,
-                             "data_notes": state.get("notes"), "parent_recipe": ctx.parent_recipe,
-                             "previous_failures": state.get("failures")})
-        r = await Runner.run(agents["recipe"], prompt)
-        return {"recipe": _coerce(r.final_output.entries, ctx.tunable_rules),
-                "rationale": r.final_output.rationale}
-
-    async def check(state: TaskState) -> TaskState:
-        res = await tools.call_tool("recipe_check", {"recipe": state["recipe"],
-                                                     "data_commit": state["data_commit"]})
-        body = json.loads(res.content[0].text) if not res.isError else {"ok": False,
-                                                                        "failures": [res.content[0].text]}
-        return {"failures": [] if body.get("ok") else body.get("failures", []),
-                "rounds": state.get("rounds", 0) + 1}
-
-    def route(state: TaskState) -> str:
-        if not state.get("failures") or state.get("rounds", 0) >= CHECK_ROUNDS:
-            return "finish"
-        return "revise"
-
-    g = StateGraph(TaskState)
-    for name, fn in (("plan", plan), ("build", build), ("recipe", recipe), ("check", check)):
-        g.add_node(name, fn)
-    g.add_edge(START, "plan")
-    g.add_edge("plan", "build")
-    g.add_edge("build", "recipe")
-    g.add_edge("recipe", "check")
-    g.add_conditional_edges("check", route, {"revise": "build", "finish": END})
-    return g
-
-
-async def run_task(ctx: RecipeContext) -> RecipeResult:
-    async with mcp_tools() as tools:
-        if ctx.dry_run:                  # contract smoke run: prove the wiring, do no work
-            build_task_graph(None, tools, ctx).compile()
-            names = [t.name for t in await tools.list_tools()]
-            ping = await Runner.run(Agent(name="ping", model=MODEL, instructions="Reply ok."), "ping")
-            return RecipeResult(data_commit=ctx.parent_data_commit or "dry-run", recipe={},
-                                rationale=f"dry run: {len(names)} tools, model said {ping.final_output!r}")
-        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-        from ..agents.definitions import task_agents
-        graph = build_task_graph(task_agents(tools), tools, ctx)
-        async with AsyncSqliteSaver.from_conn_string(f"{WORKSPACE}/langgraph.db") as saver:
-            app = graph.compile(checkpointer=saver)
-            state = await app.ainvoke({"rounds": 0}, config={"recursion_limit": 40,
-                                      "configurable": {"thread_id": f"improve_recipe-{ctx.attempt}"}})
-    rationale = state.get("rationale", "")
-    if state.get("failures"):
-        rationale += f"\n\nUnresolved recipe_check failures: {state['failures']}"
-    return RecipeResult(data_commit=state["data_commit"], recipe=state["recipe"],
-                        rationale=f"{rationale}\n\nPlan: {state.get('plan')}\nData: {state.get('notes')}")
-```
-
-- [ ] **Step 7: The meta graph**
-
-```python
-# seed_agent/agent/graphs/meta.py
-"""edit_self: analyze -> implement -> self-test -> (implement | finalize)."""
-from __future__ import annotations
-
-import ast
-import json
-import subprocess
-import sys
-from typing import TypedDict
-
-from agents import Agent, Runner
-from ar_contract.models import EditContext, EditResult
-from langgraph.graph import END, START, StateGraph
-
-from ..settings import AGENT_ROOT, META_MAX_TURNS, MODEL, SELFTEST_ROUNDS, WORKSPACE
-
-
-class MetaState(TypedDict, total=False):
-    plan: str
-    summary: str
-    errors: list[str]
-    rounds: int
-
-
-def selftest(root: str) -> list[str]:
-    """The contract's static + import checks, run locally so the agent can fix itself."""
-    errors = []
-    try:
-        tree = ast.parse(open(f"{root}/agent/entry.py").read())
-        top = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-        for name in ("edit_self", "improve_recipe"):
-            fn = top.get(name)
-            if fn is None or len(fn.args.posonlyargs + fn.args.args) != 1 or fn.args.vararg or fn.args.kwarg:
-                errors.append(f"agent/entry.py needs top-level {name}(ctx) with exactly one parameter")
-    except (OSError, SyntaxError) as exc:
-        errors.append(f"agent/entry.py: {exc}")
-    r = subprocess.run([sys.executable, "-c", "import agent.entry"], cwd=root, capture_output=True,
-                       text=True, timeout=60)
-    if r.returncode != 0:
-        errors.append(r.stderr[-3000:])
-    return errors
-
-
-def build_meta_graph(agents: dict | None, ctx: EditContext | None) -> StateGraph:
-    async def analyze(state: MetaState) -> MetaState:
-        brief = json.dumps({"lineage": ctx.lineage, "archive": ctx.archive,
-                            "nodes_remaining": ctx.nodes_remaining, "retry": ctx.retry}, default=str)[:60_000]
-        r = await Runner.run(agents["analyst"], brief)
-        return {"plan": json.dumps(r.final_output.model_dump())}
-
-    async def implement(state: MetaState) -> MetaState:
-        prompt = f"PLAN:\n{state['plan']}"
-        if state.get("errors"):
-            prompt += f"\n\nTHE SELF-TEST FAILED; fix these first:\n{state['errors']}"
-        r = await Runner.run(agents["coder"], prompt, max_turns=META_MAX_TURNS)
-        return {"summary": str(r.final_output)}
-
-    async def test(state: MetaState) -> MetaState:
-        return {"errors": selftest(AGENT_ROOT), "rounds": state.get("rounds", 0) + 1}
-
-    def route(state: MetaState) -> str:
-        return "finish" if not state.get("errors") or state.get("rounds", 0) >= SELFTEST_ROUNDS else "fix"
-
-    g = StateGraph(MetaState)
-    for name, fn in (("analyze", analyze), ("implement", implement), ("test", test)):
-        g.add_node(name, fn)
-    g.add_edge(START, "analyze")
-    g.add_edge("analyze", "implement")
-    g.add_edge("implement", "test")
-    g.add_conditional_edges("test", route, {"fix": "implement", "finish": END})
-    return g
-
-
-async def run_meta(ctx: EditContext) -> EditResult:
-    if ctx.dry_run:
-        build_meta_graph(None, ctx).compile()
-        ping = await Runner.run(Agent(name="ping", model=MODEL, instructions="Reply ok."), "ping")
-        return EditResult(summary=f"dry run: model said {ping.final_output!r}")
-    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-    from ..agents.definitions import meta_agents
-    graph = build_meta_graph(meta_agents(), ctx)
-    async with AsyncSqliteSaver.from_conn_string(f"{WORKSPACE}/langgraph.db") as saver:
-        state = await graph.compile(checkpointer=saver).ainvoke(
-            {"rounds": 0}, config={"recursion_limit": 30,
-                                   "configurable": {"thread_id": f"edit_self-{ctx.attempt}"}})
-    note = f" (self-test still failing: {state['errors']})" if state.get("errors") else ""
-    return EditResult(summary=(state.get("summary") or "no summary") + note)
-```
-
-- [ ] **Step 8: Run the tests**
-
-Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_seed_agent.py -p no:cacheprovider`
-Expected: PASS (unit tests plus both in-process dry runs against the mock services).
+Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_seed_agent.py tests/test_seed_harness.py -p no:cacheprovider`
+Expected: PASS (16 seed-agent tests: 11 unit and 5 against the kernel services; plus the 23 harness tests).
 
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_seed_agent.py -m docker -p no:cacheprovider`
 Expected: PASS (the seed agent passes contract verification in real containers).
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add seed_agent tests/test_seed_agent.py
-git commit -m "feat(seed): seed agent -- LangGraph task/meta graphs on the Agents SDK, passing the contract"
+git commit -m "feat(seed): seed agent -- plain-Python orchestration of harness roles, one-component edits"
 ```
 
 ---
-
-### Task 17: Real-component verification, log, merge
+### Task 18: Real-component verification, log, merge
 
 **Files:**
 - Modify: `docs/superpowers/plans/verification-log.md` (append a Plan 2 section)
@@ -5325,6 +6202,8 @@ Expected: PASS, with no GPU, network or Docker needed.
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest -m docker -p no:cacheprovider`
 Expected: PASS. This covers the image, the isolation checks (§16.3 item 4), timeout and kill, contract verification on 7 fixtures, the end-to-end tool test, and the seed agent contract. Record the counts and durations.
 
+Also confirm that the harness comparison (`tests/test_seed_harness.py`, part of Step 1) still passes, and record the Task 16 mutation counts.
+
 - [ ] **Step 3: Negative control for the isolation test**
 
 Temporarily change the runner's `--network none` to `--network bridge` and re-run `tests/test_sandbox_runner.py::test_isolation_holds_from_inside -m docker`. It must **fail** (the internet becomes reachable). Restore `--network none`, re-run, and confirm it passes. Record both runs. An isolation test that also passes with networking on proves nothing (verification-log finding 8).
@@ -5335,11 +6214,11 @@ In a scratch run: ingest the 18 `WorldModel/data/examples` clips (staged copies,
 
 - [ ] **Step 5: Re-check the spec amendments**
 
-Confirm the amendments made with this plan (§9.5 network, §10 tool names) still describe what was built. If implementation diverged anywhere else, amend the spec now and list it in the log.
+Confirm the amendments made with this plan (§9.5 network, §10 tool names, §1.1 item 9 and §9.1–9.3 frameworks and edit components) still describe what was built. If implementation diverged anywhere else, amend the spec now and list it in the log.
 
 - [ ] **Step 6: Write the verification log section**
 
-Append `## Plan 2 — agent runtime` to `docs/superpowers/plans/verification-log.md`. Include the verified facts 1–13 this plan relied on, the suite and docker results, the isolation negative control, the live-LLM outcome (or its deferral), and every defect found during implementation with its fix.
+Append `## Plan 2 — agent runtime` to `docs/superpowers/plans/verification-log.md`. Include the verified facts 1–17 this plan relied on, the suite and docker results, the harness comparison and its mutation counts, the isolation negative control, the live-LLM outcome (or its deferral), and every defect found during implementation with its fix.
 
 - [ ] **Step 7: Merge and push (standing rule: `main` always current)**
 
@@ -5366,7 +6245,7 @@ Plan 4's tasks will be written after Plan 3. Plan 4 sequences these Plan 2 piece
 | `AgentsRepo` | Task 12 | `init(seed_agent)` at bootstrap; `set_ref(branch_ref(node), commit)` for the passing attempt. |
 | `ContractHarness`, `verify_contract` | Task 14 | Step 4 of the cycle. `report.to_retry()` becomes the next `edit_self` attempt's `retry`. |
 | `run_edit_self`, `run_improve_recipe`, `attempt_dirs` | Task 15 | Steps 3 and 5. Retries pass `base_commit=<failed attempt commit>` and `previous_workspace=<failed attempt workspace>`. |
-| Context conventions | Task 13 | Plan 4 **writes** `nodes/<n>/recipe.yaml`, `nodes/<n>/rationale.md` and `nodes/<n>/eval/aggregates.json`. |
+| Context conventions | Task 13 | Plan 4 **writes** `nodes/<n>/recipe.yaml`, `nodes/<n>/rationale.md`, `nodes/<n>/edit.json` (the passing `edit_self` result, including `component`) and `nodes/<n>/eval/aggregates.json`. |
 
 **Plan 4 must:**
 1. **Liveness (spec 14.5).** Plan 2 enforces only the hard cap (4 x soft). Plan 4 wraps the runner with the soft timeout plus a probe window, using gateway and tool events for the caller's token, container CPU from `RunResult.stats`, and workspace changes. **GPU utilization is not a liveness signal** (verification-log finding 2).
@@ -5374,10 +6253,12 @@ Plan 4's tasks will be written after Plan 3. Plan 4 sequences these Plan 2 piece
 3. **Termination.** Force stop and resume discard must `docker kill` containers by the prefix `ar-<run_id>-`, call `JobQueue.shutdown()` and `RunServices.stop()`, kill kernel process groups, then confirm GPU memory is released and sweep `_megasam_tmp` before the next phase (verification-log findings 6–7).
 4. **Selection versus noise.** The proxy aggregate has a noise floor of about 4.4e-4 from a single re-run. Measure it properly (repeat evaluation of one checkpoint) before long unattended runs, and use it in parent selection (verification-log finding 5).
 5. **Upstream outage.** Watch the `llm.response` error rate. Upstream unavailable for more than `gateway.upstream_outage_pause_min` pauses the loop without charging the node (spec 14.2).
-6. **Deferred Plan 1 items:** `score_node` try/finally and rank/alpha from the node's resolved config; schema columns `recipe_path` and `attempt_counts_json`; `resolve_gpus` visibility (14.6); run-relative paths if resume-after-move matters.
+6. **Edit components.** Store the passing attempt's `EditResult.component` with the node (the nodes table and `edit.json`) and show it in the dashboard lineage. It is recorded, never enforced (spec 9.1.1).
+7. **Deferred Plan 1 items:** `score_node` try/finally and rank/alpha from the node's resolved config; schema columns `recipe_path` and `attempt_counts_json`; `resolve_gpus` visibility (14.6); run-relative paths if resume-after-move matters.
 
 ## Self-review
 
-- **Spec coverage.** §9.1 → Task 16; §9.2 → Task 3; §9.3 → Tasks 3 and 13; §9.4 → Task 14; §9.5 → Tasks 10–11 (network amended); §10 tools → Tasks 7–9 (generators → Plan 3); §13.1–13.3 gateway and tool capture → Tasks 1, 4–6; §5.2 → Task 12; §5.5 aspect → Task 2; §16.1 gateway / contract / job API → Tasks 4, 5, 9, 14; §16.3 item 4 → Tasks 11 and 17. Left to Plan 4, by the contract above: §7.2 sequencing, §12, §13.4, §14.3–14.6 and liveness.
+- **Spec coverage.** §9.1 → Tasks 16–17 (§9.1.2 harness → Task 16; §9.1.1 edit components → Tasks 3 and 17); §9.2 → Task 3; §9.3 → Tasks 3 and 13; §9.4 → Task 14; §9.5 → Tasks 10–11 (network amended); §10 tools → Tasks 7–9 (generators → Plan 3); §13.1–13.3 gateway and tool capture → Tasks 1, 4–6; §5.2 → Task 12; §5.5 aspect → Task 2; §16.1 gateway / contract / job API → Tasks 4, 5, 9, 14; §16.3 item 4 → Tasks 11 and 18. Left to Plan 4, by the contract above: §7.2 sequencing, §12, §13.4, §14.3–14.6 and liveness.
 - **Placeholders.** None. The one open outcome, the live LLM run, has an explicit deferral rule.
+- **Tested before writing.** The Task 16 harness (all three stages, their test counts and the mutation counts) and the Task 17 seed agent (both entry points end to end over Unix sockets against a scripted gateway and tool server, including argument errors, unknown tools and a failing kernel tool) were run as prototypes on this machine before being written into the plan.
 - **Type consistency.** `Caller` fields are fixed in Task 4 and used unchanged in Tasks 5–9, 14 and 15. `PhaseOutcome` and `PhaseEnv` are defined once, in Task 15. Tool names are identical in `register_*`, the Task 14 mock objects, `run_improve_recipe`'s tool list and the seed prompts.
