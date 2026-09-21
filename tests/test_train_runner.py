@@ -1,5 +1,5 @@
 from pathlib import Path
-from ar_kernel.train.runner import classify_failure, parse_train_lines, newest_checkpoint
+from ar_kernel.train.runner import classify_failure, classify_timeout, parse_train_lines, newest_checkpoint
 
 CUDA_OOM = "torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB"
 NCCL = "RuntimeError: NCCL communicator was aborted on rank 2"
@@ -69,3 +69,18 @@ def test_real_successful_run_log_parses_its_train_lines():
     rows = parse_train_lines(log)
     assert [r["step"] for r in rows] == [1, 2]
     assert rows[0]["loss"] == 0.431641 and rows[1]["loss"] == 0.251953
+
+
+def test_timeout_while_still_training_is_a_recipe_failure():
+    """Training length is the agent's call, so max_steps is not capped; running
+    out of time while still progressing means the recipe asked for too much."""
+    log = (Path(__file__).parent / "fixtures" / "real_successful_train.log").read_text()
+    failure, detail = classify_timeout(log, 48 * 3600)
+    assert failure == "recipe"
+    assert "max_steps" in detail and "step 2" in detail
+
+
+def test_timeout_with_no_training_progress_is_infra():
+    failure, detail = classify_timeout("[Setup] rank 0/4 loading model components serially\n", 48 * 3600)
+    assert failure == "infra"
+    assert "hang" in detail

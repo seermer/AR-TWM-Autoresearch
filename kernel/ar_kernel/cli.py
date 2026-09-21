@@ -3,9 +3,9 @@ import argparse, json, os, sys
 from pathlib import Path
 
 from .archive.nodes import NodeStore
-from .config import KernelConfig
+from .config import KernelConfig, load_dotenv
 from .doctor import report, run_checks
-from .run import bootstrap_run, score_node
+from .run import RunNotFound, attach_run, bootstrap_run, score_node
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ar")
@@ -25,6 +25,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     cfg = KernelConfig.load()
+    # Into os.environ itself, so every subprocess (e.g. WBench's VLM phase) sees
+    # the keys too -- not just the kernel's own metric decisions.
+    load_dotenv(cfg.repo_root / ".env", os.environ)
     # Before bootstrap_run: diagnostics must not create a run dir or rewrite versions.json.
     if args.command == "doctor":
         return report(run_checks(cfg), strict=args.strict)
@@ -34,7 +37,12 @@ def main(argv: list[str] | None = None) -> int:
         print(ctx.run_dir)
         return 0
 
-    ctx = bootstrap_run(cfg, args.run_id, os.environ)
+    # status / score-node act on an EXISTING run: attach, never create or rewrite it.
+    try:
+        ctx = attach_run(cfg, args.run_id, os.environ)
+    except RunNotFound as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     nodes = NodeStore(ctx.conn)
     if args.command == "status":
         for node in nodes.all():

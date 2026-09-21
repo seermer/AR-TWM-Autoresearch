@@ -5,7 +5,7 @@ from pathlib import Path
 
 from ..archive.blobs import BlobStore
 from ..archive.clips import ClipStore
-from ..config import KernelConfig
+from ..config import KernelConfig, run_config_path
 from .checker import check_clip_formats
 from .leakage import LeakageChecker
 from .probe import aspect_ok, probe_video
@@ -43,7 +43,7 @@ class Ingestor:
         self.clips = ClipStore(conn)
         self.recorder = recorder
         self.leakage = LeakageChecker(cfg)
-        self.base_recipe = cfg.repo_root / "configs" / "base_recipe.yaml"
+        self.base_recipe = run_config_path(cfg, run_dir, "base_recipe.yaml")
         self.tolerance = float(cfg.get("ingest.aspect_tolerance"))
 
     def ingest(self, candidates: list[Candidate], node_id: str) -> list[IngestResult]:

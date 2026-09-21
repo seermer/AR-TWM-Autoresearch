@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -55,6 +56,42 @@ class KernelConfig:
     @property
     def runs_dir(self) -> Path:
         return self._path("paths.runs_dir")
+
+SNAPSHOT_FILES = ("kernel.yaml", "base_recipe.yaml", "proxy_cases.txt")
+
+
+def run_config_path(cfg: "KernelConfig", run_dir: Path, name: str) -> Path:
+    """The run's frozen copy of configs/<name> once the run exists, else the live
+    file. Reading the live repo config from inside a run let a mid-run edit or
+    `git pull` change what an in-flight run does."""
+    snap = Path(run_dir) / "config" / name
+    return snap if snap.exists() else cfg.repo_root / "configs" / name
+
+
+def load_dotenv(path: Path, env: "dict | os._Environ") -> list[str]:
+    """Copy KEY=VALUE pairs from `path` into `env` where `env` lacks them.
+
+    Shell variables always win (spec 2.1) and empty values are skipped, so the
+    placeholder .env shipped in the repo enables nothing. Returns the keys set.
+    """
+    path = Path(path)
+    if not path.is_file():
+        return []
+    applied = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip().removeprefix("export ").strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        if not key.isidentifier() or not value or env.get(key):
+            continue
+        env[key] = value
+        applied.append(key)
+    return applied
+
 
 def resolve_gpus(cfg: KernelConfig, env: Mapping[str, str]) -> list[int]:
     raw = env.get("CUDA_VISIBLE_DEVICES", "").strip() or str(cfg.get("gpus.default"))

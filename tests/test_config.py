@@ -24,3 +24,25 @@ def test_gpu_list_rejects_non_integer_entries():
     cfg = KernelConfig.load()
     with pytest.raises(GpuPolicyError, match="not an integer"):
         resolve_gpus(cfg, {"CUDA_VISIBLE_DEVICES": "0,1,2,gpu3"})
+
+
+def test_dotenv_fills_missing_keys_without_overriding_the_shell(tmp_path):
+    """Review I9: nothing loaded .env, so filling it in did not enable VLM metrics
+    even though the docs said it would. Shell variables must still win (spec 2.1)."""
+    from ar_kernel.config import load_dotenv
+    env_file = tmp_path / ".env"
+    env_file.write_text("# comment\nVLM_API_KEY=from-file\nOPENAI_MODEL='gpt-x'\n"
+                        "EMPTY_ONE=\nALREADY_SET=from-file\n\nnot a pair\n")
+    env = {"ALREADY_SET": "from-shell"}
+    applied = load_dotenv(env_file, env)
+    assert env["VLM_API_KEY"] == "from-file"
+    assert env["OPENAI_MODEL"] == "gpt-x"            # quotes stripped
+    assert env["ALREADY_SET"] == "from-shell"        # shell wins
+    assert "EMPTY_ONE" not in env                    # empty placeholders do not count
+    assert set(applied) == {"VLM_API_KEY", "OPENAI_MODEL"}
+
+
+def test_missing_dotenv_is_not_an_error(tmp_path):
+    from ar_kernel.config import load_dotenv
+    env = {}
+    assert load_dotenv(tmp_path / "nope.env", env) == [] and env == {}

@@ -97,3 +97,42 @@ def test_report_exit_codes(tmp_path, capsys):
     findings = [f for f in run_checks(clean) if f.level != "fail"]
     assert report(findings) == 0
     assert report(findings, strict=True) == (1 if any(f.level == "warn" for f in findings) else 0)
+
+
+def test_kernel_weight_table_matches_wbench_verify_install():
+    """WBENCH_WEIGHTS mirrors WBench's own table; fail loudly if they drift."""
+    import ast
+    from ar_kernel.doctor import WBENCH_WEIGHTS
+    src = (KernelConfig.load().wbench / "tools" / "verify_install.py").read_text()
+    tree = ast.parse(src)
+    upstream = next(ast.literal_eval(node.value) for node in ast.walk(tree)
+                    if isinstance(node, ast.Assign)
+                    and any(getattr(t, "id", None) == "weight_checks" for t in node.targets))
+    assert WBENCH_WEIGHTS == upstream
+
+
+def test_missing_gpu_metric_weight_is_reported(tmp_path):
+    from ar_kernel.doctor import WBENCH_WEIGHTS, wbench_weight_problems
+    root = _tree(tmp_path)
+    weights = tmp_path / "WBench" / "weights"
+    for rel in WBENCH_WEIGHTS.values():
+        (weights / rel).parent.mkdir(parents=True, exist_ok=True)
+        (weights / rel).write_bytes(b"w")
+    cfg = KernelConfig.load(root / "configs" / "kernel.yaml")
+    assert wbench_weight_problems(cfg) == []
+    (weights / WBENCH_WEIGHTS["MegaSAM"]).unlink()
+    assert any("MegaSAM" in p for p in wbench_weight_problems(cfg))
+
+
+def test_broken_link_under_wbench_weights_is_reported(tmp_path):
+    """Exactly the MegaSAM incident: hub/torchhub pointing at the old checkout."""
+    from ar_kernel.doctor import WBENCH_WEIGHTS, wbench_weight_problems
+    root = _tree(tmp_path)
+    weights = tmp_path / "WBench" / "weights"
+    for rel in WBENCH_WEIGHTS.values():
+        (weights / rel).parent.mkdir(parents=True, exist_ok=True)
+        (weights / rel).write_bytes(b"w")
+    (weights / "hub").mkdir()
+    os.symlink("/home/old-checkout/WBench/weights/torch_hub", str(weights / "hub" / "torchhub"))
+    cfg = KernelConfig.load(root / "configs" / "kernel.yaml")
+    assert any("torchhub" in p for p in wbench_weight_problems(cfg))

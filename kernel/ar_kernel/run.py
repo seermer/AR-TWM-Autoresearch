@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Mapping
 
 from .archive.db import open_db
-from .config import KernelConfig, resolve_gpus
+from .doctor import wbench_weight_problems
+from .config import SNAPSHOT_FILES, KernelConfig, resolve_gpus, run_config_path
 from .eval.merge import merge_lora
 from .eval.render import build_render_config, render_proxy
 from .eval.score import (aggregates, cleanup_eval, resolve_metric_set, score_from_report)
@@ -41,16 +42,38 @@ def _git_state(repo: Path) -> tuple[str, bool]:
                                 capture_output=True, text=True).stdout.strip())
     return sha, dirty
 
+class RunNotFound(FileNotFoundError):
+    """No run with this id exists."""
+
+
+class PreflightError(RuntimeError):
+    """The environment cannot produce a complete, comparable score."""
+
+
+_SECRET_KEYS = {"OPENAI_API_KEY", "VLM_API_KEY", "HF_TOKEN"}
+
+
+def _recorder(run_dir: Path, env: Mapping[str, str]) -> Recorder:
+    return Recorder(run_dir, redact=[v for k, v in env.items() if k in _SECRET_KEYS and v])
+
+
 def bootstrap_run(cfg: KernelConfig, run_id: str | None, env: Mapping[str, str]) -> RunContext:
+    """Create a run, freezing its configs and recording versions. Idempotent: for
+    an existing run it attaches instead, and never overwrites the snapshot."""
     run_id = run_id or dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = cfg.runs_dir / run_id
+    if (run_dir / "config" / "run.json").exists():
+        return attach_run(cfg, run_id, env)
+    gpus = resolve_gpus(cfg, env)          # before creating anything
+    problems = wbench_weight_problems(cfg)
+    if problems:
+        raise PreflightError("WBench is not runnable; fix before starting a run "
+                             "(`ar doctor` for details):\n  " + "\n  ".join(problems))
     (run_dir / "config").mkdir(parents=True, exist_ok=True)
     (run_dir / "cache" / "text_embed").mkdir(parents=True, exist_ok=True)
-    gpus = resolve_gpus(cfg, env)
-    recorder = Recorder(run_dir, redact=[v for k, v in env.items()
-                                         if k in {"OPENAI_API_KEY", "VLM_API_KEY", "HF_TOKEN"} and v])
-    shutil.copy2(cfg.repo_root / "configs" / "kernel.yaml", run_dir / "config" / "kernel.yaml")
-    shutil.copy2(cfg.repo_root / "configs" / "base_recipe.yaml", run_dir / "config" / "base_recipe.yaml")
+    recorder = _recorder(run_dir, env)
+    for name in SNAPSHOT_FILES:
+        shutil.copy2(cfg.repo_root / "configs" / name, run_dir / "config" / name)
     wm_sha, wm_dirty = _git_state(cfg.worldmodel)
     wb_sha, wb_dirty = _git_state(cfg.wbench)
     kernel_sha, kernel_dirty = _git_state(cfg.repo_root)
@@ -59,7 +82,11 @@ def bootstrap_run(cfg: KernelConfig, run_id: str | None, env: Mapping[str, str])
                 "kernel_sha": kernel_sha, "kernel_dirty": kernel_dirty}
     (run_dir / "config" / "versions.json").write_text(json.dumps(versions, indent=2))
     metric_set, excluded = preflight_metrics(cfg, env)
-    case_ids = (cfg.repo_root / "configs" / "proxy_cases.txt").read_text().strip().split(",")
+    case_ids = (run_dir / "config" / "proxy_cases.txt").read_text().strip().split(",")
+    # run.json is written last: its presence is what marks the run as created.
+    (run_dir / "config" / "run.json").write_text(json.dumps(
+        {"run_id": run_id, "metric_set": metric_set, "excluded_metrics": excluded,
+         "case_ids": case_ids, "versions": versions}, indent=2))
     recorder.event("run.start", payload={"gpus": gpus, "metric_set": metric_set,
                                          "excluded_metrics": excluded, "versions": versions,
                                          "case_ids": case_ids})
@@ -68,6 +95,23 @@ def bootstrap_run(cfg: KernelConfig, run_id: str | None, env: Mapping[str, str])
                                                "worldmodel_dirty": wm_dirty, "wbench_dirty": wb_dirty})
     return RunContext(run_dir=run_dir, conn=open_db(run_dir), recorder=recorder, gpus=gpus,
                       metric_set=metric_set, case_ids=case_ids, versions=versions)
+
+
+def attach_run(cfg: KernelConfig, run_id: str, env: Mapping[str, str]) -> RunContext:
+    """Open an existing run without modifying its snapshot or appending run.start.
+
+    For `ar status`, `ar score-node`, and resuming. A missing run is an error --
+    it used to be created silently, so a typo'd run id made a fresh run.
+    """
+    run_dir = cfg.runs_dir / run_id
+    meta_path = run_dir / "config" / "run.json"
+    if not meta_path.exists():
+        raise RunNotFound(f"no run {run_id!r} under {cfg.runs_dir}")
+    meta = json.loads(meta_path.read_text())
+    return RunContext(run_dir=run_dir, conn=open_db(run_dir), recorder=_recorder(run_dir, env),
+                      gpus=resolve_gpus(cfg, env), metric_set=meta["metric_set"],
+                      case_ids=meta["case_ids"], versions=meta["versions"])
+
 
 def score_node(cfg: KernelConfig, ctx: RunContext, node_id: str, checkpoint: Path | None,
                rank: int, alpha: int) -> tuple[float, dict]:

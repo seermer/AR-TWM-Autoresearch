@@ -41,9 +41,14 @@ Keep them relative. An absolute path here pins the tree to one machine, and
 3. **Weights are not in git.** Re-download or copy:
    `WorldModel/weights/` (LTX-2.3 transformer, `alaya-world-ar`, VAE, Gemma),
    `WBench/weights/` (SAM2, DA3, MegaSAM, HPSv3, DINOv2 torch hub).
-4. **Fill `AutoResearcher/.env`** if API-based metrics are wanted. Without
-   `VLM_API_KEY` the six VLM metrics are skipped by design, and the score is the
-   mean of whatever metrics the report does contain.
+4. **Fill `AutoResearcher/.env`** if API-based metrics are wanted. The `ar`
+   CLI loads it at startup into its own environment, so the keys also reach the
+   WBench subprocesses. Variables already set in the shell win, and empty values
+   are ignored, so the shipped placeholder enables nothing. Without
+   `VLM_API_KEY` the six VLM metrics are excluded by design; the run records the
+   exclusion and uses that fixed metric set for every node, so scores stay
+   comparable. GPU-metric weights are different: if any is missing, a run
+   refuses to start rather than silently scoring on fewer metrics.
 5. **Run `ar doctor`,** then the unit suites.
 
 ## The failure that motivated this

@@ -29,3 +29,67 @@ def test_bootstrap_refuses_too_few_gpus(tmp_path, monkeypatch):
         assert "at least 4" in str(exc)
     else:
         raise AssertionError("expected a GpuPolicyError")
+
+
+def _runs(tmp_path, monkeypatch):
+    monkeypatch.setattr(KernelConfig, "runs_dir", property(lambda self: tmp_path))
+
+
+ENV4 = {"CUDA_VISIBLE_DEVICES": "0,1,2,3"}
+
+
+def test_attaching_to_a_missing_run_is_an_error_not_a_new_run(tmp_path, monkeypatch):
+    """Review I7: `ar status --run-id <typo>` used to silently create a run."""
+    import pytest
+    from ar_kernel.run import RunNotFound, attach_run
+    _runs(tmp_path, monkeypatch)
+    with pytest.raises(RunNotFound):
+        attach_run(CFG, "no_such_run", ENV4)
+    assert not (tmp_path / "no_such_run").exists()
+
+
+def test_attach_does_not_rewrite_the_run_snapshot(tmp_path, monkeypatch):
+    """Review I7: every `ar status` re-copied configs over the snapshot and
+    rewrote versions.json, erasing the record of what the run started on."""
+    from ar_kernel.run import attach_run
+    _runs(tmp_path, monkeypatch)
+    ctx = bootstrap_run(CFG, run_id="r1", env=ENV4)
+    versions = ctx.run_dir / "config" / "versions.json"
+    versions.write_text('{"worldmodel_sha": "the-sha-the-run-started-on"}')
+    attached = attach_run(CFG, "r1", ENV4)
+    assert versions.read_text() == '{"worldmodel_sha": "the-sha-the-run-started-on"}'
+    assert attached.case_ids == ctx.case_ids and attached.metric_set == ctx.metric_set
+    starts = [e for e in attached.recorder.read_events() if e["type"] == "run.start"]
+    assert len(starts) == 1
+
+
+def test_bootstrapping_an_existing_run_id_does_not_overwrite_it(tmp_path, monkeypatch):
+    _runs(tmp_path, monkeypatch)
+    bootstrap_run(CFG, run_id="r2", env=ENV4)
+    snap = tmp_path / "r2" / "config" / "base_recipe.yaml"
+    snap.write_text(snap.read_text() + "\n# edited after the run started\n")
+    bootstrap_run(CFG, run_id="r2", env=ENV4)
+    assert snap.read_text().endswith("# edited after the run started\n")
+
+
+def test_run_uses_its_own_config_snapshot(tmp_path, monkeypatch):
+    """Gate and bootstrap must read the run's snapshot, not the live repo config,
+    so a mid-run edit or pull cannot change what an in-flight run does."""
+    from ar_kernel.run import run_config_path
+    _runs(tmp_path, monkeypatch)
+    ctx = bootstrap_run(CFG, run_id="r3", env=ENV4)
+    for name in ("kernel.yaml", "base_recipe.yaml", "proxy_cases.txt"):
+        assert run_config_path(CFG, ctx.run_dir, name) == ctx.run_dir / "config" / name
+        assert (ctx.run_dir / "config" / name).exists()
+
+
+def test_bootstrap_refuses_to_start_when_wbench_weights_are_broken(tmp_path, monkeypatch):
+    """Review I8: a run must not start when it cannot produce a complete score."""
+    import pytest
+    import ar_kernel.run as run_mod
+    _runs(tmp_path, monkeypatch)
+    monkeypatch.setattr(run_mod, "wbench_weight_problems",
+                        lambda cfg: ["MegaSAM weights missing: /x/megasam_final.pth"])
+    with pytest.raises(run_mod.PreflightError, match="MegaSAM"):
+        bootstrap_run(CFG, run_id="broken", env=ENV4)
+    assert not (tmp_path / "broken" / "config" / "run.json").exists()

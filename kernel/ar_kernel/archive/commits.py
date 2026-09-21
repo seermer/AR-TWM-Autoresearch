@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib, json, os, re, shutil, sqlite3, time
+import hashlib, json, math, os, re, shutil, sqlite3, time
 from pathlib import Path
 
 FORMATS = {"video_caption_camera", "video_timed_prompts_camera", "video_caption_static"}
@@ -39,9 +39,13 @@ class CommitStore:
                     raise CommitError(f"{name}.prompt_mode must be one of {sorted(PROMPT_MODES)}")
             elif mode is not None:
                 raise CommitError(f"{name}.prompt_mode only applies to video_timed_prompts_camera")
-            weight = float(entry.get("weight", 1.0))
-            if weight < 0:
-                raise CommitError(f"{name}.weight must be >= 0")
+            raw_weight = entry.get("weight", 1.0)
+            if isinstance(raw_weight, bool) or not isinstance(raw_weight, (int, float)):
+                raise CommitError(f"{name}.weight must be a number, got {raw_weight!r}")
+            weight = float(raw_weight)
+            if not math.isfinite(weight) or weight < 0:
+                # inf/nan used to pass here and then crash steps_per_epoch in the gate.
+                raise CommitError(f"{name}.weight must be finite and >= 0, got {raw_weight!r}")
             clip_ids = list(entry.get("clips") or [])
             if len(set(clip_ids)) != len(clip_ids):
                 dupes = sorted({c for c in clip_ids if clip_ids.count(c) > 1})

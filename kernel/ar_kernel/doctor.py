@@ -28,6 +28,57 @@ class Finding:
     detail: str
 
 
+# WBench's required GPU-metric weights, relative to WBench/weights. Mirrors
+# `weight_checks` in WBench/tools/verify_install.py; tests/test_doctor.py fails if
+# the two drift apart.
+WBENCH_WEIGHTS = {
+    "CLIP ViT-L/14": "clip/ViT-L-14.pt",
+    "Aesthetic": "aesthetic/sa_0_4_vit_l_14_linear.pth",
+    "RAFT": "raft/raft-things.pth",
+    "TransNetV2": "transnetv2/transnetv2-pytorch-weights.pth",
+    "DreamSim": "dreamsim/dino_vitb16_pretrain.pth",
+    "HPSv3": "HPSv3/HPSv3.safetensors",
+    "SAM2 (native .pt)": "sam2.1-hiera-base-plus/sam2.1_hiera_base_plus.pt",
+    "MegaSAM": "megasam/megasam_final.pth",
+    "DA3-GIANT-1.1": "DA3-GIANT-1.1/config.json",
+    "Qwen2-VL (HPSv3 base)": "Qwen2-VL-7B-Instruct/config.json",
+}
+
+
+def _broken_links(root: Path) -> list[tuple[Path, str]]:
+    out = []
+    for link in sorted(Path(root).rglob("*")):
+        try:
+            if link.is_symlink() and not link.exists():
+                out.append((link, os.readlink(str(link))))
+        except OSError:
+            continue
+    return out
+
+
+def wbench_weight_problems(cfg: KernelConfig) -> list[str]:
+    """Missing GPU-metric weights, or broken links under WBench/weights.
+
+    Run by bootstrap_run as well as `ar doctor`: a moved checkout left MegaSAM's
+    weight links dangling, every navigation case failed, and the report came out
+    missing five metrics. Metric preflight only checked the VLM key and the VP
+    weights, so nothing stopped the run starting.
+    """
+    weights = cfg.wbench / "weights"
+    problems = [f"{name} weights missing: {weights / rel}"
+                for name, rel in WBENCH_WEIGHTS.items() if not (weights / rel).exists()]
+    problems += [f"broken symlink under WBench/weights: {link} -> {target}"
+                 for link, target in _broken_links(weights)]
+    return problems
+
+
+def _wbench_weights(cfg: KernelConfig) -> list[Finding]:
+    problems = wbench_weight_problems(cfg) if (cfg.wbench / "weights").is_dir() else \
+        [f"{cfg.wbench / 'weights'} does not exist"]
+    return [Finding("fail", "wbench.weights", p) for p in problems] or \
+        [Finding("ok", "wbench.weights", "all required GPU-metric weights present")]
+
+
 def _rel_paths(cfg: KernelConfig) -> list[Finding]:
     out = []
     for key in ("paths.worldmodel", "paths.wbench", "paths.runs_dir"):
@@ -97,7 +148,7 @@ def _dotenv(cfg: KernelConfig) -> list[Finding]:
     for repo in (cfg.repo_root, cfg.worldmodel, cfg.wbench):
         p = Path(repo) / ".env"
         if not p.exists() and not p.is_symlink():
-            out.append(Finding("warn", f"dotenv.{Path(repo).name}", "no .env (API metrics will be skipped)"))
+            out.append(Finding("warn", f"dotenv.{Path(repo).name}", "no .env; VLM metrics are excluded unless VLM_API_KEY is set in the shell"))
         elif p.is_symlink() and Path(os.readlink(str(p))).is_absolute():
             out.append(Finding("fail", f"dotenv.{Path(repo).name}",
                                f"symlink target is absolute ({os.readlink(str(p))}); use a relative target"))
@@ -117,11 +168,11 @@ def run_checks(cfg: KernelConfig | None = None) -> list[Finding]:
     findings += _envs()
     findings += _dotenv(cfg)
     findings += _symlinks(cfg)
+    findings += _wbench_weights(cfg)
     return findings
 
 
 def report(findings: list[Finding], strict: bool = False) -> int:
-    mark = {"ok": "  ok  ", " warn": "warn", "fail": " FAIL "}
     for f in findings:
         if f.level == "ok":
             continue

@@ -14,6 +14,58 @@ TUNABLE_KEYS = frozenset({
     "lora.rank", "lora.alpha",
 })
 
+# Validity only -- type, sign, finiteness, range of a probability. These are NOT
+# tuning limits: how long to train and at what learning rate is the agent's
+# decision. They exist so that a malformed value is a gate failure the agent can
+# retry, rather than an exception that crashes the node (spec 14.2).
+_INT, _FLOAT = "int", "float"
+RECIPE_RULES = {
+    "optimizer.max_steps": (_INT, 1, None),
+    "optimizer.epochs": (_INT, 1, None),
+    "optimizer.grad_accum_steps": (_INT, 1, None),
+    "optimizer.warmup_steps": (_INT, 0, None),
+    "optimizer.lr": (_FLOAT, 0.0, None),            # strictly positive, see below
+    "optimizer.weight_decay": (_FLOAT, 0.0, None),
+    "optimizer.max_grad_norm": (_FLOAT, 0.0, None),  # strictly positive
+    "data.overall_caption_prob": (_FLOAT, 0.0, 1.0),
+    "sample.height": (_INT, 1, None),
+    "sample.width": (_INT, 1, None),
+    "lora.rank": (_INT, 1, None),
+    "lora.alpha": (_INT, 1, None),
+}
+_STRICTLY_POSITIVE = {"optimizer.lr", "optimizer.max_grad_norm"}
+
+
+def validate_recipe_values(recipe: dict) -> list[str]:
+    """Return one failure message per malformed tunable value (unknown keys are
+    reported separately by the gate's allowlist check)."""
+    failures = []
+    for key, value in recipe.items():
+        rule = RECIPE_RULES.get(key)
+        if rule is None:
+            continue
+        kind, low, high = rule
+        if isinstance(value, bool):
+            failures.append(f"{key} must be a number, got a boolean {value!r}")
+            continue
+        if kind == _INT and not isinstance(value, int):
+            failures.append(f"{key} must be an integer, got {value!r}")
+            continue
+        if kind == _FLOAT and not isinstance(value, (int, float)):
+            failures.append(f"{key} must be a number, got {value!r}")
+            continue
+        if kind == _FLOAT and not math.isfinite(value):
+            failures.append(f"{key} must be finite, got {value!r}")
+            continue
+        if key in _STRICTLY_POSITIVE and value <= 0:
+            failures.append(f"{key} must be > 0, got {value!r}")
+        elif value < low:
+            failures.append(f"{key} must be >= {low}, got {value!r}")
+        elif high is not None and value > high:
+            failures.append(f"{key} must be <= {high}, got {value!r}")
+    return failures
+
+
 def _assign(tree: dict, dotted: str, value) -> None:
     node = tree
     parts = dotted.split(".")

@@ -10,8 +10,11 @@ from conftest import make_mp4, write_caption, write_poses
 CFG = KernelConfig.load()
 PROV = {"kind": "derived", "from": [], "transform": "unit test fixture"}
 
-@pytest.fixture
-def gate_env(tmp_path):
+@pytest.fixture(scope="module")
+def _gate_store(tmp_path_factory):
+    """Ingesting 8 real clips costs ~40 s; the gate only reads the store, so build
+    it once per module. Each test still gets its own node dir and recorder."""
+    tmp_path = tmp_path_factory.mktemp("gate_store")
     conn = open_db(tmp_path)
     rec = Recorder(tmp_path)
     ing = Ingestor(CFG, tmp_path, conn, rec)
@@ -30,7 +33,13 @@ def gate_env(tmp_path):
     commits = CommitStore(conn, ing.blobs, ing.clips)
     commit = commits.commit(None, {"cam": {"format": "video_caption_camera", "prompt_mode": None,
                                            "weight": 1.0, "clips": clip_ids}}, "v", node_id="n1")
-    return Gate(CFG, commits, rec), commit, tmp_path
+    return commits, commit
+
+
+@pytest.fixture
+def gate_env(_gate_store, tmp_path):
+    commits, commit = _gate_store
+    return Gate(CFG, commits, Recorder(tmp_path)), commit, tmp_path
 
 def test_valid_recipe_passes_every_check(gate_env):
     gate, commit, tmp_path = gate_env
@@ -100,3 +109,24 @@ def test_fewer_clips_than_gpus_is_rejected(tmp_path):
     result = Gate(CFG, commits, rec).check({}, commit, None, "n1", tmp_path / "n1",
                                            tmp_path, [0, 1, 2, 3])
     assert not result.ok and any("clips" in f for f in result.failures)
+
+
+@pytest.mark.parametrize("key,value,fragment", [
+    ("optimizer.grad_accum_steps", 0, "grad_accum_steps"),      # was ZeroDivisionError
+    ("optimizer.grad_accum_steps", "four", "grad_accum_steps"), # was ValueError from int()
+    ("optimizer.max_steps", -5, "max_steps"),
+    ("optimizer.max_steps", 2.5, "max_steps"),
+    ("optimizer.epochs", True, "epochs"),                       # bool is an int subclass
+    ("optimizer.lr", float("nan"), "lr"),
+    ("optimizer.lr", float("inf"), "lr"),
+    ("optimizer.lr", 0, "lr"),
+    ("data.overall_caption_prob", 1.5, "overall_caption_prob"),
+    ("optimizer.warmup_steps", -1, "warmup_steps"),
+])
+def test_invalid_recipe_values_fail_the_gate_instead_of_crashing(gate_env, key, value, fragment):
+    """Review I4: agent-supplied values used to raise out of the gate, which under
+    spec 14.2 crashes the node instead of giving the agent a retry."""
+    gate, commit, tmp_path = gate_env
+    result = gate.check({key: value}, commit, None, "n1", tmp_path / "n1", tmp_path, [0, 1, 2, 3])
+    assert not result.ok
+    assert any(fragment in f for f in result.failures), result.failures

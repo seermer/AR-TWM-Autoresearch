@@ -1,0 +1,71 @@
+"""run_in_env must be safe to use from an unattended multi-day loop.
+
+Review I6: subprocess.run(timeout=) killed only the `conda run` process, so
+torchrun ranks and WBench multiprocessing workers were orphaned and kept holding
+GPUs -- the exact failure the Task 14 verification hit, where two orphaned spawn
+workers held ~19 GB for 35 minutes and made the next job OOM. A timeout also
+wrote no event and dropped the output captured so far.
+"""
+import os
+import time
+
+import pytest
+
+from ar_kernel.subproc import SubprocTimeout, run_in_env
+from ar_kernel.telemetry.recorder import Recorder
+
+ENV = "autoresearcher"
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    # A zombie still answers kill(0); treat it as dead.
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            return fh.read().split()[2] != "Z"
+    except FileNotFoundError:
+        return False
+
+
+def test_success_returns_output_and_code(tmp_path):
+    proc = run_in_env(ENV, ["python", "-c", "print('hello'); import sys; sys.exit(3)"], cwd=tmp_path)
+    assert proc.returncode == 3
+    assert "hello" in proc.stdout
+
+
+def test_timeout_kills_the_whole_process_group(tmp_path):
+    """A grandchild (standing in for a torchrun rank / spawn worker) must die too."""
+    pidfile = tmp_path / "child.pid"
+    script = f"sleep 600 & echo $! > {pidfile}; echo started; wait"
+    with pytest.raises(SubprocTimeout):
+        run_in_env(ENV, ["bash", "-c", script], cwd=tmp_path, timeout=8)
+    child = int(pidfile.read_text())
+    deadline = time.time() + 15
+    while _alive(child) and time.time() < deadline:
+        time.sleep(0.2)
+    assert not _alive(child), "grandchild survived the timeout -- it would keep holding the GPU"
+
+
+def test_timeout_records_an_event_with_the_partial_output(tmp_path):
+    rec = Recorder(tmp_path)
+    with pytest.raises(SubprocTimeout) as info:
+        run_in_env(ENV, ["bash", "-c", "echo progress-before-hang; sleep 600"],
+                   cwd=tmp_path, timeout=8, recorder=rec, node="n1", phase="train")
+    assert "progress-before-hang" in (info.value.output or "")
+    kinds = [e["type"] for e in rec.read_events("n1")]
+    assert "subproc.error" in kinds, kinds
+    err = next(e for e in rec.read_events("n1") if e["type"] == "subproc.error")
+    assert "progress-before-hang" in str(rec.load_payload(err["payload"]))
+
+
+def test_log_path_streams_output_to_disk(tmp_path):
+    """Long jobs (48 h of training) must not buffer everything in memory until exit."""
+    log = tmp_path / "logs" / "job.log"
+    proc = run_in_env(ENV, ["bash", "-c", "echo to-out; echo to-err 1>&2"], cwd=tmp_path, log_path=log)
+    assert proc.returncode == 0
+    text = log.read_text()
+    assert "to-out" in text and "to-err" in text
+    assert "to-out" in proc.stdout

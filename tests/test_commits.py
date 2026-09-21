@@ -139,3 +139,19 @@ def test_duplicate_clip_in_a_dataset_is_rejected(store):
     cs, ids, _ = store
     with pytest.raises(CommitError, match="more than once"):
         cs.commit(None, _cam([ids[0], ids[0], ids[1]]), "dup", node_id="n1")
+
+
+@pytest.mark.parametrize("weight", [float("inf"), float("nan"), "heavy"])
+def test_non_finite_or_non_numeric_weight_is_rejected(store, weight):
+    """Review I4: weight inf passed validation, then steps_per_epoch raised
+    'cannot convert float NaN to integer' inside the gate."""
+    cs, ids, _ = store
+    with pytest.raises(CommitError, match="weight"):
+        cs.commit(None, {"cam": {**_cam(ids)["cam"], "weight": weight}}, "w", node_id="n1")
+
+
+def test_commit_with_no_enabled_dataset_is_rejected(store):
+    """All-zero weights left steps_per_epoch taking max() of nothing."""
+    cs, ids, _ = store
+    with pytest.raises(CommitError, match="no dataset"):
+        cs.commit(None, {"cam": {**_cam(ids)["cam"], "weight": 0.0}}, "off", node_id="n1")

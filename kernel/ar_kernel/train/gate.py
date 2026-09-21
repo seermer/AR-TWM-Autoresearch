@@ -4,9 +4,9 @@ from pathlib import Path
 
 import yaml
 
-from ..config import KernelConfig
+from ..config import KernelConfig, run_config_path
 from ..subproc import run_in_env, _tail
-from .recipe import TUNABLE_KEYS, steps_per_epoch, write_resolved_config
+from .recipe import TUNABLE_KEYS, steps_per_epoch, validate_recipe_values, write_resolved_config
 
 @dataclass
 class GateResult:
@@ -28,8 +28,16 @@ class Gate:
         for key in recipe:
             if key not in TUNABLE_KEYS:
                 failures.append(f"{key} is not tunable; allowed: {sorted(TUNABLE_KEYS)}")
+        value_failures = validate_recipe_values(recipe)
+        if value_failures:
+            # Everything below does arithmetic on these values; stop before it can raise.
+            failures += value_failures
+            self.recorder.event("gate.failed", node=node_id, phase="gate",
+                                payload={"failures": failures, "recipe": recipe})
+            return GateResult(ok=False, failures=failures)
 
         manifest = self.commits.manifest(commit_id)
+        self.base_recipe = run_config_path(self.cfg, run_dir, "base_recipe.yaml")
         base = yaml.safe_load(self.base_recipe.read_text(encoding="utf-8"))
         height = recipe.get("sample.height", base["sample"]["height"])
         width = recipe.get("sample.width", base["sample"]["width"])

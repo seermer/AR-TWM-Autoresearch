@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..config import KernelConfig
-from ..subproc import run_in_env, _tail
+from ..subproc import SubprocTimeout, run_in_env, _tail
 
 RECIPE_SIGNATURES = (
     "CUDA out of memory", "torch.OutOfMemoryError", "loss=nan", "loss=inf",
@@ -33,6 +33,7 @@ class TrainOutcome:
     failure: str
     log_path: Path
     metrics: list[dict] = field(default_factory=list)
+    detail: str = ""        # human-readable reason, surfaced to the agent on failure
 
 def classify_failure(log: str, returncode: int) -> str:
     if any(sig in log for sig in RECIPE_SIGNATURES):
@@ -40,6 +41,25 @@ def classify_failure(log: str, returncode: int) -> str:
     if any(sig in log for sig in INFRA_SIGNATURES):
         return "infra"
     return "none" if returncode == 0 else "infra"
+
+TRAIN_TIMEOUT_SECONDS = 48 * 3600
+
+
+def classify_timeout(log: str, timeout_s: int) -> tuple[str, str]:
+    """Classify a training run that hit the phase timeout.
+
+    Training length is the agent's decision, so max_steps is not capped. If the
+    run was still making [Train] progress when time ran out, the recipe asked for
+    more training than fits: a recipe failure the agent can act on. No progress
+    at all means the job hung -- infra.
+    """
+    rows = parse_train_lines(log)
+    if rows:
+        last = rows[-1]["step"]
+        return "recipe", (f"training was still progressing (reached step {last}) when it hit the "
+                          f"{timeout_s // 3600} h limit; reduce optimizer.max_steps")
+    return "infra", f"training made no [Train] progress before the {timeout_s // 3600} h limit (hang)"
+
 
 def parse_train_lines(log: str) -> list[dict]:
     rows = []
@@ -81,19 +101,28 @@ class TrainRunner:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with self.recorder.span("train", node=node_id, phase="train",
                                 payload={"config": str(resolved), "gpus": gpus}):
-            proc = run_in_env(
-                "alayaworld", ["bash", "scripts/finetune/lowcompute_4x4090.sh"],
-                cwd=self.cfg.worldmodel,
-                extra_env={"CONFIG_PATH": str(resolved),
-                           "CUDA_VISIBLE_DEVICES": ",".join(str(g) for g in gpus),
-                           "LOG_FILTER": "all", "ALAYA_LOG_MEMORY": "1",
-                           "ALAYA_DATASET_CACHE_DIR": str(Path(node_dir) / "dataset_cache")},
-                timeout=int(48 * 3600), recorder=self.recorder, node=node_id, phase="train")
-        log = proc.stdout + proc.stderr
-        log_path.write_text(log, encoding="utf-8")
+            try:
+                # Streams to train.log as it runs rather than buffering up to 48 h
+                # of output in memory until exit.
+                proc = run_in_env(
+                    "alayaworld", ["bash", "scripts/finetune/lowcompute_4x4090.sh"],
+                    cwd=self.cfg.worldmodel,
+                    extra_env={"CONFIG_PATH": str(resolved),
+                               "CUDA_VISIBLE_DEVICES": ",".join(str(g) for g in gpus),
+                               "LOG_FILTER": "all", "ALAYA_LOG_MEMORY": "1",
+                               "ALAYA_DATASET_CACHE_DIR": str(Path(node_dir) / "dataset_cache")},
+                    timeout=TRAIN_TIMEOUT_SECONDS, recorder=self.recorder, node=node_id,
+                    phase="train", log_path=log_path)
+            except SubprocTimeout as exc:
+                log = exc.output or ""
+                failure, detail = classify_timeout(log, TRAIN_TIMEOUT_SECONDS)
+                return TrainOutcome(checkpoint=None, failure=failure, log_path=log_path,
+                                    metrics=parse_train_lines(log), detail=detail)
+        log = proc.stdout
         failure = classify_failure(log, proc.returncode)
         checkpoint = newest_checkpoint(output_dir)
+        detail = ""
         if failure == "none" and checkpoint is None:
-            failure = "recipe"
+            failure, detail = "recipe", "training exited cleanly but wrote no checkpoint"
         return TrainOutcome(checkpoint=checkpoint, failure=failure, log_path=log_path,
-                            metrics=parse_train_lines(log))
+                            metrics=parse_train_lines(log), detail=detail)
