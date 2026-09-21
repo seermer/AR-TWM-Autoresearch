@@ -39,3 +39,33 @@ def test_newest_checkpoint_ignores_dirs_without_lora(tmp_path):
     (tmp_path / "checkpoint-100").mkdir()
     (tmp_path / "checkpoint-100" / "lora.safetensors").touch()
     assert newest_checkpoint(tmp_path).name == "checkpoint-100"
+
+
+def test_real_successful_run_log_is_not_classified_as_failure():
+    """Regression: a healthy 4-GPU run prints the NCCL version banner and several
+    ProcessGroupNCCL.cpp warnings. A bare "NCCL" infra signature classified every
+    such run as an infra failure, which would have made the loop discard every
+    node it ever trained. Fixture is the verbatim log of the real 2-step run from
+    Task 14 (checkpoint-2 written, loss 0.431 -> 0.252)."""
+    log = (Path(__file__).parent / "fixtures" / "real_successful_train.log").read_text()
+    assert "NCCL version" in log, "fixture must retain the benign NCCL banner"
+    assert "ProcessGroupNCCL.cpp" in log, "fixture must retain the benign NCCL warnings"
+    assert classify_failure(log, 0) == "none"
+
+
+def test_genuine_nccl_error_is_still_infra():
+    log = "some output\nNCCL error: unhandled system error\n"
+    assert classify_failure(log, 1) == "infra"
+
+
+def test_incomplete_prompt_precache_is_infra():
+    log = ("RuntimeError: text encoder is disabled (ALAYA_SKIP_TEXT_ENCODER=1) but a "
+           "prompt missed the on-disk embedding cache. Re-run ...")
+    assert classify_failure(log, 1) == "infra"
+
+
+def test_real_successful_run_log_parses_its_train_lines():
+    log = (Path(__file__).parent / "fixtures" / "real_successful_train.log").read_text()
+    rows = parse_train_lines(log)
+    assert [r["step"] for r in rows] == [1, 2]
+    assert rows[0]["loss"] == 0.431641 and rows[1]["loss"] == 0.251953

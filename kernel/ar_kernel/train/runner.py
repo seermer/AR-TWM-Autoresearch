@@ -10,9 +10,17 @@ RECIPE_SIGNATURES = (
     "CUDA out of memory", "torch.OutOfMemoryError", "loss=nan", "loss=inf",
     "no enabled data sources", "Loaded 0 samples",
 )
+# Match only tokens that a FAILING run emits. A healthy multi-GPU run prints the
+# "NCCL version ..." banner and several ProcessGroupNCCL.cpp warnings, so a bare
+# "NCCL" substring classifies every successful distributed run as an infra failure.
 INFRA_SIGNATURES = (
-    "exitcode: -9", "NCCL", "No space left on device", "CUDA driver error",
-    "cache miss", "Killed",
+    "exitcode: -9", "No space left on device", "CUDA driver error", "Killed",
+    "NCCL error", "ncclInternalError", "ncclSystemError", "ncclUnhandledCudaError",
+    "ncclRemoteError", "NCCL communicator was aborted",
+    "Watchdog caught collective operation timeout",
+    "DistBackendError",
+    # loader.py::_text_encoder_disabled, raised when the precache is incomplete.
+    "missed the on-disk embedding cache",
 )
 TRAIN_LINE = re.compile(
     r"\[Train\] step=(?P<step>\d+) epoch=(?P<epoch>\d+).*?"

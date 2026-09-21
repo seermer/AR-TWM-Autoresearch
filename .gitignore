@@ -4,3 +4,5 @@ weights/
 *.egg-info/
 __pycache__/
 .pytest_cache/
+runs/
+.recovery/

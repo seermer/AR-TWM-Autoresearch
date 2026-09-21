@@ -1,0 +1,84 @@
+CUDA_VISIBLE_DEVICES=0,1,2,3
+[train.sh] FA3 disabled -> FA2
+==============================================
+Alaya training (generic launcher)
+  config:      /mnt/biometrics/zhantaoy/Projects/Python/Research/y2026/WM-AutoResearch/AutoResearcher/runs/manual_train/nodes/m1/train_config.yaml
+  log_file:    /mnt/biometrics/zhantaoy/Projects/Python/Research/y2026/WM-AutoResearch/AutoResearcher/runs/manual_train/nodes/m1/train/logs/train_config/train_node0_20260920_194504.log
+  gpus:        1 x 4
+  master:      127.0.0.1:29500
+  start_time:  2026-09-20 19:45:04
+==============================================
+
+*****************************************
+Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+*****************************************
+[Setup] rank 0/4 loading model components serially
+[Paths] transformer checkpoint = weights/ltx-2.3/ltx-2.3-22b-dev.safetensors
+/home/zhantaoy/miniforge3/envs/alayaworld/lib/python3.10/site-packages/torch/distributed/distributed_c10d.py:4631: UserWarning: No device id is provided via `init_process_group` or `barrier `. Using the current device set by the user. 
+  warnings.warn(  # warn only once
+[rank2]:[W920 19:45:08.433159257 ProcessGroupNCCL.cpp:4718] [PG ID 0 PG GUID 0 Rank 2]  using GPU 2 as device used by this process is currently unknown. This can potentially cause a hang if this rank to GPU mapping is incorrect. You can pecify device_id in init_process_group() to force use of a particular device.
+/home/zhantaoy/miniforge3/envs/alayaworld/lib/python3.10/site-packages/torch/distributed/distributed_c10d.py:4631: UserWarning: No device id is provided via `init_process_group` or `barrier `. Using the current device set by the user. 
+  warnings.warn(  # warn only once
+/home/zhantaoy/miniforge3/envs/alayaworld/lib/python3.10/site-packages/torch/distributed/distributed_c10d.py:4631: UserWarning: No device id is provided via `init_process_group` or `barrier `. Using the current device set by the user. 
+  warnings.warn(  # warn only once
+[rank3]:[W920 19:45:08.448304466 ProcessGroupNCCL.cpp:4718] [PG ID 0 PG GUID 0 Rank 3]  using GPU 3 as device used by this process is currently unknown. This can potentially cause a hang if this rank to GPU mapping is incorrect. You can pecify device_id in init_process_group() to force use of a particular device.
+[rank1]:[W920 19:45:08.448368052 ProcessGroupNCCL.cpp:4718] [PG ID 0 PG GUID 0 Rank 1]  using GPU 1 as device used by this process is currently unknown. This can potentially cause a hang if this rank to GPU mapping is incorrect. You can pecify device_id in init_process_group() to force use of a particular device.
+[Transformer] missing=0 unexpected=0
+There are modules in LTX23Model that should be kept in float32: []. Casting directly with `to()` can lead to inconsistent results; set `torch_dtype` in `from_pretrained()` instead to keep these modules in float32.
+[Transformer] kept on CPU for FSDP sharding (ALAYA_INIT_TRANSFORMER_ON_CPU=1)
+[Transformer] params=13.12B
+[LoRA] initialized=480 hooks=480 trainable=True
+[TextEncoder] skipped (ALAYA_SKIP_TEXT_ENCODER=1); prompts must come from the disk cache
+[Setup] rank 0/4 finished model components
+/home/zhantaoy/miniforge3/envs/alayaworld/lib/python3.10/site-packages/torch/distributed/distributed_c10d.py:4631: UserWarning: No device id is provided via `init_process_group` or `barrier `. Using the current device set by the user. 
+  warnings.warn(  # warn only once
+[rank0]:[W920 19:46:26.636087101 ProcessGroupNCCL.cpp:4718] [PG ID 0 PG GUID 0 Rank 0]  using GPU 0 as device used by this process is currently unknown. This can potentially cause a hang if this rank to GPU mapping is incorrect. You can pecify device_id in init_process_group() to force use of a particular device.
+NCCL version 2.26.2+cuda12.2
+[Setup] rank 1/4 loading model components serially
+[LoRA] initialized=480 hooks=480 trainable=True
+[Setup] rank 1/4 finished model components
+[Setup] rank 2/4 loading model components serially
+[LoRA] initialized=480 hooks=480 trainable=True
+[Setup] rank 2/4 finished model components
+[Setup] rank 3/4 loading model components serially
+[LoRA] initialized=480 hooks=480 trainable=True
+[Setup] rank 3/4 finished model components
+[HistoryEncoder] loaded weights/alaya-world-ar/history_encoder.pt; missing=0 unexpected=0
+[HistoryEncoder] loaded weights/alaya-world-ar/history_encoder.pt; missing=0 unexpected=0
+[HistoryEncoder] loaded weights/alaya-world-ar/history_encoder.pt; missing=0 unexpected=0
+[HistoryEncoder] loaded weights/alaya-world-ar/history_encoder.pt; missing=0 unexpected=0
+[Setup] rank 0/4 loading resume checkpoint serially
+[Resume] keep history encoder initialized from paths.history_encoder; resume checkpoint history_encoder.pt is ignored
+[Resume] transformer loaded=1457 missing=0 unexpected=0
+[Resume] loaded weights (base=weights/alaya-world-ar); step reset to 0
+[Setup] rank 1/4 loading resume checkpoint serially
+[Setup] rank 0/4 finished resume checkpoint
+[Setup] rank 2/4 loading resume checkpoint serially
+[Setup] rank 1/4 finished resume checkpoint
+[Setup] rank 3/4 loading resume checkpoint serially
+[Setup] rank 2/4 finished resume checkpoint
+[Setup] rank 3/4 finished resume checkpoint
+[MultiSourceVideoDataset] Loaded 6 samples from cam
+[MultiSourceVideoDataset] Loaded 6 samples from cam
+[MultiSourceVideoDataset] Loaded 6 samples from cam
+[MultiSourceVideoDataset] Loaded 6 samples from ['cam']
+[MultiSourceVideoDataset] Loaded 6 samples from cam
+[MultiSourceVideoDataset] Loaded 6 samples from ['cam'][MultiSourceVideoDataset] Loaded 6 samples from ['cam']
+
+[Data] cam: real=6 weight=1.0 valid_starts=False roll_layout=False sink_remote=False min_gap_hc=0 min_gap_i2v=0
+[MultiSourceVideoDataset] Loaded 6 samples from ['cam']
+[HistEnc-DBG fwd=1] output_gate=+0.500000 | HR raw abs|μ|=0.2659 σ=0.3339 min=-1.312 max=+1.422 | LR raw abs|μ|=0.2316 σ=0.4678 min=-7.562 max=+7.688 | sum(HR+LR) pre-gate abs|μ|=0.3853 σ=0.5755 | mem post-gate abs|μ|=0.1927 σ=0.2877
+[SpatialMemory] loading ViGeo checkpoint=third_party/ViGeo/checkpoints/ViGeo1.1 repo=third_party/ViGeo
+[SpatialMaskDbg] step=0 drift_sp=True drift_nb=True bank_sp=False bank_nb=False A_trig=False A_ratio=0.00 A_invalid_before=0 A_invalid_after=0 B_invalid_ratio=0.208 B_loss_valid=42.6667 B_loss_invalid=51.4056
+[BankDbg] step=0 is_warm=False n_push=0 total_residuals=0 n_buckets=0 per_K={} per_grid_top5={} | drift_total=3 noise=3(100%) downsample=0(0%) clean_s1=0(0%) saturation=2(67%) clean_s2=1(33%)
+[Mem] step=1 rank=2 alloc_peak=17.05GB reserved_peak=22.86GB
+[Mem] step=1 rank=1 alloc_peak=17.05GB reserved_peak=22.88GB
+[Mem] step=1 rank=3 alloc_peak=17.05GB reserved_peak=22.88GB
+[Train] step=1 epoch=0 source=cam video=22e81f3ab7b2156a899db1d6c689cf9bb3011d71dd0e58fa78971c0dbcad6a33 fs=76 fe=192 K=4 gap=0 cond=i2v:1 control=[] spatial=4 mem_drop=1 hist=drift prefix_fix=0 sigma=0.439 loss=0.431641 grad=0.0090 lr=2.00e-06 time=25.82s
+[Mem] step=1 rank=0 alloc_peak=17.05GB reserved_peak=22.88GB
+[Train] step=2 epoch=1 source=cam video=124b85a87cb8ec223a389bad4ab6bc6dc62acff342f440cc03f51b17ba424975 fs=184 fe=253 K=4 gap=0 cond=i2v:1 control=[] spatial=4 mem_drop=1 hist=drift prefix_fix=0 sigma=0.996 loss=0.251953 grad=0.1143 lr=3.00e-06 time=7.63s
+[Mem] step=2 rank=3 alloc_peak=18.28GB reserved_peak=22.86GB
+[Mem] step=2 rank=0 alloc_peak=18.28GB reserved_peak=22.93GB
+[Mem] step=2 rank=1 alloc_peak=18.28GB reserved_peak=22.93GB
+[Mem] step=2 rank=2 alloc_peak=18.28GB reserved_peak=22.83GB
+[Checkpoint] saved /mnt/biometrics/zhantaoy/Projects/Python/Research/y2026/WM-AutoResearch/AutoResearcher/runs/manual_train/nodes/m1/train/outputs/checkpoint-2
