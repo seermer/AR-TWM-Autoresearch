@@ -1,13 +1,17 @@
 from __future__ import annotations
-import json, sqlite3, time
+import json, re, sqlite3, time
 
 STATUSES = {"running", "scored", "invalid_code", "invalid_recipe", "train_failed", "crashed"}
+# node_id becomes a directory name and a telemetry file name.
+NODE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 class NodeStore:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 
     def create(self, node_id: str, parent_id: str | None, depth: int) -> None:
+        if not NODE_ID_RE.match(node_id or ""):
+            raise ValueError(f"node_id {node_id!r} must match {NODE_ID_RE.pattern}")
         self.conn.execute(
             "INSERT INTO nodes (node_id, parent_id, depth, created_at, status) VALUES (?,?,?,?,'running')",
             (node_id, parent_id, depth, time.time()),
@@ -16,14 +20,13 @@ class NodeStore:
     def set_status(self, node_id: str, status: str) -> None:
         if status not in STATUSES:
             raise ValueError(f"unknown status {status!r}; allowed: {sorted(STATUSES)}")
-        self.conn.execute("UPDATE nodes SET status=? WHERE node_id=?", (status, node_id))
+        self._update("UPDATE nodes SET status=? WHERE node_id=?", (status, node_id), node_id)
 
     def record_score(self, node_id: str, score: float, metric_set: list[str],
                      metrics: dict[str, float]) -> None:
-        self.conn.execute(
+        self._update(
             "UPDATE nodes SET score=?, metric_set=?, metrics=?, status='scored' WHERE node_id=?",
-            (float(score), json.dumps(list(metric_set)), json.dumps(metrics), node_id),
-        )
+            (float(score), json.dumps(list(metric_set)), json.dumps(metrics), node_id), node_id)
 
     def set_fields(self, node_id: str, **fields: object) -> None:
         allowed = {"agent_commit", "data_commit", "recipe_hash", "resolved_config_path",
@@ -33,7 +36,12 @@ class NodeStore:
         if unknown:
             raise ValueError(f"unknown node fields: {sorted(unknown)}")
         for key, value in fields.items():
-            self.conn.execute(f"UPDATE nodes SET {key}=? WHERE node_id=?", (value, node_id))
+            self._update(f"UPDATE nodes SET {key}=? WHERE node_id=?", (value, node_id), node_id)
+
+    def _update(self, sql: str, params: tuple, node_id: str) -> None:
+        """An UPDATE matching no row used to succeed silently, losing the write."""
+        if self.conn.execute(sql, params).rowcount == 0:
+            raise KeyError(f"no node {node_id!r}")
 
     @staticmethod
     def _row(row: sqlite3.Row) -> dict:

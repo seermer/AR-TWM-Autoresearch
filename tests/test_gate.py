@@ -41,6 +41,7 @@ def gate_env(_gate_store, tmp_path):
     commits, commit = _gate_store
     return Gate(CFG, commits, Recorder(tmp_path)), commit, tmp_path
 
+@pytest.mark.gpu
 def test_valid_recipe_passes_every_check(gate_env):
     gate, commit, tmp_path = gate_env
     result = gate.check({"optimizer.max_steps": 2, "optimizer.grad_accum_steps": 1,

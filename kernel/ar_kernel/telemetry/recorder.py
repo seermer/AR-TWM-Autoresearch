@@ -26,18 +26,31 @@ class Recorder:
             return obj
         if isinstance(obj, dict):
             return {k: self._scrub(v) for k, v in obj.items()}
-        if isinstance(obj, list):
+        if isinstance(obj, (list, tuple, set, frozenset)):
             return [self._scrub(v) for v in obj]
         return obj
 
+    def _scrub_text(self, text: str) -> str:
+        # Second pass over the serialized form: json.dumps(default=str) stringifies
+        # arbitrary objects AFTER structural scrubbing, so a secret inside a Path or
+        # an object's repr would otherwise reach disk.
+        for secret in self.redact:
+            text = text.replace(secret, "[REDACTED]")
+        return text
+
     def store_payload(self, obj: dict) -> str:
-        blob = json.dumps(self._scrub(obj), sort_keys=True, default=str).encode()
+        blob = self._scrub_text(json.dumps(self._scrub(obj), sort_keys=True, default=str)).encode()
         digest = hashlib.sha256(blob).hexdigest()
         target = self._payloads / f"{digest}.json"
         if not target.exists():
             try:
                 tmp = target.with_suffix(".tmp")
-                tmp.write_bytes(blob)
+                with tmp.open("wb") as handle:
+                    handle.write(blob)
+                    handle.flush()
+                    # The event line that references this payload is fsync'd; the
+                    # payload must be durable first or a crash leaves a dangling digest.
+                    os.fsync(handle.fileno())
                 os.replace(tmp, target)
             except OSError as exc:
                 raise TelemetryError(f"cannot write payload {digest}: {exc}") from exc
@@ -64,7 +77,7 @@ class Recorder:
         }
         try:
             with self.events_path(node).open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(record, default=str) + "\n")
+                handle.write(self._scrub_text(json.dumps(record, default=str)) + "\n")
                 handle.flush()
                 os.fsync(handle.fileno())
         except OSError as exc:

@@ -101,6 +101,8 @@ def resolve_gpus(cfg: KernelConfig, env: Mapping[str, str]) -> list[int]:
         if not entry.isdigit():
             raise GpuPolicyError(f"CUDA_VISIBLE_DEVICES entry {entry!r} is not an integer")
         gpus.append(int(entry))
+    if len(set(gpus)) != len(gpus):
+        raise GpuPolicyError(f"CUDA_VISIBLE_DEVICES lists a duplicate GPU: {raw!r}")
     minimum = int(cfg.get("gpus.min_count"))
     if len(gpus) < minimum:
         raise GpuPolicyError(f"need at least {minimum} GPUs, got {len(gpus)}: {raw!r}")

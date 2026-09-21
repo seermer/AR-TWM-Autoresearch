@@ -35,9 +35,14 @@ def run_wbench_phases(cfg: KernelConfig, work_dir: Path, model: str, gpus: list[
         if proc.returncode != 0:
             raise RuntimeError(f"visual_plausibility failed (rc={proc.returncode}): {_tail(proc)}")
         with recorder.span("wbench.report2", node=node_id, phase="eval"):
-            run_in_env("wbench-main",
-                       ["python", "main.py", "--model", model, "--work_dir", str(work_dir),
-                        "--phase", "report", "--gpus", gpu_arg],
-                       cwd=cfg.wbench, timeout=3600, recorder=recorder, node=node_id, phase="eval")
+            proc = run_in_env("wbench-main",
+                              ["python", "main.py", "--model", model, "--work_dir", str(work_dir),
+                               "--phase", "report", "--gpus", gpu_arg],
+                              cwd=cfg.wbench, timeout=3600, recorder=recorder, node=node_id,
+                              phase="eval")
+        if proc.returncode != 0:
+            # Otherwise the failure surfaces later as a misleading "metrics missing".
+            raise RuntimeError(f"wbench report (after visual_plausibility) failed "
+                               f"(rc={proc.returncode}): {_tail(proc)}")
     report_path = Path(work_dir) / model / "evaluation" / "report.json"
     return json.loads(report_path.read_text())

@@ -75,3 +75,22 @@ def test_nan_metric_mean_is_refused():
     from ar_kernel.eval.score import ScoreError
     with pytest.raises(ScoreError, match="not finite"):
         score_from_report(_report(aesthetic_quality=(float("nan"), 40)), ["aesthetic_quality"])
+
+
+def test_dimension_metrics_match_wbench_dimension_map():
+    """DIMENSION_METRICS copies WBench's DIMENSION_MAP (main.py). If WBench adds,
+    drops or renames a metric, the kernel's fixed metric set silently diverges
+    from what the report produces -- fail here instead."""
+    import ast
+    from ar_kernel.config import KernelConfig
+    src = (KernelConfig.load().wbench / "main.py").read_text()
+    node = next(n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Assign)
+                and any(getattr(t, "id", None) == "DIMENSION_MAP" for t in n.targets))
+    upstream = [m for metrics in ast.literal_eval(node.value).values() for m in metrics]
+    assert DIMENSION_METRICS == upstream
+
+
+def test_cleanup_reclaims_megasam_scratch(tmp_path):
+    (tmp_path / "m" / "_megasam_tmp" / "megasam_case_1_x").mkdir(parents=True)
+    assert "_megasam_tmp" in cleanup_eval(tmp_path, "m")
+    assert not (tmp_path / "m" / "_megasam_tmp").exists()

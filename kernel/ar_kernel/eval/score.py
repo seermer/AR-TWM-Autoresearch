@@ -18,7 +18,9 @@ DIMENSION_METRICS = [
 ]
 VLM_METRICS = {"scene_adherence", "subject_adherence", "causal_fidelity",
                "event_edit_adherence", "subject_action_adherence", "perspective_switch_adherence"}
-REGENERABLE = ("da3_cache", "megasam", "masks", "_navi_videos_tmp")
+# _megasam_tmp: MegaSAM scratch, which WBench now writes beside its output rather than
+# inside WBench; a killed run leaves ~1 GB per in-flight case there.
+REGENERABLE = ("da3_cache", "megasam", "masks", "_navi_videos_tmp", "_megasam_tmp")
 
 def resolve_metric_set(cfg: KernelConfig, env: Mapping[str, str]) -> list[str]:
     metrics = list(DIMENSION_METRICS)

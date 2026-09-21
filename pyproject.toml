@@ -19,5 +19,10 @@ where = ["kernel"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["manual: GPU verification, run explicitly"]
-addopts = "-q -m 'not manual'"
+markers = [
+    "manual: GPU verification, run explicitly",
+    "gpu: launches a real GPU job (the gate's describe step); run with -m gpu",
+]
+# Spec 16.1: the default unit suite uses no GPU. A GPU test running alongside a
+# real job has already produced a spurious gate failure through contention.
+addopts = "-q -m 'not manual and not gpu'"

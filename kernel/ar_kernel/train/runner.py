@@ -42,6 +42,23 @@ def classify_failure(log: str, returncode: int) -> str:
         return "infra"
     return "none" if returncode == 0 else "infra"
 
+DIVERGENCE_SIGNATURES = ("loss=nan", "loss=inf")
+
+
+def final_failure(log: str, returncode: int, checkpoint_exists: bool) -> str:
+    """Outcome of a finished training run.
+
+    A clean exit that wrote a checkpoint is trusted unless the loss diverged: a
+    loose infra token (e.g. "Killed" from some helper process) must not discard a
+    good run. Anything else goes through signature classification, which lets
+    log content override an exit code.
+    """
+    if returncode == 0 and checkpoint_exists:
+        return "recipe" if any(sig in log for sig in DIVERGENCE_SIGNATURES) else "none"
+    failure = classify_failure(log, returncode)
+    return "recipe" if failure == "none" and not checkpoint_exists else failure
+
+
 TRAIN_TIMEOUT_SECONDS = 48 * 3600
 
 
@@ -119,10 +136,10 @@ class TrainRunner:
                 return TrainOutcome(checkpoint=None, failure=failure, log_path=log_path,
                                     metrics=parse_train_lines(log), detail=detail)
         log = proc.stdout
-        failure = classify_failure(log, proc.returncode)
         checkpoint = newest_checkpoint(output_dir)
+        failure = final_failure(log, proc.returncode, checkpoint is not None)
         detail = ""
-        if failure == "none" and checkpoint is None:
-            failure, detail = "recipe", "training exited cleanly but wrote no checkpoint"
+        if failure == "recipe" and proc.returncode == 0 and checkpoint is None:
+            detail = "training exited cleanly but wrote no checkpoint"
         return TrainOutcome(checkpoint=checkpoint, failure=failure, log_path=log_path,
                             metrics=parse_train_lines(log), detail=detail)

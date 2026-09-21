@@ -48,3 +48,19 @@ def test_fail_closed_when_events_cannot_be_written(tmp_path):
             rec.event("train.start", node="n2")
     finally:
         (tmp_path / "telemetry" / "events").chmod(0o700)
+
+
+def test_secret_inside_a_tuple_is_redacted(tmp_path):
+    from ar_kernel.telemetry.recorder import Recorder
+    rec = Recorder(tmp_path, redact=["sk-SECRET123"])
+    digest = rec.store_payload({"argv": ("--key", "sk-SECRET123")})
+    assert "sk-SECRET123" not in (tmp_path / "telemetry" / "payloads" / f"{digest}.json").read_text()
+
+
+def test_secret_rendered_through_str_of_an_object_is_redacted(tmp_path):
+    """json.dumps(default=str) stringifies objects AFTER structural scrubbing."""
+    from pathlib import PurePosixPath
+    from ar_kernel.telemetry.recorder import Recorder
+    rec = Recorder(tmp_path, redact=["sk-SECRET123"])
+    digest = rec.store_payload({"path": PurePosixPath("/tmp/sk-SECRET123/x")})
+    assert "sk-SECRET123" not in (tmp_path / "telemetry" / "payloads" / f"{digest}.json").read_text()

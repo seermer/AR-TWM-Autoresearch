@@ -103,7 +103,7 @@ class Gate:
                        "DESCRIBE": "1"},
             timeout=3600, recorder=self.recorder, node=node_id, phase="gate")
         if describe.returncode != 0:
-            failures.append(f"describe failed (rc={describe.returncode}): {describe.stdout[-2000:]}")
+            failures.append(f"describe failed (rc={describe.returncode}): {_tail(describe, 2000)}")
 
         ok = not failures
         self.recorder.event("gate.passed" if ok else "gate.failed", node=node_id, phase="gate",

@@ -41,3 +41,25 @@ def test_attempts_are_ordered_per_phase(tmp_path):
     store.add_attempt("n1", "improve_recipe", 2, "ok", {})
     outcomes = [a["outcome"] for a in store.attempts("n1", "improve_recipe")]
     assert outcomes == ["failed", "ok"]
+
+
+def test_updating_an_unknown_node_raises_instead_of_silently_doing_nothing(tmp_path):
+    import pytest
+    from ar_kernel.archive.db import open_db
+    from ar_kernel.archive.nodes import NodeStore
+    store = NodeStore(open_db(tmp_path))
+    with pytest.raises(KeyError):
+        store.set_status("ghost", "scored")
+    with pytest.raises(KeyError):
+        store.set_fields("ghost", data_commit="x")
+
+
+def test_node_id_that_is_unsafe_as_a_path_is_rejected(tmp_path):
+    """node_id becomes a directory and a telemetry file name."""
+    import pytest
+    from ar_kernel.archive.db import open_db
+    from ar_kernel.archive.nodes import NodeStore
+    store = NodeStore(open_db(tmp_path))
+    for bad in ("../escape", "a/b", "", "x" * 80, ".hidden"):
+        with pytest.raises(ValueError):
+            store.create(bad, None, 0)

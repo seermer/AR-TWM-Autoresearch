@@ -84,3 +84,23 @@ def test_timeout_with_no_training_progress_is_infra():
     failure, detail = classify_timeout("[Setup] rank 0/4 loading model components serially\n", 48 * 3600)
     assert failure == "infra"
     assert "hang" in detail
+
+
+def test_clean_exit_with_checkpoint_is_not_overridden_by_a_loose_log_token():
+    """Review minor: signatures were checked before the return code even when rc=0
+    and a checkpoint existed, so e.g. a benign 'Killed' line in a healthy log
+    discarded a good run. Only a divergence signature may override a clean exit."""
+    from ar_kernel.train.runner import final_failure
+    healthy = "[Train] step=2 loss=0.25\nsome helper process Killed during cleanup\n"
+    assert final_failure(healthy, 0, checkpoint_exists=True) == "none"
+
+
+def test_clean_exit_with_nan_loss_is_still_a_recipe_failure():
+    from ar_kernel.train.runner import final_failure
+    assert final_failure("[Train] step=2 loss=nan grad=inf\n", 0, checkpoint_exists=True) == "recipe"
+
+
+def test_nonzero_exit_still_goes_through_signature_classification():
+    from ar_kernel.train.runner import final_failure
+    assert final_failure("torch.OutOfMemoryError: CUDA out of memory", 1, checkpoint_exists=False) == "recipe"
+    assert final_failure("NCCL error: unhandled system error", 1, checkpoint_exists=False) == "infra"

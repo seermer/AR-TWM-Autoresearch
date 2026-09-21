@@ -46,3 +46,11 @@ def test_missing_dotenv_is_not_an_error(tmp_path):
     from ar_kernel.config import load_dotenv
     env = {}
     assert load_dotenv(tmp_path / "nope.env", env) == [] and env == {}
+
+
+def test_duplicate_gpu_indices_are_rejected():
+    """'0,0,0,0' passed the >= 4 count check while naming one physical GPU."""
+    import pytest
+    from ar_kernel.config import GpuPolicyError, resolve_gpus
+    with pytest.raises(GpuPolicyError, match="duplicate"):
+        resolve_gpus(KernelConfig.load(), {"CUDA_VISIBLE_DEVICES": "0,0,0,0"})
