@@ -434,12 +434,21 @@ released base with `step reset to 0`.
    lost 3 of 22 MegaSAM cases. In the loop, a killed phase that leaks orphans
    makes the **next** node fail with an OOM that looks like a bad recipe — the
    agent would be penalized for a scheduling artifact it did not cause.
-7. **Portability is a runtime property, not a source property** (§4.6,
+7. **A killed GPU phase leaks scratch space as well as processes.**
+   `run_megasam` stages each case in `WBench/_megasam_tmp` via
+   `tempfile.TemporaryDirectory`, which cleans up on normal exit and on
+   exception but **not** on SIGKILL. Force-killing runs during this task left
+   6.7 GB across 7 directories. The loop kills phases on timeout and on a stop
+   request, so it must sweep that directory afterwards; otherwise a long
+   unattended run accumulates ~1 GB per killed case on a disk that is already
+   the binding constraint. Pairs with finding 6: kill the process group, then
+   reclaim both the GPU memory and the scratch space before the next node.
+8. **Portability is a runtime property, not a source property** (§4.6,
    `docs/PORTABILITY.md`). Tracked source was already clean; what broke was
    untracked state — symlinks left pointing at the previous checkout. `ar doctor`
    now checks this, and its tests build the broken tree rather than only asserting
    the healthy one.
-8. **Run the negative control.** Two verifications in this task passed *before*
+9. **Run the negative control.** Two verifications in this task passed *before*
    the fix was applied and so proved nothing: the `device_id` check (the warning
    fires on the first collective, not at `init_process_group`) and the seeding
    check (compared the 4-dp rounded score instead of `details.photometric_psnr`).
