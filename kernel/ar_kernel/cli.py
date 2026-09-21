@@ -4,6 +4,7 @@ from pathlib import Path
 
 from .archive.nodes import NodeStore
 from .config import KernelConfig
+from .doctor import report, run_checks
 from .run import bootstrap_run, score_node
 
 def main(argv: list[str] | None = None) -> int:
@@ -19,9 +20,15 @@ def main(argv: list[str] | None = None) -> int:
     score.add_argument("--checkpoint", default=None, help="node checkpoint dir; omit for the base model")
     score.add_argument("--lora-rank", type=int, default=64)
     score.add_argument("--lora-alpha", type=int, default=64)
+    doctor = sub.add_parser("doctor", help="check this tree is runnable here (paths, envs, symlinks)")
+    doctor.add_argument("--strict", action="store_true", help="exit non-zero on warnings too")
     args = parser.parse_args(argv)
 
     cfg = KernelConfig.load()
+    # Before bootstrap_run: diagnostics must not create a run dir or rewrite versions.json.
+    if args.command == "doctor":
+        return report(run_checks(cfg), strict=args.strict)
+
     if args.command == "init-run":
         ctx = bootstrap_run(cfg, args.run_id, os.environ)
         print(ctx.run_dir)

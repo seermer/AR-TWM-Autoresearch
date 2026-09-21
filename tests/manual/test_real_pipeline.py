@@ -74,13 +74,62 @@ def test_two_step_training_writes_a_checkpoint(tmp_path):
     assert (outcome.checkpoint / "lora.safetensors").exists()
     assert (outcome.checkpoint / "history_encoder.pt").exists()
 
+# Two WBench metric inputs are stochastic, so a single tolerance cannot cover all
+# metrics. Measured by re-running the 2026-09-13 reference generation end to end
+# (see docs/superpowers/plans/verification-log.md):
+#
+#   deterministic metrics   max |delta| 0.0007   GPU float noise only
+#   POSE_DERIVED            max |delta| 0.0084   MegaSAM's pose solver is not
+#                                                deterministic: two runs over the
+#                                                same video gave cam_c2w differing
+#                                                by 6.8e-3 and focal length by 0.92px
+#   SUBSAMPLED              max |delta| 0.0015   reconstruction_consistency.py:154
+#                                                draws points with an unseeded
+#                                                torch.randperm
+#
+# Tolerances are the measured spread with headroom, NOT a number chosen to make
+# the test pass. Keeping the deterministic band tight is the point: it is what
+# would catch a real regression in the render path.
+POSE_DERIVED = {"spatial_consistency", "gated_spatial_consistency",
+                "navigation_trajectory", "navigation_accuracy", "navigation_consistency"}
+SUBSAMPLED = {"geometric_consistency", "photometric_consistency"}
+TOLERANCE = {"deterministic": 2e-3, "subsampled": 5e-3, "pose": 2e-2}
+AGGREGATE_TOLERANCE = 2e-3
+
+
+def _tolerance(metric: str) -> float:
+    if metric in POSE_DERIVED:
+        return TOLERANCE["pose"]
+    if metric in SUBSAMPLED:
+        return TOLERANCE["subsampled"]
+    return TOLERANCE["deterministic"]
+
+
 def test_base_model_reproduces_the_recorded_proxy_score():
     ctx = bootstrap_run(CFG, run_id="manual_root", env=os.environ)
     score, detail = score_node(CFG, ctx, "root", None, 64, 64)
     import json
+    import statistics
     reference = json.loads(
         (CFG.repo_root / "reference" / "wbench_alayaworld_proxy" / "report.json").read_text())
-    for metric, value in detail["metrics"].items():
-        if metric in reference["full"]:
-            assert abs(value - reference["full"][metric]["mean"]) < 1e-3, metric
+    ref_full = reference["full"]
+
+    # Every metric the reference recorded must still be produced. The run that
+    # motivated this check lost five of them to a silent MegaSAM failure and
+    # still looked healthy.
+    shared = sorted(set(detail["metrics"]) & set(ref_full))
+    assert not set(ref_full) - set(detail["metrics"]), \
+        f"metrics missing vs reference: {sorted(set(ref_full) - set(detail['metrics']))}"
+
+    deltas = {m: detail["metrics"][m] - ref_full[m]["mean"] for m in shared}
+    offenders = {m: d for m, d in deltas.items() if abs(d) >= _tolerance(m)}
+    assert not offenders, "metrics outside their tolerance: " + ", ".join(
+        f"{m} delta={d:+.6f} tol={_tolerance(m):g}" for m, d in sorted(offenders.items()))
+
+    # The aggregate is what parent selection actually consumes, so pin it too:
+    # per-metric noise partly cancels, and this is the loop's real signal floor.
+    ref_mean = statistics.fmean(ref_full[m]["mean"] for m in shared)
+    new_mean = statistics.fmean(detail["metrics"][m] for m in shared)
+    assert abs(new_mean - ref_mean) < AGGREGATE_TOLERANCE, \
+        f"aggregate {new_mean:.6f} vs reference {ref_mean:.6f}"
     assert 0.0 < score < 1.0
