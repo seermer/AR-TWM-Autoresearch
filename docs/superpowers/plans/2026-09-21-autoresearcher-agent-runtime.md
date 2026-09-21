@@ -50,10 +50,10 @@ Each of these was checked on this machine before the plan was written. Several d
 |---|---|---|
 | 1 | Kernel foundations | done, merged to `main` |
 | **2** | **Agent runtime (this plan)** | — |
-| 3 | GPU data sources: `rollout.alayaworld`, `annotate.camera` (ViGeo), `rollout.ltx25`, `rollout.wan22`, each a feasibility spike with an explicit `enabled: false` outcome (§16.3 items 5–6) | written after Plan 2 lands |
+| 3 | GPU data sources: `rollout.alayaworld`, `annotate.camera` (ViGeo), `rollout.ltx25`, `rollout.wan22`, each in its own conda env, verified with a smoke rollout before it is enabled (§16.3 items 5–6) | written after Plan 2 lands |
 | 4 | The loop: selection, cycle, retries, per-attempt training dirs, resume/stop, liveness, dashboard | interface contract at the end of this plan; tasks written after Plan 3 |
 
-The GPU generators were split out because they carry most of the risk and are independent of the runtime. LTX-2.5 is a 22B model whose smallest checkpoint that fits a 24 GB card is NVFP4, which needs Blackwell GPUs. Wan 2.2's weights are in the original repo format, which the installed `diffusers` cannot load. Plan 2 ships the job API with a registry and a fake backend; Plan 3 plugs real backends in. With no generator enabled, agents still build data from Hugging Face datasets and the archive-wide clip pool.
+The GPU generators were split out because they are independent of the runtime, not because they are infeasible. Each GPU job holds the node's whole GPU set (default 4 × 24 GB), so LTX-2.5 (22B; bf16 checkpoint 42 GB, int8 21.5 GB on disk) runs sharded across the 4 cards, the same way the 22B LTX-2.3-based AlayaWorld already runs on this machine; the NVFP4 file is the only variant that needs Blackwell and is not used. Wan 2.2 TI2V-5B is downloaded in the official repo's format, so it runs from the official Wan2.2 code in a dedicated conda env (spec: conflicting tools get their own env) rather than through `diffusers`. Plan 2 ships the job API with a registry and a fake backend; Plan 3 plugs real backends in. Until then, agents build data from Hugging Face datasets and the archive-wide clip pool.
 
 ## Spec amendments made with this plan
 
