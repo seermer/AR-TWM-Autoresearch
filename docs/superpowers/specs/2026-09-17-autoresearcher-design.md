@@ -82,7 +82,7 @@ HGM `hgm.py`, `tree.py`, `hgm_utils.py`, `self_improve_step.py`; HyperAgents
 | Key | Use |
 |---|---|
 | `OPENAI_API_KEY` | Upstream key, held only by the gateway (never passed into containers). |
-| `OPENAI_BASE_URL` | Upstream base URL (default `https://api.openai.com/v1`). |
+| `OPENAI_BASE_URL` | Upstream base URL, including the API version as in the OpenAI SDK (default `https://api.openai.com/v1`); used as given. |
 | `OPENAI_MODEL` | Default model for agents that do not choose one. |
 | `VLM_API_KEY`, `VLM_API_URL`, `VLM_MODEL_NAME` | WBench VLM metrics. The 6 VLM metrics are computed **iff `VLM_API_KEY` is non-empty**. |
 
@@ -565,7 +565,8 @@ exactly two ways:
    (`ToolNode`'s `handle_tool_errors=True` text) instead of ending the run.
 2. **Auto-compaction.** Before every model call the harness estimates the context: the last
    reply's reported `usage.total_tokens` plus about 4 characters per token for the messages
-   after it. Below `compact_at × context_window` (`agents.compact_at`, default 0.85, and
+   after it, with each image block counted as a fixed 1,500 tokens. Below
+   `compact_at × context_window` (`agents.compact_at`, default 0.85, and
    `agents.context_window_tokens`, passed to the container) messages append linearly. At or
    above it, a dedicated summarizer call (same system prompt, tools and history,
    `tool_choice="none"`, the instruction in `prompts/compact.md`) writes a structured
@@ -790,7 +791,7 @@ root is chosen with P=1; tied values receive equal probability; all probabilitie
 |---|---|
 | LLM calls | Full request (all messages incl. system/developer/user, tool schemas, model, params) and full response (output items, tool calls, usage incl. cached tokens), latency, HTTP status, retries, cost; per-container token → node/phase/attempt; `conversation_id`, `turn_index`, `parent_call_id` (from `previous_response_id`/`conversation` when present, else by matching the request's message prefix to a prior call's request+response). Both `/v1/responses` and `/v1/chat/completions` are supported. |
 | Tool calls | Kernel tools: args, result, duration, errors, side effects (bytes, files, GPU job ids, GPU-seconds). Agent-local tools: reconstructed from function-call/output pairs in LLM traffic. Auto-compactions appear as the summarizer calls that precede a new conversation. |
-| Agent execution | `/context` bundle (hashed), container image hash, command, limits, stdout/stderr, exit code, `docker stats` samples, filesystem diff of `/agent` and `/workspace`, result JSON. |
+| Agent execution | `/context` bundle (hashed), container image hash, command, limits, stdout/stderr, exit code, `docker stats` samples, filesystem diff of `/agent` and `/workspace` (including `/workspace/staging`), result JSON. |
 | Code | Every attempt commit; diff stats; contract step logs and verdicts. |
 | Data | HF searches/downloads; rollout jobs (inputs, seeds, GPU time, outputs); ingest decisions with per-format checker reports, aspect ratio and leakage distances; data commits (manifest, parent, message, per-dataset stats); view materialization stats. |
 | Recipe | Agent recipe; resolved config; diffs vs. parent and base; each gate check result with full tool output. |

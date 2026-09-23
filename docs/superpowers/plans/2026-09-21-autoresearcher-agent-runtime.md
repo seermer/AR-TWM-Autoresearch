@@ -46,7 +46,8 @@ Each of these was checked on this machine before the plan was written. Several d
 14. **The `create_agent` reference.** The installed `langchain` 1.4.2 `agents/factory.py` is byte-identical to commit 4af7ab8. With no middleware and no `response_format`, its graph is START → model → (END, or one `Send("tools", [call])` per tool call) → model, with `recursion_limit` 9999, and it binds the tools on every model call. The Task 16 graph matches it message for message on 17 scenarios, and each of 5 mutations breaks the comparison.
 15. **Tool errors in `create_agent`.** Its default `ToolNode` handler turns only invalid arguments (`ToolInvocationError`) into a message; any other tool exception is re-raised and ends the run. An unknown tool name gets `Error: <name> is not a valid tool, try one of [...]`.
 16. **MCP 2.x attributes are snake_case**: `CallToolResult.is_error`, `.structured_content`, `Tool.input_schema`. `isError` and `inputSchema` exist only as JSON aliases, not as Python attributes. The first draft of this plan used `.isError`, which raises `AttributeError`.
-17. **No tokenizer offline.** `tiktoken` downloads its encodings on first use and containers have no network, so the harness estimates context size from the last reply's `usage_metadata` plus about 4 characters per token for the messages after it.
+17. **No tokenizer offline.** `tiktoken` downloads its encodings on first use and containers have no network, so the harness estimates context size from the last reply's `usage_metadata` plus about 4 characters per token for the messages after it. Image blocks are counted as a fixed 1,500 tokens: their base64 length says nothing about vision tokens (a 300 KB frame would otherwise count as about 75,000 tokens and force a needless compaction).
+18. **`ChatOpenAI` needs both HTTP clients on the socket.** With only `http_async_client` set, a sync `invoke()` builds its own default client, dials TCP `localhost:80`, and fails with `Connection error` (reproduced). `chat_model()` passes `http_client` and `http_async_client`, both over the gateway socket; then `invoke()` and `ainvoke()` both work.
 
 ## Plan sequence (revised)
 
@@ -558,7 +559,7 @@ Kernel-owned and mounted read-only at `/ar_contract` in every container (spec §
 **Interfaces:**
 - Produces (imported by agent code, the kernel's context builder and contract verification):
   - `ar_contract.models`: `EditContext`, `EditResult` (`summary`, optional `component`), `RecipeContext`, `RecipeResult` (pydantic v2), `EDIT_COMPONENTS = ("prompts", "tools", "harness", "orchestration", "knowledge")`, and `CONTEXT_MODELS = {"edit_self": EditContext, "improve_recipe": RecipeContext}`, `RESULT_MODELS = {"edit_self": EditResult, "improve_recipe": RecipeResult}`.
-  - `ar_contract.client`: `socket_dir() -> str` (env `AR_SOCKET_DIR`, default `/run/ar`), `token() -> str` (env `AR_TOKEN`), `default_model() -> str` (env `AR_DEFAULT_MODEL`), `chat_model(model=None, **kwargs) -> langchain_openai.ChatOpenAI` (gateway socket, Responses API, `max_retries=0`), and `mcp_session(sockets=None, auth_token=None)`, an async context manager yielding an initialized `mcp.ClientSession` on the tool server. Both read the environment when called.
+  - `ar_contract.client`: `socket_dir() -> str` (env `AR_SOCKET_DIR`, default `/run/ar`), `token() -> str` (env `AR_TOKEN`), `default_model() -> str` (env `AR_DEFAULT_MODEL`), `chat_model(model=None, **kwargs) -> langchain_openai.ChatOpenAI` (gateway socket for both the sync and the async client, fact 18; Responses API, `max_retries=0`), and `mcp_session(sockets=None, auth_token=None)`, an async context manager yielding an initialized `mcp.ClientSession` on the tool server. Both read the environment when called.
   - `ar_contract.run.main(argv) -> int`, run as `python -m ar_contract.run <edit_self|improve_recipe>`. It reads `$AR_CONTEXT_DIR/context.json` (default `/context`), imports `agent.entry` from `$AR_AGENT_DIR` (default `/agent`), calls the entry point (sync or async), validates the result, and writes `$AR_WORKSPACE/result.json` (default `/workspace`) as `{"ok": true, "result": {...}}` or `{"ok": false, "error": "...", "traceback": "..."}`. Exit code 0 means ok.
 
 - [ ] **Step 1: Write the failing tests**
@@ -694,11 +695,14 @@ def test_clients_speak_over_the_socket_directory(monkeypatch, tmp_path):
     monkeypatch.setenv("AR_TOKEN", "tok-abc")
     monkeypatch.setenv("AR_DEFAULT_MODEL", "gpt-x")
     import inspect
+    import httpx
     from ar_contract import client
     model = client.chat_model()
     assert model.model_name == "gpt-x" and model.openai_api_base == "http://localhost/v1"
     assert model.openai_api_key.get_secret_value() == "tok-abc"
     assert model.use_responses_api is True and model.max_retries == 0
+    assert isinstance(model.http_client, httpx.Client)             # sync invoke() also uses the socket
+    assert isinstance(model.http_async_client, httpx.AsyncClient)
     assert inspect.isasyncgenfunction(client.mcp_session.__wrapped__)
 ```
 
@@ -812,12 +816,18 @@ def default_model() -> str:
 
 
 def chat_model(model: str | None = None, **kwargs):
-    """A LangChain ChatOpenAI bound to the gateway (Responses API, non-streaming)."""
+    """A LangChain ChatOpenAI bound to the gateway (Responses API, non-streaming).
+
+    Both clients go over the socket: without an explicit sync client, a sync invoke()
+    would try TCP localhost:80 and fail inside the network-less container."""
     from langchain_openai import ChatOpenAI
-    transport = httpx.AsyncHTTPTransport(uds=os.path.join(socket_dir(), "gateway.sock"))
+    sock = os.path.join(socket_dir(), "gateway.sock")
     return ChatOpenAI(model=model or default_model(), base_url="http://localhost/v1", api_key=token(),
                       use_responses_api=True, max_retries=0,
-                      http_async_client=httpx.AsyncClient(transport=transport, timeout=LLM_TIMEOUT_S),
+                      http_client=httpx.Client(transport=httpx.HTTPTransport(uds=sock),
+                                               timeout=LLM_TIMEOUT_S),
+                      http_async_client=httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(uds=sock),
+                                                          timeout=LLM_TIMEOUT_S),
                       **kwargs)
 
 
@@ -1358,10 +1368,10 @@ An OpenAI-compatible HTTP service. It is the only route from a container to an L
 - Produces:
   - `gateway.mock.MockBook`: `.add(name, outputs: list[list[dict]])` registers a script, where each element is one response's `output` list. `.next(name, token) -> list[dict]` returns responses in order and repeats the last one when the script is exhausted. `.response(model, output) -> dict` builds the envelope from verified fact 6. `MockBook.default()` has scripts `smoke` (one assistant message `"ok"`) and `final:<text>` handled on the fly.
   - `gateway.mock.message(text) -> dict` and `gateway.mock.function_call(name, args: dict, call_id) -> dict` are output-item builders for tests and scripts.
-  - `gateway.app.Upstream(base_url, api_key, *, timeout_s, retries, transport=None, sleep=asyncio.sleep)`: `await .post(path, body) -> (status, body, attempts)`.
+  - `gateway.app.Upstream(base_url, api_key, *, timeout_s, retries, transport=None, sleep=asyncio.sleep)`: `await .post(path, body) -> (status, body, attempts)`. `base_url` follows the OpenAI SDK convention and includes the version (`https://api.openai.com/v1`, the default when it is empty or `None`); it is used as given, never rewritten, because providers differ in their version paths. An upstream body that is not JSON (an HTML error page from a proxy) becomes an error payload, and a non-JSON 2xx becomes a **502**; both are retried like any 5xx.
   - `gateway.app.create_gateway_app(*, registry, store, allowed_models: set[str], upstream: Upstream | None, mocks: MockBook) -> FastAPI`. It serves `POST /v1/responses` and `POST /v1/chat/completions`.
 
-Behavior, per request: token → Caller, else **401** · `stream: true` → **400** (the gateway records complete responses; `ChatOpenAI.ainvoke` sends `stream: false`, fact 6) · model not allowed → **403** · `store.begin` (a `TelemetryError` → **500**, nothing forwarded) · mock if `caller.mock_script` or `upstream is None`, else upstream · `store.end` (a `TelemetryError` → **500**) · return the upstream status and body.
+Behavior, per request: token → Caller, else **401** · `stream: true` → **400** (the gateway records complete responses; `ChatOpenAI.ainvoke` sends `stream: false`, fact 6) · model not allowed → **403** · `store.begin` (a `TelemetryError` → **500**, nothing forwarded) · mock if `caller.mock_script` or `upstream is None`, else upstream · any exception while producing the response (a gateway bug, an unknown mock script) → **502** with an error body, still passed to `store.end`, so every recorded request gets a recorded response · `store.end` (a `TelemetryError` → **500**) · return the upstream status and body.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1465,6 +1475,44 @@ def test_persistent_upstream_failure_returns_its_status(make):
     client, caller, _, seen = make(handler=lambda r: httpx.Response(503, json={"error": "down"}))
     assert _post(client, caller.token, {"model": "gpt-x", "input": "hi"}).status_code == 503
     assert len(seen) == 4                     # 1 try + 3 retries
+
+
+def test_non_json_upstream_error_is_retried_recorded_and_returned(make):
+    """Proxies answer 502/503/504 with HTML; that must not crash the gateway."""
+    client, caller, rec, seen = make(handler=lambda r: httpx.Response(502, text="<html>Bad Gateway</html>"))
+    r = _post(client, caller.token, {"model": "gpt-x", "input": "hi"})
+    assert r.status_code == 502 and "non-JSON" in r.json()["error"]["message"]
+    assert len(seen) == 4                     # retried like any 5xx
+    response_event = [e for e in rec.read_events("n1") if e["type"] == "llm.response"][0]
+    assert response_event["attempts"] == 4 and response_event["status"] == 502
+
+
+def test_non_json_success_body_becomes_a_502(make):
+    client, caller, _, _ = make(handler=lambda r: httpx.Response(200, text="not json"))
+    assert _post(client, caller.token, {"model": "gpt-x", "input": "hi"}).status_code == 502
+
+
+def test_unexpected_gateway_exception_is_still_recorded(make, monkeypatch):
+    async def bug(self, path, body):
+        raise RuntimeError("gateway bug")
+    monkeypatch.setattr(Upstream, "post", bug)
+    client, caller, rec, _ = make()
+    r = _post(client, caller.token, {"model": "gpt-x", "input": "hi"})
+    assert r.status_code == 502 and "gateway bug" in r.json()["error"]["message"]
+    assert [e["type"] for e in rec.read_events("n1")] == ["llm.request", "llm.response"]
+
+
+def test_upstream_base_url_defaults_to_openai_v1_and_is_not_rewritten():
+    import asyncio
+    seen = []
+    def record(request):
+        seen.append(str(request.url))
+        return httpx.Response(200, json={})
+    for base in (None, "", "https://proxy.example/api/v3/"):
+        up = Upstream(base, "k", timeout_s=5, retries=0, transport=httpx.MockTransport(record))
+        asyncio.run(up.post("/responses", {}))
+    assert seen == ["https://api.openai.com/v1/responses", "https://api.openai.com/v1/responses",
+                    "https://proxy.example/api/v3/responses"]
 
 
 def test_mock_mode_serves_scripted_output_without_upstream(make):
@@ -1589,12 +1637,16 @@ from .mock import MockBook
 from .store import CallStore
 
 RETRYABLE = {408, 409, 429, 500, 502, 503, 504}
+# The OpenAI SDK convention: the base URL includes the API version (spec 2: OPENAI_BASE_URL).
+DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
 
 class Upstream:
-    def __init__(self, base_url: str, api_key: str, *, timeout_s: float, retries: int,
+    def __init__(self, base_url: str | None, api_key: str, *, timeout_s: float, retries: int,
                  transport: httpx.AsyncBaseTransport | None = None, sleep=asyncio.sleep) -> None:
-        self._base = base_url.rstrip("/")
+        # Used as given: "/responses" is appended, so the URL must already end in its version
+        # ("/v1"). Appending "/v1" here would break providers whose version path differs.
+        self._base = (base_url or DEFAULT_BASE_URL).rstrip("/")
         self._headers = {"Authorization": f"Bearer {api_key}"}
         self._timeout = timeout_s
         self._retries = retries
@@ -1610,7 +1662,12 @@ class Upstream:
                 try:
                     r = await client.post(self._base + path, json=body, headers=self._headers)
                     status = r.status_code
-                    payload = r.json() if r.content else {}
+                    try:
+                        payload = r.json() if r.content else {}
+                    except ValueError:        # e.g. an HTML error page from a proxy in front of the API
+                        payload = {"error": {"message": f"upstream returned HTTP {status} with a "
+                                                        f"non-JSON body", "body": r.text[:2000]}}
+                        status = status if status >= 400 else 502   # never pass garbage on as success
                 except httpx.HTTPError as exc:
                     status, payload = 599, {"error": f"{type(exc).__name__}: {exc}"}
                 if status not in RETRYABLE and status != 599:
@@ -1642,11 +1699,14 @@ def create_gateway_app(*, registry, store: CallStore, allowed_models: set[str],
         except TelemetryError as exc:
             return JSONResponse({"error": {"message": f"telemetry unavailable: {exc}"}}, status_code=500)
         started = time.monotonic()
-        if caller.mock_script or upstream is None:
-            status, payload, attempts = 200, MockBook.response(
-                body.get("model", ""), mocks.next(caller.mock_script or "smoke", caller.token)), 1
-        else:
-            status, payload, attempts = await upstream.post(upstream_path, body)
+        try:
+            if caller.mock_script or upstream is None:
+                status, payload, attempts = 200, MockBook.response(
+                    body.get("model", ""), mocks.next(caller.mock_script or "smoke", caller.token)), 1
+            else:
+                status, payload, attempts = await upstream.post(upstream_path, body)
+        except Exception as exc:  # noqa: BLE001 -- the request is recorded; its failure must be too
+            status, payload, attempts = 502, {"error": {"message": f"gateway: {type(exc).__name__}: {exc}"}}, 1
         try:
             store.end(meta, caller, status=status, body=payload,
                       latency_s=time.monotonic() - started, attempts=attempts)
@@ -1668,7 +1728,7 @@ def create_gateway_app(*, registry, store: CallStore, allowed_models: set[str],
 - [ ] **Step 5: Run the tests**
 
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_gateway_app.py -p no:cacheprovider`
-Expected: PASS (11 tests).
+Expected: PASS (15 tests).
 
 - [ ] **Step 6: Commit**
 
@@ -3892,12 +3952,14 @@ def improve_recipe(ctx):
 
 ```python
 # tests/test_contract_verify.py
+import json
 from pathlib import Path
 
 import pytest
 
 from ar_kernel.config import KernelConfig
 from ar_kernel.contract.verify import ContractHarness, static_check, verify_contract
+from ar_kernel.sandbox.runner import RunResult
 from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.vcs.agents_repo import AgentsRepo
 
@@ -3917,6 +3979,32 @@ FIXTURES = Path(__file__).parent / "fixtures" / "agents"
 def test_static_check(src, ok, fragment):
     step = static_check(src)
     assert step.ok is ok and fragment in step.detail
+
+
+def test_each_container_token_is_revoked_and_its_jobs_cancelled(tmp_path, monkeypatch):
+    """Like the phase runner: a smoke run must not leave GPU jobs behind on the harness queue.
+    No Docker: the image build and the container are faked."""
+    run = tmp_path / "run"
+    h = ContractHarness(CFG, run, Recorder(run))
+    cancelled, tokens = [], []
+    monkeypatch.setattr(h.queue, "cancel_for_token", lambda t: cancelled.append(t) or 0)
+    monkeypatch.setattr("ar_kernel.contract.verify.ensure_image", lambda cfg, reqs, **k: "img:test")
+
+    def runner(*, mounts, env, **kw):
+        tokens.append(env["AR_TOKEN"])
+        (mounts.workspace / "result.json").write_text(json.dumps({"ok": True, "result": {}}))
+        return RunResult(0, False, "", "", 0.1, [], "c")
+
+    repo = AgentsRepo(tmp_path / "agents.git")
+    try:
+        report = verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo,
+                                 commit=repo.init(FIXTURES / "good"), harness=h, recorder=Recorder(run),
+                                 node="n1", attempt=1, runner=runner)
+    finally:
+        h.queue.shutdown()
+    assert report.ok, report.steps
+    assert len(tokens) == 3 and cancelled == tokens          # import + two smoke runs
+    assert all(h.registry.lookup(t) is None for t in tokens)
 
 
 @pytest.fixture(scope="module")
@@ -4150,6 +4238,7 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
                             node=node, phase="contract", attempt=attempt)
         finally:
             harness.registry.revoke(caller.token)
+            harness.queue.cancel_for_token(caller.token)   # as in the phase runner (Task 15)
         return result, ws
 
     (Path(run_dir) / "store").mkdir(exist_ok=True)
@@ -4181,7 +4270,7 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
 - [ ] **Step 5: Run the tests (unit, then docker)**
 
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_contract_verify.py -p no:cacheprovider`
-Expected: PASS (7 static-check cases).
+Expected: PASS (8: the 7 static-check cases and the token and job cleanup test).
 
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_contract_verify.py -m docker -p no:cacheprovider`
 Expected: PASS (7 docker cases: good, 5 broken, hang).
@@ -4243,14 +4332,18 @@ CFG = KernelConfig.load()
 
 class FakeRunner:
     """Stands in for the container: edits /agent and writes /workspace/result.json."""
-    def __init__(self, result, edit=None, exit_code=0, timed_out=False):
+    def __init__(self, result, edit=None, exit_code=0, timed_out=False, staged=None):
         self.result, self.edit, self.exit_code, self.timed_out = result, edit, exit_code, timed_out
+        self.staged = staged
         self.calls = []
 
     def __call__(self, *, mounts, env, **kw):
         self.calls.append({"mounts": mounts, "env": env, **kw})
         if self.edit:
             (mounts.agent / "agent" / "entry.py").write_text(self.edit)
+        if self.staged:                         # what hf_download would leave in /workspace/staging
+            (mounts.staging / self.staged).parent.mkdir(parents=True, exist_ok=True)
+            (mounts.staging / self.staged).write_text("x")
         if self.result is not None:
             (mounts.workspace / "result.json").write_text(json.dumps(self.result))
         return RunResult(self.exit_code, self.timed_out, "", "", 1.0, [], "c")
@@ -4320,6 +4413,17 @@ def test_token_is_revoked_and_jobs_cancelled_after_the_phase(env, monkeypatch):
                   max_attempts=3, retry=None, nodes_remaining=5)
     token = runner.calls[0]["env"]["AR_TOKEN"]
     assert penv.registry.lookup(token) is None and cancelled == [token]
+
+
+def test_staged_files_appear_in_the_recorded_diff(env):
+    """/workspace/staging is a separate host directory (a nested mount), so the
+    workspace snapshot alone would miss every staged download."""
+    make, conn, root, rec, _ = env
+    runner = FakeRunner({"ok": True, "result": {"summary": "x"}}, staged="hf/clip.mp4")
+    run_edit_self(make(runner), conn=conn, node="n1", parent_id="root", base_commit=root, attempt=1,
+                  max_attempts=3, retry=None, nodes_remaining=5)
+    end = [e for e in rec.read_events("n1") if e["type"] == "phase.end"][0]
+    assert rec.load_payload(end["payload"])["diffs"]["staging"]["added"] == ["hf/clip.mp4"]
 
 
 def test_timeout_is_a_failed_attempt(env):
@@ -4429,7 +4533,9 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
     caller = env.registry.issue(node=node, phase=phase, attempt=attempt, workspace_host=dirs["workspace"],
                                 staging_host=dirs["staging"], mock_script=mock_script)
     soft = float(env.cfg.get(f"timeouts.{phase}_s"))
-    before = {"agent": snapshot(dirs["agent"], True), "workspace": snapshot(dirs["workspace"], False)}
+    # /workspace/staging is mounted from its own host directory, so it is snapshotted separately.
+    before = {"agent": snapshot(dirs["agent"], True), "workspace": snapshot(dirs["workspace"], False),
+              "staging": snapshot(dirs["staging"], False)}
     env.recorder.event("phase.start", node=node, phase=phase, attempt=attempt, component="kernel",
                        payload={"code_commit": code_commit, "image": image})
     started = time.monotonic()
@@ -4454,7 +4560,8 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
     out_file = dirs["workspace"] / "result.json"
     body = json.loads(out_file.read_text()) if out_file.exists() else None
     diffs = {"agent": diff(before["agent"], snapshot(dirs["agent"], True)),
-             "workspace": diff(before["workspace"], snapshot(dirs["workspace"], False))}
+             "workspace": diff(before["workspace"], snapshot(dirs["workspace"], False)),
+             "staging": diff(before["staging"], snapshot(dirs["staging"], False))}
     return dirs, result, body, diffs, time.monotonic() - started
 
 
@@ -4516,7 +4623,7 @@ def run_improve_recipe(env: PhaseEnv, *, conn, node: str, parent_id: str, agent_
 - [ ] **Step 4: Run the tests**
 
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_agent_phase.py -p no:cacheprovider`
-Expected: PASS (7 tests).
+Expected: PASS (8 tests).
 
 - [ ] **Step 5: Add a docker end-to-end test: real container, real gateway (mock script), real tools**
 
@@ -4617,7 +4724,7 @@ git commit -m "feat(kernel): agent phase runner -- attempt dirs, real services, 
 The inner loop every seed role runs on. It is agent code (`seed_agent/agent/harness/`), so `edit_self` can change it like any other component. It is an explicit LangGraph ReAct graph that reproduces `langchain.agents.create_agent` exactly (fact 14), built in three commits: first the **exact** reproduction, proven equal to `create_agent` by a comparison test and mutation controls; then the two deliberate additions, each test-first:
 
 1. **Tool errors are reported, not raised.** `create_agent`'s default tool node re-raises any tool exception and ends the run (fact 15). The harness returns it to the model as an error `ToolMessage` using `ToolNode`'s `handle_tool_errors=True` text: `Error: <repr>\n Please fix your mistakes.`
-2. **Auto-compact, Claude Code style.** Before every model call, the harness estimates the context size: the last reply's reported `usage.total_tokens` plus about 4 characters per token for the messages after it (no tokenizer offline, fact 17). Below `compact_at × context_window` nothing happens and messages append linearly. At or above it, a dedicated summarizer call (same system prompt, tools and history; `tool_choice="none"`; the instruction in `prompts/compact.md`) condenses the history, and the history is replaced by one user message: a continuation preamble plus the summary.
+2. **Auto-compact, Claude Code style.** Before every model call, the harness estimates the context size: the last reply's reported `usage.total_tokens` plus about 4 characters per token for the messages after it, with each image block counted as a fixed 1,500 tokens rather than by its base64 length (no tokenizer offline, fact 17). Below `compact_at × context_window` nothing happens and messages append linearly. At or above it, a dedicated summarizer call (same system prompt, tools and history; `tool_choice="none"`; the instruction in `prompts/compact.md`) condenses the history, and the history is replaced by one user message: a continuation preamble plus the summary.
 
 The comparison test stays in the suite for good. `create_agent` is the reference whenever no tool raises and the context stays below the threshold.
 
@@ -4631,7 +4738,7 @@ The comparison test stays in the suite for good. `create_agent` is the reference
 - Produces (used by Task 17's roles):
   - `agent.harness.react.build_react_agent(model: BaseChatModel, tools: list[BaseTool], system_prompt: str | None = None, *, context_window: int, compact_at: float = 0.85, compact_prompt: str | None = None)` returns a compiled graph. Call it as `await graph.ainvoke({"messages": [...]})`; the result's `"messages"` is the full history. `compact_prompt=None` reads `agent/prompts/compact.md`.
   - `agent.harness.react.run_tool(tools_by_name, call) -> ToolMessage`, plus the constants `RECURSION_LIMIT = 9999`, `COMPACT_AT = 0.85` and `COMPACT_PROMPT` (a `Path`).
-  - `agent.harness.compact.estimate_tokens(messages, system_prompt=None) -> int`, `needs_compaction(messages, system_prompt, context_window, compact_at) -> bool`, `summarize(model, tools, system_prompt, messages, instruction) -> str`, and `CONTINUATION` (a format string with `{summary}`).
+  - `agent.harness.compact.estimate_tokens(messages, system_prompt=None) -> int`, `needs_compaction(messages, system_prompt, context_window, compact_at) -> bool`, `summarize(model, tools, system_prompt, messages, instruction) -> str`, `CONTINUATION` (a format string with `{summary}`), and `IMAGE_TOKENS = 1500`.
 
 - [ ] **Step 1: Scaffolding**
 
@@ -4985,6 +5092,13 @@ def test_estimate_uses_last_reported_usage_plus_tail():
     assert estimate_tokens([HumanMessage("x" * 400)], system_prompt="s" * 40) == 110
 
 
+def test_images_count_as_a_fixed_estimate_not_their_base64_length():
+    from agent.harness.compact import IMAGE_TOKENS
+    image = {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + "A" * 400_000}}
+    msgs = [HumanMessage(content=[{"type": "text", "text": "x" * 40}, image])]
+    assert IMAGE_TOKENS <= estimate_tokens(msgs) < IMAGE_TOKENS + 100      # not 400_000 / 4
+
+
 def test_a_single_message_is_never_compacted():
     assert not needs_compaction([HumanMessage("x" * 10 ** 6)], None, 1000, 0.85)
 
@@ -5044,6 +5158,10 @@ from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemM
 from langchain_core.tools import BaseTool
 
 CHARS_PER_TOKEN = 4          # no tokenizer offline (tiktoken downloads its encodings)
+# An image costs a bounded number of vision tokens however long its base64 is, so it is
+# counted as a fixed, generous estimate instead of by characters.
+IMAGE_TOKENS = 1_500
+IMAGE_BLOCK_TYPES = {"image_url", "image", "input_image"}
 CONTINUATION = (
     "This session is being continued from a previous conversation that ran out of context. "
     "The summary below covers the earlier portion of the conversation.\n\n"
@@ -5054,9 +5172,15 @@ CONTINUATION = (
 
 
 def _chars(message: AnyMessage) -> int:
-    content = message.content if isinstance(message.content, str) else json.dumps(message.content, default=str)
+    if isinstance(message.content, str):
+        size = len(message.content)
+    else:
+        size = sum(IMAGE_TOKENS * CHARS_PER_TOKEN
+                   if isinstance(block, dict) and block.get("type") in IMAGE_BLOCK_TYPES
+                   else len(block if isinstance(block, str) else json.dumps(block, default=str))
+                   for block in message.content)
     calls = getattr(message, "tool_calls", None) or []
-    return len(content) + (len(json.dumps(calls, default=str)) if calls else 0)
+    return size + (len(json.dumps(calls, default=str)) if calls else 0)
 
 
 def estimate_tokens(messages: list[AnyMessage], system_prompt: str | None = None) -> int:
@@ -5244,7 +5368,7 @@ Output only the summary.
 - [ ] **Step 11: Run the tests**
 
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_seed_harness.py -p no:cacheprovider`
-Expected: PASS (23 tests; the comparison scenarios still match `create_agent`).
+Expected: PASS (24 tests; the comparison scenarios still match `create_agent`).
 
 - [ ] **Step 12: Commit**
 
@@ -5276,7 +5400,7 @@ The seed's job is to be a **correct, working starting point**, not a strong rese
 - Consumes (inside the container): `ar_contract.client.chat_model`, `ar_contract.client.mcp_session`, `ar_contract.models.*` including `EDIT_COMPONENTS` (Task 3); `build_react_agent` (Task 16); the kernel tools by name (Tasks 7–9); the environment variables `AR_DEFAULT_MODEL`, `AR_CONTEXT_WINDOW`, `AR_COMPACT_AT`, `AR_AGENT_DIR` and `AR_WORKSPACE`, which the kernel sets (Tasks 14–15).
 - Produces:
   - `agent.entry.edit_self(ctx) -> EditResult` and `agent.entry.improve_recipe(ctx) -> RecipeResult`, both `async`.
-  - Pure helpers for tests: `agent.tools.media.snap_segments(segments, duration)`, `agent.tools.files.resolve_inside(root, path)`, `agent.tools.files.replace_once(text, old, new)`, `agent.tools.submit.submit_tool(name, description, schema) -> (StructuredTool, Submission)`, `agent.orchestration.meta.selftest(root) -> list[str]`, and `agent.orchestration.meta.COMPONENTS` / `EditPlan`.
+  - Pure helpers for tests: `agent.tools.media.snap_segments(segments, duration)`, `agent.tools.files.resolve_inside(root, path)`, `agent.tools.files.replace_once(text, old, new)`, `agent.tools.files.read_utf8(path)` (strict; `edit_file` refuses non-UTF-8 files rather than corrupt them), `agent.tools.submit.submit_tool(name, description, schema) -> (StructuredTool, Submission)`, `agent.orchestration.meta.selftest(root) -> list[str]`, and `agent.orchestration.meta.COMPONENTS` / `EditPlan`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -5347,6 +5471,17 @@ def test_edit_file_needs_exactly_one_match():
         replace_once("a b a", "a", "c")
     with pytest.raises(ValueError, match="found 0"):
         replace_once("a", "z", "c")
+
+
+def test_edit_file_refuses_non_utf8_files_and_leaves_them_untouched(tmp_path):
+    from agent.tools.files import make_file_tools
+    raw = b"caption: caf\xe9\n"                              # Latin-1, not UTF-8
+    (tmp_path / "c.txt").write_bytes(raw)
+    tools = {t.name: t for t in make_file_tools(str(tmp_path))}
+    assert "caf" in tools["read_file"].invoke({"path": "c.txt"})     # reading replaces bad bytes
+    with pytest.raises(ValueError, match="not UTF-8"):
+        tools["edit_file"].invoke({"path": "c.txt", "old": "caption", "new": "title"})
+    assert (tmp_path / "c.txt").read_bytes() == raw
 
 
 def test_read_only_file_tools_cannot_write(tmp_path):
@@ -5483,6 +5618,22 @@ def _tool_outputs(rec, node) -> list[str]:
             out += [i.get("output", "") for i in body.get("input", [])
                     if isinstance(i, dict) and i.get("type") == "function_call_output"]
     return out
+
+
+def test_chat_model_works_sync_and_async_over_the_socket(kernel, tmp_path, monkeypatch):
+    """The container has no network: both the sync and the async client must use the socket."""
+    _, registry, services = kernel
+    caller = registry.issue(node="n-chat", phase="edit_self", attempt=1, workspace_host=tmp_path,
+                            staging_host=tmp_path, mock_script="smoke")
+    monkeypatch.setenv("AR_SOCKET_DIR", str(services.socket_dir))
+    monkeypatch.setenv("AR_TOKEN", caller.token)
+    monkeypatch.setenv("AR_DEFAULT_MODEL", "mock-model")
+    from langchain_core.messages import HumanMessage
+    from ar_contract.client import chat_model
+    model = chat_model()
+    assert model.invoke([HumanMessage("ping")]).text == "ok"
+    assert asyncio.run(model.ainvoke([HumanMessage("ping")])).text == "ok"
+    registry.revoke(caller.token)
 
 
 BASE = {"nodes_remaining": 3, "attempt": 1, "max_attempts": 3}
@@ -5657,6 +5808,16 @@ def resolve_inside(root: str, path: str) -> Path:
     return target
 
 
+def read_utf8(target: Path) -> str:
+    """Strict UTF-8 read for editing: replacing undecodable bytes and writing the text back
+    would silently corrupt the file."""
+    try:
+        return target.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{target.name} is not UTF-8 text (byte {exc.start}); "
+                         f"change it with run_command instead") from None
+
+
 def replace_once(text: str, old: str, new: str) -> str:
     count = text.count(old)
     if count != 1:
@@ -5668,7 +5829,7 @@ def make_file_tools(root: str, *, writable: bool = True) -> list:
     @tool
     def read_file(path: str) -> str:
         """Read a text file (path relative to the tool root)."""
-        return resolve_inside(root, path).read_text(errors="replace")[:MAX_READ]
+        return resolve_inside(root, path).read_text(encoding="utf-8", errors="replace")[:MAX_READ]
 
     @tool
     def list_dir(path: str = ".") -> list[str]:
@@ -5681,14 +5842,14 @@ def make_file_tools(root: str, *, writable: bool = True) -> list:
         """Create or overwrite a text file (path relative to the tool root)."""
         target = resolve_inside(root, path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content)
+        target.write_text(content, encoding="utf-8")
         return f"wrote {len(content)} chars to {path}"
 
     @tool
     def edit_file(path: str, old: str, new: str) -> str:
         """Replace one exact occurrence of `old` with `new` in a text file. `old` must appear exactly once."""
         target = resolve_inside(root, path)
-        target.write_text(replace_once(target.read_text(), old, new))
+        target.write_text(replace_once(read_utf8(target), old, new), encoding="utf-8")
         return f"edited {path}"
 
     @tool
@@ -6173,7 +6334,7 @@ confirm or refute it. Finish with a one-paragraph summary of what you changed an
 - [ ] **Step 7: Run the tests**
 
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_seed_agent.py tests/test_seed_harness.py -p no:cacheprovider`
-Expected: PASS (16 seed-agent tests: 11 unit and 5 against the kernel services; plus the 23 harness tests).
+Expected: PASS (18 seed-agent tests: 12 unit and 6 against the kernel services; plus the 24 harness tests).
 
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_seed_agent.py -m docker -p no:cacheprovider`
 Expected: PASS (the seed agent passes contract verification in real containers).
@@ -6218,7 +6379,7 @@ Confirm the amendments made with this plan (§9.5 network, §10 tool names, §1.
 
 - [ ] **Step 6: Write the verification log section**
 
-Append `## Plan 2 — agent runtime` to `docs/superpowers/plans/verification-log.md`. Include the verified facts 1–17 this plan relied on, the suite and docker results, the harness comparison and its mutation counts, the isolation negative control, the live-LLM outcome (or its deferral), and every defect found during implementation with its fix.
+Append `## Plan 2 — agent runtime` to `docs/superpowers/plans/verification-log.md`. Include the verified facts 1–18 this plan relied on, the suite and docker results, the harness comparison and its mutation counts, the isolation negative control, the live-LLM outcome (or its deferral), and every defect found during implementation with its fix.
 
 - [ ] **Step 7: Merge and push (standing rule: `main` always current)**
 
@@ -6261,4 +6422,5 @@ Plan 4's tasks will be written after Plan 3. Plan 4 sequences these Plan 2 piece
 - **Spec coverage.** §9.1 → Tasks 16–17 (§9.1.2 harness → Task 16; §9.1.1 edit components → Tasks 3 and 17); §9.2 → Task 3; §9.3 → Tasks 3 and 13; §9.4 → Task 14; §9.5 → Tasks 10–11 (network amended); §10 tools → Tasks 7–9 (generators → Plan 3); §13.1–13.3 gateway and tool capture → Tasks 1, 4–6; §5.2 → Task 12; §5.5 aspect → Task 2; §16.1 gateway / contract / job API → Tasks 4, 5, 9, 14; §16.3 item 4 → Tasks 11 and 18. Left to Plan 4, by the contract above: §7.2 sequencing, §12, §13.4, §14.3–14.6 and liveness.
 - **Placeholders.** None. The one open outcome, the live LLM run, has an explicit deferral rule.
 - **Tested before writing.** The Task 16 harness (all three stages, their test counts and the mutation counts) and the Task 17 seed agent (both entry points end to end over Unix sockets against a scripted gateway and tool server, including argument errors, unknown tools and a failing kernel tool) were run as prototypes on this machine before being written into the plan.
+- **External review (2026-09-23).** Seven reported problems were checked against this plan. Fixed: non-JSON upstream bodies crashed the gateway (Task 5; reproduced, and the old line fails the new tests); `chat_model()` had no sync client on the socket (Task 3, fact 18; reproduced); staged files were missing from the workspace diff (Task 15). Fixed although the stated impact did not hold: the contract harness now cancels the caller's jobs (Task 14; its queue has no backends and a private lock, so nothing could be stranded yet); images are estimated at a fixed size (Task 16; the seed never puts images in a role's history, but an edited agent could); `edit_file` refuses non-UTF-8 files with a clear message (Task 17; the reported crash could not happen, because the harness reports tool errors, and switching `edit_file` to `errors="replace"` as proposed would have silently corrupted such files). Not changed: `Upstream` does not append `/v1` to the base URL, because the OpenAI SDK convention and spec §2 put the version in `OPENAI_BASE_URL`, and rewriting it would break providers with other version paths; it now defaults to `https://api.openai.com/v1` when unset (Task 5).
 - **Type consistency.** `Caller` fields are fixed in Task 4 and used unchanged in Tasks 5–9, 14 and 15. `PhaseOutcome` and `PhaseEnv` are defined once, in Task 15. Tool names are identical in `register_*`, the Task 14 mock objects, `run_improve_recipe`'s tool list and the seed prompts.
