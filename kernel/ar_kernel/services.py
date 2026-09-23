@@ -23,6 +23,7 @@ class RunServices:
         self.socket_dir = Path(socket_dir)
         self._servers: list[uvicorn.Server] = []
         self._threads: list[threading.Thread] = []
+        self._names: list[str] = []
 
     def start(self, gateway_app, tools_app, ready_timeout_s: float = 20.0) -> None:
         self.socket_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -37,6 +38,7 @@ class RunServices:
             thread.start()
             self._servers.append(server)
             self._threads.append(thread)
+            self._names.append(name)
         deadline = time.monotonic() + ready_timeout_s
         while not all(s.started for s in self._servers):
             if time.monotonic() > deadline:
@@ -51,7 +53,13 @@ class RunServices:
             server.should_exit = True
         for thread in self._threads:
             thread.join(timeout=10)
+        stuck = [name for name, thread in zip(self._names, self._threads) if thread.is_alive()]
         self._servers.clear()
         self._threads.clear()
+        self._names.clear()
+        # Clean up the sockets before raising, so a stuck thread never leaves one behind.
         for name in ("gateway.sock", "tools.sock"):
             (self.socket_dir / name).unlink(missing_ok=True)
+        if stuck:
+            raise RuntimeError(f"service thread(s) did not stop within the join timeout: "
+                               f"{', '.join(stuck)}")

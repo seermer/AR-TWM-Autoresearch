@@ -101,3 +101,15 @@ def test_sockets_are_owner_only(live):
     # Controller ruling: both sockets must also be owner-only, not just the directory.
     for name in ("gateway.sock", "tools.sock"):
         assert oct(os.stat(services.socket_dir / name).st_mode & 0o777) == "0o600"
+
+
+def test_stop_leaves_no_live_threads_and_no_sockets(live):
+    _, _, services, _ = live
+    threads = list(services._threads)
+    sock_paths = [services.socket_dir / name for name in ("gateway.sock", "tools.sock")]
+    assert all(p.exists() for p in sock_paths)
+
+    services.stop()
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert not any(p.exists() for p in sock_paths)
