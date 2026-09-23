@@ -140,3 +140,17 @@ def test_rejected_candidate_files_are_returned_to_staging(tmp_path):
     assert not result.accepted
     assert cand.video.exists() and cand.caption.exists()
     assert not [p for p in (tmp_path / "quarantine").rglob("*") if p.is_file()]
+
+
+def test_rotated_clip_is_rejected_with_a_fix_hint(tmp_path):
+    """WorldModel decodes frames in stored orientation; a rotated clip would train sideways."""
+    import subprocess
+    ing = _ingestor(tmp_path)
+    cand = _candidate(tmp_path, "rot")
+    rotated = cand.video.with_name("v_rot.mp4")
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-display_rotation", "180",
+                    "-i", str(cand.video), "-c", "copy", str(rotated)], check=True)
+    rotated.replace(cand.video)
+    result = ing.ingest([cand], node_id="n1")[0]
+    assert not result.accepted
+    assert any("rotation" in r and "re-encode" in r for r in result.reasons)

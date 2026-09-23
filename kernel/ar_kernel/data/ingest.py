@@ -113,9 +113,17 @@ class Ingestor:
                          node_id: str) -> IngestResult:
         video, caption, pose = held["video"], held["caption"], held.get("pose")
         info = probe_video(video)
+        if info.rotation:
+            reasons = [f"video carries a {info.rotation} degree display rotation; WorldModel decodes "
+                       f"frames in stored orientation, so they would train rotated. re-encode with "
+                       f"the rotation applied (ffmpeg applies it when transcoding: "
+                       f"ffmpeg -i in.mp4 -c:v libx264 -pix_fmt yuv420p out.mp4)"]
+            self.recorder.event("ingest.rejected", node=node_id, phase="ingest",
+                                payload={"reasons": reasons})
+            return IngestResult(accepted=False, reasons=reasons)
         if not aspect_ok(info, self.tolerance):
-            reasons = [f"aspect ratio {info.width}/{info.height} is not within "
-                       f"{self.tolerance:.0%} of 16:9"]
+            reasons = [f"display aspect ratio {info.display_aspect:.4f} (coded {info.width}x{info.height}, "
+                       f"sar {info.sar:.4f}) is not within {self.tolerance:.0%} of 16:9"]
             self.recorder.event("ingest.rejected", node=node_id, phase="ingest",
                                 payload={"reasons": reasons})
             return IngestResult(accepted=False, reasons=reasons)
