@@ -126,6 +126,20 @@ def test_non_json_upstream_error_is_retried_recorded_and_returned(make):
     assert response_event["attempts"] == 4 and response_event["status"] == 502
 
 
+def test_non_json_upstream_error_body_is_recorded_without_truncation(make):
+    """No truncation or sampling of telemetry (spec 13.1.3): a long non-JSON error body
+    (e.g. a verbose HTML error page from a proxy) must be recorded in full, not clipped."""
+    long_body = "<html>" + ("x" * 3000) + "</html>"
+    client, caller, rec, seen = make(handler=lambda r: httpx.Response(502, text=long_body))
+    r = _post(client, caller.token, {"model": "gpt-x", "input": "hi"})
+    assert r.status_code == 502
+    assert r.json()["error"]["body"] == long_body
+    response_event = [e for e in rec.read_events("n1") if e["type"] == "llm.response"][0]
+    recorded = rec.load_payload(response_event["payload"])
+    assert recorded["body"]["error"]["body"] == long_body
+    assert len(recorded["body"]["error"]["body"]) == len(long_body) > 2000
+
+
 def test_non_json_success_body_becomes_a_502(make):
     client, caller, _, _ = make(handler=lambda r: httpx.Response(200, text="not json"))
     assert _post(client, caller.token, {"model": "gpt-x", "input": "hi"}).status_code == 502

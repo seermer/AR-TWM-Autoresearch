@@ -42,8 +42,10 @@ class Upstream:
                     try:
                         payload = r.json() if r.content else {}
                     except ValueError:        # e.g. an HTML error page from a proxy in front of the API
+                        # No truncation of telemetry (spec 13.1.3): the full body is recorded,
+                        # even though it never reaches the agent JSON-encoded verbatim either way.
                         payload = {"error": {"message": f"upstream returned HTTP {status} with a "
-                                                        f"non-JSON body", "body": r.text[:2000]}}
+                                                        f"non-JSON body", "body": r.text}}
                         status = status if status >= 400 else 502   # never pass garbage on as success
                 except httpx.HTTPError as exc:
                     status, payload = 599, {"error": f"{type(exc).__name__}: {exc}"}
