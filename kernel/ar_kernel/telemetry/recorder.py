@@ -4,17 +4,24 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable
 
+import zstandard
+
 class TelemetryError(RuntimeError):
     """Telemetry could not be persisted; the caller must not proceed."""
 
 class Recorder:
-    def __init__(self, run_dir: Path, redact: Iterable[str] = ()) -> None:
+    def __init__(self, run_dir: Path, redact: Iterable[str] = (), run_id: str | None = None) -> None:
         self.run_dir = Path(run_dir)
+        self.run_id = run_id or self.run_dir.name
         self.redact = [s for s in redact if s]
         self._events = self.run_dir / "telemetry" / "events"
         self._payloads = self.run_dir / "telemetry" / "payloads"
         for directory in (self._events, self._payloads):
             directory.mkdir(parents=True, exist_ok=True)
+
+    def add_redaction(self, secret: str) -> None:
+        if secret and secret not in self.redact:
+            self.redact.append(secret)
 
     def events_path(self, node: str = "run") -> Path:
         return self._events / f"{node}.jsonl"
@@ -41,12 +48,12 @@ class Recorder:
     def store_payload(self, obj: dict) -> str:
         blob = self._scrub_text(json.dumps(self._scrub(obj), sort_keys=True, default=str)).encode()
         digest = hashlib.sha256(blob).hexdigest()
-        target = self._payloads / f"{digest}.json"
+        target = self._payloads / f"{digest}.json.zst"
         if not target.exists():
             try:
-                tmp = target.with_suffix(".tmp")
+                tmp = target.with_name(target.name + ".tmp")
                 with tmp.open("wb") as handle:
-                    handle.write(blob)
+                    handle.write(zstandard.ZstdCompressor(level=10).compress(blob))
                     handle.flush()
                     # The event line that references this payload is fsync'd; the
                     # payload must be durable first or a crash leaves a dangling digest.
@@ -57,14 +64,19 @@ class Recorder:
         return digest
 
     def load_payload(self, digest: str) -> dict:
-        return json.loads((self._payloads / f"{digest}.json").read_text())
+        compressed = self._payloads / f"{digest}.json.zst"
+        if compressed.exists():
+            return json.loads(zstandard.ZstdDecompressor().decompress(compressed.read_bytes()))
+        return json.loads((self._payloads / f"{digest}.json").read_text())   # pre-zstd runs
 
     def event(self, type: str, *, node: str = "run", phase: str = "-", attempt: int = 0,
               payload: dict | None = None, span_id: str | None = None,
-              parent_span_id: str | None = None, **fields: Any) -> str:
+              parent_span_id: str | None = None, component: str = "kernel", **fields: Any) -> str:
         record = {
             "ts_wall": time.time(),
             "ts_mono": time.monotonic(),
+            "run_id": self.run_id,
+            "component": component,
             "run_dir": str(self.run_dir),
             "node": node,
             "phase": phase,
@@ -92,17 +104,17 @@ class Recorder:
 
     @contextmanager
     def span(self, type: str, *, node: str = "run", phase: str = "-", attempt: int = 0,
-             payload: dict | None = None, **fields: Any):
+             payload: dict | None = None, component: str = "kernel", **fields: Any):
         span_id = self.event(f"{type}.start", node=node, phase=phase, attempt=attempt,
-                             payload=payload, **fields)
+                             payload=payload, component=component, **fields)
         started = time.monotonic()
         try:
             yield span_id
         except BaseException as exc:
             self.event(f"{type}.error", node=node, phase=phase, attempt=attempt,
-                       span_id=span_id,
+                       span_id=span_id, component=component,
                        payload={"error": repr(exc), "traceback": traceback.format_exc()},
                        duration_s=time.monotonic() - started)
             raise
         self.event(f"{type}.end", node=node, phase=phase, attempt=attempt, span_id=span_id,
-                   duration_s=time.monotonic() - started)
+                   component=component, duration_s=time.monotonic() - started)

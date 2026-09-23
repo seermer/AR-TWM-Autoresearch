@@ -54,7 +54,8 @@ def test_secret_inside_a_tuple_is_redacted(tmp_path):
     from ar_kernel.telemetry.recorder import Recorder
     rec = Recorder(tmp_path, redact=["sk-SECRET123"])
     digest = rec.store_payload({"argv": ("--key", "sk-SECRET123")})
-    assert "sk-SECRET123" not in (tmp_path / "telemetry" / "payloads" / f"{digest}.json").read_text()
+    assert "sk-SECRET123" not in json.dumps(rec.load_payload(digest))
+    assert b"sk-SECRET123" not in _raw_payload(tmp_path, digest)
 
 
 def test_secret_rendered_through_str_of_an_object_is_redacted(tmp_path):
@@ -63,4 +64,59 @@ def test_secret_rendered_through_str_of_an_object_is_redacted(tmp_path):
     from ar_kernel.telemetry.recorder import Recorder
     rec = Recorder(tmp_path, redact=["sk-SECRET123"])
     digest = rec.store_payload({"path": PurePosixPath("/tmp/sk-SECRET123/x")})
-    assert "sk-SECRET123" not in (tmp_path / "telemetry" / "payloads" / f"{digest}.json").read_text()
+    assert "sk-SECRET123" not in json.dumps(rec.load_payload(digest))
+    assert b"sk-SECRET123" not in _raw_payload(tmp_path, digest)
+
+
+import json
+import zstandard
+
+
+def _raw_payload(run_dir, digest) -> bytes:
+    """Decompressed on-disk bytes, so a test proves the secret never reached the disk."""
+    path = run_dir / "telemetry" / "payloads" / f"{digest}.json.zst"
+    return zstandard.ZstdDecompressor().decompress(path.read_bytes())
+
+
+def test_every_event_carries_run_id_and_component(tmp_path):
+    from ar_kernel.telemetry.recorder import Recorder
+    rec = Recorder(tmp_path / "run42")
+    rec.event("x.happened", node="n1", component="gateway")
+    event = rec.read_events("n1")[0]
+    assert event["run_id"] == "run42"
+    assert event["component"] == "gateway"
+
+
+def test_component_defaults_to_kernel(tmp_path):
+    from ar_kernel.telemetry.recorder import Recorder
+    rec = Recorder(tmp_path)
+    rec.event("y")
+    assert rec.read_events()[0]["component"] == "kernel"
+
+
+def test_payloads_are_zstd_and_round_trip(tmp_path):
+    from ar_kernel.telemetry.recorder import Recorder
+    rec = Recorder(tmp_path)
+    big = {"messages": ["the same long prompt " * 200] * 20}
+    digest = rec.store_payload(big)
+    path = tmp_path / "telemetry" / "payloads" / f"{digest}.json.zst"
+    assert path.exists()
+    assert path.stat().st_size < len(json.dumps(big)) / 5
+    assert rec.load_payload(digest) == big
+
+
+def test_legacy_uncompressed_payloads_stay_readable(tmp_path):
+    from ar_kernel.telemetry.recorder import Recorder
+    rec = Recorder(tmp_path)
+    legacy = tmp_path / "telemetry" / "payloads" / "abc123.json"
+    legacy.write_text('{"old": true}')
+    assert rec.load_payload("abc123") == {"old": True}
+
+
+def test_redaction_added_after_construction_applies(tmp_path):
+    """Container tokens are issued after the recorder exists."""
+    from ar_kernel.telemetry.recorder import Recorder
+    rec = Recorder(tmp_path)
+    rec.add_redaction("tok-LATE-ISSUED")
+    digest = rec.store_payload({"auth": "Bearer tok-LATE-ISSUED"})
+    assert b"tok-LATE-ISSUED" not in _raw_payload(tmp_path, digest)

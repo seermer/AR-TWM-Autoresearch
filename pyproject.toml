@@ -2,10 +2,16 @@
 name = "ar-kernel"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["pyyaml>=6.0", "numpy>=1.26", "pillow>=10.0", "imagehash>=4.3"]
+dependencies = [
+    "pyyaml>=6.0", "numpy>=1.26", "pillow>=10.0", "imagehash>=4.3",
+    "fastapi>=0.141", "uvicorn>=0.53", "httpx>=0.28", "httpx2==2.13.0", "pydantic>=2.12",
+    "mcp==2.2.0", "openai>=3.0,<4",
+    "langgraph==1.2.11", "langchain-core==1.6.3", "langchain-openai==1.6.2",
+    "huggingface_hub>=1.32", "zstandard>=0.25",
+]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "langchain==1.4.2"]
 
 [project.scripts]
 ar = "ar_kernel.cli:main"
@@ -15,14 +21,15 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-where = ["kernel"]
+where = ["kernel", "contract"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
     "manual: GPU verification, run explicitly",
     "gpu: launches a real GPU job (the gate's describe step); run with -m gpu",
+    "docker: starts real containers; run with -m docker",
 ]
 # Spec 16.1: the default unit suite uses no GPU. A GPU test running alongside a
 # real job has already produced a spurious gate failure through contention.
-addopts = "-q -m 'not manual and not gpu'"
+addopts = "-q -m 'not manual and not gpu and not docker'"

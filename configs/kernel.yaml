@@ -35,3 +35,25 @@ telemetry:
   gpu_sample_sec: 5
 tools:
   job_wait_max_s: 300
+  hf_download_max_bytes: 21474836480   # 20 GiB per hf.download call
+gateway:
+  model_allowlist: []            # OPENAI_MODEL from the environment is always allowed too
+  upstream_timeout_s: 600
+  upstream_retries: 5            # 429/5xx, exponential backoff 1, 2, 4, ... s
+  upstream_outage_pause_min: 15
+agents:                          # passed to agent containers as AR_CONTEXT_WINDOW / AR_COMPACT_AT
+  context_window_tokens: 128000  # set to the agent model's context window
+  compact_at: 0.85               # the harness auto-compacts at this fraction of the window
+sandbox:
+  image: ar-agent
+  cpus: 16
+  memory_gb: 64
+timeouts:                        # soft timeouts (spec 14.5); Plan 2 enforces the hard cap = 4x soft
+  edit_self_s: 7200
+  improve_recipe_s: 86400
+  contract_import_s: 60
+  contract_smoke_s: 900
+generators:                      # every variant disabled until Plan 3 verifies it (spec 16.3 item 5)
+  alayaworld: {dmd4: {enabled: false}, ar30: {enabled: false}}
+  ltx25: {dev: {enabled: false}, distilled: {enabled: false}}
+  wan22: {ti2v-5b: {enabled: false}}
