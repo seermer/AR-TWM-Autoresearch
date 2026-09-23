@@ -1,0 +1,56 @@
+"""Schemas the kernel validates every agent call against (spec 9.3)."""
+from __future__ import annotations
+
+import typing
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+# The five parts of an agent version an edit_self plan picks from (spec 9.1.1).
+EditComponent = Literal["prompts", "tools", "harness", "orchestration", "knowledge"]
+EDIT_COMPONENTS = typing.get_args(EditComponent)
+
+
+class _Ctx(BaseModel):
+    model_config = ConfigDict(extra="allow")     # the kernel may add fields; agents ignore unknowns
+    lineage: list[dict[str, Any]] = Field(default_factory=list)
+    archive: dict[str, Any] = Field(default_factory=dict)
+    nodes_remaining: int
+    attempt: int
+    max_attempts: int
+    retry: dict[str, Any] | None = None          # the failed attempt's report, when retrying
+    dry_run: bool = False
+
+
+class EditContext(_Ctx):
+    agent_dir: str = "/agent"
+
+
+class RecipeContext(_Ctx):
+    workspace: str = "/workspace"
+    clip_pool: list[dict[str, Any]] = Field(default_factory=list)
+    parent_data_commit: str | None = None
+    parent_recipe: dict[str, Any] = Field(default_factory=dict)
+    base_recipe: dict[str, Any] = Field(default_factory=dict)
+    tunable_rules: dict[str, Any] = Field(default_factory=dict)
+    resolution_allowlist: list[list[int]] = Field(default_factory=list)
+    lora_allowlist: list[list[int]] = Field(default_factory=list)
+    format_rules: str = ""
+    n_gpus: int = 4
+    tools: list[str] = Field(default_factory=list)   # enabled kernel tool names
+
+
+class EditResult(BaseModel):
+    summary: str = Field(min_length=1)
+    # The component the edit plan chose. Recorded with the node, never enforced.
+    component: EditComponent | None = None
+
+
+class RecipeResult(BaseModel):
+    data_commit: str = Field(min_length=1)
+    recipe: dict[str, Any]
+    rationale: str = Field(min_length=1)
+
+
+CONTEXT_MODELS = {"edit_self": EditContext, "improve_recipe": RecipeContext}
+RESULT_MODELS = {"edit_self": EditResult, "improve_recipe": RecipeResult}
