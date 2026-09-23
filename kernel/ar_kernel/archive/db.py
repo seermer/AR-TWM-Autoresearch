@@ -41,7 +41,9 @@ CREATE TABLE IF NOT EXISTS data_commits (
 def open_db(run_dir: Path) -> sqlite3.Connection:
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(run_dir / "archive.db", isolation_level=None)
+    # Tool calls and the loop write from different threads through separate
+    # connections; wait for a lock instead of failing with "database is locked".
+    conn = sqlite3.connect(run_dir / "archive.db", isolation_level=None, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")

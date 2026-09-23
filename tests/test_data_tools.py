@@ -1,0 +1,146 @@
+import subprocess
+import threading
+
+import pytest
+
+from ar_kernel.archive.db import open_db
+from ar_kernel.archive.nodes import NodeStore
+from ar_kernel.config import KernelConfig
+from ar_kernel.telemetry.recorder import Recorder
+from ar_kernel.tools.context import TokenRegistry
+from ar_kernel.tools.data_tools import DataTools
+from ar_kernel.tools.server import ToolError
+from conftest import make_mp4, write_caption, write_poses
+
+CFG = KernelConfig.load()
+PROV = {"kind": "derived", "from": [], "transform": "unit test"}
+
+
+@pytest.fixture(scope="module")
+def env(tmp_path_factory):
+    """Build once: ingest runs WorldModel's checker (~5 s per clip)."""
+    run = tmp_path_factory.mktemp("run")
+    rec = Recorder(run)
+    nodes = NodeStore(open_db(run))
+    nodes.create("root", None, 0)
+    nodes.create("n1", "root", 1)
+    tools = DataTools(CFG, run, rec, [0, 1, 2, 3], threading.Lock())
+    reg = TokenRegistry(rec)
+    ws = run / "nodes" / "n1" / "attempts" / "improve_recipe-1" / "workspace"
+    st = run / "staging" / "n1" / "improve_recipe-1"
+    ws.mkdir(parents=True), st.mkdir(parents=True)
+    caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=st)
+    cands = []
+    for i in range(4):
+        seconds = 4.0 + 0.5 * i                      # distinct content -> distinct clips
+        d = st / f"c{i}"
+        make_mp4(d / "v.mp4", seconds=seconds)
+        write_caption(d / "c.json")
+        write_poses(d / "p.npz", n_frames=int(seconds * 30))
+        cands.append({"video": f"/workspace/staging/c{i}/v.mp4",
+                      "caption": f"/workspace/staging/c{i}/c.json",
+                      "pose": f"/workspace/staging/c{i}/p.npz",
+                      "camera_motion": "moving", "provenance": PROV})
+    results = tools.ingest(caller, cands)
+    return tools, caller, results, run
+
+
+def test_ingest_accepts_staged_candidates_by_container_path(env):
+    _, _, results, _ = env
+    assert all(r["accepted"] for r in results), results
+    assert len({r["clip_id"] for r in results}) == 4
+    assert all("video_caption_camera" in r["formats"] for r in results)
+
+
+def test_ingest_refuses_paths_outside_the_workspace(env):
+    tools, caller, _, _ = env
+    with pytest.raises(ToolError, match="outside /workspace"):
+        tools.ingest(caller, [{"video": "/etc/passwd", "caption": "/workspace/staging/x.json",
+                               "camera_motion": "moving", "provenance": PROV}])
+
+
+def test_ingest_rejects_a_malformed_candidate_as_a_tool_error(env):
+    tools, caller, _, _ = env
+    with pytest.raises(ToolError, match="provenance"):
+        tools.ingest(caller, [{"video": "/workspace/staging/x.mp4",
+                               "caption": "/workspace/staging/x.json", "camera_motion": "moving"}])
+
+
+def test_probe_reports_display_geometry(env):
+    tools, caller, _, run = env
+    make_mp4(caller.staging_host / "probe_me.mp4", seconds=3.0)
+    info = tools.probe(caller, "/workspace/staging/probe_me.mp4")
+    assert info["width"] == 736 and info["rotation"] == 0 and abs(info["display_aspect"] - 736 / 414) < 1e-6
+
+
+def test_query_returns_the_archive_wide_pool_with_provenance(env):
+    tools, caller, results, _ = env
+    out = tools.query(caller, {"format": "video_caption_camera"})
+    ids = {c["clip_id"] for c in out["clips"]}
+    assert {r["clip_id"] for r in results} <= ids
+    clip = next(c for c in out["clips"] if c["clip_id"] == results[0]["clip_id"])
+    assert clip["provenance"] == PROV and clip["ingested_by"] == "n1" and clip["used_by_scores"] == []
+
+
+def test_commit_returns_id_and_per_dataset_stats(env):
+    tools, caller, results, _ = env
+    out = tools.commit(caller, None, {"cam": {"format": "video_caption_camera", "prompt_mode": None,
+                                              "weight": 1.0, "clips": [r["clip_id"] for r in results]}},
+                       "four clips")
+    assert len(out["commit_id"]) == 64
+    assert out["datasets"]["cam"] == {"format": "video_caption_camera", "prompt_mode": None,
+                                      "weight": 1.0, "clips": 4}
+
+
+def test_commit_validation_errors_become_tool_errors(env):
+    tools, caller, results, _ = env
+    with pytest.raises(ToolError, match="more than once"):
+        tools.commit(caller, None, {"cam": {"format": "video_caption_camera", "prompt_mode": None,
+                                            "weight": 1.0, "clips": [results[0]["clip_id"]] * 2}}, "dup")
+
+
+def test_recipe_check_reports_gate_failures_without_leaving_a_view(env, monkeypatch):
+    """Controller ruling: the brief's version of this test is vacuous -- its recipe
+    fails the "not tunable" check before Gate.check ever reaches materialize(), so
+    the "no leftover view" assertion passed even with cleanup code deleted.
+
+    This version uses a recipe that clears every pre-materialize gate check (see
+    tests/test_gate.py for the same arithmetic), so the gate genuinely builds a
+    view under the scratch directory, and monkeypatches only the GPU-job steps
+    (check_dataset / precache_dry_run / describe, all routed through
+    ar_kernel.train.gate.run_in_env) so the test needs no GPU or alayaworld env.
+    The fake run_in_env itself asserts the view was populated with real hardlinked
+    clip files -- proving recipe_check's cleanup has something real to remove.
+    """
+    tools, caller, results, _ = env
+    commit = tools.commit(caller, None, {"cam": {"format": "video_caption_camera", "prompt_mode": None,
+                                                 "weight": 1.0, "clips": [r["clip_id"] for r in results]}},
+                          "for check")["commit_id"]
+
+    seen_populated_view = []
+
+    def fake_run_in_env(env_name, args, **kwargs):
+        views = list((caller.workspace_host.parent / "recipe_check").glob("*/view"))
+        seen_populated_view.append(bool(views) and any(any(v.rglob("*.mp4")) for v in views))
+        return subprocess.CompletedProcess(args, 1, "", "monkeypatched: no GPU job in unit tests")
+
+    monkeypatch.setattr("ar_kernel.train.gate.run_in_env", fake_run_in_env)
+
+    # Clears tunable/value checks, resolution/lora defaults (base recipe values
+    # are in the allowlists), the 4-clips->4-GPUs check, and steps_per_epoch:
+    # epoch_windows=4, per_rank=4//4=1, per_epoch=1//1=1, 1*1 >= max_steps=1.
+    recipe = {"optimizer.max_steps": 1, "optimizer.epochs": 1, "optimizer.grad_accum_steps": 1}
+    out = tools.recipe_check(caller, recipe, commit)
+
+    assert seen_populated_view and all(seen_populated_view), \
+        "the gate must have actually built and populated a view before the GPU-job steps ran"
+    assert out["ok"] is False
+    assert any("failed" in f for f in out["failures"]), out["failures"]
+    leftovers = list((caller.workspace_host.parent / "recipe_check").glob("*"))
+    assert leftovers == []
+
+
+def test_register_names_are_openai_safe():
+    import re
+    from ar_kernel.tools.data_tools import TOOL_NAMES
+    assert all(re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", n) for n in TOOL_NAMES)
