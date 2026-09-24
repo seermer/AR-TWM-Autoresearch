@@ -454,3 +454,105 @@ released base with `step reset to 0`.
    check (compared the 4-dp rounded score instead of `details.photometric_psnr`).
    Both looked like confirmation. A verification that passes against the unfixed
    code is not evidence.
+
+---
+
+## Plan 2 — agent runtime
+
+Task 18 of `2026-09-21-autoresearcher-agent-runtime`, run on 2026-09-24 against branch
+`feat/agent-runtime` at `3c20f7a` (code) on this machine. Tasks 1–17 were implemented and
+reviewed before this. **Merge to `main` is withheld** until the whole-branch review is done.
+
+### Verified facts relied on
+
+Plan 2 facts 1–18 (pre-plan spikes, 2026-09-21), in short: MCP 2.x is `MCPServer`, its client
+uses `httpx2`, UDS needs `allowed_hosts=["localhost"]`, `session_idle_timeout=None`, long
+client timeouts (fact 5, now 4 h); the mock Responses API envelope works with
+`ChatOpenAI(use_responses_api=True)`; `--network none` + UDS is the only isolation that also
+hides host services (an `--internal` network still reached host SSH); ffmpeg writes and
+ffprobe reports display rotation; the pinned package set (`langgraph` 1.2.11,
+`langchain-core` 1.6.3, `langchain-openai` 1.6.2, `mcp` 2.2.0, `httpx2` 2.13.0, `langchain`
+1.4.2 for tests only); caller identity via `ctx.request_context.request.headers`;
+underscore tool names; the 107-byte `AF_UNIX` path cap; one event loop per MCP session;
+`create_agent` (langchain 1.4.2 @ 4af7ab8) as the harness reference and its tool-error
+behaviour; snake_case MCP attributes; no offline tokenizer (usage + 4 chars/token, images
+1,500 tokens); `ChatOpenAI` needs both sync and async HTTP clients on the socket.
+
+### Results
+
+| Check | Result |
+|---|---|
+| Default suite (`pytest -p no:cacheprovider`) | **PASS: 342 passed, 17 deselected**, 1 warning (starlette `BlockingPortal` deprecation, pre-existing), 7 m 14 s wall |
+| Docker suite alone (`pytest -m docker`), GPUs idle (`nvidia-smi`: no compute processes) | **PASS: 13 passed, 346 deselected**, 71.7 s (1 m 13 s wall). Slowest: real tool server end to end 37.9 s, hanging smoke run times out 15.6 s, runner timeout kill 8.3 s, seed agent contract 3.5 s, image 1.7 s, isolation 0.31 s. No `ar-*` containers left behind |
+| Harness comparison `tests/test_seed_harness.py` | **PASS: 26 passed** (17 `create_agent` comparison cases + tool-error + 8 compaction tests) |
+| Harness mutation controls (on a copy of `seed_agent/agent/harness.py`, restored byte-identical, sha256 checked) | invalid-tool text **4 failed**; sequential calls in reverse **4**; system prompt after history (`[*system, *messages]` → `[*messages, *system]`) **10**; no content normalisation **2**; invalid-argument text **2**. At stage 1 (18-test file) they were 4, 4, 9, 2, 2; the extra failure is `test_compaction_replaces_history_and_continues` |
+| Isolation negative control | `--network none` → `--network bridge` in `sandbox/runner.py`: `test_isolation_holds_from_inside` **FAILED** (`assert 'open' == 'blocked'`: the internet was reachable). Restored `--network none`: **PASSED** (0.44 s); `git diff kernel/` empty |
+| Live LLM run (Step 4) | **Deferred: no `OPENAI_API_KEY`** (`OPENAI_API_KEY` and `OPENAI_MODEL` are unset in `.env`). Not passed; Plan 4 contract item 10 carries it |
+
+### Spec and plan sync (Step 5)
+
+The earlier amendments (§9.5 no network, §10 underscore names, §1.1 item 9 and §9.1–9.3
+frameworks and edit components) still describe what was built. Amended now to match the
+code: §5.2 attempt refs `refs/attempts/<node>/<phase>-<k>`; §7.2 retries carry the workspace
+for both phases and move staging; §9.1 seed layout (`entry.py` with settings, `harness.py`,
+`orchestration.py`, `tools.py`, `prompts/`, `knowledge/data_building.md`,
+`memory/README.md`) and §9.1.1 paths; §9.1.2 compaction inside the model node on the merged
+state; §9.2 4 h MCP client timeout, kernel re-validation of `result.json`, image build
+failure is a failed attempt; §9.5 `/agent` read-only for `improve_recipe`; §10 `hf.search`
+returns no sizes and searches datasets only. The plan's File structure, Tasks 3–17 notes,
+test counts, the `<plan-2-branch>` placeholder and the Plan 4 contract (config keys as
+constructor parameters, `JobQueue.shutdown` `RuntimeError`, live-run deferral) were updated.
+
+### Defects found during implementation, and their fixes
+
+Pre-flight scan (30 issues, F1–F30) rulings, applied in the named tasks:
+- F1: Task 3 re-runs `pip install -e '.[dev]'` after creating `contract/ar_contract` (editable install maps packages found at install time).
+- F2: Task 2's rejection message keeps "aspect ratio" so the Plan 1 ingest test stays valid.
+- F3/F4: plan test counts were prose; code blocks win, prose synced here.
+- F5: Task 15 re-validates `result.json` with the phase's pydantic model; invalid is `ok=False`.
+- F6: Task 15 deletes a stale `workspace/result.json` before the container starts.
+- F7: `run_edit_self` gained `previous_workspace`, so a retry keeps `edit_plan.json`.
+- F8: on retry the previous staging dir is moved, not copied (downloads up to 20 GiB).
+- F9: the runner scrubs `AR_TOKEN` from the recorded argv; Task 14 records sandbox events on the harness recorder.
+- F10: MCP client timeout 900 s → 14,400 s (a shorter timeout makes agents retry running work).
+- F11: `TokenRegistry.on_revoke` + `CallStore.forget` bound linking memory to live containers.
+- F12: gateway/tool config keys are constructor parameters; added to the Plan 4 contract.
+- F13: the gateway leak test decompresses zstd payloads before searching.
+- F14: the data-tools "leaves no view" test really builds a view first.
+- F15: the runner test uses config roots, not absolute paths.
+- F16: the service test asserts both sockets are 0600.
+- F17: per-dataset stats helpers are module-level in `data_tools`; Task 13 imports them.
+- F18: `EditComponent` Literal defined once in `ar_contract.models`; the seed imports it.
+- F19: the GPU job cancel path reuses the Plan 1 launcher (`run_in_env(cancel=)`).
+- F20: hard-coded phase tool list kept; pinned by a test (deferred minor).
+- F21/F29/F30: doc sync (attempt refs, branch name, `/agent` ro, `hf_search` sizes), done here.
+- F22: seed self-test also rejects keyword-only parameters.
+- F23: seed-agent tests isolate `sys.path` and drop `agent*` modules.
+- F24: `httpx2==2.13.0` declared.
+- F25: the seed MCP adapter prefers `structured_content` over text blocks.
+- F26: the job test waits for the pid file, not a fixed timer.
+- F27/F28: unused import dropped; `run_tool`/summarizer marked async in the interface text.
+
+Review rulings and fix rounds:
+- Task 5 ruling + fix: the plan's `r.text[:2000]` truncated non-JSON upstream error bodies (violates §13.1.3); now the full body is kept (`358feb4`).
+- Task 6 ruling: `ToolError` subclasses the MCP SDK's `ToolError`; MCP 2.2 otherwise masks the message as "Error executing tool".
+- Task 6 ruling: `timeout_keep_alive=900` on `tools.sock` kept (sessions are keyed by header; in-flight responses are not idle).
+- Task 6 fix: `RunServices.stop()` silently dropped live threads; it now raises on a stuck server thread (`d352a96`).
+- Task 8 fix: repo-reported file names that are absolute or contain `..` could escape the `hf_download` destination; refused (`db82ac4`).
+- Task 9 fix: NaN `timeout_s` bypassed the `job_wait` cap; `shutdown` join shorter than the kill path and silent (now raises `RuntimeError`); `run_cancellable` dropped telemetry and the -15 contract (`311c673`).
+- Task 11 ruling + fix: a failed `docker run -d` left a Created container; now removed on every path (`cfae713`).
+- Task 14 ruling + fix: agent-controlled inputs (non-UTF-8 `entry.py`, `RecursionError` in `ast.parse`, malformed or non-object `result.json`) escaped `verify_contract` as kernel exceptions; now failed steps, with the traceback tail in the smoke detail (`e987837`).
+- Task 15 ruling: `ImageBuildError` from an agent-authored `requirements.txt` becomes a failed attempt, not a Plan 4 exception.
+- Task 15 fix: malformed / non-UTF-8 / non-object / symlinked / directory `result.json` raised and skipped the `edit_self` commit; `ImageBuildError`; re-run staging not cleared (move nested); token issued before the `try` and a revoke listener could skip `cancel_for_token`; `ok` must be literally `true` and `error` coerced to a string (`701aa1a`).
+- Seed simplicity ruling (user requirement): the seed agent collapses to `entry.py`, `harness.py`, `orchestration.py`, `tools.py`, `prompts/`, `knowledge/data_building.md`, `memory/README.md`.
+- Task 16 ruling + fix: compaction routing on conditional edges was evaluated per `Send` branch under parallel tool calls (reproduced: a summarizer beside a model call on stale history, and a skipped due compaction); the check moved into `call_model` on the merged state and the graph became exactly `create_agent`'s, with two parallel-call tests (`3c20f7a`).
+
+Deferred minors (logged in the ledger, not fixed in Plan 2) include: `JobQueue` marks a job
+running before it holds the GPU lock; a backend raising after cancel ends `failed`;
+`run_command` timeout kills only bash; one pre-existing unexplained warning in the suite.
+
+### Process note
+
+During this task's doc sync, one text-substitution script was run with the system
+`python3` instead of the conda env (a rule breach; it only edited the plan Markdown and was
+re-checked). All later scripts and every test ran in the `autoresearcher` env.

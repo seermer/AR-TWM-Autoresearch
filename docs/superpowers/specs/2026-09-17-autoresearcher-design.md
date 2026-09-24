@@ -211,7 +211,8 @@ AutoResearcher/
 `runs/<run>/agents.git` is a real git repository. The root node's commit is the content of
 `seed_agent/`. A child's code is committed on branch `node/<id>`, branched from the
 parent's commit. Every attempt (including failed ones) is committed under
-`refs/attempts/<node>/<k>`.
+`refs/attempts/<node>/<phase>-<k>` (e.g. `refs/attempts/n7/edit_self-2`). *(Amended
+2026-09-24, Plan 2 as built: the phase is part of the ref, since both phases have attempts.)*
 
 ### 5.3 Blob store
 
@@ -409,7 +410,10 @@ One node at a time. GPU phases never overlap.
 - **Retry semantics (3↔4, 5↔6):** a retry continues from the failed attempt's code or
   workspace; the failure report (verifier or gate output) is provided at
   `/context/retry.json`. The agent may fix or reset. Clips ingested during a failed recipe
-  attempt remain in the archive-wide clip pool.
+  attempt remain in the archive-wide clip pool. *(Plan 2 as built: both phases take the
+  failed attempt's workspace, so an `edit_self` retry keeps its edit plan; the workspace is
+  copied, its stale `result.json` removed, and the attempt's staging directory is moved,
+  not copied, because downloads can be tens of GiB.)*
 - **Exhaustion:** `invalid_code` after `N_edit` failed attempts; `invalid_recipe` after
   `N_recipe`.
 - **Recipe-caused training failures** (CUDA OOM, NaN/inf loss, training wall-time cap
@@ -495,26 +499,28 @@ so near-pure hyperparameter changes are visible in analysis.
 
 ### 9.1 Seed agent repo (`seed_agent/`, fully editable by agents)
 
-*(Amended 2026-09-21, Plan 2 revision: the OpenAI Agents SDK is dropped.)*
+*(Amended 2026-09-21, Plan 2 revision: the OpenAI Agents SDK is dropped. Amended 2026-09-24,
+Plan 2 as built: agent code prefers simplicity over everything, since every cycle reads and
+rewrites it, so the seed is four modules instead of packages.)*
 
 ```
 agent/
-  entry.py            # def edit_self(ctx) -> EditResult ; def improve_recipe(ctx) -> RecipeResult
+  entry.py            # def edit_self(ctx) -> EditResult ; def improve_recipe(ctx) -> RecipeResult,
+                      #   plus the settings: model, context window, compaction threshold, round limits
   requirements.txt
-  settings.py         # model, context window, compaction threshold, round limits
-  harness/            # single-agent inner loop (§9.1.2): react.py (explicit LangGraph ReAct
-                      #   graph), compact.py (auto-compaction)
-  orchestration/      # multi-agent workflow in plain Python: roles.py (a role = system prompt
-                      #   + knowledge + tools, run on the harness), task.py (improve_recipe),
-                      #   meta.py (edit_self)
+  harness.py          # single-agent inner loop (§9.1.2): explicit LangGraph ReAct graph with
+                      #   auto-compaction
+  orchestration.py    # multi-agent workflow in plain Python: roles (a role = system prompt
+                      #   + knowledge + tools, run on the harness), improve_recipe, edit_self
   prompts/            # one Markdown system prompt per role, plus compact.md
-  tools/              # agent-local tools (file read/list/write/edit, bash, ffmpeg/ffprobe;
+  tools.py            # agent-local tools (file read/list/write/edit, bash, ffmpeg/ffprobe;
                       #   caption_clip: sample frames with ffmpeg and caption them with a
                       #   vision model through the gateway; timed-prompt helper that snaps
                       #   segment boundaries to round boundaries), the MCP -> LangChain adapter
                       #   for kernel tools, and submit_* result tools
-  knowledge/          # reference material that roles read (formats, conversion recipes)
-  memory/             # agent-owned notes (in the code repo, inherited by children)
+  knowledge/          # reference material that roles read: data_building.md (formats,
+                      #   conversion recipes)
+  memory/             # agent-owned notes (in the code repo, inherited by children): README.md
 ```
 
 **Roles and results.** Each LLM step is a role run on the harness. A role returns its result
@@ -542,9 +548,9 @@ focused change, so the next node's score can be attributed to it:
 | Component | Where (seed layout) | What changes |
 |---|---|---|
 | `prompts` | `agent/prompts/` | The system prompt of any role |
-| `tools` | `agent/tools/` | Agent-local tools and the kernel-tool adapter (never the kernel tools themselves) |
-| `harness` | `agent/harness/` | The single-agent inner loop: graph, tool execution, context management |
-| `orchestration` | `agent/orchestration/` | Which roles run, in what order, with which tools and context |
+| `tools` | `agent/tools.py` | Agent-local tools and the kernel-tool adapter (never the kernel tools themselves) |
+| `harness` | `agent/harness.py` | The single-agent inner loop: graph, tool execution, context management |
+| `orchestration` | `agent/orchestration.py` (+ settings in `agent/entry.py`) | Which roles run, in what order, with which tools and context |
 | `knowledge` | `agent/knowledge/` | Reference material roles read |
 
 The choice is returned as `EditResult.component`, stored with the node and shown in the
@@ -553,7 +559,7 @@ touches other components. Notes in `memory/` are bookkeeping and may be written 
 
 #### 9.1.2 Seed harness
 
-`build_react_agent(model, tools, system_prompt, *, context_window, compact_at)` behaves
+`build_react_agent(model, tools, system_prompt, *, context_window, compact_at, compact_prompt)` behaves
 exactly like `create_agent(model, tools, system_prompt=...)` from `langchain` 1.4.2 with no
 middleware and no `response_format`: START → model → END if the last AI message has no tool
 calls, otherwise one parallel `Send("tools", [call])` per call → model; tools are bound on
@@ -563,24 +569,35 @@ exactly two ways:
 
 1. **Tool errors.** A tool that raises is reported to the model as an error `ToolMessage`
    (`ToolNode`'s `handle_tool_errors=True` text) instead of ending the run.
-2. **Auto-compaction.** Before every model call the harness estimates the context: the last
+2. **Auto-compaction.** Before every model call, inside the model node, the harness estimates
+   the context on the merged state (after all parallel tool results are in): the last
    reply's reported `usage.total_tokens` plus about 4 characters per token for the messages
    after it, with each image block counted as a fixed 1,500 tokens. Below
    `compact_at × context_window` (`agents.compact_at`, default 0.85, and
    `agents.context_window_tokens`, passed to the container) messages append linearly. At or
    above it, a dedicated summarizer call (same system prompt, tools and history,
    `tool_choice="none"`, the instruction in `prompts/compact.md`) writes a structured
-   summary, and the history is replaced by one user message: a continuation preamble plus
-   the summary.
+   summary, the history is replaced by one user message (a continuation preamble plus
+   the summary), and the model call runs on it. The graph itself stays exactly
+   `create_agent`'s: there is no separate compaction node. *(Amended 2026-09-24, Plan 2 as
+   built: a routing function on the edge from the tool node runs once per parallel `Send`
+   branch, before their results merge, so it could compact beside a normal model call or
+   skip a due compaction.)*
 
 ### 9.2 Fixed contract package (`ar_contract`, kernel-owned, read-only)
 
 - Pydantic models: `EditContext`, `EditResult`, `RecipeContext`, `RecipeResult`.
 - Client helpers: `chat_model()` (a `ChatOpenAI` bound to the gateway socket with the
-  per-container token) and `mcp_session()` (an MCP client session on the tool server socket).
+  per-container token) and `mcp_session()` (an MCP client session on the tool server socket,
+  with a 4 h read timeout: `recipe.check` can wait on the GPU lock and then run long gate
+  steps, and `hf.download` can fetch 20 GiB; a shorter client timeout would make the agent
+  retry work still in progress. The phase hard cap bounds real hangs).
 - Runner: `python -m ar_contract.run <edit_self|improve_recipe>`. It imports `agent.entry`,
   calls the function, validates the result against the schema, and writes
-  `/workspace/result.json`.
+  `/workspace/result.json`. The kernel does not trust that file (agent code can write it):
+  it re-validates it against the same schema, and anything unreadable or invalid is a failed
+  attempt, never a kernel exception. An agent-authored `requirements.txt` that fails to
+  build is also a failed attempt.
 
 ### 9.3 Contexts and results
 
@@ -604,7 +621,7 @@ exactly two ways:
 
 | Mount | Mode | Content |
 |---|---|---|
-| `/agent` | rw | Copy of the code being run/edited |
+| `/agent` | rw for `edit_self`, ro for `improve_recipe` | Copy of the code being run/edited *(amended 2026-09-24, Plan 2 as built: only `edit_self` changes code)* |
 | `/workspace` | rw | Staging, scratch, results |
 | `/context` | ro | Context bundle (+ `retry.json`) |
 | `/store` | ro | Blob store (clips resolved via tools) |
@@ -636,7 +653,7 @@ conversion, cropping, trimming, captioning, prompt timing) is agent code.
 
 | Tool | Behavior |
 |---|---|
-| `hf.search(query, kind)` | Hugging Face dataset/model search; returns ids, tags, license, sizes. |
+| `hf.search(query, kind)` | Hugging Face dataset search; returns ids, license, tags, download counts and last-modified time. *(Amended 2026-09-24, Plan 2 as built: no sizes, which need a per-repo metadata call; `hf.download` checks them against the byte cap before transferring. `kind` other than `dataset` is refused: models are not training data.)* |
 | `hf.download(repo, revision, patterns, max_bytes)` | Downloads into `/workspace/staging/hf/...`; records repo, revision, files, bytes, license. |
 | `rollout.alayaworld(first_frame, camera, prompt_schedule, frames, variant, seed)` | Renders with the released checkpoint (`variant`: `dmd4` = 4-step student, `ar30` = 30-step teacher) through the `custom_i2v` validation path. `camera` is `{cam_c2w [N,4,4], intrinsics}` or a navigation action list. Output is a staging candidate in standard layout: 24 fps mp4, `cam_c2w` for every frame + intrinsics, caption JSON; with a per-round `prompt_schedule`, `segments` aligned to round boundaries (eligible for `per_chunk`). |
 | `rollout.ltx25(prompt, image?, video?, frames, resolution, seed, variant)` | LTX-2.5 generation (T2V/I2V/V2V; `dev` or `distilled`), 24 fps, 16:9. Output: mp4 + caption JSON (no poses). |

@@ -34,7 +34,7 @@ Each of these was checked on this machine before the plan was written. Several d
 2. **The MCP 2.x client uses `httpx2`, not `httpx`.** `mcp.client.streamable_http.streamable_http_client(url, http_client=httpx2.AsyncClient(transport=httpx2.AsyncHTTPTransport(uds=...)))` yields `(read, write)` for `mcp.ClientSession(read, write, read_timeout_seconds=...)`. Verified end to end over a Unix socket.
 3. **Host header over UDS.** The MCP server's DNS-rebinding guard rejects `Host: localhost` (no port) with **421**. Pass `transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=True, allowed_hosts=["localhost"], allowed_origins=[])`, and address both services as `http://localhost/...` over the socket.
 4. **Session idle timeout.** `streamable_http_app` defaults to `session_idle_timeout=1800`, which silently kills the session of an agent that makes no tool call for 30 min. Use `session_idle_timeout=None`.
-5. **Client timeout.** `data_ingest` runs WorldModel's checker per clip and takes minutes. `ar_contract.client.mcp_session` sets `read_timeout_seconds=900` and a 900 s `httpx2` timeout.
+5. **Client timeout.** `data_ingest` runs WorldModel's checker per clip and takes minutes; `recipe_check` can wait on the GPU lock and then run 3,600 s gate steps; `hf_download` can fetch up to 20 GiB. `ar_contract.client.mcp_session` sets `read_timeout_seconds=MCP_TIMEOUT_S` and the same `httpx2` timeout, with `MCP_TIMEOUT_S = 14400` (4 h). *(As built: the first draft said 900 s; a client timeout shorter than a server operation makes the agent retry work that is still running. The phase hard cap bounds real hangs.)*
 6. **Mock Responses API.** A scripted `/v1/responses` server works with `langchain-openai`'s `ChatOpenAI(use_responses_api=True)` when each response carries `id, object="response", created_at, status="completed", model, output, parallel_tool_calls, tool_choice, tools, usage{input_tokens, output_tokens, total_tokens, input_tokens_details{cached_tokens}, output_tokens_details{reasoning_tokens}}`. A tool call is an output item `{"type":"function_call","id","call_id","name","arguments","status":"completed"}`. `ChatOpenAI` turns these into `tool_calls`, sends `function_call_output` items on the next request, reports `usage` as `usage_metadata`, and sends `stream: false`, so the gateway needs no streaming. `bind_tools(tools, tool_choice="none")` sends `tool_choice: "none"`, and `image_url` content blocks become `input_image` items. Its resent history equals the previous request plus response under the gateway's prefix normalization (Task 4), checked for tool-call and text turns, so conversation linking works; after an auto-compaction the history loses that prefix and a new conversation starts.
 7. **Sandbox networking.** A Docker `--internal` network blocks the internet and DNS, **but the host stays reachable at the bridge IP**: SSH on 22 and another host service were open from inside. `--network none` plus the UDS socket directory gives complete isolation. Verified: the agent loop completes, host ports are unreachable, the internet is blocked, and files are owned by the host uid.
 8. **ffmpeg 6.1.1** writes rotation with `ffmpeg -display_rotation 90 -i in.mp4 -c copy out.mp4`, and ffprobe reports it as `side_data_list:[{"rotation":90}]`. A 552x414 clip with `sample_aspect_ratio` `4:3` displays at 16:9.
@@ -70,6 +70,13 @@ The GPU generators were split out because they are independent of the runtime, n
 
 All amendments are applied to the spec in the same commits as this plan.
 
+Amendments made during implementation (applied to the spec in Task 18):
+- **§5.2 attempt refs:** `refs/attempts/<node>/<phase>-<k>` (for example `edit_self-2`), not `refs/attempts/<node>/<k>`, because both phases have attempts.
+- **§9.1 layout and §9.1.1 paths:** the seed agent is `entry.py` (with the settings), `harness.py`, `orchestration.py`, `tools.py`, `prompts/`, `knowledge/data_building.md` and `memory/README.md` (simplicity ruling, File structure).
+- **§9.1.2 compaction placement:** the compaction check runs inside the model node on the merged state; the graph is exactly `create_agent`'s (Task 16).
+- **§9.5 mounts:** `/agent` is read-only for `improve_recipe`; only `edit_self` changes code.
+- **§10 `hf.search`:** returns ids, license, tags, downloads and last-modified time, not sizes; `hf.download` checks sizes before transferring.
+
 ## File structure
 
 ```
@@ -99,14 +106,17 @@ kernel/ar_kernel/
 contract/ar_contract/          CREATE  kernel-owned, mounted read-only into containers
   __init__.py  models.py  client.py  run.py
 seed_agent/agent/              CREATE  initial agent code (the root node's commit)
-  entry.py  settings.py  requirements.txt
-  harness/react.py  harness/compact.py          single-agent inner loop (Task 16)
-  orchestration/roles.py  task.py  meta.py      multi-agent workflow, plain Python (Task 17)
-  prompts/*.md  tools/*.py  knowledge/*.md  memory/README.md
+  entry.py            edit_self / improve_recipe + the settings constants (Task 17)
+  harness.py          single-agent inner loop: ReAct graph + auto-compaction (Task 16)
+  orchestration.py    roles + improve_recipe workflow + edit_self workflow, plain Python (Task 17)
+  tools.py            file/bash, media, MCP adapter, submit_* tools (Task 17)
+  requirements.txt  prompts/*.md  knowledge/data_building.md  memory/README.md
 docker/agent.Dockerfile        CREATE
 configs/kernel.yaml            MODIFY  gateway, agents, tools, sandbox, timeouts, generators blocks
 tests/                         CREATE  one test file per component (named per task)
 ```
+
+*As built (2026-09-23, user requirement):* agent code is what self-improvement reads and rewrites every cycle, so it prefers simplicity over everything: fewer, shorter files and straightforward code. The seed agent was therefore built as the four modules above instead of the first draft's `settings.py`, `harness/{react,compact}.py`, `orchestration/{roles,task,meta}.py` and `tools/{files,media,kernel,submit}.py` packages, with the same behaviour and tests. `knowledge/README.md` was dropped (the edit components table and `memory/README.md` already say what `knowledge/` is for).
 
 ---
 ### Task 1: Dependencies, config blocks, telemetry v2
@@ -558,7 +568,7 @@ Kernel-owned and mounted read-only at `/ar_contract` in every container (spec §
 
 **Interfaces:**
 - Produces (imported by agent code, the kernel's context builder and contract verification):
-  - `ar_contract.models`: `EditContext`, `EditResult` (`summary`, optional `component`), `RecipeContext`, `RecipeResult` (pydantic v2), `EDIT_COMPONENTS = ("prompts", "tools", "harness", "orchestration", "knowledge")`, and `CONTEXT_MODELS = {"edit_self": EditContext, "improve_recipe": RecipeContext}`, `RESULT_MODELS = {"edit_self": EditResult, "improve_recipe": RecipeResult}`.
+  - `ar_contract.models`: `EditContext`, `EditResult` (`summary`, optional `component`), `RecipeContext`, `RecipeResult` (pydantic v2), `EditComponent = Literal["prompts", "tools", "harness", "orchestration", "knowledge"]` and `EDIT_COMPONENTS = typing.get_args(EditComponent)` (defined once; Task 17 imports `EditComponent`), and `CONTEXT_MODELS = {"edit_self": EditContext, "improve_recipe": RecipeContext}`, `RESULT_MODELS = {"edit_self": EditResult, "improve_recipe": RecipeResult}`.
   - `ar_contract.client`: `socket_dir() -> str` (env `AR_SOCKET_DIR`, default `/run/ar`), `token() -> str` (env `AR_TOKEN`), `default_model() -> str` (env `AR_DEFAULT_MODEL`), `chat_model(model=None, **kwargs) -> langchain_openai.ChatOpenAI` (gateway socket for both the sync and the async client, fact 18; Responses API, `max_retries=0`), and `mcp_session(sockets=None, auth_token=None)`, an async context manager yielding an initialized `mcp.ClientSession` on the tool server. Both read the environment when called.
   - `ar_contract.run.main(argv) -> int`, run as `python -m ar_contract.run <edit_self|improve_recipe>`. It reads `$AR_CONTEXT_DIR/context.json` (default `/context`), imports `agent.entry` from `$AR_AGENT_DIR` (default `/agent`), calls the entry point (sync or async), validates the result, and writes `$AR_WORKSPACE/result.json` (default `/workspace`) as `{"ok": true, "result": {...}}` or `{"ok": false, "error": "...", "traceback": "..."}`. Exit code 0 means ok.
 
@@ -723,12 +733,14 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'ar_contract'`.
 """Schemas the kernel validates every agent call against (spec 9.3)."""
 from __future__ import annotations
 
+import typing
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 # The five parts of an agent version an edit_self plan picks from (spec 9.1.1).
-EDIT_COMPONENTS = ("prompts", "tools", "harness", "orchestration", "knowledge")
+EditComponent = Literal["prompts", "tools", "harness", "orchestration", "knowledge"]
+EDIT_COMPONENTS = typing.get_args(EditComponent)
 
 
 class _Ctx(BaseModel):
@@ -763,7 +775,7 @@ class RecipeContext(_Ctx):
 class EditResult(BaseModel):
     summary: str = Field(min_length=1)
     # The component the edit plan chose. Recorded with the node, never enforced.
-    component: Literal["prompts", "tools", "harness", "orchestration", "knowledge"] | None = None
+    component: EditComponent | None = None
 
 
 class RecipeResult(BaseModel):
@@ -799,7 +811,7 @@ from pathlib import Path
 import httpx
 import httpx2
 
-MCP_TIMEOUT_S = 900.0
+MCP_TIMEOUT_S = 14400.0      # 4 h (fact 5): recipe_check and hf_download can outlast 900 s
 LLM_TIMEOUT_S = 900.0
 
 
@@ -937,6 +949,7 @@ and exhaustive tests before any HTTP is involved.
   - `tools.context.bearer(header: str | None) -> str | None`.
   - `tools.context.to_host(caller, container_path: str) -> Path`, `tools.context.to_container(caller, host_path: Path) -> str`, and `tools.context.PathError(ValueError)`.
   - `gateway.store.CallStore(recorder)`: `.begin(caller, endpoint, body) -> dict` returns `{call_id, conversation_id, turn_index, parent_call_id}`; `.end(meta, caller, *, status, body, latency_s, attempts) -> None`. Both raise `TelemetryError` if persistence fails (fail-closed).
+  - *As built:* `TokenRegistry.on_revoke(fn)` registers a listener called with the token on `.revoke`, and `CallStore.forget(token)` drops that token's conversation-linking state; the store also drops a call's stored `request` once its normalized `prefix` is kept. Task 5's `create_gateway_app` wires `registry.on_revoke(store.forget)`, so linking memory is bounded by the live containers.
 
 Container mount layout (used by every later task):
 `/workspace` ← `caller.workspace_host`; `/workspace/staging` ← `caller.staging_host`,
@@ -1124,7 +1137,7 @@ def to_container(caller: Caller, host_path: Path) -> str:
 - [ ] **Step 4: Run the path tests**
 
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_tool_context.py -p no:cacheprovider`
-Expected: PASS (13 tests counting the parametrized ones).
+Expected: PASS (14 tests counting the parametrized ones).
 
 - [ ] **Step 5: Write the failing tests for the call store**
 
@@ -1666,7 +1679,7 @@ class Upstream:
                         payload = r.json() if r.content else {}
                     except ValueError:        # e.g. an HTML error page from a proxy in front of the API
                         payload = {"error": {"message": f"upstream returned HTTP {status} with a "
-                                                        f"non-JSON body", "body": r.text[:2000]}}
+                                                        f"non-JSON body", "body": r.text}}   # full body: no telemetry truncation (§13.1.3)
                         status = status if status >= 400 else 502   # never pass garbage on as success
                 except httpx.HTTPError as exc:
                     status, payload = 599, {"error": f"{type(exc).__name__}: {exc}"}
@@ -1728,7 +1741,7 @@ def create_gateway_app(*, registry, store: CallStore, allowed_models: set[str],
 - [ ] **Step 5: Run the tests**
 
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_gateway_app.py -p no:cacheprovider`
-Expected: PASS (15 tests).
+Expected: PASS (16 tests).
 
 - [ ] **Step 6: Commit**
 
@@ -1750,12 +1763,13 @@ The MCP server factory that every kernel tool registers on, plus starting and st
 **Interfaces:**
 - Consumes: `TokenRegistry`, `bearer` (Task 4); `create_gateway_app` (Task 5).
 - Produces:
-  - `tools.server.ToolError(Exception)`: the message the agent sees.
+  - `tools.server.ToolError`: the message the agent sees. *As built:* it subclasses the MCP SDK's `mcp.server.mcpserver.exceptions.ToolError` (still an `Exception`), because MCP 2.2 masks the message of any other exception type as `Error executing tool <name>`.
   - `tools.server.ToolKit(registry, recorder)`: `await .call(ctx, name: str, args: dict, fn: Callable[[Caller], Any]) -> Any`. Resolves the caller, records, runs `fn(caller)` in a worker thread, and re-raises every failure as `ToolError`.
   - `tools.server.build_tool_app(mcp: MCPServer) -> Starlette`, with the transport settings from facts 3–4.
   - `tools.server.new_mcp() -> MCPServer`.
   - `services.socket_dir_for(run_dir: Path) -> Path`, a short per-run directory under the system temp dir (fact 12: Unix socket paths are capped at 107 bytes).
   - `services.RunServices`: `.start(gateway_app, tools_app) -> None`, `.stop() -> None`, `.socket_dir: Path`. It binds `gateway.sock` and `tools.sock` with mode 0600, in a directory with mode 0700.
+  - *As built (review fix):* `.stop()` raises `RuntimeError` if a server thread is still alive after its join timeout, instead of silently leaking it.
 
 Tool names use underscores: OpenAI function names must match `^[a-zA-Z0-9_-]+$`, and LangChain passes tool names through as function names. So spec §10's `data.ingest` is registered as `data_ingest`, and so on.
 
@@ -1884,13 +1898,15 @@ import traceback
 from typing import Any, Callable
 
 from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError as _MCPToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
 from .context import bearer
 
 
-class ToolError(Exception):
-    """A failure the agent should see and may act on."""
+class ToolError(_MCPToolError):
+    """A failure the agent should see and may act on. Subclasses the SDK's ToolError:
+    the SDK masks any other exception's message as "Error executing tool <name>"."""
 
 
 def new_mcp() -> MCPServer:
@@ -2009,7 +2025,7 @@ class RunServices:
 - [ ] **Step 5: Run the tests**
 
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_tool_server.py -p no:cacheprovider`
-Expected: PASS (6 tests).
+Expected: PASS (7 tests).
 
 - [ ] **Step 6: Commit**
 
@@ -2400,6 +2416,7 @@ git commit -m "feat(tools): data tools over the kernel -- probe, ingest, query, 
   - `.download(caller, repo, revision, patterns, max_bytes=None) -> dict`.
   - `hf_tools.register_hf_tools(mcp, kit, tools)` registers `hf_search` and `hf_download`.
 - The kernel process has network access and `HF_TOKEN` from the shell; the container has neither.
+- *As built:* `hf_search` returns ids, license, tags, download counts and last-modified time but **no sizes** (sizes need a per-repo `dataset_info(files_metadata=True)` call; `hf_download` makes it and checks the byte cap before transferring). This is a spec §10 amendment. `hf_download` also refuses repo-reported file names that are absolute or contain `..` (review fix).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2582,7 +2599,7 @@ def register_hf_tools(mcp, kit, tools: HfTools) -> None:
 - [ ] **Step 4: Run the tests**
 
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_hf_tools.py -p no:cacheprovider`
-Expected: PASS (5 tests).
+Expected: PASS (6 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -2607,7 +2624,8 @@ The asynchronous job mechanism behind every GPU tool (spec 10): a queue that run
   - `jobs.JobBackend` (Protocol): `name: str`, `tool: str` (the MCP tool name), `run(job: Job, cancel: threading.Event, report: Callable[[dict], None]) -> dict`.
   - `jobs.Job` (dataclass): `id, backend, args, node, token, state, progress, result, error, created, started, finished`.
   - `jobs.JobQueue(recorder, gpu_lock: threading.Lock, wait_cap_s: float)`: `.register(backend)`, `.submit(caller, backend_name, args) -> str`, `.status(caller, job_id) -> dict`, `.wait(caller, job_id, timeout_s) -> dict`, `.cancel(caller, job_id) -> dict`, `.cancel_for_token(token) -> int`, `.shutdown()`. States: `queued`, `running`, `done`, `failed`, `cancelled`.
-  - `jobs.run_cancellable(env, args, *, cwd, cancel, extra_env=None, log_path, poll_s=1.0) -> int`. It starts the command in its own session and kills the **group** when `cancel` is set. It returns the exit code, or -15 when cancelled.
+  - `jobs.run_cancellable(env, args, *, cwd, cancel, extra_env=None, log_path, poll_s=1.0) -> int`. It starts the command in its own session and kills the **group** when `cancel` is set. It returns the exit code, or -15 when cancelled. *As built:* it is a thin wrapper over the Plan 1 launcher rather than a second launcher: `subproc.run_in_env` gained `cancel: threading.Event | None = None` and `poll_s`; with `cancel` set it polls, kills the process group on cancel, records a distinct `subproc.cancelled` event and sets `.cancelled` on its result. `run_cancellable` also takes `recorder`, `node` and `phase` (passed through for telemetry) and returns -15 whenever `.cancelled` is true, even if SIGKILL was needed.
+  - *As built:* `JobQueue.shutdown()` raises `RuntimeError` if the worker thread outlives its join deadline (a job may still hold a GPU); `job_wait` also caps a non-finite `timeout_s`.
   - `jobs.register_job_tools(mcp, kit, queue)` registers `job_status`, `job_wait`, `job_cancel`.
 - A caller can see and cancel only jobs its own token submitted. `cancel_for_token` runs when a phase's container exits (Task 15), so an agent's orphaned jobs never keep the GPUs.
 
@@ -2963,7 +2981,7 @@ def register_job_tools(mcp, kit, q: JobQueue) -> None:
 - [ ] **Step 4: Run the tests**
 
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_jobs.py -p no:cacheprovider`
-Expected: PASS (9 tests).
+Expected: PASS (12 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -3149,6 +3167,7 @@ One container per agent call (spec 9.5): the mount table, no network, the host u
   - `sandbox.runner.run_container(*, image, name, mounts, command, env, cpus, memory_gb, timeout_s, recorder, node, phase, attempt, stats_every_s=30.0) -> RunResult`.
   - `sandbox.runner.snapshot(root: Path, hash_files: bool) -> dict[str, str]` and `sandbox.runner.diff(before, after) -> dict` (`added`, `removed`, `changed`), used for the §13.3 filesystem diff.
 - Guarantees: the container is removed on every exit path; a timeout kills the container (`docker kill` stops every process in it, so no orphans); the result records `timed_out`.
+- *As built:* the argv recorded in telemetry has the `AR_TOKEN` value replaced by `<redacted>` (defence in depth; the real argv keeps it), and a `docker run -d` that fails after creating the container still removes it (review fix).
 
 Container flags: `--network none --user <uid>:<gid> --read-only --tmpfs /tmp:rw,size=4g --cap-drop ALL --security-opt no-new-privileges --pids-limit 4096 --cpus <n> --memory <g>g`. Mounts: `/agent` (rw, or ro for `improve_recipe`), `/workspace` rw, `/workspace/staging` rw (nested), `/context` ro, `/store` ro, `/ar_contract` ro, `/run/ar` rw (the sockets). The runner always sets `HOME=/workspace/.home`, `PYTHONPATH=/ar_contract`, `AR_SOCKET_DIR=/run/ar`, `AR_AGENT_DIR=/agent`, `AR_CONTEXT_DIR=/context`, `AR_WORKSPACE=/workspace`.
 
@@ -3393,7 +3412,7 @@ def run_container(*, image: str, name: str, mounts: Mounts, command: list[str], 
 - [ ] **Step 4: Run the tests**
 
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_sandbox_runner.py -p no:cacheprovider`
-Expected: PASS (2 unit tests).
+Expected: PASS (3 unit tests).
 
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_sandbox_runner.py -m docker -p no:cacheprovider`
 Expected: PASS (3 docker tests, including the isolation test).
@@ -3409,7 +3428,7 @@ git commit -m "feat(sandbox): isolated container runner -- no network, host uid,
 
 ### Task 12: The agent code repository
 
-`runs/<run>/agents.git` (spec 5.2): the root commit is `seed_agent/`; a child's code lives on `node/<id>`; every attempt, failed ones included, is committed under `refs/attempts/<node>/<k>`. This uses git plumbing with a private index, so the repository never needs a checked-out working tree.
+`runs/<run>/agents.git` (spec 5.2): the root commit is `seed_agent/`; a child's code lives on `node/<id>`; every attempt, failed ones included, is committed under `refs/attempts/<node>/<phase>-<k>` (for example `refs/attempts/n1/edit_self-2`). This uses git plumbing with a private index, so the repository never needs a checked-out working tree.
 
 **Files:**
 - Create: `kernel/ar_kernel/vcs/__init__.py` (empty), `kernel/ar_kernel/vcs/agents_repo.py`
@@ -3884,6 +3903,7 @@ Runs after every self-edit, in fresh containers from the child commit (spec 9.4)
   - `contract.verify.ContractHarness(cfg, run_dir, recorder)`: `.start()`, `.stop()`, `.socket_dir`, `.registry`. It holds the mock gateway (upstream `None`, script `smoke`, model `mock-model` allowed) and the mock tools on their own socket directory.
   - `contract.verify.verify_contract(*, cfg, run_dir, run_id, repo, commit, harness, recorder, node, attempt, import_timeout_s=None, smoke_timeout_s=None, runner=run_container) -> ContractReport`.
 - Timeouts: import `timeouts.contract_import_s` (60 s); smoke run hard cap = 4 x `timeouts.contract_smoke_s` (spec 14.5). Tests pass small overrides.
+- *As built (review fix):* agent-controlled inputs never escape `verify_contract` as kernel exceptions: a non-UTF-8 `entry.py` or an `ast.parse` `RecursionError` fails the static step, and a malformed or non-object `result.json` fails the smoke step (with the result's traceback tail in the detail). Sandbox events use the harness's recorder, so the container token is redacted from them.
 
 - [ ] **Step 1: Create the fixture agents**
 
@@ -4270,7 +4290,7 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
 - [ ] **Step 5: Run the tests (unit, then docker)**
 
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_contract_verify.py -p no:cacheprovider`
-Expected: PASS (8: the 7 static-check cases and the token and job cleanup test).
+Expected: PASS (13 as built: the 7 static-check cases, the token and job cleanup test, and 5 added in review: token redaction in telemetry and agent-controlled inputs, namely a non-UTF-8 `entry.py`, a recursion-depth `ast.parse` failure and malformed `result.json`).
 
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_contract_verify.py -m docker -p no:cacheprovider`
 Expected: PASS (7 docker cases: good, 5 broken, hang).
@@ -4304,9 +4324,15 @@ runs/<run>/staging/<n>/<phase>-<k>/            (mounted at /workspace/staging)
   - `agent_phase.PhaseEnv` (dataclass): `cfg, run_dir, run_id, recorder, registry, queue, repo, socket_dir, gpus, default_model, runner=run_container`.
   - `agent_phase.PhaseOutcome` (dataclass): `ok: bool, result: dict | None, error: str | None, exit_code: int | None, timed_out: bool, commit: str | None, attempt_dir: Path, duration_s: float`.
   - `agent_phase.attempt_dirs(run_dir, node, phase, attempt) -> dict[str, Path]` with keys `attempt, agent, workspace, context, staging`.
-  - `agent_phase.run_edit_self(env, *, conn, node, parent_id, base_commit, attempt, max_attempts, retry, nodes_remaining, mock_script=None, dry_run=False) -> PhaseOutcome`. `base_commit` is the parent's code on attempt 1 and the failed attempt's commit on a retry (spec 7.2).
+  - `agent_phase.run_edit_self(env, *, conn, node, parent_id, base_commit, attempt, max_attempts, retry, nodes_remaining, previous_workspace=None, mock_script=None, dry_run=False) -> PhaseOutcome`. `base_commit` is the parent's code on attempt 1 and the failed attempt's commit on a retry (spec 7.2). *As built:* `previous_workspace` was added so a contract retry keeps `/workspace/edit_plan.json` (Task 17) and stays with the same component.
   - `agent_phase.run_improve_recipe(env, *, conn, node, parent_id, agent_commit, attempt, max_attempts, retry, nodes_remaining, previous_workspace=None, mock_script=None, dry_run=False) -> PhaseOutcome`. `previous_workspace` is copied in on a retry (spec 7.2).
-- `improve_recipe` mounts `/agent` read-only: only `edit_self` changes code. A `RecipeResult` naming a data commit that does not exist is `ok=False`.
+- `improve_recipe` mounts `/agent` read-only: only `edit_self` changes code (a spec §9.5 amendment). A `RecipeResult` naming a data commit that does not exist is `ok=False`.
+- *As built (differences from the code below, all from the pre-flight rulings and review):*
+  - `result.json` is agent-controlled, so the kernel never trusts it: `_read_result` returns a failed body for a symlink, directory, non-UTF-8, non-JSON or non-object file; `_validate_result` requires `ok` to be literally `true` and re-validates `result` with the phase's pydantic model (`EditResult` / `RecipeResult`); anything else is a failed attempt with a reason, never a kernel exception. `error` is coerced to a string.
+  - `_run` removes a stale `workspace/result.json` (unlinking a symlink without following it) before the container starts, so a retry's copied workspace cannot supply the previous attempt's result.
+  - On a retry, the previous attempt's staging directory (`staging/<n>/<prev phase>-<k>`) is **moved**, not copied, into the new attempt's staging (downloads can be 20 GiB); re-running the same attempt number first clears its old staging.
+  - An `ImageBuildError` from an agent-authored `requirements.txt` becomes a failed `PhaseOutcome` (and `edit_self` still commits the attempt), not an exception for Plan 4.
+  - The `try` opens right after the token is issued, and a nested `try/finally` makes `queue.cancel_for_token` run even if `registry.revoke` raises.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4623,7 +4649,7 @@ def run_improve_recipe(env: PhaseEnv, *, conn, node: str, parent_id: str, agent_
 - [ ] **Step 4: Run the tests**
 
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_agent_phase.py -p no:cacheprovider`
-Expected: PASS (8 tests).
+Expected: PASS (23 tests as built, including the review additions for untrusted `result.json`, image build failures and staging on retry).
 
 - [ ] **Step 5: Add a docker end-to-end test: real container, real gateway (mock script), real tools**
 
@@ -4721,24 +4747,28 @@ git commit -m "feat(kernel): agent phase runner -- attempt dirs, real services, 
 ---
 ### Task 16: The seed harness (single-agent inner loop)
 
-The inner loop every seed role runs on. It is agent code (`seed_agent/agent/harness/`), so `edit_self` can change it like any other component. It is an explicit LangGraph ReAct graph that reproduces `langchain.agents.create_agent` exactly (fact 14), built in three commits: first the **exact** reproduction, proven equal to `create_agent` by a comparison test and mutation controls; then the two deliberate additions, each test-first:
+The inner loop every seed role runs on. It is agent code (`seed_agent/agent/harness.py`), so `edit_self` can change it like any other component. It is an explicit LangGraph ReAct graph that reproduces `langchain.agents.create_agent` exactly (fact 14), built in three commits: first the **exact** reproduction, proven equal to `create_agent` by a comparison test and mutation controls; then the two deliberate additions, each test-first:
 
 1. **Tool errors are reported, not raised.** `create_agent`'s default tool node re-raises any tool exception and ends the run (fact 15). The harness returns it to the model as an error `ToolMessage` using `ToolNode`'s `handle_tool_errors=True` text: `Error: <repr>\n Please fix your mistakes.`
-2. **Auto-compact, Claude Code style.** Before every model call, the harness estimates the context size: the last reply's reported `usage.total_tokens` plus about 4 characters per token for the messages after it, with each image block counted as a fixed 1,500 tokens rather than by its base64 length (no tokenizer offline, fact 17). Below `compact_at × context_window` nothing happens and messages append linearly. At or above it, a dedicated summarizer call (same system prompt, tools and history; `tool_choice="none"`; the instruction in `prompts/compact.md`) condenses the history, and the history is replaced by one user message: a continuation preamble plus the summary.
+2. **Auto-compact, Claude Code style.** Before every model call, inside the model node and on the merged state, the harness estimates the context size: the last reply's reported `usage.total_tokens` plus about 4 characters per token for the messages after it, with each image block counted as a fixed 1,500 tokens rather than by its base64 length (no tokenizer offline, fact 17). Below `compact_at × context_window` nothing happens and messages append linearly. At or above it, a dedicated summarizer call (same system prompt, tools and history; `tool_choice="none"`; the instruction in `prompts/compact.md`) condenses the history, and the history is replaced by one user message: a continuation preamble plus the summary. The real model call then runs on that message.
+
+*As built (review ruling):* the first draft routed to a separate `compact` node through conditional edges from `START` and from `tools`. Under parallel tool calls that routing function runs once per `Send` branch, before the branches' results are merged: a reviewer reproduced a summarizer running beside a model call on the stale history, and a due compaction being skipped when only the combined tool outputs crossed the threshold. The check therefore lives in the model node, which sees the merged state, and the graph is exactly `create_agent`'s (START → model, model → tools per call, tools → model). Two tests pin the parallel cases.
+
+The seed layout follows the simplicity ruling (File structure): the first draft's `harness/react.py` and `harness/compact.py` are one module, `harness.py`, imported as `agent.harness`.
 
 The comparison test stays in the suite for good. `create_agent` is the reference whenever no tool raises and the context stays below the threshold.
 
 **Files:**
-- Create: `seed_agent/.gitignore`, `seed_agent/agent/__init__.py` (empty), `seed_agent/agent/harness/__init__.py` (empty)
-- Create: `seed_agent/agent/harness/react.py`, `seed_agent/agent/harness/compact.py`, `seed_agent/agent/prompts/compact.md`
+- Create: `seed_agent/.gitignore`, `seed_agent/agent/__init__.py` (empty)
+- Create: `seed_agent/agent/harness.py`, `seed_agent/agent/prompts/compact.md`
 - Test: `tests/test_seed_harness.py`
 
 **Interfaces:**
 - Consumes: `langgraph` 1.2.11, `langchain-core` 1.6.3; `langchain` 1.4.2 in tests only (the reference).
 - Produces (used by Task 17's roles):
-  - `agent.harness.react.build_react_agent(model: BaseChatModel, tools: list[BaseTool], system_prompt: str | None = None, *, context_window: int, compact_at: float = 0.85, compact_prompt: str | None = None)` returns a compiled graph. Call it as `await graph.ainvoke({"messages": [...]})`; the result's `"messages"` is the full history. `compact_prompt=None` reads `agent/prompts/compact.md`.
-  - `agent.harness.react.run_tool(tools_by_name, call) -> ToolMessage`, plus the constants `RECURSION_LIMIT = 9999`, `COMPACT_AT = 0.85` and `COMPACT_PROMPT` (a `Path`).
-  - `agent.harness.compact.estimate_tokens(messages, system_prompt=None) -> int`, `needs_compaction(messages, system_prompt, context_window, compact_at) -> bool`, `summarize(model, tools, system_prompt, messages, instruction) -> str`, `CONTINUATION` (a format string with `{summary}`), and `IMAGE_TOKENS = 1500`.
+  - `agent.harness.build_react_agent(model: BaseChatModel, tools: list[BaseTool], system_prompt: str | None = None, *, context_window: int, compact_at: float = 0.85, compact_prompt: str | None = None)` returns a compiled graph. Call it as `await graph.ainvoke({"messages": [...]})`; the result's `"messages"` is the full history. `compact_prompt=None` reads `agent/prompts/compact.md`.
+  - `async agent.harness.run_tool(tools_by_name, call) -> ToolMessage`, plus the constants `RECURSION_LIMIT = 9999`, `COMPACT_AT = 0.85` and `COMPACT_PROMPT` (a `Path`).
+  - `agent.harness.estimate_tokens(messages, system_prompt=None) -> int`, `needs_compaction(messages, system_prompt, context_window, compact_at) -> bool`, `CONTINUATION` (a format string with `{summary}`), and `IMAGE_TOKENS = 1500`. (The first draft's separate `summarize` helper was folded into the model node.)
 
 - [ ] **Step 1: Scaffolding**
 
@@ -4748,14 +4778,14 @@ __pycache__/
 *.pyc
 ```
 
-Create the empty `seed_agent/agent/__init__.py` and `seed_agent/agent/harness/__init__.py`.
+Create the empty `seed_agent/agent/__init__.py`.
 
 - [ ] **Step 2: Write the comparison test (exact behaviour)**
 
 The scripted model replays fixed `AIMessage`s and records every prompt it receives and every `bind_tools` call. Each scenario runs through our graph and through `create_agent`, and the test requires identical final message lists **and** identical prompts and tool bindings. The scenarios cover: a plain answer, one tool call, parallel calls that finish out of order, an unknown tool, invalid arguments, dict and list outputs, and a multi-step run. Each runs with and without a system prompt, plus a no-tools case and a raising tool.
 
 ```python
-"""The seed harness (agent/harness) against langchain.agents.create_agent.
+"""The seed harness (agent.harness) against langchain.agents.create_agent.
 
 create_agent (langchain 1.4.2, factory.py @ 4af7ab8) is the reference: both must
 produce identical message lists AND show the model identical prompts and tool bindings."""
@@ -4774,7 +4804,7 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 SEED = Path(__file__).resolve().parents[1] / "seed_agent"
 sys.path.insert(0, str(SEED))
 
-from agent.harness.react import build_react_agent  # noqa: E402
+from agent.harness import build_react_agent  # noqa: E402
 
 
 class Scripted(BaseChatModel):
@@ -4902,12 +4932,12 @@ def test_a_raising_tool_propagates_in_both():
 - [ ] **Step 3: Run it to confirm it fails**
 
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_seed_harness.py -p no:cacheprovider`
-Expected: FAIL (`ModuleNotFoundError: No module named 'agent.harness.react'`).
+Expected: FAIL (`ModuleNotFoundError: No module named 'agent.harness'`).
 
 - [ ] **Step 4: Implement the exact reproduction**
 
 ```python
-# seed_agent/agent/harness/react.py
+# seed_agent/agent/harness.py
 """Single-agent inner loop: an explicit ReAct graph.
 
 Reproduces langchain.agents.create_agent (langchain 1.4.2, factory.py @ 4af7ab8)
@@ -5008,10 +5038,10 @@ Expected: PASS (18 tests).
 
 - [ ] **Step 6: Mutation controls (the comparison test must be able to fail)**
 
-A comparison that passes against a broken copy proves nothing (verification-log finding 8). Apply each mutation to `react.py`, run the test, record the failure count, and restore the file:
+A comparison that passes against a broken copy proves nothing (verification-log finding 9, "Run the negative control"). Apply each mutation to `harness.py`, run the test, record the failure count, and restore the file:
 
 ```bash
-H=seed_agent/agent/harness/react.py; ORIG=$(mktemp); cp $H $ORIG
+H=seed_agent/agent/harness.py; ORIG=$(mktemp); cp $H $ORIG
 for expr in 's/try one of \[/try one of  [/' \
             's/return \[Send("tools", \[call\]) for call in last.tool_calls\]/return [Send("tools", list(reversed(last.tool_calls)))]/' \
             's/\[\*system, \*state\["messages"\]\]/[*state["messages"], *system]/' \
@@ -5026,10 +5056,12 @@ cp $ORIG $H && rm $ORIG
 
 Expected, in order: 4, 4, 9, 2 and 2 failed (the invalid-tool text; sequential calls in reverse; the system prompt after the history; no content normalisation; the invalid-argument text). The restored file passes all 18 again. Keep these counts for the Task 18 log.
 
+*As built:* on the final `harness.py` and the 26-test file (after Steps 8–11), the model call reads a local `messages`, so the third mutation is spelled `'s/\[\*system, \*messages\]/[*messages, *system]/'`; the counts are then 4, 4, **10**, 2 and 2. The extra failure is `test_compaction_replaces_history_and_continues`, which checks the position of the continuation message in the post-compaction prompt.
+
 - [ ] **Step 7: Commit**
 
 ```bash
-git add seed_agent/.gitignore seed_agent/agent/__init__.py seed_agent/agent/harness tests/test_seed_harness.py
+git add seed_agent/.gitignore seed_agent/agent/__init__.py seed_agent/agent/harness.py tests/test_seed_harness.py
 git commit -m "feat(seed): explicit ReAct harness reproducing create_agent, with a comparison test"
 ```
 
@@ -5052,7 +5084,7 @@ def test_tool_exception_is_reported_where_create_agent_raises():
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_seed_harness.py -p no:cacheprovider`
 Expected: FAIL (1 test: `RuntimeError: boom 1` escapes our graph).
 
-In `react.py`, add the template after `INVALID_ARGS`:
+In `harness.py`, add the template after `INVALID_ARGS`:
 
 ```python
 TOOL_ERROR = "Error: {error}\n Please fix your mistakes."   # ToolNode's handle_tool_errors=True text
@@ -5072,7 +5104,7 @@ Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/tes
 Expected: PASS (18 tests).
 
 ```bash
-git add seed_agent/agent/harness/react.py tests/test_seed_harness.py
+git add seed_agent/agent/harness.py tests/test_seed_harness.py
 git commit -m "feat(seed): harness reports tool errors to the model instead of ending the run"
 ```
 
@@ -5080,7 +5112,7 @@ git commit -m "feat(seed): harness reports tool errors to the model instead of e
 
 In `tests/test_seed_harness.py`:
 - Change the import line to `from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage`.
-- Add `from agent.harness.compact import CONTINUATION, estimate_tokens, needs_compaction  # noqa: E402` above the `react` import.
+- Add `from agent.harness import CONTINUATION, estimate_tokens, needs_compaction  # noqa: E402` above the `build_react_agent` import.
 - Add `BIG = 10 ** 9      # a context window compaction never reaches` below the imports.
 - Make `_ours` build with `build_react_agent(model, tools, system, context_window=BIG)`.
 - Append these tests:
@@ -5093,7 +5125,7 @@ def test_estimate_uses_last_reported_usage_plus_tail():
 
 
 def test_images_count_as_a_fixed_estimate_not_their_base64_length():
-    from agent.harness.compact import IMAGE_TOKENS
+    from agent.harness import IMAGE_TOKENS
     image = {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + "A" * 400_000}}
     msgs = [HumanMessage(content=[{"type": "text", "text": "x" * 40}, image])]
     assert IMAGE_TOKENS <= estimate_tokens(msgs) < IMAGE_TOKENS + 100      # not 400_000 / 4
@@ -5130,92 +5162,59 @@ def test_below_the_threshold_messages_append_linearly():
     assert [m.type for m in out["messages"]] == ["human", "ai", "tool", "ai"] and len(log["prompts"]) == 2
 
 
+def test_compaction_triggers_once_when_parallel_outputs_only_cross_together():
+    # Neither slow_echo output alone reaches the threshold (700 + 350/4 = 787 < 850); combined
+    # they do (700 + 700/4 = 875 >= 850). The compaction check must see both tool results
+    # merged in one call_model invocation, not one call per Send branch, or this due
+    # compaction would be skipped.
+    script = [_ai("", [("slow_echo", {"text": "A" * 350, "delay": 0.0}, "c1"),
+                       ("slow_echo", {"text": "B" * 350, "delay": 0.0}, "c2")], total=700),
+              _ai("SUMMARY TEXT"), _ai("done")]
+    log = {"bind": [], "prompts": []}
+    agent = build_react_agent(Scripted(script=script, log=log), TOOLS, "sys", context_window=1000,
+                              compact_prompt="COMPACT NOW")
+    out = asyncio.run(agent.ainvoke({"messages": [HumanMessage("task")]}))
+    assert len(log["prompts"]) == 3                                       # no call on the old history
+    assert sum(kwargs == {"tool_choice": "none"} for _, kwargs in log["bind"]) == 1  # one summarizer call
+    continuation = CONTINUATION.format(summary="SUMMARY TEXT")
+    assert [m.type for m in out["messages"]] == ["human", "ai"]
+    assert out["messages"][0].content == continuation and out["messages"][-1].content == "done"
+
+
+def test_compaction_triggers_once_even_when_one_parallel_output_alone_crosses():
+    # slow_echo's first output alone already crosses (700 + 700/4 = 875 >= 850); the second does
+    # not (700 + 10/4 = 702 < 850). Per-Send routing would send the first branch to "compact"
+    # and the second to "model" in the same step, producing a stray reply on the stale merged
+    # history alongside the summary; call_model must instead see them merged and compact once.
+    script = [_ai("", [("slow_echo", {"text": "C" * 700, "delay": 0.0}, "c1"),
+                       ("slow_echo", {"text": "D" * 10, "delay": 0.0}, "c2")], total=700),
+              _ai("SUMMARY TEXT"), _ai("done")]
+    log = {"bind": [], "prompts": []}
+    agent = build_react_agent(Scripted(script=script, log=log), TOOLS, "sys", context_window=1000,
+                              compact_prompt="COMPACT NOW")
+    out = asyncio.run(agent.ainvoke({"messages": [HumanMessage("task")]}))
+    assert len(log["prompts"]) == 3                                       # no model call besides the summarizer
+    assert sum(kwargs == {"tool_choice": "none"} for _, kwargs in log["bind"]) == 1
+    continuation = CONTINUATION.format(summary="SUMMARY TEXT")
+    assert [m.type for m in out["messages"]] == ["human", "ai"]
+    assert out["messages"][0].content == continuation and out["messages"][-1].content == "done"
+
+
 def test_the_default_compaction_prompt_is_the_seed_prompt_file():
-    from agent.harness.react import COMPACT_PROMPT
+    from agent.harness import COMPACT_PROMPT
     assert COMPACT_PROMPT.is_file() and "Next step" in COMPACT_PROMPT.read_text()
 ```
 
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_seed_harness.py -p no:cacheprovider`
-Expected: FAIL (`ModuleNotFoundError: No module named 'agent.harness.compact'`).
+Expected: FAIL (`ImportError: cannot import name 'CONTINUATION' from 'agent.harness'`).
 
 - [ ] **Step 10: Implement auto-compact**
 
-```python
-# seed_agent/agent/harness/compact.py
-"""Auto-compact, in the style of Claude Code.
-
-Before every model call the harness estimates the context size. Below the threshold
-nothing happens and messages are appended linearly. At or above it, a dedicated
-summarizer call condenses the whole history, and the history is replaced by one
-user message carrying that summary.
-"""
-from __future__ import annotations
-
-import json
-
-from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
-from langchain_core.tools import BaseTool
-
-CHARS_PER_TOKEN = 4          # no tokenizer offline (tiktoken downloads its encodings)
-# An image costs a bounded number of vision tokens however long its base64 is, so it is
-# counted as a fixed, generous estimate instead of by characters.
-IMAGE_TOKENS = 1_500
-IMAGE_BLOCK_TYPES = {"image_url", "image", "input_image"}
-CONTINUATION = (
-    "This session is being continued from a previous conversation that ran out of context. "
-    "The summary below covers the earlier portion of the conversation.\n\n"
-    "Summary:\n{summary}\n\n"
-    "Continue the work from where it left off without asking any further questions. "
-    "Resume directly: do not acknowledge the summary or recap what was happening."
-)
-
-
-def _chars(message: AnyMessage) -> int:
-    if isinstance(message.content, str):
-        size = len(message.content)
-    else:
-        size = sum(IMAGE_TOKENS * CHARS_PER_TOKEN
-                   if isinstance(block, dict) and block.get("type") in IMAGE_BLOCK_TYPES
-                   else len(block if isinstance(block, str) else json.dumps(block, default=str))
-                   for block in message.content)
-    calls = getattr(message, "tool_calls", None) or []
-    return size + (len(json.dumps(calls, default=str)) if calls else 0)
-
-
-def estimate_tokens(messages: list[AnyMessage], system_prompt: str | None = None) -> int:
-    """The last reply's reported usage (input + output) plus an estimate for what came after.
-    Without a reported usage (first call, or right after compaction), estimate everything."""
-    for i in range(len(messages) - 1, -1, -1):
-        message = messages[i]
-        if isinstance(message, AIMessage) and message.usage_metadata:
-            tail = sum(_chars(m) for m in messages[i + 1:])
-            return message.usage_metadata["total_tokens"] + tail // CHARS_PER_TOKEN
-    head = len(system_prompt or "")
-    return (head + sum(_chars(m) for m in messages)) // CHARS_PER_TOKEN
-
-
-def needs_compaction(messages: list[AnyMessage], system_prompt: str | None, context_window: int,
-                     compact_at: float) -> bool:
-    # One message cannot be condensed further; let the model call fail loudly instead of looping.
-    return len(messages) > 1 and estimate_tokens(messages, system_prompt) >= compact_at * context_window
-
-
-async def summarize(model: BaseChatModel, tools: list[BaseTool], system_prompt: str | None,
-                    messages: list[AnyMessage], instruction: str) -> str:
-    """The summarizer sees the same system prompt, tools and history as the agent, plus the
-    compaction instruction; tool_choice='none' keeps it to writing text."""
-    bound = model.bind_tools(tools, tool_choice="none") if tools else model.bind()
-    system = [SystemMessage(content=system_prompt)] if system_prompt is not None else []
-    reply = await bound.ainvoke([*system, *messages, HumanMessage(content=instruction)])
-    return reply.text.strip()
-```
-
-The final `react.py`:
+The final `harness.py` (the compaction check runs inside `call_model`, on the merged state):
 
 ```python
-# seed_agent/agent/harness/react.py
-"""Single-agent inner loop: an explicit ReAct graph.
+# seed_agent/agent/harness.py
+"""Single-agent inner loop: an explicit ReAct graph, plus Claude-Code-style auto-compaction.
 
 Reproduces langchain.agents.create_agent (langchain 1.4.2, factory.py @ 4af7ab8)
 with no middleware, no response_format and async tools:
@@ -5226,9 +5225,15 @@ Tool execution follows langgraph.prebuilt.ToolNode's default messages.
 Two deliberate differences from create_agent's default:
   1. A tool that raises is reported to the model as an error ToolMessage
      (create_agent re-raises and ends the run).
-  2. Auto-compact: before each model call, if the context estimate reaches
-     compact_at * context_window, the history is summarized and replaced
-     (compact.py). Below the threshold, messages are appended linearly.
+  2. Auto-compact: call_model estimates the context size before every model call
+     (the last reply's reported usage plus ~4 chars/token for what came after, with
+     each image counted as a fixed IMAGE_TOKENS), on the merged state -- there is no
+     per-Send routing decision, so parallel tool results are never seen in isolation.
+     Below compact_at * context_window nothing happens and messages append linearly.
+     At or above it, a dedicated summarizer call (same system prompt, tools and
+     history; tool_choice="none") condenses the history, and the history is replaced
+     by one user message -- a continuation preamble plus the summary -- before the
+     real model call runs on it.
 """
 from __future__ import annotations
 
@@ -5246,17 +5251,28 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
 from langgraph.types import Send
 from pydantic import ValidationError
 
-from .compact import CONTINUATION, needs_compaction, summarize
-
 RECURSION_LIMIT = 9_999
 COMPACT_AT = 0.85
-COMPACT_PROMPT = Path(__file__).resolve().parents[1] / "prompts" / "compact.md"
+COMPACT_PROMPT = Path(__file__).resolve().parent / "prompts" / "compact.md"
 INVALID_TOOL = "Error: {name} is not a valid tool, try one of [{names}]."
 INVALID_ARGS = ("Error invoking tool '{name}' with kwargs {args} with error:\n"
                 " {error}\n Please fix the error and try again.")
 TOOL_ERROR = "Error: {error}\n Please fix your mistakes."   # ToolNode's handle_tool_errors=True text
 TOOL_BLOCK_TYPES = {"text", "image_url", "image", "json", "search_result", "custom_tool_call_output",
                     "document", "file"}
+
+CHARS_PER_TOKEN = 4          # no tokenizer offline (tiktoken downloads its encodings)
+# An image costs a bounded number of vision tokens however long its base64 is, so it is
+# counted as a fixed, generous estimate instead of by characters.
+IMAGE_TOKENS = 1_500
+IMAGE_BLOCK_TYPES = {"image_url", "image", "input_image"}
+CONTINUATION = (
+    "This session is being continued from a previous conversation that ran out of context. "
+    "The summary below covers the earlier portion of the conversation.\n\n"
+    "Summary:\n{summary}\n\n"
+    "Continue the work from where it left off without asking any further questions. "
+    "Resume directly: do not acknowledge the summary or recap what was happening."
+)
 
 
 class ReactState(TypedDict):
@@ -5292,6 +5308,36 @@ async def run_tool(tools: dict[str, BaseTool], call: ToolCall) -> ToolMessage:
     return message
 
 
+def _chars(message: AnyMessage) -> int:
+    if isinstance(message.content, str):
+        size = len(message.content)
+    else:
+        size = sum(IMAGE_TOKENS * CHARS_PER_TOKEN
+                   if isinstance(block, dict) and block.get("type") in IMAGE_BLOCK_TYPES
+                   else len(block if isinstance(block, str) else json.dumps(block, default=str))
+                   for block in message.content)
+    calls = getattr(message, "tool_calls", None) or []
+    return size + (len(json.dumps(calls, default=str)) if calls else 0)
+
+
+def estimate_tokens(messages: list[AnyMessage], system_prompt: str | None = None) -> int:
+    """The last reply's reported usage (input + output) plus an estimate for what came after.
+    Without a reported usage (first call, or right after compaction), estimate everything."""
+    for i in range(len(messages) - 1, -1, -1):
+        message = messages[i]
+        if isinstance(message, AIMessage) and message.usage_metadata:
+            tail = sum(_chars(m) for m in messages[i + 1:])
+            return message.usage_metadata["total_tokens"] + tail // CHARS_PER_TOKEN
+    head = len(system_prompt or "")
+    return (head + sum(_chars(m) for m in messages)) // CHARS_PER_TOKEN
+
+
+def needs_compaction(messages: list[AnyMessage], system_prompt: str | None, context_window: int,
+                     compact_at: float) -> bool:
+    # One message cannot be condensed further; let the model call fail loudly instead of looping.
+    return len(messages) > 1 and estimate_tokens(messages, system_prompt) >= compact_at * context_window
+
+
 def build_react_agent(model: BaseChatModel, tools: list[BaseTool], system_prompt: str | None = None, *,
                       context_window: int, compact_at: float = COMPACT_AT,
                       compact_prompt: str | None = None):
@@ -5299,37 +5345,34 @@ def build_react_agent(model: BaseChatModel, tools: list[BaseTool], system_prompt
     system = [SystemMessage(content=system_prompt)] if system_prompt is not None else []
 
     async def call_model(state: ReactState) -> dict:
+        messages, reset = state["messages"], []
+        if needs_compaction(messages, system_prompt, context_window, compact_at):
+            # A dedicated summarizer call sees the same system prompt, tools and history as the
+            # agent, plus the compaction instruction; tool_choice="none" keeps it to writing text.
+            instruction = compact_prompt if compact_prompt is not None else COMPACT_PROMPT.read_text()
+            summarizer = model.bind_tools(tools, tool_choice="none") if tools else model.bind()
+            reply = await summarizer.ainvoke([*system, *messages, HumanMessage(content=instruction)])
+            messages = [HumanMessage(content=CONTINUATION.format(summary=reply.text.strip()))]
+            reset = [RemoveMessage(id=REMOVE_ALL_MESSAGES), *messages]
         bound = model.bind_tools(tools, tool_choice=None) if tools else model.bind()
-        return {"messages": [await bound.ainvoke([*system, *state["messages"]])]}
+        return {"messages": [*reset, await bound.ainvoke([*system, *messages])]}
 
     async def call_tool(calls: list[ToolCall]) -> dict:
         return {"messages": [await run_tool(by_name, call) for call in calls]}
 
-    async def compact(state: ReactState) -> dict:
-        instruction = compact_prompt if compact_prompt is not None else COMPACT_PROMPT.read_text()
-        summary = await summarize(model, tools, system_prompt, state["messages"], instruction)
-        return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES),
-                             HumanMessage(content=CONTINUATION.format(summary=summary))]}
-
-    def before_model(state: ReactState) -> str:
-        over = needs_compaction(state["messages"], system_prompt, context_window, compact_at)
-        return "compact" if over else "model"
-
     def after_model(state: ReactState):
         last = state["messages"][-1]
-        if not tools or not isinstance(last, AIMessage) or not last.tool_calls:
+        if not last.tool_calls:
             return END
         return [Send("tools", [call]) for call in last.tool_calls]
 
     graph = StateGraph(ReactState)
-    graph.add_node("compact", compact)
     graph.add_node("model", call_model)
-    graph.add_conditional_edges(START, before_model, ["compact", "model"])
-    graph.add_edge("compact", "model")
+    graph.add_edge(START, "model")
     if tools:
         graph.add_node("tools", call_tool)
         graph.add_conditional_edges("model", after_model, ["tools", END])
-        graph.add_conditional_edges("tools", before_model, ["compact", "model"])
+        graph.add_edge("tools", "model")
     else:
         graph.add_edge("model", END)
     return graph.compile().with_config({"recursion_limit": RECURSION_LIMIT})
@@ -5368,12 +5411,12 @@ Output only the summary.
 - [ ] **Step 11: Run the tests**
 
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_seed_harness.py -p no:cacheprovider`
-Expected: PASS (24 tests; the comparison scenarios still match `create_agent`).
+Expected: PASS (26 tests; the comparison scenarios still match `create_agent`).
 
 - [ ] **Step 12: Commit**
 
 ```bash
-git add seed_agent/agent/harness seed_agent/agent/prompts/compact.md tests/test_seed_harness.py
+git add seed_agent/agent/harness.py seed_agent/agent/prompts/compact.md tests/test_seed_harness.py
 git commit -m "feat(seed): Claude-Code-style auto-compaction in the harness"
 ```
 
@@ -5389,18 +5432,25 @@ The root node's code (spec 9.1): the agent every later version descends from. Th
 The seed's job is to be a **correct, working starting point**, not a strong researcher. The loop improves it. Keep it simple, deterministic where it can be (the recipe check and the self-test are code, not LLM calls), and honest about limits in its prompts.
 
 **Files:**
-- Create: `seed_agent/agent/requirements.txt`, `seed_agent/agent/settings.py`, `seed_agent/agent/entry.py`
-- Create: `seed_agent/agent/tools/__init__.py` (empty), `files.py`, `media.py`, `kernel.py`, `submit.py`
-- Create: `seed_agent/agent/orchestration/__init__.py` (empty), `roles.py`, `task.py`, `meta.py`
+- Create: `seed_agent/agent/requirements.txt`, `seed_agent/agent/entry.py` (entry points + settings constants)
+- Create: `seed_agent/agent/tools.py` (file/bash tools, media tools, MCP adapter, submit tools)
+- Create: `seed_agent/agent/orchestration.py` (roles, the `improve_recipe` workflow, the `edit_self` workflow)
 - Create: `seed_agent/agent/prompts/{planner,data_builder,recipe_writer,edit_planner,coder}.md`
-- Create: `seed_agent/agent/knowledge/README.md`, `seed_agent/agent/knowledge/data_building.md`, `seed_agent/agent/memory/README.md`
+- Create: `seed_agent/agent/knowledge/data_building.md`, `seed_agent/agent/memory/README.md`
 - Test: `tests/test_seed_agent.py`
 
 **Interfaces:**
 - Consumes (inside the container): `ar_contract.client.chat_model`, `ar_contract.client.mcp_session`, `ar_contract.models.*` including `EDIT_COMPONENTS` (Task 3); `build_react_agent` (Task 16); the kernel tools by name (Tasks 7–9); the environment variables `AR_DEFAULT_MODEL`, `AR_CONTEXT_WINDOW`, `AR_COMPACT_AT`, `AR_AGENT_DIR` and `AR_WORKSPACE`, which the kernel sets (Tasks 14–15).
 - Produces:
   - `agent.entry.edit_self(ctx) -> EditResult` and `agent.entry.improve_recipe(ctx) -> RecipeResult`, both `async`.
-  - Pure helpers for tests: `agent.tools.media.snap_segments(segments, duration)`, `agent.tools.files.resolve_inside(root, path)`, `agent.tools.files.replace_once(text, old, new)`, `agent.tools.files.read_utf8(path)` (strict; `edit_file` refuses non-UTF-8 files rather than corrupt them), `agent.tools.submit.submit_tool(name, description, schema) -> (StructuredTool, Submission)`, `agent.orchestration.meta.selftest(root) -> list[str]`, and `agent.orchestration.meta.COMPONENTS` / `EditPlan`.
+  - Pure helpers for tests: `agent.tools.snap_segments(segments, duration)`, `agent.tools.resolve_inside(root, path)`, `agent.tools.replace_once(text, old, new)`, `agent.tools.read_utf8(path)` (strict; `edit_file` refuses non-UTF-8 files rather than corrupt them), `agent.tools.make_file_tools(root, *, writable=True)`, `agent.tools.result_text(result) -> str`, `agent.tools.submit_tool(name, description, schema) -> (StructuredTool, SimpleNamespace)` (the box's `.value` holds the submission), `agent.orchestration.selftest(root) -> list[str]`, and `agent.orchestration.COMPONENTS` / `EditPlan`.
+
+*As built (seed simplicity ruling, see File structure).* The code in Steps 3–5 is shown per first-draft file; it was committed as three modules with the same behaviour: `settings.py` → the constants at the top of `entry.py` (`orchestration.py` imports them; `entry.py` imports `orchestration` lazily inside each entry point, which avoids a circular import); `tools/{files,media,kernel,submit}.py` → `tools.py`; `orchestration/{roles,task,meta}.py` → `orchestration.py`. Once-used helpers were inlined and relative imports adjusted. Other differences:
+- The MCP adapter has one helper, `result_text(result)`: `is_error` raises `ToolException` with the joined text; otherwise it prefers `structured_content` (as JSON) over per-item text blocks, so a tool returning a list (for example an empty `hf_search`) is one JSON value. `run_task` parses `recipe_check` with `json.loads(result_text(...))` in place of `result_json`.
+- `EditPlan.component` uses `EditComponent` from `ar_contract.models` (Task 3), and `COMPONENTS` names the new paths: `agent/prompts/*.md`, `agent/tools.py`, `agent/harness.py`, `agent/orchestration.py` (+ `agent/entry.py` settings), `agent/knowledge/*.md`.
+- `selftest` also rejects keyword-only parameters (matching Task 14's static check) and runs `python -c "import agent.entry, agent.orchestration"`: `entry.py` imports `orchestration` lazily, so importing `agent.entry` alone would not exercise the files `edit_self` edits. `prompts/coder.md` gives the same command; `prompts/edit_planner.md` says the components are listed with their files in the context.
+- `knowledge/README.md` was dropped rather than folded into `data_building.md` (folding it would add meta-text to the data builder's system prompt).
+- `tests/test_seed_agent.py` imports from `agent.tools` and `agent.orchestration`, and adds `test_kernel_results_prefer_structured_content` and a keyword-only case in the self-test test.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -5435,7 +5485,7 @@ sys.path.insert(0, str(SEED))
 
 
 def test_snap_segments_puts_boundaries_on_rounds():
-    from agent.tools.media import snap_segments
+    from agent.tools import snap_segments
     segs = [{"time_range_s": [0.0, 3.1], "prompt": "walk"}, {"time_range_s": [3.1, 8.0], "prompt": "turn"}]
     out = snap_segments(segs, duration=8.0)
     boundary = out[0]["time_range_s"][1]
@@ -5446,7 +5496,7 @@ def test_snap_segments_puts_boundaries_on_rounds():
 
 
 def test_snap_segments_drops_segments_that_collapse():
-    from agent.tools.media import snap_segments
+    from agent.tools import snap_segments
     segs = [{"time_range_s": [0.0, 1.0], "prompt": "a"}, {"time_range_s": [1.0, 1.1], "prompt": "b"},
             {"time_range_s": [1.1, 6.0], "prompt": "c"}]
     assert [s["prompt"] for s in snap_segments(segs, duration=6.0)] == ["a", "c"]
@@ -5454,18 +5504,18 @@ def test_snap_segments_drops_segments_that_collapse():
 
 @pytest.mark.parametrize("bad", ["../../etc/passwd", "/etc/passwd", "sub/../../x"])
 def test_file_tools_stay_inside_their_root(tmp_path, bad):
-    from agent.tools.files import resolve_inside
+    from agent.tools import resolve_inside
     with pytest.raises(ValueError):
         resolve_inside(str(tmp_path), bad)
 
 
 def test_file_tools_accept_paths_inside(tmp_path):
-    from agent.tools.files import resolve_inside
+    from agent.tools import resolve_inside
     assert resolve_inside(str(tmp_path), "a/b.txt") == tmp_path / "a" / "b.txt"
 
 
 def test_edit_file_needs_exactly_one_match():
-    from agent.tools.files import replace_once
+    from agent.tools import replace_once
     assert replace_once("a b a", "b", "c") == "a c a"
     with pytest.raises(ValueError, match="found 2"):
         replace_once("a b a", "a", "c")
@@ -5474,7 +5524,7 @@ def test_edit_file_needs_exactly_one_match():
 
 
 def test_edit_file_refuses_non_utf8_files_and_leaves_them_untouched(tmp_path):
-    from agent.tools.files import make_file_tools
+    from agent.tools import make_file_tools
     raw = b"caption: caf\xe9\n"                              # Latin-1, not UTF-8
     (tmp_path / "c.txt").write_bytes(raw)
     tools = {t.name: t for t in make_file_tools(str(tmp_path))}
@@ -5485,14 +5535,14 @@ def test_edit_file_refuses_non_utf8_files_and_leaves_them_untouched(tmp_path):
 
 
 def test_read_only_file_tools_cannot_write(tmp_path):
-    from agent.tools.files import make_file_tools
+    from agent.tools import make_file_tools
     assert {t.name for t in make_file_tools(str(tmp_path), writable=False)} == {"read_file", "list_dir"}
 
 
 def test_submit_tool_validates_then_captures():
     from pydantic import ValidationError
-    from agent.orchestration.meta import EditPlan
-    from agent.tools.submit import submit_tool
+    from agent.orchestration import EditPlan
+    from agent.tools import submit_tool
     tool, box = submit_tool("submit_edit_plan", "d", EditPlan)
     plan = {"component": "everything", "change": "x", "files": [], "rationale": "r", "expected_effect": "e"}
     with pytest.raises(ValidationError):
@@ -5504,7 +5554,7 @@ def test_submit_tool_validates_then_captures():
 
 def test_edit_components_match_the_contract():
     from ar_contract.models import EDIT_COMPONENTS
-    from agent.orchestration.meta import COMPONENTS, EditPlan
+    from agent.orchestration import COMPONENTS, EditPlan
     assert tuple(COMPONENTS) == EDIT_COMPONENTS
     assert set(typing.get_args(EditPlan.model_fields["component"].annotation)) == set(EDIT_COMPONENTS)
     for component, where in COMPONENTS.items():
@@ -5512,7 +5562,7 @@ def test_edit_components_match_the_contract():
 
 
 def test_selftest_passes_on_the_seed_and_catches_a_broken_entry(tmp_path):
-    from agent.orchestration.meta import selftest
+    from agent.orchestration import selftest
     copy = tmp_path / "copy"
     shutil.copytree(SEED, copy)
     assert selftest(str(copy)) == []
@@ -6334,7 +6384,7 @@ confirm or refute it. Finish with a one-paragraph summary of what you changed an
 - [ ] **Step 7: Run the tests**
 
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_seed_agent.py tests/test_seed_harness.py -p no:cacheprovider`
-Expected: PASS (18 seed-agent tests: 12 unit and 6 against the kernel services; plus the 24 harness tests).
+Expected: PASS (18 seed-agent tests: 13 unit and 5 against the kernel services; plus the 26 harness tests).
 
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_seed_agent.py -m docker -p no:cacheprovider`
 Expected: PASS (the seed agent passes contract verification in real containers).
@@ -6367,7 +6417,7 @@ Also confirm that the harness comparison (`tests/test_seed_harness.py`, part of 
 
 - [ ] **Step 3: Negative control for the isolation test**
 
-Temporarily change the runner's `--network none` to `--network bridge` and re-run `tests/test_sandbox_runner.py::test_isolation_holds_from_inside -m docker`. It must **fail** (the internet becomes reachable). Restore `--network none`, re-run, and confirm it passes. Record both runs. An isolation test that also passes with networking on proves nothing (verification-log finding 8).
+Temporarily change the runner's `--network none` to `--network bridge` and re-run `tests/test_sandbox_runner.py::test_isolation_holds_from_inside -m docker`. It must **fail** (the internet becomes reachable). Restore `--network none`, re-run, and confirm it passes. Record both runs. An isolation test that also passes with networking on proves nothing (verification-log finding 9, "Run the negative control").
 
 - [ ] **Step 4: Live LLM run (only if `OPENAI_API_KEY` and `OPENAI_MODEL` are set)**
 
@@ -6384,7 +6434,7 @@ Append `## Plan 2 — agent runtime` to `docs/superpowers/plans/verification-log
 - [ ] **Step 7: Merge and push (standing rule: `main` always current)**
 
 ```bash
-git checkout main && git merge --ff-only <plan-2-branch> && git push origin main
+git checkout main && git merge --ff-only feat/agent-runtime && git push origin main
 ```
 
 Confirm that the commit `main` points to is the one that passed Steps 1–3, and delete the merged local branch.
@@ -6416,6 +6466,9 @@ Plan 4's tasks will be written after Plan 3. Plan 4 sequences these Plan 2 piece
 5. **Upstream outage.** Watch the `llm.response` error rate. Upstream unavailable for more than `gateway.upstream_outage_pause_min` pauses the loop without charging the node (spec 14.2).
 6. **Edit components.** Store the passing attempt's `EditResult.component` with the node (the nodes table and `edit.json`) and show it in the dashboard lineage. It is recorded, never enforced (spec 9.1.1).
 7. **Deferred Plan 1 items:** `score_node` try/finally and rank/alpha from the node's resolved config; schema columns `recipe_path` and `attempt_counts_json`; `resolve_gpus` visibility (14.6); run-relative paths if resume-after-move matters.
+8. **Config to constructor parameters.** Plan 2's services read no config themselves. Plan 4 builds them from `KernelConfig` and passes `gateway.upstream_timeout_s` and `gateway.upstream_retries` to `Upstream(timeout_s=, retries=)`, `gateway.model_allowlist` (∪ `{OPENAI_MODEL}`) to `create_gateway_app(allowed_models=)`, and `tools.job_wait_max_s` to `JobQueue(wait_cap_s=)`.
+9. **Shutdown errors.** `JobQueue.shutdown()` raises `RuntimeError` when the worker thread outlives its join deadline (a job may still hold a GPU). Plan 4's shutdown and force-stop paths must catch it, still run `RunServices.stop()` and the container and process-group kills, and then confirm the GPUs are free before continuing.
+10. **Live LLM run.** Task 18's live run against a real model (Step 4) is deferred until `OPENAI_API_KEY` and `OPENAI_MODEL` are set. Plan 4 must run it, as Task 18 Step 4 describes, before the first unattended run.
 
 ## Self-review
 
