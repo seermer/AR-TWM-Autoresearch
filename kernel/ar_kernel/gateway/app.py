@@ -45,7 +45,8 @@ class Upstream:
             return body
         if path == "/chat/completions":
             return {**body, "reasoning_effort": self.effort}
-        return {**body, "reasoning": {**(body.get("reasoning") or {}), "effort": self.effort}}
+        reasoning = body.get("reasoning") if isinstance(body.get("reasoning"), dict) else {}
+        return {**body, "reasoning": {**reasoning, "effort": self.effort}}
 
     async def post(self, path: str, body: dict) -> tuple[int, dict, int]:
         attempts, status, payload = 0, 599, {"error": "no attempt made"}
@@ -84,7 +85,12 @@ def create_gateway_app(*, registry, store: CallStore, allowed_models: set[str],
         caller = registry.lookup(bearer(request.headers.get("authorization")))
         if caller is None:
             return JSONResponse({"error": {"message": "unknown or revoked token"}}, status_code=401)
-        body = await request.json()
+        try:
+            body = await request.json()
+        except ValueError:                    # malformed JSON or undecodable bytes
+            body = None
+        if not isinstance(body, dict):        # rejected like the checks below: not recorded, never forwarded
+            return JSONResponse({"error": {"message": "the request body must be a JSON object"}}, status_code=400)
         if body.get("stream"):
             return JSONResponse({"error": {"message": "streaming is not supported by the gateway; "
                                                       "use non-streaming calls"}},

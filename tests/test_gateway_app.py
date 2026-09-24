@@ -79,6 +79,15 @@ def test_streaming_is_refused(make):
     assert _post(client, caller.token, {"model": "gpt-x", "input": "hi", "stream": True}).status_code == 400
 
 
+
+@pytest.mark.parametrize("content", [b"{not json", b"[1, 2]", b"\xff\xfe"], ids=["malformed", "array", "binary"])
+def test_a_body_that_is_not_a_json_object_is_400_and_never_forwarded(make, content):
+    client, caller, _, seen = make()
+    r = client.post("/v1/chat/completions", content=content,
+                    headers={"Authorization": f"Bearer {caller.token}", "Content-Type": "application/json"})
+    assert r.status_code == 400 and "JSON object" in r.json()["error"]["message"]
+    assert seen == []
+
 def test_forwarded_call_is_recorded_and_upstream_key_never_reaches_telemetry(make, tmp_path):
     client, caller, rec, seen = make()
     r = _post(client, caller.token, {"model": "gpt-x", "input": "hi"})
@@ -258,6 +267,12 @@ def test_gateway_forwards_the_agent_effort_when_none_is_configured(tmp_path):
           path="/v1/chat/completions")
     assert seen[0]["reasoning_effort"] == "high"
 
+
+
+def test_a_non_object_reasoning_field_is_replaced_not_a_crash(tmp_path):
+    client, caller, _, seen = _make_with_effort(tmp_path, "low")
+    r = _post(client, caller.token, {"model": "gpt-x", "input": "hi", "reasoning": "high"})
+    assert r.status_code == 200 and seen[0]["reasoning"] == {"effort": "low"}
 
 def test_upstream_from_env():
     up = Upstream.from_env({"OPENAI_BASE_URL": "https://llm.example", "OPENAI_API_KEY": "sk-x",
