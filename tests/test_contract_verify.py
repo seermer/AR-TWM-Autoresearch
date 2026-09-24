@@ -1,0 +1,153 @@
+import json
+from pathlib import Path
+
+import pytest
+
+from ar_kernel.config import KernelConfig
+from ar_kernel.contract.verify import ContractHarness, static_check, verify_contract
+from ar_kernel.sandbox.runner import RunResult
+from ar_kernel.telemetry.recorder import Recorder
+from ar_kernel.vcs.agents_repo import AgentsRepo
+
+CFG = KernelConfig.load()
+FIXTURES = Path(__file__).parent / "fixtures" / "agents"
+
+
+@pytest.mark.parametrize("src,ok,fragment", [
+    ("def edit_self(ctx): ...\ndef improve_recipe(ctx): ...\n", True, ""),
+    ("async def edit_self(ctx): ...\nasync def improve_recipe(ctx): ...\n", True, ""),
+    ("def edit_self(ctx): ...\n", False, "improve_recipe"),
+    ("def edit_self(ctx, extra): ...\ndef improve_recipe(ctx): ...\n", False, "exactly one"),
+    ("def edit_self(*args): ...\ndef improve_recipe(ctx): ...\n", False, "exactly one"),
+    ("def outer():\n    def edit_self(ctx): ...\ndef improve_recipe(ctx): ...\n", False, "edit_self"),
+    ("def edit_self(ctx):\n  return (\n", False, "syntax"),
+])
+def test_static_check(src, ok, fragment):
+    step = static_check(src)
+    assert step.ok is ok and fragment in step.detail
+
+
+def test_each_container_token_is_revoked_and_its_jobs_cancelled(tmp_path, monkeypatch):
+    """Like the phase runner: a smoke run must not leave GPU jobs behind on the harness queue.
+    No Docker: the image build and the container are faked."""
+    run = tmp_path / "run"
+    h = ContractHarness(CFG, run, Recorder(run))
+    cancelled, tokens = [], []
+    monkeypatch.setattr(h.queue, "cancel_for_token", lambda t: cancelled.append(t) or 0)
+    monkeypatch.setattr("ar_kernel.contract.verify.ensure_image", lambda cfg, reqs, **k: "img:test")
+
+    def runner(*, mounts, env, **kw):
+        tokens.append(env["AR_TOKEN"])
+        (mounts.workspace / "result.json").write_text(json.dumps({"ok": True, "result": {}}))
+        return RunResult(0, False, "", "", 0.1, [], "c")
+
+    repo = AgentsRepo(tmp_path / "agents.git")
+    try:
+        report = verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo,
+                                 commit=repo.init(FIXTURES / "good"), harness=h, recorder=Recorder(run),
+                                 node="n1", attempt=1, runner=runner)
+    finally:
+        h.queue.shutdown()
+    assert report.ok, report.steps
+    assert len(tokens) == 3 and cancelled == tokens          # import + two smoke runs
+    assert all(h.registry.lookup(t) is None for t in tokens)
+
+
+def test_container_token_printed_by_agent_is_redacted_from_telemetry(tmp_path, monkeypatch):
+    """Controller ruling: verify_contract's own telemetry (the sandbox run and the
+    final contract.report) goes through the `recorder` argument, which in real
+    usage (and in `test_each_container_token_is_revoked_and_its_jobs_cancelled`
+    above) is a *different* Recorder instance from `harness.recorder` -- the one
+    TokenRegistry.issue() already redacts on. If verify_contract only relied on
+    that, a token an agent printed to stdout/stderr would leak into whatever
+    `recorder` records. No Docker: the runner is faked, standing in for what a
+    real run_container would record via `recorder.event("sandbox.end", ...)`."""
+    run = tmp_path / "run"
+    h = ContractHarness(CFG, run, Recorder(run))
+    monkeypatch.setattr("ar_kernel.contract.verify.ensure_image", lambda cfg, reqs, **k: "img:test")
+    recorder = Recorder(run)
+    seen_tokens: list[str] = []
+
+    def runner(*, mounts, command, env, recorder, node, phase, attempt, **kw):
+        token = env["AR_TOKEN"]
+        seen_tokens.append(token)
+        if command[-1] == "edit_self":
+            stderr = f"agent stderr leaked its own token: {token}"
+            recorder.event("sandbox.end", node=node, phase=phase, attempt=attempt,
+                           component="sandbox", payload={"stdout": "", "stderr": stderr})
+            return RunResult(1, False, "", stderr, 0.1, [], "c")
+        (mounts.workspace / "result.json").write_text(json.dumps({"ok": True, "result": {}}))
+        return RunResult(0, False, "", "", 0.1, [], "c")
+
+    repo = AgentsRepo(tmp_path / "agents.git")
+    try:
+        report = verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo,
+                                 commit=repo.init(FIXTURES / "good"), harness=h, recorder=recorder,
+                                 node="n1", attempt=1, runner=runner)
+    finally:
+        h.queue.shutdown()
+
+    failed = next(s for s in report.steps if not s.ok)
+    assert not report.ok and failed.name == "smoke:edit_self"
+    assert seen_tokens and all(len(t) > 10 for t in seen_tokens)
+
+    events = recorder.read_events("n1")
+    assert events, "expected telemetry events to have been recorded for node n1"
+    saw_redacted = False
+    for event in events:
+        assert all(token not in json.dumps(event) for token in seen_tokens), \
+            f"a container token leaked into an unscrubbed event: {event}"
+        if event.get("payload"):
+            body = recorder.load_payload(event["payload"])
+            dumped = json.dumps(body)
+            assert all(token not in dumped for token in seen_tokens), \
+                f"a container token leaked into a recorded payload: {body}"
+            saw_redacted = saw_redacted or "[REDACTED]" in dumped
+    assert saw_redacted, "expected the scrubbed placeholder to appear where the token was"
+
+
+@pytest.fixture(scope="module")
+def harness(tmp_path_factory):
+    run = tmp_path_factory.mktemp("run")
+    h = ContractHarness(CFG, run, Recorder(run))
+    h.start()
+    yield h, run
+    h.stop()
+
+
+def _verify(harness, tmp_path, fixture, **timeouts):
+    h, run = harness
+    repo = AgentsRepo(tmp_path / "agents.git")
+    commit = repo.init(FIXTURES / fixture)
+    return verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo, commit=commit, harness=h,
+                           recorder=Recorder(run), node="n1", attempt=1, **timeouts)
+
+
+def _failed_step(report):
+    return next((s for s in report.steps if not s.ok), None)
+
+
+@pytest.mark.docker
+def test_good_agent_passes_every_step(harness, tmp_path):
+    report = _verify(harness, tmp_path, "good")
+    assert report.ok, report.steps
+    assert [s.name for s in report.steps] == ["build", "static", "import", "smoke:edit_self",
+                                              "smoke:improve_recipe"]
+
+
+@pytest.mark.docker
+@pytest.mark.parametrize("fixture,step", [
+    ("bad_requirements", "build"), ("no_improve", "static"), ("two_params", "static"),
+    ("import_error", "import"), ("invalid_result", "smoke:edit_self"),
+])
+def test_broken_agents_fail_at_the_right_step(harness, tmp_path, fixture, step):
+    report = _verify(harness, tmp_path, fixture)
+    assert not report.ok and _failed_step(report).name == step
+    assert report.to_retry()["failed_step"] == step
+
+
+@pytest.mark.docker
+def test_hanging_smoke_run_times_out(harness, tmp_path):
+    report = _verify(harness, tmp_path, "hangs", smoke_timeout_s=15)
+    failed = _failed_step(report)
+    assert failed.name == "smoke:edit_self" and "timed out" in failed.detail
