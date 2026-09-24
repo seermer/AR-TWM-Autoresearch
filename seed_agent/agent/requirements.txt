@@ -1,0 +1,4 @@
+# Extra runtime packages for this agent version. The base image already provides
+# langgraph, langchain-core, langchain-openai, mcp, httpx, httpx2, pydantic, numpy,
+# opencv-python-headless, Pillow and ffmpeg. The container has no network, so
+# anything listed here is baked into the image at build time.
