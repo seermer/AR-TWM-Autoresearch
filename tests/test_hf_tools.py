@@ -77,3 +77,32 @@ def test_repo_ids_cannot_escape_staging(env):
     tools, caller = env
     with pytest.raises(ToolError):
         tools.download(caller, "../../etc", "main", ["*"])
+
+
+class EscapeApi(FakeApi):
+    """A dataset whose sibling listing itself tries to escape the staging dir."""
+
+    def dataset_info(self, repo_id, revision=None, files_metadata=False):
+        return SimpleNamespace(id=repo_id, sha=SHA, card_data={"license": "cc-by-4.0"},
+                               siblings=[SimpleNamespace(rfilename="../escape.mp4", size=10),
+                                         SimpleNamespace(rfilename="/etc/passwd", size=10)])
+
+
+def test_repo_reported_paths_cannot_escape_dest(tmp_path):
+    calls = []
+
+    def spy_snapshot(**kwargs):
+        calls.append(kwargs)
+        return kwargs["local_dir"]
+
+    reg = TokenRegistry(Recorder(tmp_path))
+    caller = reg.issue(node="n1", phase="improve_recipe", attempt=1,
+                       workspace_host=tmp_path / "ws", staging_host=tmp_path / "staging")
+    (tmp_path / "staging").mkdir()
+    tools = HfTools(CFG, api=EscapeApi(), snapshot=spy_snapshot)
+
+    with pytest.raises(ToolError, match="unsafe"):
+        tools.download(caller, "org/walks", "main", ["*"])
+    assert not calls
+    assert not (caller.staging_host / "hf").exists()
+    assert not (tmp_path / "escape.mp4").exists()

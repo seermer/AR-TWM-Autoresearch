@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import fnmatch
 import re
+from pathlib import PurePosixPath
 from typing import Any
 
 from mcp.server.mcpserver import Context
@@ -50,6 +51,10 @@ class HfTools:
                        if any(fnmatch.fnmatch(s.rfilename, p) for p in patterns))
         if not files:
             raise ToolError(f"no files match {patterns} in {repo}@{revision}")
+        for f in files:                     # repo-reported names must stay inside dest (join below)
+            p = PurePosixPath(f)
+            if p.is_absolute() or ".." in p.parts or "\\" in f:
+                raise ToolError(f"repo lists unsafe file path {f!r}; refusing to download")
         sizes = {s.rfilename: int(s.size or 0) for s in info.siblings}
         total = sum(sizes[f] for f in files)
         cap = min(self.cap, int(max_bytes)) if max_bytes else self.cap
