@@ -193,6 +193,44 @@ def test_below_the_threshold_messages_append_linearly():
     assert [m.type for m in out["messages"]] == ["human", "ai", "tool", "ai"] and len(log["prompts"]) == 2
 
 
+def test_compaction_triggers_once_when_parallel_outputs_only_cross_together():
+    # Neither slow_echo output alone reaches the threshold (700 + 350/4 = 787 < 850); combined
+    # they do (700 + 700/4 = 875 >= 850). The compaction check must see both tool results
+    # merged in one call_model invocation, not one call per Send branch, or this due
+    # compaction would be skipped.
+    script = [_ai("", [("slow_echo", {"text": "A" * 350, "delay": 0.0}, "c1"),
+                       ("slow_echo", {"text": "B" * 350, "delay": 0.0}, "c2")], total=700),
+              _ai("SUMMARY TEXT"), _ai("done")]
+    log = {"bind": [], "prompts": []}
+    agent = build_react_agent(Scripted(script=script, log=log), TOOLS, "sys", context_window=1000,
+                              compact_prompt="COMPACT NOW")
+    out = asyncio.run(agent.ainvoke({"messages": [HumanMessage("task")]}))
+    assert len(log["prompts"]) == 3                                       # no call on the old history
+    assert sum(kwargs == {"tool_choice": "none"} for _, kwargs in log["bind"]) == 1  # one summarizer call
+    continuation = CONTINUATION.format(summary="SUMMARY TEXT")
+    assert [m.type for m in out["messages"]] == ["human", "ai"]
+    assert out["messages"][0].content == continuation and out["messages"][-1].content == "done"
+
+
+def test_compaction_triggers_once_even_when_one_parallel_output_alone_crosses():
+    # slow_echo's first output alone already crosses (700 + 700/4 = 875 >= 850); the second does
+    # not (700 + 10/4 = 702 < 850). Per-Send routing would send the first branch to "compact"
+    # and the second to "model" in the same step, producing a stray reply on the stale merged
+    # history alongside the summary; call_model must instead see them merged and compact once.
+    script = [_ai("", [("slow_echo", {"text": "C" * 700, "delay": 0.0}, "c1"),
+                       ("slow_echo", {"text": "D" * 10, "delay": 0.0}, "c2")], total=700),
+              _ai("SUMMARY TEXT"), _ai("done")]
+    log = {"bind": [], "prompts": []}
+    agent = build_react_agent(Scripted(script=script, log=log), TOOLS, "sys", context_window=1000,
+                              compact_prompt="COMPACT NOW")
+    out = asyncio.run(agent.ainvoke({"messages": [HumanMessage("task")]}))
+    assert len(log["prompts"]) == 3                                       # no model call besides the summarizer
+    assert sum(kwargs == {"tool_choice": "none"} for _, kwargs in log["bind"]) == 1
+    continuation = CONTINUATION.format(summary="SUMMARY TEXT")
+    assert [m.type for m in out["messages"]] == ["human", "ai"]
+    assert out["messages"][0].content == continuation and out["messages"][-1].content == "done"
+
+
 def test_the_default_compaction_prompt_is_the_seed_prompt_file():
     from agent.harness import COMPACT_PROMPT
     assert COMPACT_PROMPT.is_file() and "Next step" in COMPACT_PROMPT.read_text()

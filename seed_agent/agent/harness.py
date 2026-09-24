@@ -9,13 +9,15 @@ Tool execution follows langgraph.prebuilt.ToolNode's default messages.
 Two deliberate differences from create_agent's default:
   1. A tool that raises is reported to the model as an error ToolMessage
      (create_agent re-raises and ends the run).
-  2. Auto-compact: before each model call, the harness estimates the context size
+  2. Auto-compact: call_model estimates the context size before every model call
      (the last reply's reported usage plus ~4 chars/token for what came after, with
-     each image counted as a fixed IMAGE_TOKENS). Below compact_at * context_window
-     nothing happens and messages append linearly. At or above it, a dedicated
-     summarizer call (same system prompt, tools and history; tool_choice="none")
-     condenses the history, and the history is replaced by one user message: a
-     continuation preamble plus the summary.
+     each image counted as a fixed IMAGE_TOKENS), on the merged state -- there is no
+     per-Send routing decision, so parallel tool results are never seen in isolation.
+     Below compact_at * context_window nothing happens and messages append linearly.
+     At or above it, a dedicated summarizer call (same system prompt, tools and
+     history; tool_choice="none") condenses the history, and the history is replaced
+     by one user message -- a continuation preamble plus the summary -- before the
+     real model call runs on it.
 """
 from __future__ import annotations
 
@@ -120,16 +122,6 @@ def needs_compaction(messages: list[AnyMessage], system_prompt: str | None, cont
     return len(messages) > 1 and estimate_tokens(messages, system_prompt) >= compact_at * context_window
 
 
-async def summarize(model: BaseChatModel, tools: list[BaseTool], system_prompt: str | None,
-                    messages: list[AnyMessage], instruction: str) -> str:
-    """The summarizer sees the same system prompt, tools and history as the agent, plus the
-    compaction instruction; tool_choice='none' keeps it to writing text."""
-    bound = model.bind_tools(tools, tool_choice="none") if tools else model.bind()
-    system = [SystemMessage(content=system_prompt)] if system_prompt is not None else []
-    reply = await bound.ainvoke([*system, *messages, HumanMessage(content=instruction)])
-    return reply.text.strip()
-
-
 def build_react_agent(model: BaseChatModel, tools: list[BaseTool], system_prompt: str | None = None, *,
                       context_window: int, compact_at: float = COMPACT_AT,
                       compact_prompt: str | None = None):
@@ -137,37 +129,34 @@ def build_react_agent(model: BaseChatModel, tools: list[BaseTool], system_prompt
     system = [SystemMessage(content=system_prompt)] if system_prompt is not None else []
 
     async def call_model(state: ReactState) -> dict:
+        messages, reset = state["messages"], []
+        if needs_compaction(messages, system_prompt, context_window, compact_at):
+            # A dedicated summarizer call sees the same system prompt, tools and history as the
+            # agent, plus the compaction instruction; tool_choice="none" keeps it to writing text.
+            instruction = compact_prompt if compact_prompt is not None else COMPACT_PROMPT.read_text()
+            summarizer = model.bind_tools(tools, tool_choice="none") if tools else model.bind()
+            reply = await summarizer.ainvoke([*system, *messages, HumanMessage(content=instruction)])
+            messages = [HumanMessage(content=CONTINUATION.format(summary=reply.text.strip()))]
+            reset = [RemoveMessage(id=REMOVE_ALL_MESSAGES), *messages]
         bound = model.bind_tools(tools, tool_choice=None) if tools else model.bind()
-        return {"messages": [await bound.ainvoke([*system, *state["messages"]])]}
+        return {"messages": [*reset, await bound.ainvoke([*system, *messages])]}
 
     async def call_tool(calls: list[ToolCall]) -> dict:
         return {"messages": [await run_tool(by_name, call) for call in calls]}
 
-    async def compact(state: ReactState) -> dict:
-        instruction = compact_prompt if compact_prompt is not None else COMPACT_PROMPT.read_text()
-        summary = await summarize(model, tools, system_prompt, state["messages"], instruction)
-        return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES),
-                             HumanMessage(content=CONTINUATION.format(summary=summary))]}
-
-    def before_model(state: ReactState) -> str:
-        over = needs_compaction(state["messages"], system_prompt, context_window, compact_at)
-        return "compact" if over else "model"
-
     def after_model(state: ReactState):
         last = state["messages"][-1]
-        if not tools or not isinstance(last, AIMessage) or not last.tool_calls:
+        if not last.tool_calls:
             return END
         return [Send("tools", [call]) for call in last.tool_calls]
 
     graph = StateGraph(ReactState)
-    graph.add_node("compact", compact)
     graph.add_node("model", call_model)
-    graph.add_conditional_edges(START, before_model, ["compact", "model"])
-    graph.add_edge("compact", "model")
+    graph.add_edge(START, "model")
     if tools:
         graph.add_node("tools", call_tool)
         graph.add_conditional_edges("model", after_model, ["tools", END])
-        graph.add_conditional_edges("tools", before_model, ["compact", "model"])
+        graph.add_edge("tools", "model")
     else:
         graph.add_edge("model", END)
     return graph.compile().with_config({"recursion_limit": RECURSION_LIMIT})
