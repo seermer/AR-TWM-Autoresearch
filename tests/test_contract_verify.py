@@ -13,6 +13,14 @@ CFG = KernelConfig.load()
 FIXTURES = Path(__file__).parent / "fixtures" / "agents"
 
 
+# 20,000 nested binary operations exhaust the parser's own AST-construction
+# recursion budget (RecursionError), not Python's own call stack -- distinct
+# from the "too many nested parentheses" SyntaxError the parser raises for
+# nested brackets/calls/parens. Deliberately not a SyntaxError.
+_DEEPLY_NESTED_SRC = ("def edit_self(ctx):\n    return " + "1+" * 20000 + "1\n"
+                     "def improve_recipe(ctx): ...\n")
+
+
 @pytest.mark.parametrize("src,ok,fragment", [
     ("def edit_self(ctx): ...\ndef improve_recipe(ctx): ...\n", True, ""),
     ("async def edit_self(ctx): ...\nasync def improve_recipe(ctx): ...\n", True, ""),
@@ -21,6 +29,7 @@ FIXTURES = Path(__file__).parent / "fixtures" / "agents"
     ("def edit_self(*args): ...\ndef improve_recipe(ctx): ...\n", False, "exactly one"),
     ("def outer():\n    def edit_self(ctx): ...\ndef improve_recipe(ctx): ...\n", False, "edit_self"),
     ("def edit_self(ctx):\n  return (\n", False, "syntax"),
+    pytest.param(_DEEPLY_NESTED_SRC, False, "cannot parse", id="deeply_nested_recursion_error"),
 ])
 def test_static_check(src, ok, fragment):
     step = static_check(src)
@@ -53,11 +62,71 @@ def test_each_container_token_is_revoked_and_its_jobs_cancelled(tmp_path, monkey
     assert all(h.registry.lookup(t) is None for t in tokens)
 
 
+def test_non_utf8_entry_py_fails_static_instead_of_raising(tmp_path, monkeypatch):
+    """entry.read_text() defaults to UTF-8; a non-UTF-8 agent/entry.py is an agent
+    fault (spec 10/14.2) and must fail the `static` step, not raise out of
+    verify_contract. No Docker: the runner would never even be called."""
+    run = tmp_path / "run"
+    h = ContractHarness(CFG, run, Recorder(run))
+    monkeypatch.setattr("ar_kernel.contract.verify.ensure_image", lambda cfg, reqs, **k: "img:test")
+    agent_src = tmp_path / "agent_src" / "agent"
+    agent_src.mkdir(parents=True)
+    (agent_src / "__init__.py").write_text("")
+    (agent_src / "entry.py").write_bytes(b"\xff\xfe\x00not valid utf-8")
+
+    def runner(**kw):
+        pytest.fail("the runner must not be invoked once static_check has failed")
+
+    repo = AgentsRepo(tmp_path / "agents.git")
+    try:
+        report = verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo,
+                                 commit=repo.init(agent_src.parent), harness=h, recorder=Recorder(run),
+                                 node="n1", attempt=1, runner=runner)
+    finally:
+        h.queue.shutdown()
+    failed = next(s for s in report.steps if not s.ok)
+    assert not report.ok and failed.name == "static" and "utf-8" in failed.detail.lower()
+
+
+@pytest.mark.parametrize("write_result_json,fragment", [
+    (lambda ws: (ws / "result.json").write_text("{not valid json"), "cannot read"),
+    (lambda ws: (ws / "result.json").write_text(json.dumps(["not", "a", "dict"])), "not a JSON object"),
+])
+def test_malformed_result_json_fails_the_smoke_step_instead_of_raising(
+        tmp_path, monkeypatch, write_result_json, fragment):
+    """A smoke run's /workspace/result.json is agent-controlled output (written by
+    ar_contract.run, but the agent code inside the container could in principle
+    corrupt or replace it): malformed JSON (JSONDecodeError) or valid JSON that
+    isn't an object (body.get would raise AttributeError) must fail the
+    smoke:<kind> step, not raise out of verify_contract. No Docker: the runner
+    is faked."""
+    run = tmp_path / "run"
+    h = ContractHarness(CFG, run, Recorder(run))
+    monkeypatch.setattr("ar_kernel.contract.verify.ensure_image", lambda cfg, reqs, **k: "img:test")
+
+    def runner(*, mounts, command, **kw):
+        if command[-1] == "edit_self":
+            write_result_json(mounts.workspace)
+        else:
+            (mounts.workspace / "result.json").write_text(json.dumps({"ok": True, "result": {}}))
+        return RunResult(0, False, "", "", 0.1, [], "c")
+
+    repo = AgentsRepo(tmp_path / "agents.git")
+    try:
+        report = verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo,
+                                 commit=repo.init(FIXTURES / "good"), harness=h, recorder=Recorder(run),
+                                 node="n1", attempt=1, runner=runner)
+    finally:
+        h.queue.shutdown()
+    failed = next(s for s in report.steps if not s.ok)
+    assert not report.ok and failed.name == "smoke:edit_self" and fragment in failed.detail
+
+
 def test_container_token_printed_by_agent_is_redacted_from_telemetry(tmp_path, monkeypatch):
-    """Controller ruling: verify_contract's own telemetry (the sandbox run and the
-    final contract.report) goes through the `recorder` argument, which in real
-    usage (and in `test_each_container_token_is_revoked_and_its_jobs_cancelled`
-    above) is a *different* Recorder instance from `harness.recorder` -- the one
+    """verify_contract's own telemetry (the sandbox run and the final
+    contract.report) goes through the `recorder` argument, which in real usage
+    (and in `test_each_container_token_is_revoked_and_its_jobs_cancelled` above)
+    is a *different* Recorder instance from `harness.recorder` -- the one
     TokenRegistry.issue() already redacts on. If verify_contract only relied on
     that, a token an agent printed to stdout/stderr would leak into whatever
     `recorder` records. No Docker: the runner is faked, standing in for what a

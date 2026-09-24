@@ -50,6 +50,12 @@ def static_check(entry_source: str) -> ContractStep:
         tree = ast.parse(entry_source)
     except SyntaxError as exc:
         return ContractStep("static", False, f"syntax error in agent/entry.py: {exc}")
+    except (ValueError, RecursionError, MemoryError) as exc:
+        # Agent-controlled source, not a kernel bug: e.g. deeply nested expressions
+        # exhaust the parser's own recursion budget (spec 10/14.2 -- agent faults
+        # must become a failed step, never a kernel exception).
+        return ContractStep("static", False,
+                            f"cannot parse agent/entry.py: {type(exc).__name__}: {exc}")
     top = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
     for name in ENTRY_POINTS:
         fn = top.get(name)
@@ -150,7 +156,12 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
         return finish(False)
 
     entry = code / "agent" / "entry.py"
-    step = static_check(entry.read_text() if entry.exists() else "")
+    try:
+        entry_source = entry.read_text() if entry.exists() else ""
+    except UnicodeDecodeError as exc:
+        step = ContractStep("static", False, f"agent/entry.py is not valid UTF-8: {exc}")
+    else:
+        step = static_check(entry_source)
     report.steps.append(step)
     if not step.ok:
         return finish(False)
@@ -165,12 +176,11 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
             (ctx_dir / "context.json").write_text(json.dumps(context))
         caller = harness.registry.issue(node=node, phase="contract", attempt=attempt,
                                         workspace_host=ws, staging_host=staging, mock_script="smoke")
-        # Controller ruling: TokenRegistry.issue() only redacts on harness.recorder.
-        # verify_contract's own telemetry (this runner call, and finish()'s
-        # contract.report event below) is recorded through the `recorder` argument,
-        # which may be a different Recorder instance -- add the redaction there too,
-        # or a token an agent prints to stdout/stderr would leak into that recorder's
-        # telemetry.
+        # `recorder` is not necessarily `harness.recorder` (a different Recorder
+        # instance, in every real caller): TokenRegistry.issue() only redacted the
+        # token on harness.recorder, so this runner call's own telemetry (and
+        # finish()'s contract.report event below) needs the redaction added here
+        # too, or a token an agent prints to stdout/stderr would leak into it.
         recorder.add_redaction(caller.token)
         try:
             result = runner(image=report.image, name=container_name(run_id, node, "contract", attempt),
@@ -205,9 +215,21 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
             report.steps.append(ContractStep(name, False, f"timed out after {smoke_timeout_s:.0f}s"))
             return finish(False)
         out = ws / "result.json"
-        body = json.loads(out.read_text()) if out.exists() else {"ok": False, "error": "no result.json"}
+        body: dict = {"ok": False, "error": "no result.json"}
+        if out.exists():
+            try:
+                parsed = json.loads(out.read_text())
+            except (OSError, ValueError) as exc:
+                body = {"ok": False, "error": f"cannot read /workspace/result.json: {exc}"}
+            else:
+                body = parsed if isinstance(parsed, dict) else {
+                    "ok": False,
+                    "error": f"/workspace/result.json is not a JSON object (got {type(parsed).__name__})"}
         if result.exit_code != 0 or not body.get("ok"):
-            report.steps.append(ContractStep(name, False, f"{body.get('error')}\n{result.stderr[-2000:]}"))
+            tb = body.get("traceback")
+            tb_tail = f"\n{tb[-2000:]}" if isinstance(tb, str) and tb else ""
+            report.steps.append(ContractStep(
+                name, False, f"{body.get('error')}\n{result.stderr[-2000:]}{tb_tail}"))
             return finish(False)
         report.steps.append(ContractStep(name, True))
     return finish(True)
