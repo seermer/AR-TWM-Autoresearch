@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import socket
 import subprocess
 import threading
@@ -181,3 +182,41 @@ def test_snapshot_skips_fifos_and_marks_unreadable_files(tmp_path):
     finally:
         (tmp_path / "locked.txt").chmod(0o644)
     assert snap["locked.txt"] == "unreadable" and "pipe" not in snap and len(snap["ok.txt"]) == 64
+
+
+def _lock_up(root):
+    """What an agent can leave behind: a chmod-000 file and a chmod-000 directory holding a file."""
+    (root / "locked.txt").write_text("x")
+    (root / "locked.txt").chmod(0)
+    (root / "sealed").mkdir()
+    (root / "sealed" / "inner.txt").write_text("y")
+    (root / "sealed").chmod(0)
+
+
+def test_restored_access_lets_a_retry_copy_and_delete_the_tree(tmp_path):
+    from ar_kernel.sandbox.runner import restore_owner_access
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _lock_up(ws)
+    (ws / "link").symlink_to(tmp_path / "elsewhere")          # dangling link: must not be followed
+    restore_owner_access(ws)
+    shutil.copytree(ws, tmp_path / "retry", symlinks=True)    # the retry's workspace copy
+    shutil.rmtree(ws)                                         # re-running an attempt number
+    assert (tmp_path / "retry" / "sealed" / "inner.txt").read_text() == "y"
+
+
+@pytest.mark.docker
+def test_container_runs_restore_owner_access_on_every_writable_mount(tmp_path, mounts):
+    script = ("import os\n"
+              "for root in ('/agent', '/workspace', '/workspace/staging'):\n"
+              "    open(root + '/locked.txt', 'w').write('x'); os.chmod(root + '/locked.txt', 0)\n"
+              "    os.mkdir(root + '/sealed'); open(root + '/sealed/inner.txt', 'w').write('y')\n"
+              "    os.chmod(root + '/sealed', 0)\n")
+    res = _run(tmp_path, mounts, script)
+    assert res.exit_code == 0, res.stderr
+    for root in (mounts.agent, mounts.workspace, mounts.staging):
+        assert (root / "sealed" / "inner.txt").read_text() == "y"
+        assert (root / "locked.txt").read_text() == "x"
+    shutil.copytree(mounts.workspace, tmp_path / "retry", symlinks=True)
+    shutil.rmtree(mounts.workspace)

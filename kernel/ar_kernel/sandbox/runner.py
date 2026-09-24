@@ -67,6 +67,25 @@ def snapshot(root: Path, hash_files: bool) -> dict[str, str]:
     return out
 
 
+def restore_owner_access(root: Path) -> None:
+    """Give the owner rw (and x on directories) on everything under `root` again, never following
+    a link. A chmod-000 file or directory an agent leaves (containers run as the host uid) must not
+    break the kernel's later hash, copy, commit or delete of the tree."""
+    def grant(path: str, bits: int) -> None:
+        try:
+            if not os.path.islink(path):
+                os.chmod(path, os.lstat(path).st_mode | bits)
+        except OSError:                  # e.g. a mount point docker created as root
+            pass
+
+    grant(str(root), 0o700)
+    for dirpath, dirnames, filenames in os.walk(root):     # top-down: a dir is fixed before it is entered
+        for name in dirnames:
+            grant(os.path.join(dirpath, name), 0o700)
+        for name in filenames:
+            grant(os.path.join(dirpath, name), 0o600)
+
+
 def diff(before: dict[str, str], after: dict[str, str]) -> dict[str, list[str]]:
     return {"added": sorted(set(after) - set(before)),
             "removed": sorted(set(before) - set(after)),
@@ -151,6 +170,8 @@ def run_container(*, image: str, name: str, mounts: Mounts, command: list[str], 
     finally:
         stop.set()
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+        for root in (mounts.agent, mounts.workspace, mounts.staging):   # everything the agent can write
+            restore_owner_access(root)
     result = RunResult(exit_code, timed_out, stdout, stderr, time.monotonic() - started, stats, name)
     recorder.event("sandbox.end", container=name, exit_code=exit_code, timed_out=timed_out,
                    duration_s=result.duration_s,
