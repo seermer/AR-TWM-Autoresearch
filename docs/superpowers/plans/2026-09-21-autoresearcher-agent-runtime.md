@@ -569,7 +569,7 @@ Kernel-owned and mounted read-only at `/ar_contract` in every container (spec §
 **Interfaces:**
 - Produces (imported by agent code, the kernel's context builder and contract verification):
   - `ar_contract.models`: `EditContext`, `EditResult` (`summary`, optional `component`), `RecipeContext`, `RecipeResult` (pydantic v2), `EditComponent = Literal["prompts", "tools", "harness", "orchestration", "knowledge"]` and `EDIT_COMPONENTS = typing.get_args(EditComponent)` (defined once; Task 17 imports `EditComponent`), and `CONTEXT_MODELS = {"edit_self": EditContext, "improve_recipe": RecipeContext}`, `RESULT_MODELS = {"edit_self": EditResult, "improve_recipe": RecipeResult}`.
-  - `ar_contract.client`: `socket_dir() -> str` (env `AR_SOCKET_DIR`, default `/run/ar`), `token() -> str` (env `AR_TOKEN`), `default_model() -> str` (env `AR_DEFAULT_MODEL`), `chat_model(model=None, **kwargs) -> langchain_openai.ChatOpenAI` (gateway socket for both the sync and the async client, fact 18; Responses API, `max_retries=0`), and `mcp_session(sockets=None, auth_token=None)`, an async context manager yielding an initialized `mcp.ClientSession` on the tool server. Both read the environment when called.
+  - `ar_contract.client`: `socket_dir() -> str` (env `AR_SOCKET_DIR`, default `/run/ar`), `token() -> str` (env `AR_TOKEN`), `default_model() -> str` (env `AR_DEFAULT_MODEL`), `chat_model(model=None, **kwargs) -> langchain_openai.ChatOpenAI` (gateway socket for both the sync and the async client, fact 18; Chat Completions since Task 19, `max_retries=0`), and `mcp_session(sockets=None, auth_token=None)`, an async context manager yielding an initialized `mcp.ClientSession` on the tool server. Both read the environment when called.
   - `ar_contract.run.main(argv) -> int`, run as `python -m ar_contract.run <edit_self|improve_recipe>`. It reads `$AR_CONTEXT_DIR/context.json` (default `/context`), imports `agent.entry` from `$AR_AGENT_DIR` (default `/agent`), calls the entry point (sync or async), validates the result, and writes `$AR_WORKSPACE/result.json` (default `/workspace`) as `{"ok": true, "result": {...}}` or `{"ok": false, "error": "...", "traceback": "..."}`. Exit code 0 means ok.
 
 - [ ] **Step 1: Write the failing tests**
@@ -3358,7 +3358,7 @@ def _docker_args(image, name, mounts: Mounts, command, env, cpus, memory_gb) -> 
             "-v", f"{mounts.context}:/context:ro",
             "-v", f"{mounts.store}:/store:ro",
             "-v", f"{mounts.contract}:/ar_contract:ro",
-            "-v", f"{mounts.sockets}:/run/ar:rw"]
+            "-v", f"{mounts.sockets}:/run/ar:ro"]   # final review: connect works, deleting a socket does not
     for key, value in {**base_env, **env}.items():
         args += ["-e", f"{key}={value}"]
     return args + [image, *command]
@@ -6481,7 +6481,7 @@ Plan 4's tasks will be written after Plan 3. Plan 4 sequences these Plan 2 piece
 7. **Deferred Plan 1 items:** `score_node` try/finally and rank/alpha from the node's resolved config; schema columns `recipe_path` and `attempt_counts_json`; `resolve_gpus` visibility (14.6); run-relative paths if resume-after-move matters.
 8. **Config to constructor parameters.** Plan 2's services read no config themselves. Plan 4 builds them from `KernelConfig` and passes `gateway.upstream_timeout_s` and `gateway.upstream_retries` to `Upstream.from_env(os.environ, timeout_s=, retries=)`, `gateway.model_allowlist` (∪ `{OPENAI_MODEL}`) to `create_gateway_app(allowed_models=)`, and `tools.job_wait_max_s` to `JobQueue(wait_cap_s=)`.
 9. **Shutdown errors.** `JobQueue.shutdown()` raises `RuntimeError` when the worker thread outlives its join deadline (a job may still hold a GPU). Plan 4's shutdown and force-stop paths must catch it, still run `RunServices.stop()` and the container and process-group kills, and then confirm the GPUs are free before continuing.
-10. **Live LLM run.** Task 18's live run against a real model (Step 4) is deferred until `OPENAI_API_KEY` and `OPENAI_MODEL` are set. Plan 4 must run it, as Task 18 Step 4 describes, before the first unattended run.
+10. **Live LLM run.** Task 19 passed a capped live check through the gateway (783 tokens). The full Task 18 Step 4 run (a live `improve_recipe`) is still owed; unless it is recorded in the verification log before merge, Plan 4 must run it, as Task 18 Step 4 describes, before the first unattended run.
 
 ## Self-review
 

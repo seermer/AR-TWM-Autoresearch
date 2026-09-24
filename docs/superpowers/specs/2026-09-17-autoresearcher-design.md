@@ -632,7 +632,8 @@ exactly two ways:
 
 - Not mounted: `WorldModel/`, `WBench/`, `AutoResearcher/kernel`, `.env`, weights.
 - Network: **none** (`--network none`). The gateway and the tool server are reached over Unix
-  domain sockets in a per-run socket directory mounted at `/run/ar`. *(Amended 2026-09-21, Plan 2:
+  domain sockets in a per-run socket directory mounted read-only at `/run/ar` (connecting needs no
+  write access to the directory, so an agent cannot delete the sockets; final review, 2026-09-24). *(Amended 2026-09-21, Plan 2:
   a Docker `--internal` network was tested and still exposes host services on the bridge IP; SSH
   was reachable from inside the sandbox.)*
 - Limits: CPU and memory caps from `kernel.yaml`; no GPU. The image ships `ffmpeg`/
