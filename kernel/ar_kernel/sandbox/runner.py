@@ -122,14 +122,18 @@ def run_container(*, image: str, name: str, mounts: Mounts, command: list[str], 
             if r.returncode == 0 and r.stdout.strip():
                 stats.append({"t": time.monotonic() - started, **json.loads(r.stdout)})
 
-    exit_code, timed_out = None, False
-    launched = subprocess.run(args, capture_output=True, text=True)
-    if launched.returncode != 0:
-        recorder.event("sandbox.error", payload={"stderr": launched.stderr}, container=name, **base)
-        return RunResult(None, False, "", launched.stderr, time.monotonic() - started, [], name)
-    sampler = threading.Thread(target=sample, daemon=True)
-    sampler.start()
+    exit_code, timed_out, stdout, stderr = None, False, "", ""
     try:
+        # `docker run -d` can fail *after* it has created the container (e.g. an
+        # OCI runtime error or a bad bind source): a `Created` container named
+        # `name` is left behind unless the removal below also covers this path.
+        launched = subprocess.run(args, capture_output=True, text=True)
+        if launched.returncode != 0:
+            recorder.event("sandbox.error", payload={"stderr": launched.stderr}, container=name, **base)
+            stderr = launched.stderr
+            return RunResult(None, False, "", stderr, time.monotonic() - started, [], name)
+        sampler = threading.Thread(target=sample, daemon=True)
+        sampler.start()
         try:
             waited = subprocess.run(["docker", "wait", name], capture_output=True, text=True,
                                     timeout=timeout_s)

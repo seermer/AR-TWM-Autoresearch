@@ -49,20 +49,41 @@ def _run(tmp_path, mounts, script, timeout_s=120, env=None):
                          node="n1", phase="test", attempt=1, stats_every_s=1)
 
 
-def test_sandbox_start_never_records_the_container_token(tmp_path, mounts, monkeypatch):
-    """Controller ruling: the runner must not record the AR_TOKEN value in
-    telemetry, regardless of which Recorder is used (no add_redaction call here).
-    Fail the docker launch immediately so no real container is needed."""
+def test_failed_launch_is_still_removed_and_only_the_recorded_argv_is_redacted(tmp_path, mounts, monkeypatch):
+    """Controller ruling (fix round 1): `docker run -d` can fail *after* creating
+    the container (OCI runtime error, bad bind source, missing executable),
+    leaving a `Created` container behind. The removal must still run on that
+    path -- "the container is removed on every exit path" wins over the code
+    that skipped it via an early return outside the `finally`.
+
+    Also (controller ruling, original): the runner must not record the
+    AR_TOKEN value in telemetry, regardless of which Recorder is used (no
+    add_redaction call here) -- but that redaction must only touch the
+    recorded copy, never the real argv handed to the actual `docker run`
+    subprocess call.
+    """
+    calls: list[list[str]] = []
+
     def fake_run(args, **kwargs):
-        return subprocess.CompletedProcess(args, returncode=1, stdout="", stderr="docker not invoked")
+        calls.append(list(args))
+        if args[:2] == ["docker", "run"]:
+            return subprocess.CompletedProcess(args, returncode=1, stdout="", stderr="oci runtime error")
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     secret = "ar-super-secret-token-value"
     recorder = Recorder(tmp_path / "run")
-    run_container(image="unused:tag", name=container_name("t", "n1", "test", 1), mounts=mounts,
+    name = container_name("t", "n1", "test", 1)
+    run_container(image="unused:tag", name=name, mounts=mounts,
                   command=["python", "-c", "pass"], env={"AR_TOKEN": secret},
                   cpus=2, memory_gb=2, timeout_s=5, recorder=recorder,
                   node="n1", phase="test", attempt=1, stats_every_s=1)
+
+    run_call = next(c for c in calls if c[:2] == ["docker", "run"])
+    assert f"AR_TOKEN={secret}" in run_call, "the real docker invocation must still get the real token"
+
+    rm_calls = [c for c in calls if c[:3] == ["docker", "rm", "-f"]]
+    assert rm_calls == [["docker", "rm", "-f", name]], "a failed launch must still be removed"
 
     events = recorder.read_events("n1")
     start_events = [e for e in events if e["type"] == "sandbox.start"]
