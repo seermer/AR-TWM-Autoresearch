@@ -1,6 +1,8 @@
 import json
 import os
+import socket
 import subprocess
+import threading
 
 import pytest
 
@@ -99,7 +101,8 @@ def test_failed_launch_is_still_removed_and_only_the_recorded_argv_is_redacted(t
 @pytest.mark.docker
 def test_isolation_holds_from_inside(tmp_path, mounts):
     """Spec 16.3 item 4: no internet, no host services, no kernel/WorldModel/WBench/.env,
-    no writes to /store or /context; files written are owned by the host user.
+    no writes to /store or /context; files written are owned by the host user. The socket dir is
+    mounted read-only: the gateway socket cannot be deleted, but connecting to it still works.
 
     The host paths checked below are derived from KernelConfig (project/repo
     roots), never hardcoded, so the test is portable across checkouts/machines.
@@ -119,9 +122,23 @@ out["visible"] = [p for p in host_paths if os.path.exists(p)]
 for target in ("/store/new.bin", "/context/new.json", "/etc/new"):
     try: open(target, "w").write("x"); out[target] = "writable"
     except OSError: out[target] = "denied"
+try: os.remove("/run/ar/gateway.sock"); out["sock_rm"] = "removed"
+except OSError: out["sock_rm"] = "denied"
+c = socket.socket(socket.AF_UNIX); c.settimeout(10); c.connect("/run/ar/gateway.sock")
+out["sock_reply"] = c.recv(16).decode()
 open("/workspace/staging/made.txt", "w").write("x")
 print(json.dumps(out))
 """
+    server = socket.socket(socket.AF_UNIX)          # stands in for the gateway's socket
+    server.bind(str(mounts.sockets / "gateway.sock"))
+    server.listen(1)
+
+    def serve():
+        conn, _ = server.accept()
+        conn.sendall(b"hello")
+        conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
     res = run_container(image=ensure_image(CFG, ""), name=container_name("t", "n1", "test", 1),
                         mounts=mounts, command=["python", "-c", script, json.dumps(host_paths)],
                         env={}, cpus=2, memory_gb=2, timeout_s=120,
@@ -133,6 +150,9 @@ print(json.dumps(out))
     assert out["host_ssh"] in ("closed", "unreachable")
     assert out["visible"] == []
     assert out["/store/new.bin"] == out["/context/new.json"] == out["/etc/new"] == "denied"
+    assert out["sock_rm"] == "denied" and out["sock_reply"] == "hello"
+    assert (mounts.sockets / "gateway.sock").exists()
+    server.close()
     assert os.stat(mounts.staging / "made.txt").st_uid == os.getuid()
 
 

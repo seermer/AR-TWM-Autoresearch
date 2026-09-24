@@ -87,7 +87,7 @@ def _docker_args(image, name, mounts: Mounts, command, env, cpus, memory_gb) -> 
             "-v", f"{mounts.context}:/context:ro",
             "-v", f"{mounts.store}:/store:ro",
             "-v", f"{mounts.contract}:/ar_contract:ro",
-            "-v", f"{mounts.sockets}:/run/ar:rw"]
+            "-v", f"{mounts.sockets}:/run/ar:ro"]   # connect works; deleting a socket does not
     for key, value in {**base_env, **env}.items():
         args += ["-e", f"{key}={value}"]
     return args + [image, *command]
