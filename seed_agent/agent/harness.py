@@ -36,7 +36,6 @@ from langgraph.types import Send
 from pydantic import ValidationError
 
 RECURSION_LIMIT = 9_999
-COMPACT_AT = 0.85
 COMPACT_PROMPT = Path(__file__).resolve().parent / "prompts" / "compact.md"
 INVALID_TOOL = "Error: {name} is not a valid tool, try one of [{names}]."
 INVALID_ARGS = ("Error invoking tool '{name}' with kwargs {args} with error:\n"
@@ -123,7 +122,7 @@ def needs_compaction(messages: list[AnyMessage], system_prompt: str | None, cont
 
 
 def build_react_agent(model: BaseChatModel, tools: list[BaseTool], system_prompt: str | None = None, *,
-                      context_window: int, compact_at: float = COMPACT_AT,
+                      context_window: int, compact_at: float,
                       compact_prompt: str | None = None):
     by_name = {t.name: t for t in tools}
     system = [SystemMessage(content=system_prompt)] if system_prompt is not None else []

@@ -115,7 +115,7 @@ async def _run(builder, script, tools, system, history):
 
 
 def _ours(model, tools, system):
-    return build_react_agent(model, tools, system, context_window=BIG)
+    return build_react_agent(model, tools, system, context_window=BIG, compact_at=0.85)
 
 
 def _theirs(model, tools, system):
@@ -173,7 +173,7 @@ def test_compaction_replaces_history_and_continues():
               _ai("done", total=50)]
     log = {"bind": [], "prompts": []}
     agent = build_react_agent(Scripted(script=script, log=log), TOOLS, "sys", context_window=1000,
-                              compact_prompt="COMPACT NOW")
+                              compact_at=0.85, compact_prompt="COMPACT NOW")
     out = asyncio.run(agent.ainvoke({"messages": [HumanMessage("task")]}))
     summarizer = log["prompts"][1]
     assert [m["type"] for m in summarizer] == ["system", "human", "ai", "tool", "human"]
@@ -188,7 +188,8 @@ def test_compaction_replaces_history_and_continues():
 def test_below_the_threshold_messages_append_linearly():
     script = [_ai("", [("add", {"a": 1, "b": 2}, "c1")], total=800), _ai("done", total=820)]
     log = {"bind": [], "prompts": []}
-    agent = build_react_agent(Scripted(script=script, log=log), TOOLS, "sys", context_window=1000)
+    agent = build_react_agent(Scripted(script=script, log=log), TOOLS, "sys", context_window=1000,
+                              compact_at=0.85)
     out = asyncio.run(agent.ainvoke({"messages": [HumanMessage("task")]}))
     assert [m.type for m in out["messages"]] == ["human", "ai", "tool", "ai"] and len(log["prompts"]) == 2
 
@@ -203,7 +204,7 @@ def test_compaction_triggers_once_when_parallel_outputs_only_cross_together():
               _ai("SUMMARY TEXT"), _ai("done")]
     log = {"bind": [], "prompts": []}
     agent = build_react_agent(Scripted(script=script, log=log), TOOLS, "sys", context_window=1000,
-                              compact_prompt="COMPACT NOW")
+                              compact_at=0.85, compact_prompt="COMPACT NOW")
     out = asyncio.run(agent.ainvoke({"messages": [HumanMessage("task")]}))
     assert len(log["prompts"]) == 3                                       # no call on the old history
     assert sum(kwargs == {"tool_choice": "none"} for _, kwargs in log["bind"]) == 1  # one summarizer call
@@ -222,7 +223,7 @@ def test_compaction_triggers_once_even_when_one_parallel_output_alone_crosses():
               _ai("SUMMARY TEXT"), _ai("done")]
     log = {"bind": [], "prompts": []}
     agent = build_react_agent(Scripted(script=script, log=log), TOOLS, "sys", context_window=1000,
-                              compact_prompt="COMPACT NOW")
+                              compact_at=0.85, compact_prompt="COMPACT NOW")
     out = asyncio.run(agent.ainvoke({"messages": [HumanMessage("task")]}))
     assert len(log["prompts"]) == 3                                       # no model call besides the summarizer
     assert sum(kwargs == {"tool_choice": "none"} for _, kwargs in log["bind"]) == 1

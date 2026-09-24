@@ -47,16 +47,17 @@ def system_prompt(name: str, knowledge: tuple[str, ...] = ()) -> str:
     return text
 
 
-async def run_role(system: str, tools: list, task: str, submission=None, submit_name: str = "") -> list[AnyMessage]:
-    """Run one role to completion. A role that must submit gets one reminder if it stops early."""
+async def run_role(system: str, tools: list, task: str, submission=None) -> list[AnyMessage]:
+    """Run one role to completion. A role that must submit (`submission`: the box from submit_tool)
+    gets one reminder if it stops early."""
     agent = build_react_agent(chat_model(MODEL), tools, system, context_window=CONTEXT_WINDOW,
                               compact_at=COMPACT_AT)
     state = await agent.ainvoke({"messages": [HumanMessage(content=task)]})
     if submission is not None and submission.value is None:
         state = await agent.ainvoke({"messages": [*state["messages"],
-                                                  HumanMessage(content=REMIND.format(tool=submit_name))]})
+                                                  HumanMessage(content=REMIND.format(tool=submission.name))]})
     if submission is not None and submission.value is None:
-        raise RuntimeError(f"the role finished without calling {submit_name}")
+        raise RuntimeError(f"the role finished without calling {submission.name}")
     return state["messages"]
 
 
@@ -90,7 +91,7 @@ async def run_task(ctx: RecipeContext) -> RecipeResult:
                               "clip_pool_size": len(ctx.clip_pool), "tools": ctx.tools, "retry": ctx.retry,
                               "format_rules": ctx.format_rules}, default=str)[:BRIEF_CHARS]
         plan_tool, plan = submit_tool("submit_plan", "Submit the data plan for this node.", DataPlan)
-        await run_role(system_prompt("planner"), [plan_tool], context, plan, "submit_plan")
+        await run_role(system_prompt("planner"), [plan_tool], context, plan)
         failures: list = []
         for _ in range(CHECK_ROUNDS):
             build_tool, built = submit_tool("submit_data_commit", "Submit the data commit to train on.",
@@ -101,12 +102,12 @@ async def run_task(ctx: RecipeContext) -> RecipeResult:
                          + json.dumps(failures))
             await run_role(system_prompt("data_builder", knowledge=("data_building.md",)),
                            [*ktools, *make_file_tools(WORKSPACE), caption_clip, snap_timed_prompts,
-                            build_tool], task, built, "submit_data_commit")
+                            build_tool], task, built)
             recipe_tool, draft = submit_tool("submit_recipe", "Submit the training recipe.", RecipeDraft)
             await run_role(system_prompt("recipe_writer"), [recipe_tool], json.dumps(
                 {"rules": ctx.tunable_rules, "resolution_allowlist": ctx.resolution_allowlist,
                  "lora_allowlist": ctx.lora_allowlist, "n_gpus": ctx.n_gpus, "data_notes": built.value.notes,
-                 "parent_recipe": ctx.parent_recipe, "previous_failures": failures}), draft, "submit_recipe")
+                 "parent_recipe": ctx.parent_recipe, "previous_failures": failures}), draft)
             recipe = {key: int(round(value)) if ctx.tunable_rules.get(key, {}).get("type") == "int"
                       else float(value) for key, value in draft.value.recipe.items()}
             try:
@@ -168,7 +169,7 @@ async def run_meta(ctx: EditContext) -> EditResult:
                         "nodes_remaining": ctx.nodes_remaining, "retry": ctx.retry,
                         "previous_attempt_plan": previous}, default=str)[:BRIEF_CHARS]
     await run_role(system_prompt("edit_planner"), [*make_file_tools(AGENT_ROOT, writable=False), plan_tool],
-                   brief, plan, "submit_edit_plan")
+                   brief, plan)
     p = plan.value
     plan_file.write_text(p.model_dump_json(indent=2))
     errors: list[str] = []

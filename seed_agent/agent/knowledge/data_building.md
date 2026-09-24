@@ -22,3 +22,8 @@
 
 - Segment boundaries must fall on round boundaries: 25/24 s, then every 32/24 s. Use
   snap_timed_prompts after writing the segments.
+
+## Captions
+
+- caption_clip sends video frames to the agent model, so it needs a vision-capable model; with
+  a text-only model every call returns a tool error, so write captions another way.

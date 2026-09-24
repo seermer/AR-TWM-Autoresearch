@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from ar_contract.client import chat_model
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import StructuredTool, ToolException, tool
 from pydantic import BaseModel
@@ -28,16 +29,6 @@ def resolve_inside(root: str, path: str) -> Path:
     if not target.is_relative_to(base):
         raise ValueError(f"{path} is outside {root}")
     return target
-
-
-def read_utf8(target: Path) -> str:
-    """Strict UTF-8 read for editing: replacing undecodable bytes and writing the text back
-    would silently corrupt the file."""
-    try:
-        return target.read_text(encoding="utf-8")
-    except UnicodeDecodeError as exc:
-        raise ValueError(f"{target.name} is not UTF-8 text (byte {exc.start}); "
-                         f"change it with run_command instead") from None
 
 
 def replace_once(text: str, old: str, new: str) -> str:
@@ -70,7 +61,12 @@ def make_file_tools(root: str, *, writable: bool = True) -> list:
     def edit_file(path: str, old: str, new: str) -> str:
         """Replace one exact occurrence of `old` with `new` in a text file. `old` must appear exactly once."""
         target = resolve_inside(root, path)
-        target.write_text(replace_once(read_utf8(target), old, new), encoding="utf-8")
+        try:        # strict: writing back text with replaced undecodable bytes would corrupt the file
+            text = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"{path} is not UTF-8 text (byte {exc.start}); "
+                             f"change it with run_command instead") from None
+        target.write_text(replace_once(text, old, new), encoding="utf-8")
         return f"edited {path}"
 
     @tool
@@ -116,9 +112,9 @@ def snap_timed_prompts(segments_json: str, duration: float) -> str:
 
 @tool
 async def caption_clip(video_path: str, hint: str = "") -> str:
-    """Caption a video: samples 4 frames with ffmpeg and asks a vision model (through the kernel
-    gateway) for one factual caption of the scene and the camera motion."""
-    from ar_contract.client import chat_model
+    """Caption a video: samples 4 frames with ffmpeg and asks the agent model (through the kernel
+    gateway) for one factual caption of the scene and the camera motion. Needs a vision-capable
+    model; with a text-only model every call returns a tool error."""
     duration = float(json.loads(subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", video_path],
         capture_output=True, text=True, check=True).stdout)["format"]["duration"])
@@ -161,7 +157,7 @@ async def kernel_tools(session) -> list[StructuredTool]:
 # to the model as a tool error (the harness), so it can correct them ----
 
 def submit_tool(name: str, description: str, schema: type[BaseModel]) -> tuple[StructuredTool, SimpleNamespace]:
-    box = SimpleNamespace(value=None)       # box.value: the validated submission, once submitted
+    box = SimpleNamespace(value=None, name=name)       # box.value: the validated submission, once submitted
 
     async def submit(**kwargs) -> str:
         box.value = schema.model_validate(kwargs)
