@@ -14,8 +14,8 @@ from .archive.blobs import BlobStore
 from .archive.clips import ClipStore
 from .archive.commits import CommitStore
 from .context_bundle import build_edit_context, build_recipe_context, write_bundle
-from .sandbox.image import ensure_image
-from .sandbox.runner import Mounts, container_name, diff, run_container, snapshot
+from .sandbox.image import ImageBuildError, ensure_image
+from .sandbox.runner import Mounts, RunResult, container_name, diff, run_container, snapshot
 
 
 @dataclass
@@ -56,6 +56,12 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
     dirs = attempt_dirs(env.run_dir, node, phase, attempt)
     if dirs["attempt"].exists():
         shutil.rmtree(dirs["attempt"])
+    if dirs["staging"].exists():
+        # Review fix: staging lives outside the attempt dir (its own host mount),
+        # so re-running the same attempt number must clear it too, or stale
+        # files pollute the before-snapshot and a later retry's shutil.move
+        # below would nest the old staging inside this one instead of replacing it.
+        shutil.rmtree(dirs["staging"])
     env.repo.checkout(code_commit, dirs["agent"])
     if previous_workspace is not None and Path(previous_workspace).exists():
         prev_ws = Path(previous_workspace)
@@ -69,7 +75,13 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
     for key in ("workspace", "context", "staging"):
         dirs[key].mkdir(parents=True, exist_ok=True)
     result_file = dirs["workspace"] / "result.json"
-    if result_file.exists():
+    if result_file.is_symlink():
+        # Never follow a workspace symlink: unlink it without touching whatever
+        # host path it points at.
+        result_file.unlink()
+    elif result_file.is_dir():
+        shutil.rmtree(result_file)
+    elif result_file.is_file():
         # Controller ruling: a retry's workspace is copied from the previous
         # attempt (e.g. to keep edit_self's /workspace/edit_plan.json); that
         # attempt's own result.json must never be mistaken for this one's.
@@ -77,24 +89,35 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
     (Path(env.run_dir) / "store").mkdir(exist_ok=True)
     write_bundle(ctx, dirs["context"])
     reqs = dirs["agent"] / "agent" / "requirements.txt"
-    image = ensure_image(env.cfg, reqs.read_text() if reqs.exists() else "", recorder=env.recorder, node=node)
-    caller = env.registry.issue(node=node, phase=phase, attempt=attempt, workspace_host=dirs["workspace"],
-                                staging_host=dirs["staging"], mock_script=mock_script)
-    if caller.token not in env.recorder.redact:
-        # Controller ruling: TokenRegistry.issue() only redacts on the recorder it
-        # was constructed with. That is usually env.recorder too, but verify
-        # rather than assume -- if it isn't (as in the contract harness, Task 14),
-        # a token an agent prints to stdout/stderr would otherwise leak into
-        # env.recorder's own telemetry.
-        env.recorder.add_redaction(caller.token)
-    soft = float(env.cfg.get(f"timeouts.{phase}_s"))
-    # /workspace/staging is mounted from its own host directory, so it is snapshotted separately.
-    before = {"agent": snapshot(dirs["agent"], True), "workspace": snapshot(dirs["workspace"], False),
-              "staging": snapshot(dirs["staging"], False)}
-    env.recorder.event("phase.start", node=node, phase=phase, attempt=attempt, component="kernel",
-                       payload={"code_commit": code_commit, "image": image})
     started = time.monotonic()
     try:
+        image = ensure_image(env.cfg, reqs.read_text() if reqs.exists() else "", recorder=env.recorder, node=node)
+    except ImageBuildError as exc:
+        # Review fix: an agent-authored requirements.txt can fail to build.
+        # This must be a failed attempt recorded like any other -- not an
+        # exception that skips edit_self's commit of the (already checked out)
+        # attempt tree, which a retry needs as its next base_commit.
+        empty_diff = {"added": [], "removed": [], "changed": []}
+        result = RunResult(None, False, "", str(exc), time.monotonic() - started, [], "")
+        body = {"ok": False, "error": f"agent image failed to build: {exc}"}
+        diffs = {"agent": dict(empty_diff), "workspace": dict(empty_diff), "staging": dict(empty_diff)}
+        return dirs, result, body, diffs, time.monotonic() - started
+
+    caller = env.registry.issue(node=node, phase=phase, attempt=attempt, workspace_host=dirs["workspace"],
+                                staging_host=dirs["staging"], mock_script=mock_script)
+    # Review fix: open the try immediately after the token is issued -- a raise
+    # anywhere from here on (redaction, snapshots, the container call itself)
+    # must still revoke the token and cancel its jobs, or an ended phase could
+    # keep the GPUs. The nested try/finally guarantees cancel_for_token runs
+    # even if revoke() itself raises.
+    try:
+        env.recorder.add_redaction(caller.token)   # idempotent, regardless of who redacted it first
+        soft = float(env.cfg.get(f"timeouts.{phase}_s"))
+        # /workspace/staging is mounted from its own host directory, so it is snapshotted separately.
+        before = {"agent": snapshot(dirs["agent"], True), "workspace": snapshot(dirs["workspace"], False),
+                  "staging": snapshot(dirs["staging"], False)}
+        env.recorder.event("phase.start", node=node, phase=phase, attempt=attempt, component="kernel",
+                           payload={"code_commit": code_commit, "image": image})
         result = env.runner(
             image=image, name=container_name(env.run_id, node, phase, attempt),
             mounts=Mounts(agent=dirs["agent"], workspace=dirs["workspace"], staging=dirs["staging"],
@@ -110,14 +133,33 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
             timeout_s=4 * soft,                 # hard cap (spec 14.5); liveness is Plan 4
             recorder=env.recorder, node=node, phase=phase, attempt=attempt)
     finally:
-        env.registry.revoke(caller.token)
-        env.queue.cancel_for_token(caller.token)     # an ended phase must not keep the GPUs
+        try:
+            env.registry.revoke(caller.token)
+        finally:
+            env.queue.cancel_for_token(caller.token)     # an ended phase must not keep the GPUs
     out_file = dirs["workspace"] / "result.json"
-    body = json.loads(out_file.read_text()) if out_file.exists() else None
+    body = _read_result(out_file)
     diffs = {"agent": diff(before["agent"], snapshot(dirs["agent"], True)),
              "workspace": diff(before["workspace"], snapshot(dirs["workspace"], False)),
              "staging": diff(before["staging"], snapshot(dirs["staging"], False))}
     return dirs, result, body, diffs, time.monotonic() - started
+
+
+def _read_result(out_file: Path) -> dict | None:
+    """Read and parse workspace/result.json defensively: its bytes are entirely
+    agent-controlled. Returns None for "no result" (missing, a directory, or a
+    symlink -- never followed onto the wider host filesystem), a synthetic
+    failed body for anything that isn't parseable JSON or isn't a JSON object,
+    and otherwise the parsed body. Never raises into the kernel."""
+    if out_file.is_symlink() or not out_file.is_file():
+        return None
+    try:
+        body = json.loads(out_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        return {"ok": False, "error": f"result.json could not be parsed: {type(exc).__name__}: {exc}"}
+    if not isinstance(body, dict):
+        return {"ok": False, "error": "result.json is not a JSON object"}
+    return body
 
 
 def _validate_result(phase: str, body: dict) -> tuple[bool, dict | None, str | None]:
@@ -126,8 +168,9 @@ def _validate_result(phase: str, body: dict) -> tuple[bool, dict | None, str | N
     fields are used. Returns (ok, result, error); never raises (controller
     ruling -- a malformed result, e.g. missing `data_commit`, is a failed
     attempt, never a KeyError in the kernel)."""
-    if not body.get("ok"):
-        return False, None, body.get("error")
+    if body.get("ok") is not True:                 # truthy-but-not-True is still a failure
+        error = body.get("error")
+        return False, None, str(error) if error is not None else "agent reported failure without an error"
     try:
         model = RESULT_MODELS[phase](**(body.get("result") or {}))
     except (TypeError, ValidationError) as exc:

@@ -18,13 +18,16 @@ CFG = KernelConfig.load()
 
 class FakeRunner:
     """Stands in for the container: edits /agent and writes /workspace/result.json."""
-    def __init__(self, result, edit=None, exit_code=0, timed_out=False, staged=None):
+    def __init__(self, result, edit=None, exit_code=0, timed_out=False, staged=None, raises=None):
         self.result, self.edit, self.exit_code, self.timed_out = result, edit, exit_code, timed_out
         self.staged = staged
+        self.raises = raises
         self.calls = []
 
     def __call__(self, *, mounts, env, **kw):
         self.calls.append({"mounts": mounts, "env": env, **kw})
+        if self.raises is not None:
+            raise self.raises
         if self.edit:
             (mounts.agent / "agent" / "entry.py").write_text(self.edit)
         if self.staged:                         # what hf_download would leave in /workspace/staging
@@ -241,6 +244,152 @@ def test_token_redaction_falls_back_to_env_recorder_when_registry_uses_a_differe
                   max_attempts=3, retry=None, nodes_remaining=5)
     token2 = runner2.calls[0]["env"]["AR_TOKEN"]
     assert token2 in rec.redact and token2 in other_recorder.redact
+
+
+# --- Review fix round 1 -----------------------------------------------------
+
+
+def test_malformed_json_result_is_a_failed_attempt_and_still_committed(env):
+    """Finding 1: bad JSON in result.json must not raise a JSONDecodeError out
+    of the kernel, and edit_self must still commit the attempt."""
+    make, conn, root, _, _ = env
+
+    def bad_json(*, mounts, env, **kw):
+        (mounts.workspace / "result.json").write_text("{not valid json")
+        return RunResult(0, False, "", "", 1.0, [], "c")
+
+    penv = make(bad_json)
+    out = run_edit_self(penv, conn=conn, node="n1", parent_id="root", base_commit=root, attempt=1,
+                        max_attempts=3, retry=None, nodes_remaining=5)
+    assert not out.ok and out.result is None and out.error
+    assert penv.repo.resolve("refs/attempts/n1/edit_self-1") == out.commit
+
+
+def test_non_utf8_result_is_a_failed_attempt_not_a_crash(env):
+    """Finding 1: non-UTF-8 bytes in result.json must not raise a
+    UnicodeDecodeError out of the kernel."""
+    make, conn, root, _, _ = env
+
+    def bad_bytes(*, mounts, env, **kw):
+        (mounts.workspace / "result.json").write_bytes(b"\xff\xfe\x00\x01")
+        return RunResult(0, False, "", "", 1.0, [], "c")
+
+    out = run_edit_self(make(bad_bytes), conn=conn, node="n1", parent_id="root", base_commit=root,
+                        attempt=1, max_attempts=3, retry=None, nodes_remaining=5)
+    assert not out.ok and out.result is None and out.error
+
+
+def test_non_object_json_result_is_a_failed_attempt_not_a_crash(env):
+    """Finding 1: a JSON value that isn't an object (e.g. a list) must not
+    raise an AttributeError out of the kernel on body.get(...)."""
+    make, conn, root, _, _ = env
+
+    def array_body(*, mounts, env, **kw):
+        (mounts.workspace / "result.json").write_text(json.dumps([1, 2, 3]))
+        return RunResult(0, False, "", "", 1.0, [], "c")
+
+    out = run_improve_recipe(make(array_body), conn=conn, node="n1", parent_id="root", agent_commit=root,
+                             attempt=1, max_attempts=3, retry=None, nodes_remaining=5)
+    assert not out.ok and "not a JSON object" in out.error
+
+
+def test_symlinked_result_json_is_not_followed_onto_the_host(env, tmp_path):
+    """Finding 1: a symlinked result.json must be treated as "no result", not
+    resolved and read -- the target could be any host path the container's
+    user can reach."""
+    make, conn, root, _, _ = env
+    secret = tmp_path / "secret.json"
+    secret.write_text(json.dumps({"ok": True, "result": {"summary": "leaked"}}))
+
+    def symlink_result(*, mounts, env, **kw):
+        (mounts.workspace / "result.json").symlink_to(secret)
+        return RunResult(0, False, "", "", 1.0, [], "c")
+
+    penv = make(symlink_result)
+    out = run_edit_self(penv, conn=conn, node="n1", parent_id="root", base_commit=root, attempt=1,
+                        max_attempts=3, retry=None, nodes_remaining=5)
+    assert not out.ok and "no result.json" in out.error
+    assert penv.repo.resolve("refs/attempts/n1/edit_self-1") == out.commit
+
+
+def test_image_build_failure_is_a_failed_attempt_and_edit_self_still_commits(env, monkeypatch):
+    """Finding 2: an agent-authored requirements.txt that fails to build must
+    become a failed PhaseOutcome (with phase.end recorded), not an exception
+    that skips edit_self's commit -- a retry needs that commit as its
+    base_commit."""
+    from ar_kernel.sandbox.image import ImageBuildError
+
+    make, conn, root, rec, _ = env
+
+    def boom(cfg, reqs, **k):
+        raise ImageBuildError("pip install exploded")
+
+    monkeypatch.setattr("ar_kernel.agent_phase.ensure_image", boom)
+    runner = FakeRunner({"ok": True, "result": {"summary": "unused"}})
+    penv = make(runner)
+    out = run_edit_self(penv, conn=conn, node="n1", parent_id="root", base_commit=root, attempt=1,
+                        max_attempts=3, retry=None, nodes_remaining=5)
+    assert not out.ok and "pip install exploded" in out.error
+    assert penv.repo.resolve("refs/attempts/n1/edit_self-1") == out.commit
+    assert runner.calls == []                        # the container never started
+    end = [e for e in rec.read_events("n1") if e["type"] == "phase.end"][0]
+    assert end["ok"] is False
+
+
+def test_rerunning_the_same_attempt_number_clears_stale_staging(env, tmp_path):
+    """Finding 3: staging lives outside the attempt dir, so re-running the same
+    attempt number must clear it too, or stale files pollute the new run."""
+    make, conn, root, _, _ = env
+    run_dir = tmp_path / "run"
+    run_improve_recipe(make(FakeRunner({"ok": False, "error": "x"}, exit_code=1, staged="old/file.bin")),
+                       conn=conn, node="n1", parent_id="root", agent_commit=root, attempt=1,
+                       max_attempts=3, retry=None, nodes_remaining=5)
+    staging = attempt_dirs(run_dir, "n1", "improve_recipe", 1)["staging"]
+    assert (staging / "old" / "file.bin").exists()
+    runner2 = FakeRunner({"ok": False, "error": "y"}, exit_code=1)   # nothing staged this time
+    run_improve_recipe(make(runner2), conn=conn, node="n1", parent_id="root", agent_commit=root,
+                       attempt=1, max_attempts=3, retry=None, nodes_remaining=5)   # same attempt number
+    assert not (staging / "old" / "file.bin").exists()
+    assert runner2.calls[0]["mounts"].staging == staging
+
+
+def test_runner_exception_still_revokes_token_and_cancels_jobs(env, monkeypatch):
+    """Finding 4: an exception raised by the container call (or anything after
+    the token is issued) must still revoke the token and cancel its jobs."""
+    make, conn, root, _, queue = env
+    cancelled = []
+    monkeypatch.setattr(queue, "cancel_for_token", lambda t: cancelled.append(t) or 0)
+    runner = FakeRunner(None, raises=RuntimeError("docker exploded"))
+    penv = make(runner)
+    with pytest.raises(RuntimeError, match="docker exploded"):
+        run_edit_self(penv, conn=conn, node="n1", parent_id="root", base_commit=root, attempt=1,
+                      max_attempts=3, retry=None, nodes_remaining=5)
+    token = runner.calls[0]["env"]["AR_TOKEN"]
+    assert penv.registry.lookup(token) is None
+    assert cancelled == [token]
+
+
+def test_ok_must_be_the_literal_true_not_merely_truthy(env):
+    """Cheap fix: `{"ok": 1}` (truthy but not True) must not be treated as success."""
+    make, conn, root, _, _ = env
+    out = run_edit_self(make(FakeRunner({"ok": 1, "result": {"summary": "x"}})), conn=conn, node="n1",
+                        parent_id="root", base_commit=root, attempt=1, max_attempts=3, retry=None,
+                        nodes_remaining=5)
+    assert not out.ok and out.result is None
+
+
+def test_error_field_is_coerced_to_a_string_with_a_fallback(env):
+    """Cheap fix: a non-string (or missing) error field must not crash telemetry
+    or PhaseOutcome; a missing error gets a clear fallback message."""
+    make, conn, root, _, _ = env
+    out1 = run_edit_self(make(FakeRunner({"ok": False})), conn=conn, node="n1", parent_id="root",
+                         base_commit=root, attempt=1, max_attempts=3, retry=None, nodes_remaining=5)
+    assert out1.error == "agent reported failure without an error"
+
+    out2 = run_edit_self(make(FakeRunner({"ok": False, "error": 42})), conn=conn, node="n1",
+                         parent_id="root", base_commit=root, attempt=2, max_attempts=3, retry=None,
+                         nodes_remaining=5)
+    assert out2.error == "42"
 
 
 @pytest.mark.docker
