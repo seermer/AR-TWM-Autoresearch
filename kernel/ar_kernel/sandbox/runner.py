@@ -48,14 +48,19 @@ def container_name(run_id: str, node: str, phase: str, attempt: int) -> str:
 
 def snapshot(root: Path, hash_files: bool) -> dict[str, str]:
     """path -> fingerprint. Hash small code trees; use size+mtime for workspaces
-    that may hold gigabytes of video."""
+    that may hold gigabytes of video. Only regular files count (never a FIFO or
+    a symlink); a file the agent made unreadable is recorded as "unreadable"."""
     out = {}
     root = Path(root)
     for p in sorted(root.rglob("*")):
         if p.is_file() and not p.is_symlink():
             rel = str(p.relative_to(root))
             if hash_files:
-                out[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+                try:
+                    with p.open("rb") as f:
+                        out[rel] = hashlib.file_digest(f, "sha256").hexdigest()
+                except OSError:
+                    out[rel] = "unreadable"
             else:
                 st = p.stat()
                 out[rel] = f"{st.st_size}:{st.st_mtime_ns}"

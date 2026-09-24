@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,7 @@ from .archive.commits import CommitStore
 from .context_bundle import build_edit_context, build_recipe_context, write_bundle
 from .sandbox.image import ImageBuildError, ensure_image
 from .sandbox.runner import Mounts, RunResult, container_name, diff, run_container, snapshot
+from .vcs.agents_repo import CheckoutError
 
 
 @dataclass
@@ -51,9 +53,19 @@ def attempt_dirs(run_dir: Path, node: str, phase: str, attempt: int) -> dict[str
             "context": base / "context", "staging": Path(run_dir) / "staging" / node / f"{phase}-{attempt}"}
 
 
+def _failed_before_start(dirs: dict, started: float, error: str) -> tuple:
+    """An attempt that fails before its container starts: a failed attempt recorded like
+    any other, never an exception that skips edit_self's commit of the attempt tree."""
+    empty = {"added": [], "removed": [], "changed": []}
+    result = RunResult(None, False, "", error, time.monotonic() - started, [], "")
+    diffs = {"agent": dict(empty), "workspace": dict(empty), "staging": dict(empty)}
+    return dirs, result, {"ok": False, "error": error}, diffs, time.monotonic() - started
+
+
 def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str, ctx,
          mock_script: str | None, agent_readonly: bool, previous_workspace: Path | None) -> tuple:
     dirs = attempt_dirs(env.run_dir, node, phase, attempt)
+    started = time.monotonic()
     if dirs["attempt"].exists():
         shutil.rmtree(dirs["attempt"])
     if dirs["staging"].exists():
@@ -62,10 +74,19 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
         # files pollute the before-snapshot and a later retry's shutil.move
         # below would nest the old staging inside this one instead of replacing it.
         shutil.rmtree(dirs["staging"])
-    env.repo.checkout(code_commit, dirs["agent"])
+    try:
+        env.repo.checkout(code_commit, dirs["agent"])
+    except CheckoutError as exc:
+        # An agent-committed tree that cannot be extracted (e.g. a symlink out of
+        # the tree). Drop the partial checkout so edit_self commits nothing.
+        shutil.rmtree(dirs["agent"])
+        return _failed_before_start(dirs, started, f"cannot check out the agent code: {exc}")
     if previous_workspace is not None and Path(previous_workspace).exists():
         prev_ws = Path(previous_workspace)
-        shutil.copytree(prev_ws, dirs["workspace"], symlinks=True)
+        try:
+            shutil.copytree(prev_ws, dirs["workspace"], symlinks=True)
+        except (shutil.Error, OSError) as exc:     # FIFOs or files the agent made unreadable
+            return _failed_before_start(dirs, started, f"cannot copy the previous workspace: {exc}")
         # Controller ruling: the previous attempt's staging dir is named after its
         # own attempt directory (prev_ws.parent.name); MOVE it into the new
         # attempt's staging path, since a partial hf_download can be tens of GiB.
@@ -89,19 +110,14 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
     (Path(env.run_dir) / "store").mkdir(exist_ok=True)
     write_bundle(ctx, dirs["context"])
     reqs = dirs["agent"] / "agent" / "requirements.txt"
-    started = time.monotonic()
     try:
-        image = ensure_image(env.cfg, reqs.read_text() if reqs.exists() else "", recorder=env.recorder, node=node)
+        reqs_text = reqs.read_text(encoding="utf-8") if reqs.exists() else ""
+    except (OSError, UnicodeDecodeError) as exc:     # e.g. a directory, or not UTF-8
+        return _failed_before_start(dirs, started, f"cannot read agent/requirements.txt: {exc}")
+    try:
+        image = ensure_image(env.cfg, reqs_text, recorder=env.recorder, node=node)
     except ImageBuildError as exc:
-        # Review fix: an agent-authored requirements.txt can fail to build.
-        # This must be a failed attempt recorded like any other -- not an
-        # exception that skips edit_self's commit of the (already checked out)
-        # attempt tree, which a retry needs as its next base_commit.
-        empty_diff = {"added": [], "removed": [], "changed": []}
-        result = RunResult(None, False, "", str(exc), time.monotonic() - started, [], "")
-        body = {"ok": False, "error": f"agent image failed to build: {exc}"}
-        diffs = {"agent": dict(empty_diff), "workspace": dict(empty_diff), "staging": dict(empty_diff)}
-        return dirs, result, body, diffs, time.monotonic() - started
+        return _failed_before_start(dirs, started, f"agent image failed to build: {exc}")
 
     caller = env.registry.issue(node=node, phase=phase, attempt=attempt, workspace_host=dirs["workspace"],
                                 staging_host=dirs["staging"], mock_script=mock_script)
@@ -208,8 +224,16 @@ def run_edit_self(env: PhaseEnv, *, conn, node: str, parent_id: str, base_commit
                                                agent_readonly=False, previous_workspace=previous_workspace)
     # edit_self commits the edited code to an attempt ref whether or not the
     # attempt succeeded (spec 5.2): a failed edit is still inspectable/resumable.
-    commit = env.repo.commit_tree(dirs["agent"], base_commit, f"{node} edit_self attempt {attempt}")
-    env.repo.set_ref(env.repo.attempt_ref(node, "edit_self", attempt), commit)
+    # No tree (checkout failed) or an uncommittable one (e.g. a file the agent
+    # made unreadable) means no commit and a failed attempt.
+    commit = None
+    if dirs["agent"].exists():
+        try:
+            commit = env.repo.commit_tree(dirs["agent"], base_commit, f"{node} edit_self attempt {attempt}")
+        except subprocess.CalledProcessError as exc:
+            body = {"ok": False, "error": f"cannot commit the agent tree: {exc.stderr.decode(errors='replace')}"}
+        else:
+            env.repo.set_ref(env.repo.attempt_ref(node, "edit_self", attempt), commit)
     return _outcome(env, "edit_self", node, attempt, dirs, result, body, diffs, duration, commit)
 
 

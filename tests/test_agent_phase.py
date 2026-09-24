@@ -392,6 +392,78 @@ def test_error_field_is_coerced_to_a_string_with_a_fallback(env):
     assert out2.error == "42"
 
 
+# --- Final review: agent-hostile filesystem states are failed attempts, never kernel exceptions ---
+
+
+def _edit_then_retry(make, conn, root, mutate):
+    """Attempt 1 lets `mutate(agent_dir)` run inside the 'container'; attempt 2 retries from its commit."""
+    def runner(*, mounts, env, **kw):
+        mutate(mounts.agent / "agent")
+        (mounts.workspace / "result.json").write_text(json.dumps({"ok": True, "result": {"summary": "x"}}))
+        return RunResult(0, False, "", "", 1.0, [], "c")
+
+    out1 = run_edit_self(make(runner), conn=conn, node="n1", parent_id="root", base_commit=root, attempt=1,
+                         max_attempts=3, retry=None, nodes_remaining=5)
+    retry_runner = FakeRunner({"ok": True, "result": {"summary": "unused"}})
+    out2 = run_edit_self(make(retry_runner), conn=conn, node="n1", parent_id="root", base_commit=out1.commit,
+                         attempt=2, max_attempts=3, retry={"failures": []}, nodes_remaining=5)
+    return out1, out2, retry_runner
+
+
+def test_committed_symlink_leaving_the_tree_fails_the_retry_instead_of_raising(env):
+    make, conn, root, _, _ = env
+    out1, out2, retry_runner = _edit_then_retry(make, conn, root,
+                                                lambda agent: (agent / "ctx").symlink_to("/context/x"))
+    assert out1.ok and out1.commit
+    assert not out2.ok and "check out" in out2.error and retry_runner.calls == []
+    assert out2.commit is None
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda agent: ((agent / "requirements.txt").mkdir(), (agent / "requirements.txt" / "x").write_text("")),
+    lambda agent: (agent / "requirements.txt").write_bytes(b"\xff\xfe not utf-8"),
+], ids=["directory", "non_utf8"])
+def test_unreadable_requirements_txt_is_a_failed_attempt(env, mutate):
+    make, conn, root, _, _ = env
+    _, out2, retry_runner = _edit_then_retry(make, conn, root, mutate)
+    assert not out2.ok and "requirements.txt" in out2.error and retry_runner.calls == []
+    assert out2.commit                                   # the (unchanged) attempt tree is still committed
+
+
+def test_uncommittable_agent_tree_is_a_failed_attempt(env):
+    """A chmod-000 file the agent leaves in /agent makes `git add` fail."""
+    make, conn, root, _, _ = env
+
+    def lock(agent):
+        (agent / "locked.py").write_text("x = 1\n")
+        (agent / "locked.py").chmod(0)
+
+    def runner(*, mounts, env, **kw):
+        lock(mounts.agent / "agent")
+        (mounts.workspace / "result.json").write_text(json.dumps({"ok": True, "result": {"summary": "x"}}))
+        return RunResult(0, False, "", "", 1.0, [], "c")
+
+    out = run_edit_self(make(runner), conn=conn, node="n1", parent_id="root", base_commit=root, attempt=1,
+                        max_attempts=3, retry=None, nodes_remaining=5)
+    (out.attempt_dir / "agent" / "agent" / "locked.py").chmod(0o644)
+    assert not out.ok and "commit" in out.error and out.commit is None
+
+
+def test_previous_workspace_with_a_fifo_is_a_failed_attempt(env):
+    import os
+
+    make, conn, root, _, _ = env
+    first = make(FakeRunner({"ok": False, "error": "x"}, exit_code=1))
+    out1 = run_improve_recipe(first, conn=conn, node="n1", parent_id="root", agent_commit=root,
+                              attempt=1, max_attempts=3, retry=None, nodes_remaining=5)
+    os.mkfifo(out1.attempt_dir / "workspace" / "pipe")
+    runner = FakeRunner({"ok": False, "error": "y"}, exit_code=1)
+    out2 = run_improve_recipe(make(runner), conn=conn, node="n1", parent_id="root", agent_commit=root,
+                              attempt=2, max_attempts=3, retry={"failures": ["x"]}, nodes_remaining=5,
+                              previous_workspace=out1.attempt_dir / "workspace")
+    assert not out2.ok and "previous workspace" in out2.error and runner.calls == []
+
+
 @pytest.mark.docker
 def test_container_commits_data_through_the_real_tool_server(tmp_path):
     """No LLM: the fixture agent calls data_query and data_commit over the socket;

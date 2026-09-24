@@ -149,3 +149,15 @@ def test_timeout_kills_and_removes_the_container(tmp_path, mounts):
 def test_exit_code_and_streams_are_captured(tmp_path, mounts):
     res = _run(tmp_path, mounts, "import sys; print('out'); print('err', file=sys.stderr); sys.exit(3)")
     assert res.exit_code == 3 and "out" in res.stdout and "err" in res.stderr and not res.timed_out
+
+
+def test_snapshot_skips_fifos_and_marks_unreadable_files(tmp_path):
+    (tmp_path / "ok.txt").write_text("x")
+    (tmp_path / "locked.txt").write_text("secret")
+    (tmp_path / "locked.txt").chmod(0)
+    os.mkfifo(tmp_path / "pipe")
+    try:
+        snap = snapshot(tmp_path, True)
+    finally:
+        (tmp_path / "locked.txt").chmod(0o644)
+    assert snap["locked.txt"] == "unreadable" and "pipe" not in snap and len(snap["ok.txt"]) == 64

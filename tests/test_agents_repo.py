@@ -59,3 +59,13 @@ def test_resolve_unknown_ref_is_none(tmp_path, seed):
     repo = AgentsRepo(tmp_path / "agents.git")
     repo.init(seed)
     assert repo.resolve("refs/heads/node/nope") is None
+
+
+def test_checkout_of_a_symlink_leaving_the_tree_raises_checkout_error(tmp_path, seed):
+    from ar_kernel.vcs.agents_repo import CheckoutError
+
+    (seed / "agent" / "ctx").symlink_to("/context/x")      # committed by an agent, points outside the tree
+    repo = AgentsRepo(tmp_path / "agents.git")
+    root = repo.init(seed)
+    with pytest.raises(CheckoutError, match="ctx"):
+        repo.checkout(root, tmp_path / "work")

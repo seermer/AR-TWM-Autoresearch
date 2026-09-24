@@ -89,7 +89,7 @@ def test_non_utf8_entry_py_fails_static_instead_of_raising(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("write_result_json,fragment", [
-    (lambda ws: (ws / "result.json").write_text("{not valid json"), "cannot read"),
+    (lambda ws: (ws / "result.json").write_text("{not valid json"), "could not be parsed"),
     (lambda ws: (ws / "result.json").write_text(json.dumps(["not", "a", "dict"])), "not a JSON object"),
 ])
 def test_malformed_result_json_fails_the_smoke_step_instead_of_raising(
@@ -120,6 +120,63 @@ def test_malformed_result_json_fails_the_smoke_step_instead_of_raising(
         h.queue.shutdown()
     failed = next(s for s in report.steps if not s.ok)
     assert not report.ok and failed.name == "smoke:edit_self" and fragment in failed.detail
+
+
+def _verify_tree(tmp_path, monkeypatch, mutate, runner=None):
+    """verify_contract on a copy of the good fixture changed by `mutate(agent_dir)`; no Docker."""
+    import shutil
+    run = tmp_path / "run"
+    h = ContractHarness(CFG, run, Recorder(run))
+    monkeypatch.setattr("ar_kernel.contract.verify.ensure_image", lambda cfg, reqs, **k: "img:test")
+    src = tmp_path / "src"
+    shutil.copytree(FIXTURES / "good", src)
+    mutate(src / "agent")
+
+    def no_runner(**kw):
+        pytest.fail("the runner must not be invoked")
+
+    repo = AgentsRepo(tmp_path / "agents.git")
+    try:
+        return verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo, commit=repo.init(src), harness=h,
+                               recorder=Recorder(run), node="n1", attempt=1, runner=runner or no_runner)
+    finally:
+        h.queue.shutdown()
+
+
+def _replace_with_dir(path):
+    path.unlink(missing_ok=True)
+    path.mkdir()
+    (path / "x").write_text("")
+
+
+@pytest.mark.parametrize("mutate,step,fragment", [
+    (lambda a: (a / "ctx").symlink_to("/context/x"), "checkout", "ctx"),
+    (lambda a: _replace_with_dir(a / "requirements.txt"), "build", "requirements.txt"),
+    (lambda a: (a / "requirements.txt").write_bytes(b"\xff\xfe"), "build", "requirements.txt"),
+    (lambda a: _replace_with_dir(a / "entry.py"), "static", "entry.py"),
+], ids=["symlink_out_of_tree", "requirements_dir", "requirements_non_utf8", "entry_dir"])
+def test_agent_hostile_trees_fail_a_step_instead_of_raising(tmp_path, monkeypatch, mutate, step, fragment):
+    report = _verify_tree(tmp_path, monkeypatch, mutate)
+    failed = next(s for s in report.steps if not s.ok)
+    assert not report.ok and failed.name == step and fragment in failed.detail
+
+
+@pytest.mark.parametrize("plant", ["symlink", "fifo"])
+def test_smoke_result_json_symlink_or_fifo_is_not_followed(tmp_path, monkeypatch, plant):
+    """A symlink onto a host file must not be read (its JSON would reach the agent); a FIFO must not hang."""
+    import os
+    secret = tmp_path / "secret.json"
+    secret.write_text(json.dumps({"ok": True, "result": {}}))
+
+    def runner(*, mounts, command, **kw):
+        out = mounts.workspace / "result.json"
+        if command[-1] == "edit_self":
+            out.symlink_to(secret) if plant == "symlink" else os.mkfifo(out)
+        return RunResult(0, False, "", "", 0.1, [], "c")
+
+    report = _verify_tree(tmp_path, monkeypatch, lambda a: None, runner=runner)
+    failed = next(s for s in report.steps if not s.ok)
+    assert not report.ok and failed.name == "smoke:edit_self" and "no result.json" in failed.detail
 
 
 def test_container_token_printed_by_agent_is_redacted_from_telemetry(tmp_path, monkeypatch):

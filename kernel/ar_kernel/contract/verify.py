@@ -10,6 +10,7 @@ from pathlib import Path
 
 from ar_contract.models import EditContext, RecipeContext
 
+from ..agent_phase import _read_result
 from ..gateway.app import create_gateway_app
 from ..gateway.mock import MockBook
 from ..gateway.store import CallStore
@@ -21,6 +22,7 @@ from ..tools.data_tools import register_data_tools
 from ..tools.hf_tools import register_hf_tools
 from ..tools.jobs import JobQueue, register_job_tools
 from ..tools.server import ToolError, ToolKit, build_tool_app, new_mcp
+from ..vcs.agents_repo import CheckoutError
 
 MOCK_MODEL = "mock-model"
 ENTRY_POINTS = ("edit_self", "improve_recipe")
@@ -138,7 +140,6 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
     work = Path(run_dir) / "nodes" / node / "contract" / f"attempt-{attempt}"
     shutil.rmtree(work, ignore_errors=True)
     code = work / "agent"
-    repo.checkout(commit, code)
 
     def finish(ok: bool) -> ContractReport:
         report.ok = ok
@@ -146,10 +147,20 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
                        component="contract", ok=ok, payload=report.to_retry())
         return report
 
+    try:
+        repo.checkout(commit, code)
+    except CheckoutError as exc:
+        report.steps.append(ContractStep("checkout", False, str(exc)))
+        return finish(False)
+
     reqs_path = code / "agent" / "requirements.txt"
     try:
-        report.image = ensure_image(cfg, reqs_path.read_text() if reqs_path.exists() else "",
-                                    recorder=recorder, node=node)
+        reqs = reqs_path.read_text(encoding="utf-8") if reqs_path.exists() else ""
+    except (OSError, UnicodeDecodeError) as exc:      # e.g. a directory, or not UTF-8
+        report.steps.append(ContractStep("build", False, f"cannot read agent/requirements.txt: {exc}"))
+        return finish(False)
+    try:
+        report.image = ensure_image(cfg, reqs, recorder=recorder, node=node)
         report.steps.append(ContractStep("build", True))
     except ImageBuildError as exc:
         report.steps.append(ContractStep("build", False, str(exc)))
@@ -157,9 +168,9 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
 
     entry = code / "agent" / "entry.py"
     try:
-        entry_source = entry.read_text() if entry.exists() else ""
-    except UnicodeDecodeError as exc:
-        step = ContractStep("static", False, f"agent/entry.py is not valid UTF-8: {exc}")
+        entry_source = entry.read_text(encoding="utf-8") if entry.exists() else ""
+    except (OSError, UnicodeDecodeError) as exc:
+        step = ContractStep("static", False, f"cannot read agent/entry.py as UTF-8 text: {exc}")
     else:
         step = static_check(entry_source)
     report.steps.append(step)
@@ -214,17 +225,8 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
         if result.timed_out:
             report.steps.append(ContractStep(name, False, f"timed out after {smoke_timeout_s:.0f}s"))
             return finish(False)
-        out = ws / "result.json"
-        body: dict = {"ok": False, "error": "no result.json"}
-        if out.exists():
-            try:
-                parsed = json.loads(out.read_text())
-            except (OSError, ValueError) as exc:
-                body = {"ok": False, "error": f"cannot read /workspace/result.json: {exc}"}
-            else:
-                body = parsed if isinstance(parsed, dict) else {
-                    "ok": False,
-                    "error": f"/workspace/result.json is not a JSON object (got {type(parsed).__name__})"}
+        # Never follows a symlink or opens a FIFO the agent planted there.
+        body = _read_result(ws / "result.json") or {"ok": False, "error": "no result.json"}
         if result.exit_code != 0 or not body.get("ok"):
             tb = body.get("traceback")
             tb_tail = f"\n{tb[-2000:]}" if isinstance(tb, str) and tb else ""

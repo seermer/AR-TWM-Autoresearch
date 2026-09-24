@@ -11,6 +11,10 @@ from pathlib import Path
 _IDENT = ["-c", "user.name=AutoResearcher kernel", "-c", "user.email=kernel@autoresearcher.local"]
 
 
+class CheckoutError(Exception):
+    """A committed tree cannot be extracted safely, e.g. an agent committed a symlink that leaves the tree."""
+
+
 class AgentsRepo:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
@@ -60,8 +64,11 @@ class AgentsRepo:
             raise FileExistsError(f"{dest} is not empty")
         dest.mkdir(parents=True, exist_ok=True)
         archive = self._git("archive", "--format=tar", commit).stdout
-        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-            tar.extractall(dest, filter="data")
+        try:
+            with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+                tar.extractall(dest, filter="data")
+        except tarfile.TarError as exc:
+            raise CheckoutError(f"cannot check out {commit[:12]}: {exc}") from exc
 
     def read_file(self, commit: str, path: str) -> str | None:
         r = self._git("show", f"{commit}:{path}", check=False)
