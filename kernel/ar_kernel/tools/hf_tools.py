@@ -61,7 +61,10 @@ class HfTools:
         if total > cap:
             raise ToolError(f"{len(files)} files total {total} bytes, over the {cap}-byte cap; "
                             f"narrow the patterns")
-        dest = caller.staging_host / "hf" / repo.replace("/", "__") / info.sha
+        # The agent owns staging: resolve planted links and refuse anything that lands outside it.
+        dest = (caller.staging_host / "hf" / repo.replace("/", "__") / info.sha).resolve()
+        if not dest.is_relative_to(caller.staging_host.resolve()):
+            raise ToolError("download destination resolves outside staging; refusing")
         self.snapshot(repo_id=repo, repo_type="dataset", revision=info.sha,
                       allow_patterns=files, local_dir=str(dest))
         return {"repo": repo, "revision": info.sha, "bytes": total, "license": _license(info),

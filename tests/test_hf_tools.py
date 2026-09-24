@@ -106,3 +106,26 @@ def test_repo_reported_paths_cannot_escape_dest(tmp_path):
     assert not calls
     assert not (caller.staging_host / "hf").exists()
     assert not (tmp_path / "escape.mp4").exists()
+
+
+def test_download_refuses_a_staging_symlink_that_leaves_staging(tmp_path):
+    """The agent owns /workspace/staging: a planted staging/hf -> outside link must not be written through."""
+    calls = []
+
+    def spy_snapshot(**kwargs):
+        calls.append(kwargs)
+        return fake_snapshot(**kwargs)
+
+    reg = TokenRegistry(Recorder(tmp_path))
+    caller = reg.issue(node="n1", phase="improve_recipe", attempt=1,
+                       workspace_host=tmp_path / "ws", staging_host=tmp_path / "staging")
+    (tmp_path / "staging").mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "staging" / "hf").symlink_to(outside)
+    tools = HfTools(CFG, api=FakeApi(), snapshot=spy_snapshot)
+
+    with pytest.raises(ToolError, match="outside staging"):
+        tools.download(caller, "org/walks", "main", ["videos/*.mp4"])
+    assert not calls
+    assert list(outside.iterdir()) == []
