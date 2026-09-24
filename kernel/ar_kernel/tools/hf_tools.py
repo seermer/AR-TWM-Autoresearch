@@ -2,16 +2,39 @@
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
-from pathlib import PurePosixPath
+import shutil
+import uuid
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from mcp.server.mcpserver import Context
 
-from .context import to_container
+from .context import STAGING
 from .server import ToolError
 
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _move_into(src: Path, base: Path, rel: str) -> None:
+    """Move `src` to base/rel without following any link under `base`: each directory is opened
+    with O_NOFOLLOW and the move is relative to that directory's fd, so a link the agent plants
+    or swaps in (it owns staging, and its container runs meanwhile) raises instead of redirecting."""
+    *dirs, name = PurePosixPath(rel).parts
+    fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in dirs:
+            try:
+                os.mkdir(part, dir_fd=fd)
+            except FileExistsError:
+                pass
+            sub = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = sub
+        os.replace(src, name, dst_dir_fd=fd)
+    finally:
+        os.close(fd)
 
 
 def _license(obj) -> str | None:
@@ -26,7 +49,9 @@ def _license(obj) -> str | None:
 
 
 class HfTools:
-    def __init__(self, cfg, api=None, snapshot=None) -> None:
+    def __init__(self, cfg, private_dir: Path, api=None, snapshot=None) -> None:
+        # Downloads land here first: a kernel-only dir (under run_dir) never mounted into a container.
+        self.private_dir = Path(private_dir)
         if api is None or snapshot is None:
             import huggingface_hub
             api = api or huggingface_hub.HfApi()
@@ -61,14 +86,26 @@ class HfTools:
         if total > cap:
             raise ToolError(f"{len(files)} files total {total} bytes, over the {cap}-byte cap; "
                             f"narrow the patterns")
-        # The agent owns staging: resolve planted links and refuse anything that lands outside it.
-        dest = (caller.staging_host / "hf" / repo.replace("/", "__") / info.sha).resolve()
-        if not dest.is_relative_to(caller.staging_host.resolve()):
+        # The agent owns staging. Refuse early (before a large transfer) if a planted link already
+        # sends the destination outside it; _move_into below is the guard that cannot be raced.
+        rel, staging = f"hf/{repo.replace('/', '__')}/{info.sha}", caller.staging_host.resolve()
+        if not (staging / rel).resolve().is_relative_to(staging):
             raise ToolError("download destination resolves outside staging; refusing")
-        self.snapshot(repo_id=repo, repo_type="dataset", revision=info.sha,
-                      allow_patterns=files, local_dir=str(dest))
+        tmp = self.private_dir / uuid.uuid4().hex
+        tmp.mkdir(parents=True)
+        try:
+            self.snapshot(repo_id=repo, repo_type="dataset", revision=info.sha,
+                          allow_patterns=files, local_dir=str(tmp))
+            for f in files:
+                try:
+                    _move_into(tmp / f, staging, f"{rel}/{f}")
+                except OSError as exc:
+                    raise ToolError(f"cannot place {f} in staging (a link or non-directory in the way?): "
+                                    f"{exc}") from None
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
         return {"repo": repo, "revision": info.sha, "bytes": total, "license": _license(info),
-                "files": [to_container(caller, dest / f) for f in files],
+                "files": [str(STAGING / rel / f) for f in files],
                 "provenance": {"kind": "hf_dataset", "repo": repo, "revision": info.sha,
                                "files": files}}
 

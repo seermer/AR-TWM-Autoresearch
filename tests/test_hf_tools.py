@@ -40,7 +40,7 @@ def env(tmp_path):
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1,
                        workspace_host=tmp_path / "ws", staging_host=tmp_path / "staging")
     (tmp_path / "staging").mkdir()
-    return HfTools(CFG, api=FakeApi(), snapshot=fake_snapshot), caller
+    return HfTools(CFG, tmp_path / "hf_tmp", api=FakeApi(), snapshot=fake_snapshot), caller
 
 
 def test_search_reports_license(env):
@@ -99,7 +99,7 @@ def test_repo_reported_paths_cannot_escape_dest(tmp_path):
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1,
                        workspace_host=tmp_path / "ws", staging_host=tmp_path / "staging")
     (tmp_path / "staging").mkdir()
-    tools = HfTools(CFG, api=EscapeApi(), snapshot=spy_snapshot)
+    tools = HfTools(CFG, tmp_path / "hf_tmp", api=EscapeApi(), snapshot=spy_snapshot)
 
     with pytest.raises(ToolError, match="unsafe"):
         tools.download(caller, "org/walks", "main", ["*"])
@@ -123,9 +123,30 @@ def test_download_refuses_a_staging_symlink_that_leaves_staging(tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()
     (tmp_path / "staging" / "hf").symlink_to(outside)
-    tools = HfTools(CFG, api=FakeApi(), snapshot=spy_snapshot)
+    tools = HfTools(CFG, tmp_path / "hf_tmp", api=FakeApi(), snapshot=spy_snapshot)
 
     with pytest.raises(ToolError, match="outside staging"):
         tools.download(caller, "org/walks", "main", ["videos/*.mp4"])
     assert not calls
     assert list(outside.iterdir()) == []
+
+
+def test_links_planted_inside_an_earlier_download_are_not_written_through(env, tmp_path):
+    """snapshot_download writes dest/<file> and dest/.cache/...: after a first download the agent
+    can replace dest/videos or plant dest/.cache as links to the host. The kernel downloads into a
+    private dir and never follows a link when moving files into staging."""
+    tools, caller = env
+    first = tools.download(caller, "org/walks", "main", ["videos/*.mp4"])
+    dest = caller.staging_host / "hf" / "org__walks" / first["revision"]
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    for name in ("videos/a.mp4", "videos/b.mp4"):
+        (dest / name).unlink()
+    (dest / "videos").rmdir()
+    (dest / "videos").symlink_to(outside)
+    (dest / ".cache").symlink_to(outside)
+
+    with pytest.raises(ToolError, match="staging"):
+        tools.download(caller, "org/walks", "main", ["videos/*.mp4"])
+    assert list(outside.iterdir()) == []
+    assert list((tmp_path / "hf_tmp").iterdir()) == []          # the private dir is cleaned on failure
