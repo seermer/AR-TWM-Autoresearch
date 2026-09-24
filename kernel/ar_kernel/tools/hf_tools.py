@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from huggingface_hub.errors import HfHubHTTPError
 from mcp.server.mcpserver import Context
 
 from .context import STAGING
@@ -71,7 +72,10 @@ class HfTools:
                  max_bytes: int | None = None) -> dict:
         if not REPO_RE.match(repo or ""):
             raise ToolError(f"invalid dataset repo id {repo!r}")
-        info = self.api.dataset_info(repo, revision=revision, files_metadata=True)
+        try:
+            info = self.api.dataset_info(repo, revision=revision, files_metadata=True)
+        except HfHubHTTPError as exc:
+            raise ToolError(str(exc)) from None
         files = sorted(s.rfilename for s in info.siblings
                        if any(fnmatch.fnmatch(s.rfilename, p) for p in patterns))
         if not files:
@@ -94,8 +98,11 @@ class HfTools:
         tmp = self.private_dir / uuid.uuid4().hex
         tmp.mkdir(parents=True)
         try:
-            self.snapshot(repo_id=repo, repo_type="dataset", revision=info.sha,
-                          allow_patterns=files, local_dir=str(tmp))
+            try:
+                self.snapshot(repo_id=repo, repo_type="dataset", revision=info.sha,
+                              allow_patterns=files, local_dir=str(tmp))
+            except HfHubHTTPError as exc:
+                raise ToolError(str(exc)) from None
             for f in files:
                 try:
                     _move_into(tmp / f, staging, f"{rel}/{f}")

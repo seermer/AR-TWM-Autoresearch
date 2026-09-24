@@ -1,6 +1,8 @@
 """No network: HfApi and snapshot_download are replaced by fakes."""
 from types import SimpleNamespace
 
+import httpx
+import huggingface_hub.errors as hf_errors
 import pytest
 
 from ar_kernel.config import KernelConfig
@@ -129,6 +131,50 @@ def test_download_refuses_a_staging_symlink_that_leaves_staging(tmp_path):
         tools.download(caller, "org/walks", "main", ["videos/*.mp4"])
     assert not calls
     assert list(outside.iterdir()) == []
+
+
+def _hub_error(cls, message):
+    resp = httpx.Response(404, request=httpx.Request("GET", "https://huggingface.co/api/datasets/org/x"))
+    return cls(message, response=resp)
+
+
+class DatasetInfoRaisesApi(FakeApi):
+    def __init__(self, exc):
+        self.exc = exc
+
+    def dataset_info(self, repo_id, revision=None, files_metadata=False):
+        raise self.exc
+
+
+@pytest.mark.parametrize("cls, message", [
+    (hf_errors.GatedRepoError, "403 Client Error: gated"),
+    (hf_errors.RepositoryNotFoundError, "404 Client Error: repo not found"),
+    (hf_errors.RevisionNotFoundError, "404 Client Error: revision not found"),
+])
+def test_dataset_info_hub_errors_become_tool_errors(cls, message, tmp_path):
+    reg = TokenRegistry(Recorder(tmp_path))
+    caller = reg.issue(node="n1", phase="improve_recipe", attempt=1,
+                       workspace_host=tmp_path / "ws", staging_host=tmp_path / "staging")
+    (tmp_path / "staging").mkdir()
+    exc = _hub_error(cls, message)
+    tools = HfTools(CFG, tmp_path / "hf_tmp", api=DatasetInfoRaisesApi(exc), snapshot=fake_snapshot)
+
+    with pytest.raises(ToolError, match=message):
+        tools.download(caller, "org/walks", "main", ["*"])
+
+
+def test_snapshot_download_hub_error_becomes_tool_error(env):
+    tools, caller = env
+    message = "404 Client Error: entry not found"
+
+    def raising_snapshot(**kwargs):
+        # RemoteEntryNotFoundError, not EntryNotFoundError: in the installed huggingface_hub only the
+        # former subclasses HfHubHTTPError (the latter is a plain Exception, used for local lookups).
+        raise _hub_error(hf_errors.RemoteEntryNotFoundError, message)
+
+    tools.snapshot = raising_snapshot
+    with pytest.raises(ToolError, match=message):
+        tools.download(caller, "org/walks", "main", ["videos/*.mp4"])
 
 
 def test_links_planted_inside_an_earlier_download_are_not_written_through(env, tmp_path):
