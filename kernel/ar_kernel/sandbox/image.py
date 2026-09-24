@@ -30,12 +30,18 @@ def image_tag(cfg, requirements: str) -> str:
 
 
 def image_exists(tag: str) -> bool:
-    return subprocess.run(["docker", "image", "inspect", tag], capture_output=True).returncode == 0
+    try:
+        return subprocess.run(["docker", "image", "inspect", tag], capture_output=True).returncode == 0
+    except FileNotFoundError as exc:
+        raise ImageBuildError(f"docker is not installed: {exc}") from exc
 
 
 def _build(tag: str, dockerfile_text: str, context: Path, recorder, node: str) -> None:
-    proc = subprocess.run(["docker", "build", "-t", tag, "-f", "-", str(context)],
-                          input=dockerfile_text, capture_output=True, text=True, timeout=3600)
+    try:
+        proc = subprocess.run(["docker", "build", "-t", tag, "-f", "-", str(context)],
+                              input=dockerfile_text, capture_output=True, text=True, timeout=3600)
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:   # a hanging build, or no docker
+        raise ImageBuildError(f"docker build {tag} failed: {exc}") from exc
     if recorder is not None:
         recorder.event("sandbox.image_build", node=node, component="sandbox", tag=tag,
                        returncode=proc.returncode,
