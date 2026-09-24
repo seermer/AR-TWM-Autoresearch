@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, signal, subprocess, time
+import os, signal, subprocess, threading, time
 from pathlib import Path
 
 KILL_GRACE_SECONDS = 30
@@ -14,7 +14,9 @@ class SubprocTimeout(subprocess.TimeoutExpired):
 
 def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None = None,
                timeout: int | None = None, recorder=None, node: str = "run",
-               phase: str = "-", log_path: Path | None = None) -> subprocess.CompletedProcess:
+               phase: str = "-", log_path: Path | None = None,
+               cancel: "threading.Event | None" = None,
+               poll_s: float = 1.0) -> subprocess.CompletedProcess:
     """Run `args` inside conda env `env`.
 
     The job runs in its own session, so a timeout kills the WHOLE process group:
@@ -25,8 +27,17 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
     long training jobs, instead of buffering hours of output in memory); the
     returned CompletedProcess carries the file's contents as stdout.
 
-    Every exit path records an event: subproc.end, or subproc.error on timeout
-    or launch failure, including the output captured so far.
+    With `cancel` set, the wait is polled every `poll_s` seconds and, once the
+    event is set, the process group is killed the same way a timeout kills it
+    (the GPU job queue uses this so `job_cancel` cannot orphan a torch rank).
+    A cancellation is reported as its own `subproc.cancelled` event, distinct
+    from `subproc.end`; the returned `CompletedProcess.returncode` is whatever
+    the killed process group actually exited with (-15 for a plain SIGTERM
+    death). Callers that never pass `cancel` see exactly the prior behaviour.
+
+    Every exit path records an event: subproc.end (or subproc.cancelled), or
+    subproc.error on timeout or launch failure, including the output captured
+    so far.
     """
     command = ["conda", "run", "--no-capture-output", "-n", env, *args]
     process_env = {**os.environ, **(extra_env or {})}
@@ -52,8 +63,9 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
         _error(recorder, node, phase, f"launch failed: {exc}", "", "", log_path)
         raise
 
+    cancelled = False
     try:
-        stdout, stderr = proc.communicate(timeout=timeout)
+        stdout, stderr, cancelled = _wait(proc, timeout, cancel, poll_s)
     except subprocess.TimeoutExpired:
         _kill_group(proc)
         stdout, stderr = proc.communicate()
@@ -74,10 +86,37 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
         stdout, stderr = Path(log_path).read_text(encoding="utf-8", errors="replace"), ""
     result = subprocess.CompletedProcess(command, proc.returncode, stdout or "", stderr or "")
     if recorder is not None:
-        recorder.event("subproc.end", node=node, phase=phase, returncode=proc.returncode,
+        recorder.event("subproc.cancelled" if cancelled else "subproc.end", node=node, phase=phase,
+                       returncode=proc.returncode,
                        payload={"stdout": result.stdout, "stderr": result.stderr,
                                 "log_path": str(log_path) if log_path else None})
     return result
+
+
+def _wait(proc: subprocess.Popen, timeout: int | None, cancel: "threading.Event | None",
+         poll_s: float) -> tuple[str, str, bool]:
+    """Wait for `proc`, polling `cancel` when given; returns (stdout, stderr, cancelled).
+
+    With no `cancel`, this is exactly the prior single blocking `communicate(timeout=)`
+    call. With one, `communicate(timeout=poll_s)` is safe to retry on TimeoutExpired
+    (it does not kill the child); each retry checks `cancel` and, when a `timeout`
+    was also given, the deadline.
+    """
+    if cancel is None:
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return stdout, stderr, False
+    deadline = time.monotonic() + timeout if timeout is not None else None
+    while True:
+        try:
+            stdout, stderr = proc.communicate(timeout=poll_s)
+            return stdout, stderr, False
+        except subprocess.TimeoutExpired:
+            if cancel.is_set():
+                _kill_group(proc)
+                stdout, stderr = proc.communicate()
+                return stdout, stderr, True
+            if deadline is not None and time.monotonic() >= deadline:
+                raise
 
 
 def _kill_group(proc: subprocess.Popen) -> None:
