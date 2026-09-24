@@ -487,10 +487,49 @@ behaviour; snake_case MCP attributes; no offline tokenizer (usage + 4 chars/toke
 | Harness comparison `tests/test_seed_harness.py` | **PASS: 26 passed** (17 `create_agent` comparison cases + tool-error + 8 compaction tests) |
 | Harness mutation controls (on a copy of `seed_agent/agent/harness.py`, restored byte-identical, sha256 checked) | invalid-tool text **4 failed**; sequential calls in reverse **4**; system prompt after history (`[*system, *messages]` → `[*messages, *system]`) **10**; no content normalisation **2**; invalid-argument text **2**. At stage 1 (18-test file) they were 4, 4, 9, 2, 2; the extra failure is `test_compaction_replaces_history_and_continues` |
 | Isolation negative control | `--network none` → `--network bridge` in `sandbox/runner.py`: `test_isolation_holds_from_inside` **FAILED** (`assert 'open' == 'blocked'`: the internet was reachable). Restored `--network none`: **PASSED** (0.44 s); `git diff kernel/` empty |
-| Live LLM run (Step 4) | At `3c20f7a`: **deferred, no `OPENAI_API_KEY`** (`OPENAI_API_KEY` and `OPENAI_MODEL` were unset in `.env`). See the Task 19 row: a capped live check has passed since; the full live `improve_recipe` run is still pending (Plan 4 contract item 10) |
+| Live LLM run (Step 4) | At `3c20f7a`: **deferred, no `OPENAI_API_KEY`** (`OPENAI_API_KEY` and `OPENAI_MODEL` were unset in `.env`). See the Task 19 row for the capped live check, and the live `improve_recipe` run below |
 | Task 19 (`98790e9`: OpenAI-compatible Chat Completions client, gateway-enforced reasoning effort) | Default suite **PASS: 350 passed**; docker suite **PASS: 13 passed**; capped live check through the gateway against the configured provider **PASS** (783 tokens) |
 | Final-review fix wave (after `98790e9`) | Default suite **PASS: 370 passed, 17 deselected**, 1 warning (the same starlette deprecation), 7 m 10 s. Docker suite alone, GPUs idle: **PASS: 13 passed, 374 deselected**, 71.4 s; the seed agent's contract run and the real-tool-server run connect over the now read-only `/run/ar`. No `ar-*` containers left, no new images. No live API calls |
 | Re-review follow-ups (hf private dir, owner-access restore) | Default suite **PASS: 372 passed, 18 deselected**, 1 warning, 7 m 10 s. Docker suite alone, GPUs idle: **PASS: 14 passed, 376 deselected**, 71.5 s. Negative control: with the restore call disabled, the new docker test fails (`PermissionError` on the sealed directory) |
+| Live `improve_recipe` run (Step 4, at `f6a55bf`, 2026-09-24) | **Ran end to end; stopped by the budget guard, `ok=False`** (see below). 44 LLM requests, 0 upstream errors, 2,181,532 tokens, 320 s phase, no kernel exception, no container left |
+
+### Live `improve_recipe` run (Step 4)
+
+Scratch run `runs/live_t18_20260924_140811` (gitignored, 107 MB): the 18 `WorldModel/data/examples`
+clips ingested from staged copies inside the run (the source tree untouched) and committed as the
+root node's data (3 datasets, 6 clips each); `agents.git` initialised from `seed_agent/`; real
+gateway (`Upstream.from_env`, `.env` read in-process, key never printed) and the real tool server
+(`DataTools`, `HfTools(private_dir=run_dir/hf_tmp)`, `JobQueue`, one `gpu_lock`); GPUs `0,1,2,3`
+explicit and idle beforehand. Provider `https://api.deepseek.com`, model `deepseek-flash`,
+`OPENAI_EFFORT=low`. `timeouts.improve_recipe_s` was overridden in-process to 600 s (hard cap 40 min),
+and a watchdog summing the gateway's `llm.response` usage every 10 s killed the container past
+2,000,000 total tokens or 45 min wall.
+
+- **Outcome:** `ok=False`, `error="no result.json (exit code 137)"`: the watchdog's token cap fired
+  320 s into the phase, while the data builder was about to call `data_commit`. Not a timeout.
+- **Usage (gateway):** 44 requests, all HTTP 200; prompt 2,135,084 (2,064,256 cache hits, 94.6%),
+  completion 46,448 (31,715 reasoning), total 2,181,532. Cost from DeepSeek's published
+  `deepseek-flash` prices (run at 18:08 UTC, off-peak): about **$0.045** (peak rates: about $0.09).
+- **Flow:** planner 2 calls (`submit_plan`, then one plain-text turn after it); the data builder
+  was then one conversation of 42 turns whose prompt grew from 4 k to 106 k tokens (compaction
+  threshold 108.8 k never reached). The model asked for 122 tool calls: `hf_download` 66,
+  `hf_search` 24, `run_command` 18, `read_file` 6, `data_query` 4, `list_dir` 2, `submit_plan` 1,
+  `data_commit` 1 (answered after the kill, never executed). Kernel tools: 94 calls, 53 errors, all
+  `hf_download` (26 "no files match", 21 over the byte cap, 5 gated repos with no `HF_TOKEN`, 1 not
+  found). `hf_search` worked without a token. `recipe_check` never ran, so no GPU was used.
+- **Behaviour seen:** the agent used `hf_download` with `max_bytes` of 10 bytes as a way to list repo
+  sizes (no listing tool exists); it read `/store/blobs` and `/agent` directly to audit the pool and
+  concluded the example data had no defect to fix, then chose to re-weight the root datasets.
+- **Findings (not fixed here):** (1) Hugging Face errors (`GatedRepoError`,
+  `RepositoryNotFoundError`) from `HfTools.download` (`kernel/ar_kernel/tools/hf_tools.py:97`,
+  `snapshot_download` on a gated repo, 5 times; `:74`, `dataset_info` on a missing repo, once) are
+  not `ToolError`s, so `ToolKit.call` records them as contained kernel
+  exceptions with a traceback (6 in this run); the agent still gets the message. They are expected
+  agent-facing failures and would pollute any kernel-bug signal. (2) Killing the container does not
+  cancel an in-flight upstream call: the last response (110 k tokens) arrived and was recorded
+  8.5 s after `phase.end`, so a token cap overshoots by up to one request plus one poll interval
+  (here 9%). Plan 4's force stop should expect this. (3) A pure token cap is a poor cost proxy with
+  this provider: cached prompt tokens were 95% of the count but about 14% of the cost.
 
 ### Spec and plan sync (Step 5)
 
