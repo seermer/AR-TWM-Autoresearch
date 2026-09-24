@@ -4,7 +4,11 @@ Reproduces langchain.agents.create_agent (langchain 1.4.2, factory.py @ 4af7ab8)
 with no middleware, no response_format and async tools:
   START -> model; model -> END if the last AI message has no tool calls,
   else one Send("tools", [call]) per tool call (parallel); tools -> model.
-Tool execution follows langgraph.prebuilt.ToolNode's default error handling.
+Tool execution follows langgraph.prebuilt.ToolNode's default messages.
+
+One deliberate difference from create_agent's default: a tool that raises is
+reported to the model as an error ToolMessage (create_agent re-raises and ends
+the run).
 """
 from __future__ import annotations
 
@@ -24,6 +28,7 @@ RECURSION_LIMIT = 9_999
 INVALID_TOOL = "Error: {name} is not a valid tool, try one of [{names}]."
 INVALID_ARGS = ("Error invoking tool '{name}' with kwargs {args} with error:\n"
                 " {error}\n Please fix the error and try again.")
+TOOL_ERROR = "Error: {error}\n Please fix your mistakes."   # ToolNode's handle_tool_errors=True text
 TOOL_BLOCK_TYPES = {"text", "image_url", "image", "json", "search_result", "custom_tool_call_output",
                     "document", "file"}
 
@@ -54,6 +59,9 @@ async def run_tool(tools: dict[str, BaseTool], call: ToolCall) -> ToolMessage:
                           for e in exc.errors())
         return ToolMessage(INVALID_ARGS.format(name=call["name"], args=call["args"], error=error),
                            name=call["name"], tool_call_id=call["id"], status="error")
+    except Exception as exc:  # noqa: BLE001 -- difference 1: report, do not crash
+        return ToolMessage(TOOL_ERROR.format(error=repr(exc)), name=call["name"],
+                           tool_call_id=call["id"], status="error")
     message.content = _content(message.content)
     return message
 

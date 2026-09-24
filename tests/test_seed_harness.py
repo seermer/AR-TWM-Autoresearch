@@ -135,8 +135,12 @@ def test_no_tools_matches_create_agent():
             == asyncio.run(_run(_theirs, script, [], "s", [HumanMessage("x")])))
 
 
-def test_a_raising_tool_propagates_in_both():
-    script = [_ai("", [("boom", {"x": 1}, "c1")]), _ai("unreachable")]
-    for builder in (_ours, _theirs):
-        with pytest.raises(RuntimeError, match="boom 1"):
-            asyncio.run(_run(builder, script, TOOLS, None, [HumanMessage("x")]))
+def test_tool_exception_is_reported_where_create_agent_raises():
+    script = [_ai("", [("boom", {"x": 1}, "c1")]), _ai("recovered")]
+    with pytest.raises(RuntimeError, match="boom 1"):
+        asyncio.run(_run(_theirs, script, TOOLS, None, [HumanMessage("x")]))
+    messages, _ = asyncio.run(_run(_ours, script, TOOLS, None, [HumanMessage("x")]))
+    err = messages[2]
+    assert err["type"] == "tool" and err["status"] == "error" and err["tool_call_id"] == "c1"
+    assert err["content"] == "Error: RuntimeError('boom 1')\n Please fix your mistakes."
+    assert messages[-1]["content"] == "recovered"
