@@ -161,3 +161,35 @@ def test_on_revoke_wired_to_forget_via_registry(tmp_path):
     reg.revoke(caller.token)
 
     assert m1["call_id"] not in store._calls
+
+
+def test_chat_model_resent_history_links_to_a_real_style_chat_response(env):
+    """Task 19: the agent's ChatOpenAI (Chat Completions) resends the prior request plus the
+    assistant message. Upstream messages carry fields the client never sends back (OpenAI's
+    `refusal`/`annotations`, a tool-call `index`, empty content next to tool calls)
+    and may space the arguments JSON differently; linking must survive all of that."""
+    import json
+
+    import httpx
+    from langchain_core.messages import HumanMessage, ToolMessage
+    from ar_contract.client import ReasoningChatOpenAI
+    reply = {"id": "cc1", "object": "chat.completion", "created": 1, "model": "m",
+             "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
+                 "role": "assistant", "content": "", "refusal": None, "annotations": [],
+                 "reasoning_content": "plan", "tool_calls": [
+                     {"index": 0, "id": "c1", "type": "function",
+                      "function": {"name": "data_query", "arguments": '{"q":1,"a":"b"}'}}]}}],
+             "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}}
+    sent = []
+    def handler(request):
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json=reply)
+    model = ReasoningChatOpenAI(model="m", base_url="http://up/v1", api_key="k", max_retries=0,
+                                http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+    first = model.invoke([HumanMessage("go")])
+    model.invoke([HumanMessage("go"), first, ToolMessage("[]", tool_call_id="c1")])
+    _, store, caller = env
+    m1 = store.begin(caller, "/v1/chat/completions", sent[0])
+    store.end(m1, caller, status=200, body=reply, latency_s=0, attempts=1)
+    m2 = store.begin(caller, "/v1/chat/completions", sent[1])
+    assert m2["conversation_id"] == m1["conversation_id"] and m2["turn_index"] == 1

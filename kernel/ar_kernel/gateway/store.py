@@ -3,7 +3,10 @@
 Linking, in order: an explicit previous_response_id; a Responses API conversation
 id; otherwise the request's history begins with a prior call's request + response
 (how ChatOpenAI continues a run, fact 6). Prefix matching only looks at calls from the
-same container token.
+same container token. A Chat Completions assistant message is compared by what a client
+sends back (content, tool call ids/names/parsed arguments, reasoning_content), because
+upstream replies carry extra fields (`refusal`, `annotations`, tool-call `index`) and may
+format the arguments JSON differently.
 
 CallStore keeps every call's full normalized history for the whole run, so memory
 grows with calls x history. forget() bounds that growth: once a caller token is
@@ -21,9 +24,27 @@ from typing import Any
 _VOLATILE = {"id", "status"}          # differ between an output item and its resent copy
 
 
+def _assistant(message: dict) -> dict:
+    def args(raw: Any) -> Any:
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            return raw
+    calls = [{"id": c.get("id"), "name": (c.get("function") or {}).get("name"),
+              "arguments": args((c.get("function") or {}).get("arguments"))}
+             for c in message.get("tool_calls") or []]
+    return {"role": "assistant", "content": message.get("content") or None,
+            "tool_calls": calls or None, "reasoning_content": message.get("reasoning_content") or None}
+
+
+def _chat(messages: list[Any]) -> list[Any]:
+    return [_assistant(m) if isinstance(m, dict) and m.get("role") == "assistant" else m
+            for m in messages]
+
+
 def _items(endpoint: str, body: dict) -> list[Any]:
     if endpoint.endswith("/chat/completions"):
-        return list(body.get("messages") or [])
+        return _chat(list(body.get("messages") or []))
     raw = body.get("input")
     if isinstance(raw, str):
         return [{"role": "user", "content": raw}]
@@ -32,7 +53,7 @@ def _items(endpoint: str, body: dict) -> list[Any]:
 
 def _out_items(endpoint: str, body: dict) -> list[Any]:
     if endpoint.endswith("/chat/completions"):
-        return [c.get("message") for c in body.get("choices") or [] if c.get("message")]
+        return _chat([c.get("message") for c in body.get("choices") or [] if c.get("message")])
     return list(body.get("output") or [])
 
 

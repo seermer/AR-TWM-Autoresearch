@@ -1,5 +1,6 @@
-"""Scripted Responses API outputs. The envelope is the minimum ChatOpenAI
-accepts (verified fact 6 in the Plan 2 document)."""
+"""Scripted LLM outputs. A script is a list of Responses API output lists; `response`
+renders one as a Responses envelope (the minimum ChatOpenAI accepts, verified fact 6 in the
+Plan 2 document) and `chat_response` as a Chat Completions one (Task 19)."""
 from __future__ import annotations
 
 import json
@@ -56,3 +57,19 @@ class MockBook:
                 "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
                           "input_tokens_details": {"cached_tokens": 0},
                           "output_tokens_details": {"reasoning_tokens": 0}}}
+
+    @staticmethod
+    def chat_response(model: str, output: list[dict]) -> dict:
+        text = "".join(c["text"] for item in output if item["type"] == "message"
+                       for c in item["content"] if c["type"] == "output_text")
+        calls = [{"id": item["call_id"], "type": "function",
+                  "function": {"name": item["name"], "arguments": item["arguments"]}}
+                 for item in output if item["type"] == "function_call"]
+        message = {"role": "assistant", "content": text or None}
+        if calls:
+            message["tool_calls"] = calls
+        return {"id": f"chatcmpl-{uuid.uuid4().hex}", "object": "chat.completion",
+                "created": int(time.time()), "model": model,
+                "choices": [{"index": 0, "message": message,
+                             "finish_reason": "tool_calls" if calls else "stop"}],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}

@@ -213,13 +213,15 @@ def _run(kernel, tmp_path, kind, script, node, ctx):
 
 
 def _tool_outputs(rec, node) -> list[str]:
-    """Every function_call_output the agent sent back to the model, from gateway telemetry."""
+    """Every tool result the agent sent back to the model (Chat Completions `tool` messages),
+    from gateway telemetry."""
     out = []
     for event in rec.read_events(node):
         if event["type"] == "llm.request":
             body = rec.load_payload(event["payload"])["body"]
-            out += [i.get("output", "") for i in body.get("input", [])
-                    if isinstance(i, dict) and i.get("type") == "function_call_output"]
+            assert "messages" in body                            # the Chat Completions path
+            out += [m["content"] if isinstance(m["content"], str) else json.dumps(m["content"])
+                    for m in body["messages"] if m.get("role") == "tool"]
     return out
 
 
@@ -262,6 +264,8 @@ def test_improve_recipe_full_flow(kernel, tmp_path):
                for o in outputs)                                                 # kernel tool error reported
     kinds = [e["type"] for e in rec.read_events("n-recipe")]
     assert "tool.call" in kinds and "tool.error" in kinds                        # kernel-side records
+    turns = [e["turn_index"] for e in rec.read_events("n-recipe") if e["type"] == "llm.request"]
+    assert max(turns) >= 2                     # the harness's resent chat history links (Task 19)
 
 
 def test_edit_self_plans_exactly_one_component(kernel, tmp_path):

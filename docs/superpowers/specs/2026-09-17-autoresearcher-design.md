@@ -49,8 +49,10 @@ HGM `hgm.py`, `tree.py`, `hgm_utils.py`, `self_improve_step.py`; HyperAgents
    agent's own code: it reproduces `langchain.agents.create_agent` (no middleware), plus two
    additions: tool errors are reported to the model, and Claude-Code-style auto-compaction
    (§9.1.2). Multi-agent orchestration is plain Python. Both are agent code, so
-   self-improvement can change them. Agent LLMs are OpenAI models only, reached through
-   `langchain-openai`'s `ChatOpenAI` (Responses API) pointed at the gateway. *(Amended 2026-09-21, Plan 2 revision: the OpenAI Agents SDK is dropped.)*
+   self-improvement can change them. Agent LLMs are reached through an OpenAI-compatible
+   Chat Completions endpoint (e.g. OpenAI or DeepSeek) at `OPENAI_BASE_URL`, via
+   `langchain-openai`'s `ChatOpenAI` pointed at the gateway; a provider's `reasoning_content`
+   is kept and sent back when it returns one, and the gateway enforces `OPENAI_EFFORT`. *(Amended 2026-09-21, Plan 2 revision: the OpenAI Agents SDK is dropped. Amended 2026-09-24, Plan 2 Task 19: Chat Completions instead of the Responses API, any OpenAI-compatible provider.)*
 
 ### 1.2 Non-goals
 
@@ -82,8 +84,9 @@ HGM `hgm.py`, `tree.py`, `hgm_utils.py`, `self_improve_step.py`; HyperAgents
 | Key | Use |
 |---|---|
 | `OPENAI_API_KEY` | Upstream key, held only by the gateway (never passed into containers). |
-| `OPENAI_BASE_URL` | Upstream base URL, including the API version as in the OpenAI SDK (default `https://api.openai.com/v1`); used as given. |
+| `OPENAI_BASE_URL` | Upstream base URL of an OpenAI-compatible API (default `https://api.openai.com/v1`). Used exactly as given: the endpoint path (`/chat/completions`, `/responses`) is appended, nothing else (OpenAI's base includes `/v1`; other providers may have no version segment). |
 | `OPENAI_MODEL` | Default model for agents that do not choose one. |
+| `OPENAI_EFFORT` | Optional reasoning effort (e.g. `low`). When set, the gateway overrides every forwarded request with it (`reasoning_effort` for Chat Completions, `reasoning.effort` for Responses); empty leaves requests untouched. |
 | `VLM_API_KEY`, `VLM_API_URL`, `VLM_MODEL_NAME` | WBench VLM metrics. The 6 VLM metrics are computed **iff `VLM_API_KEY` is non-empty**. |
 
 Existing shell variables (e.g. `HF_TOKEN`) take precedence; loaders never override them.

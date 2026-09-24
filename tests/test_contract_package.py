@@ -128,8 +128,8 @@ def test_edit_result_component_is_optional_and_checked():
 
 
 def test_clients_speak_over_the_socket_directory(monkeypatch, tmp_path):
-    """Facts 2-6: the chat model talks to the gateway socket (Responses API, no client-side
-    retries); the MCP session is an async context manager. Built without connecting; Task 6
+    """Facts 2-6: the chat model talks to the gateway socket (Chat Completions since Task 19,
+    no client-side retries); the MCP session is an async context manager. Built without connecting; Task 6
     and Task 17 exercise both over real sockets."""
     monkeypatch.setenv("AR_SOCKET_DIR", str(tmp_path))
     monkeypatch.setenv("AR_TOKEN", "tok-abc")
@@ -140,7 +140,60 @@ def test_clients_speak_over_the_socket_directory(monkeypatch, tmp_path):
     model = client.chat_model()
     assert model.model_name == "gpt-x" and model.openai_api_base == "http://localhost/v1"
     assert model.openai_api_key.get_secret_value() == "tok-abc"
-    assert model.use_responses_api is True and model.max_retries == 0
+    assert isinstance(model, client.ReasoningChatOpenAI)
+    assert model.use_responses_api is False and model.max_retries == 0
     assert isinstance(model.http_client, httpx.Client)             # sync invoke() also uses the socket
     assert isinstance(model.http_async_client, httpx.AsyncClient)
     assert inspect.isasyncgenfunction(client.mcp_session.__wrapped__)
+
+
+def _stub_model(replies, seen):
+    """The Task 19 client class on a stub transport: records request bodies, returns `replies`."""
+    import httpx
+    from ar_contract.client import ReasoningChatOpenAI
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json=replies[len(seen) - 1])
+    return ReasoningChatOpenAI(model="m", base_url="http://up/v1", api_key="k",
+                               use_responses_api=False, max_retries=0,
+                               http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+
+
+def _chat_reply(message):
+    return {"id": "cc1", "object": "chat.completion", "created": 1, "model": "m",
+            "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}}
+
+
+def test_reasoning_content_round_trips_through_the_chat_model():
+    """Some OpenAI-compatible providers return reasoning_content and require it back on every
+    earlier assistant message (Task 19); stock ChatOpenAI drops it both ways. Messages that never
+    had it are sent unchanged."""
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+    seen = []
+    model = _stub_model([
+        _chat_reply({"role": "assistant", "content": "", "reasoning_content": "think first",
+                     "tool_calls": [{"index": 0, "id": "c1", "type": "function",
+                                     "function": {"name": "echo", "arguments": '{"x": 1}'}}]}),
+        _chat_reply({"role": "assistant", "content": "done", "reasoning_content": ""})], seen)
+    first = model.invoke([HumanMessage("go")])
+    assert first.additional_kwargs["reasoning_content"] == "think first"
+    assert first.tool_calls[0]["name"] == "echo"
+    plain = AIMessage("earlier reply without reasoning")
+    second = model.invoke([HumanMessage("go"), plain, HumanMessage("again"), first,
+                           ToolMessage("1", tool_call_id="c1")])
+    assert second.text == "done" and second.additional_kwargs["reasoning_content"] == ""
+    assistants = [m for m in seen[1]["messages"] if m["role"] == "assistant"]
+    assert "reasoning_content" not in assistants[0]
+    assert assistants[1]["reasoning_content"] == "think first"
+    assert assistants[1]["tool_calls"][0]["id"] == "c1"
+
+
+def test_reasoning_content_is_never_invented():
+    from langchain_core.messages import HumanMessage
+    seen = []
+    model = _stub_model([_chat_reply({"role": "assistant", "content": "hi"})] * 2, seen)
+    first = model.invoke([HumanMessage("go")])
+    assert "reasoning_content" not in first.additional_kwargs
+    model.invoke([HumanMessage("go"), first, HumanMessage("more")])
+    assert seen[1]["messages"][1] == {"role": "assistant", "content": "hi"}

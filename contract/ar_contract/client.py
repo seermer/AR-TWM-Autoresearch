@@ -3,6 +3,8 @@
 The container has no network. The gateway and tool server listen on sockets in
 SOCKET_DIR. Details verified on this stack (see the Plan 2 facts):
 - the chat model uses httpx over the gateway socket; the MCP 2.x client REQUIRES httpx2;
+- the chat model speaks Chat Completions, the most widely supported OpenAI-compatible
+  endpoint, and round-trips a provider's `reasoning_content` when it returns one (Task 19);
 - the host is 'localhost' (the MCP server's rebinding guard rejects anything else);
 - MCP calls such as data_ingest run the dataset checker and take minutes, and recipe_check
   can wait on the GPU lock then run 3600 s gate steps while hf_download fetches 20 GiB, so
@@ -19,6 +21,8 @@ from pathlib import Path
 
 import httpx
 import httpx2
+from langchain_core.messages import AIMessage
+from langchain_openai import ChatOpenAI
 
 MCP_TIMEOUT_S = 14400.0
 LLM_TIMEOUT_S = 900.0
@@ -36,20 +40,44 @@ def default_model() -> str:
     return os.environ.get("AR_DEFAULT_MODEL", "mock-model")
 
 
-def chat_model(model: str | None = None, **kwargs):
-    """A LangChain ChatOpenAI bound to the gateway (Responses API, non-streaming).
+class ReasoningChatOpenAI(ChatOpenAI):
+    """ChatOpenAI (Chat Completions) that keeps a reply's `reasoning_content`, when the provider
+    returns one, in `additional_kwargs` and sends it back with that assistant message (some
+    OpenAI-compatible providers require this when tools are sent). Stock langchain-openai drops
+    it both ways. A no-op for providers that never return the field."""
+
+    def _create_chat_result(self, response, generation_info=None):
+        result = super()._create_chat_result(response, generation_info)
+        raw = response if isinstance(response, dict) else response.model_dump()
+        for generation, choice in zip(result.generations, raw.get("choices") or []):
+            reasoning = (choice.get("message") or {}).get("reasoning_content")
+            if reasoning is not None:
+                generation.message.additional_kwargs["reasoning_content"] = reasoning
+        return result
+
+    def _get_request_payload(self, input_, *, stop=None, **kwargs):
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        # payload["messages"] is built one-to-one from these messages
+        for message, sent in zip(self._convert_input(input_).to_messages(), payload.get("messages", [])):
+            if isinstance(message, AIMessage) and "reasoning_content" in message.additional_kwargs:
+                sent["reasoning_content"] = message.additional_kwargs["reasoning_content"]
+        return payload
+
+
+def chat_model(model: str | None = None, **kwargs) -> ReasoningChatOpenAI:
+    """A LangChain chat model bound to the gateway (Chat Completions, non-streaming).
 
     Both clients go over the socket: without an explicit sync client, a sync invoke()
-    would try TCP localhost:80 and fail inside the network-less container."""
-    from langchain_openai import ChatOpenAI
+    would try TCP localhost:80 and fail inside the network-less container. Reasoning effort
+    is not set here: the gateway enforces OPENAI_EFFORT."""
     sock = os.path.join(socket_dir(), "gateway.sock")
-    return ChatOpenAI(model=model or default_model(), base_url="http://localhost/v1", api_key=token(),
-                      use_responses_api=True, max_retries=0,
-                      http_client=httpx.Client(transport=httpx.HTTPTransport(uds=sock),
-                                               timeout=LLM_TIMEOUT_S),
-                      http_async_client=httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(uds=sock),
-                                                          timeout=LLM_TIMEOUT_S),
-                      **kwargs)
+    return ReasoningChatOpenAI(model=model or default_model(), base_url="http://localhost/v1",
+                               api_key=token(), use_responses_api=False, max_retries=0,
+                               http_client=httpx.Client(transport=httpx.HTTPTransport(uds=sock),
+                                                        timeout=LLM_TIMEOUT_S),
+                               http_async_client=httpx.AsyncClient(
+                                   transport=httpx.AsyncHTTPTransport(uds=sock), timeout=LLM_TIMEOUT_S),
+                               **kwargs)
 
 
 @asynccontextmanager

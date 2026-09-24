@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Mapping
 
 import httpx
 from fastapi import FastAPI, Request
@@ -14,24 +15,39 @@ from .mock import MockBook
 from .store import CallStore
 
 RETRYABLE = {408, 409, 429, 500, 502, 503, 504}
-# The OpenAI SDK convention: the base URL includes the API version (spec 2: OPENAI_BASE_URL).
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
 
 class Upstream:
     def __init__(self, base_url: str | None, api_key: str, *, timeout_s: float, retries: int,
-                 transport: httpx.AsyncBaseTransport | None = None, sleep=asyncio.sleep) -> None:
-        # Used as given: "/responses" is appended, so the URL must already end in its version
-        # ("/v1"). Appending "/v1" here would break providers whose version path differs.
+                 effort: str | None = None, transport: httpx.AsyncBaseTransport | None = None,
+                 sleep=asyncio.sleep) -> None:
+        # Used as given; the endpoint path ("/chat/completions", "/responses") is appended.
+        # Providers differ: OpenAI's base includes "/v1", others have no version segment.
         self._base = (base_url or DEFAULT_BASE_URL).rstrip("/")
+        self.effort = effort          # reasoning effort forced on every forwarded request
         self._headers = {"Authorization": f"Bearer {api_key}"}
         self._timeout = timeout_s
         self._retries = retries
         self._transport = transport
         self._sleep = sleep
 
+    @classmethod
+    def from_env(cls, environ: Mapping[str, str], **kwargs) -> "Upstream":
+        """OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_EFFORT (empty -> not enforced); `kwargs`
+        go to the constructor (timeout_s, retries, ...)."""
+        return cls(environ.get("OPENAI_BASE_URL"), environ.get("OPENAI_API_KEY", ""),
+                   effort=environ.get("OPENAI_EFFORT") or None, **kwargs)
+
+    def enforce(self, path: str, body: dict) -> dict:
+        """`body` with the configured reasoning effort, overriding whatever the agent sent."""
+        if not self.effort:
+            return body
+        if path == "/chat/completions":
+            return {**body, "reasoning_effort": self.effort}
+        return {**body, "reasoning": {**(body.get("reasoning") or {}), "effort": self.effort}}
+
     async def post(self, path: str, body: dict) -> tuple[int, dict, int]:
-        # path is "/responses" or "/chat/completions"; the base URL already ends in /v1
         attempts, status, payload = 0, 599, {"error": "no attempt made"}
         async with httpx.AsyncClient(transport=self._transport, timeout=self._timeout) as client:
             for attempt in range(self._retries + 1):
@@ -77,14 +93,18 @@ def create_gateway_app(*, registry, store: CallStore, allowed_models: set[str],
             return JSONResponse({"error": {"message": f"model {body.get('model')!r} is not in the "
                                                       f"allowlist {sorted(allowed_models)}"}},
                                 status_code=403)
+        mock = bool(caller.mock_script) or upstream is None
+        if not mock:
+            body = upstream.enforce(upstream_path, body)   # before begin: record what is forwarded
         try:
             meta = store.begin(caller, endpoint, body)
         except TelemetryError as exc:
             return JSONResponse({"error": {"message": f"telemetry unavailable: {exc}"}}, status_code=500)
         started = time.monotonic()
         try:
-            if caller.mock_script or upstream is None:
-                status, payload, attempts = 200, MockBook.response(
+            if mock:
+                render = MockBook.chat_response if upstream_path == "/chat/completions" else MockBook.response
+                status, payload, attempts = 200, render(
                     body.get("model", ""), mocks.next(caller.mock_script or "smoke", caller.token)), 1
             else:
                 status, payload, attempts = await upstream.post(upstream_path, body)

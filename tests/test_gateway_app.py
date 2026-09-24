@@ -219,3 +219,73 @@ def test_revoking_a_token_drops_its_linking_state_in_the_store(tmp_path):
 
     assert store._calls == {}  # dropped by the on_revoke -> forget wiring
     assert reg.lookup(caller.token) is None
+
+
+def _make_with_effort(tmp_path, effort, handler=_ok):
+    rec = Recorder(tmp_path)
+    reg, store, seen = TokenRegistry(rec), CallStore(rec), []
+    caller = reg.issue(node="n1", phase="edit_self", attempt=1, workspace_host=tmp_path,
+                       staging_host=tmp_path)
+    up = _upstream_that(handler, seen)
+    up.effort = effort
+    app = create_gateway_app(registry=reg, store=store, allowed_models={"gpt-x"}, upstream=up,
+                             mocks=MockBook.default())
+    return TestClient(app), caller, rec, seen
+
+
+def test_gateway_enforces_reasoning_effort_on_chat_completions(tmp_path):
+    client, caller, rec, seen = _make_with_effort(tmp_path, "low")
+    r = _post(client, caller.token, {"model": "gpt-x", "reasoning_effort": "high",
+                                     "messages": [{"role": "user", "content": "hi"}]},
+              path="/v1/chat/completions")
+    assert r.status_code == 200 and seen[0]["reasoning_effort"] == "low"
+    request = [e for e in rec.read_events("n1") if e["type"] == "llm.request"][0]
+    assert rec.load_payload(request["payload"])["body"]["reasoning_effort"] == "low"   # as forwarded
+
+
+def test_gateway_enforces_reasoning_effort_on_responses(tmp_path):
+    client, caller, _, seen = _make_with_effort(tmp_path, "low")
+    _post(client, caller.token, {"model": "gpt-x", "input": "hi",
+                                 "reasoning": {"effort": "high", "summary": "auto"}})
+    _post(client, caller.token, {"model": "gpt-x", "input": "hi"})
+    assert [s["reasoning"] for s in seen] == [{"effort": "low", "summary": "auto"}, {"effort": "low"}]
+
+
+def test_gateway_forwards_the_agent_effort_when_none_is_configured(tmp_path):
+    client, caller, _, seen = _make_with_effort(tmp_path, None)
+    _post(client, caller.token, {"model": "gpt-x", "reasoning_effort": "high",
+                                 "messages": [{"role": "user", "content": "hi"}]},
+          path="/v1/chat/completions")
+    assert seen[0]["reasoning_effort"] == "high"
+
+
+def test_upstream_from_env():
+    up = Upstream.from_env({"OPENAI_BASE_URL": "https://llm.example", "OPENAI_API_KEY": "sk-x",
+                            "OPENAI_EFFORT": "low"}, timeout_s=5, retries=1)
+    assert (up._base, up._headers, up.effort) == ("https://llm.example",
+                                                  {"Authorization": "Bearer sk-x"}, "low")
+    up = Upstream.from_env({"OPENAI_EFFORT": ""}, timeout_s=5, retries=1)
+    assert (up._base, up.effort) == ("https://api.openai.com/v1", None)
+
+
+def test_mock_mode_serves_chat_completions(tmp_path):
+    rec = Recorder(tmp_path)
+    reg, store = TokenRegistry(rec), CallStore(rec)
+    book = MockBook()
+    book.add("two_steps", [[function_call("data_query", {"q": 1}, "c1")], [message("done")]])
+    caller = reg.issue(node="n", phase="p", attempt=1, workspace_host=tmp_path,
+                       staging_host=tmp_path, mock_script="two_steps")
+    client = TestClient(create_gateway_app(registry=reg, store=store, allowed_models={"gpt-x"},
+                                           upstream=None, mocks=book))
+    body = {"model": "gpt-x", "messages": [{"role": "user", "content": "x"}]}
+    first = _post(client, caller.token, body, path="/v1/chat/completions").json()
+    second = _post(client, caller.token, body, path="/v1/chat/completions").json()
+    assert first["object"] == "chat.completion" and first["model"] == "gpt-x"
+    assert first["choices"][0]["finish_reason"] == "tool_calls"
+    assert first["choices"][0]["message"] == {
+        "role": "assistant", "content": None,
+        "tool_calls": [{"id": "c1", "type": "function",
+                        "function": {"name": "data_query", "arguments": '{"q": 1}'}}]}
+    assert second["choices"][0]["finish_reason"] == "stop"
+    assert second["choices"][0]["message"] == {"role": "assistant", "content": "done"}
+    assert set(first["usage"]) >= {"prompt_tokens", "completion_tokens", "total_tokens"}
