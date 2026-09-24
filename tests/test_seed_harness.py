@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import tool
 from langchain_core.utils.function_calling import convert_to_openai_tool
@@ -17,7 +17,10 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 SEED = Path(__file__).resolve().parents[1] / "seed_agent"
 sys.path.insert(0, str(SEED))
 
+from agent.harness import CONTINUATION, estimate_tokens, needs_compaction  # noqa: E402
 from agent.harness import build_react_agent  # noqa: E402
+
+BIG = 10 ** 9      # a context window compaction never reaches
 
 
 class Scripted(BaseChatModel):
@@ -112,7 +115,7 @@ async def _run(builder, script, tools, system, history):
 
 
 def _ours(model, tools, system):
-    return build_react_agent(model, tools, system)
+    return build_react_agent(model, tools, system, context_window=BIG)
 
 
 def _theirs(model, tools, system):
@@ -144,3 +147,52 @@ def test_tool_exception_is_reported_where_create_agent_raises():
     assert err["type"] == "tool" and err["status"] == "error" and err["tool_call_id"] == "c1"
     assert err["content"] == "Error: RuntimeError('boom 1')\n Please fix your mistakes."
     assert messages[-1]["content"] == "recovered"
+
+
+def test_estimate_uses_last_reported_usage_plus_tail():
+    msgs = [HumanMessage("x" * 400), _ai("hi", total=1000), ToolMessage("y" * 80, tool_call_id="c")]
+    assert estimate_tokens(msgs) == 1000 + 20
+    assert estimate_tokens([HumanMessage("x" * 400)], system_prompt="s" * 40) == 110
+
+
+def test_images_count_as_a_fixed_estimate_not_their_base64_length():
+    from agent.harness import IMAGE_TOKENS
+    image = {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + "A" * 400_000}}
+    msgs = [HumanMessage(content=[{"type": "text", "text": "x" * 40}, image])]
+    assert IMAGE_TOKENS <= estimate_tokens(msgs) < IMAGE_TOKENS + 100      # not 400_000 / 4
+
+
+def test_a_single_message_is_never_compacted():
+    assert not needs_compaction([HumanMessage("x" * 10 ** 6)], None, 1000, 0.85)
+
+
+def test_compaction_replaces_history_and_continues():
+    # call 1 asks for a tool and reports 900 tokens >= 0.85 * 1000, so the harness compacts
+    # before call 2 (the summarizer); call 3 continues from the summary alone.
+    script = [_ai("", [("add", {"a": 1, "b": 2}, "c1")], total=900), _ai("SUMMARY TEXT"),
+              _ai("done", total=50)]
+    log = {"bind": [], "prompts": []}
+    agent = build_react_agent(Scripted(script=script, log=log), TOOLS, "sys", context_window=1000,
+                              compact_prompt="COMPACT NOW")
+    out = asyncio.run(agent.ainvoke({"messages": [HumanMessage("task")]}))
+    summarizer = log["prompts"][1]
+    assert [m["type"] for m in summarizer] == ["system", "human", "ai", "tool", "human"]
+    assert summarizer[0]["content"] == "sys" and summarizer[-1]["content"] == "COMPACT NOW"
+    assert log["bind"][1][1] == {"tool_choice": "none"}        # the summarizer only writes text
+    continuation = CONTINUATION.format(summary="SUMMARY TEXT")
+    assert [m.type for m in out["messages"]] == ["human", "ai"]
+    assert out["messages"][0].content == continuation and log["prompts"][2][1]["content"] == continuation
+    assert out["messages"][-1].content == "done"
+
+
+def test_below_the_threshold_messages_append_linearly():
+    script = [_ai("", [("add", {"a": 1, "b": 2}, "c1")], total=800), _ai("done", total=820)]
+    log = {"bind": [], "prompts": []}
+    agent = build_react_agent(Scripted(script=script, log=log), TOOLS, "sys", context_window=1000)
+    out = asyncio.run(agent.ainvoke({"messages": [HumanMessage("task")]}))
+    assert [m.type for m in out["messages"]] == ["human", "ai", "tool", "ai"] and len(log["prompts"]) == 2
+
+
+def test_the_default_compaction_prompt_is_the_seed_prompt_file():
+    from agent.harness import COMPACT_PROMPT
+    assert COMPACT_PROMPT.is_file() and "Next step" in COMPACT_PROMPT.read_text()
