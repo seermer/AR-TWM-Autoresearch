@@ -5,9 +5,26 @@ import time
 import pytest
 
 from ar_kernel.telemetry.recorder import Recorder
+from ar_kernel.tools import jobs as jobs_module
 from ar_kernel.tools.context import TokenRegistry
 from ar_kernel.tools.jobs import JobQueue, run_cancellable
 from ar_kernel.tools.server import ToolError
+
+
+def _cancel_once_child_appears(pidfile, cancel: threading.Event, deadline_s: float = 60) -> None:
+    """Trigger `cancel` once `pidfile` shows up, bounded by `deadline_s`.
+
+    Waiting for the actual readiness signal (rather than a fixed timer) avoids
+    racing `conda run`'s own startup latency; the bounded deadline still fails
+    the test promptly if the launch never happens at all.
+    """
+    def watch() -> None:
+        deadline = time.monotonic() + deadline_s
+        while time.monotonic() < deadline and not pidfile.exists():
+            time.sleep(0.1)
+        cancel.set()
+
+    threading.Thread(target=watch, daemon=True).start()
 
 
 class SleepyBackend:
@@ -109,23 +126,50 @@ def test_unknown_backend_is_a_tool_error(env):
         q.submit(a, "wan22", {})
 
 
-def test_run_cancellable_kills_the_whole_group(tmp_path):
-    """Plan 3 backends launch torch jobs through this; a cancel must not orphan ranks.
+def test_wait_caps_a_non_finite_timeout(env):
+    """A lax-parsing client (e.g. JSON-RPC "nan") can hand job_wait a non-finite
+    timeout_s. min(nan, cap) is nan whenever nan sorts first, which never
+    satisfies `remaining <= 0`, so this must not be allowed to busy-spin past
+    the cap -- both NaN and +inf must still return at the cap."""
+    q, a, _, _ = env
+    job_id = q.submit(a, "sleepy", {"steps": 200, "dt": 0.05})
+    for timeout_s in (float("nan"), float("inf")):
+        started = time.monotonic()
+        out = q.wait(a, job_id, timeout_s)
+        assert out["state"] == "running"
+        assert time.monotonic() - started < 2.5
 
-    The cancel fires once the child's pid file appears (readiness signal) rather
-    than after a fixed timer, so this does not race conda run's startup latency;
-    the wait itself is bounded so a launch failure still fails the test promptly.
-    """
+
+def test_shutdown_raises_if_the_worker_outlives_the_join_timeout(tmp_path, monkeypatch):
+    """A worker wedged past its join timeout (its backend hung inside a kill
+    path) must not exit shutdown() silently -- the caller needs to know a job
+    might still be holding a GPU."""
+    class StuckBackend:
+        name, tool = "stuck", "rollout_stuck"
+
+        def run(self, job, cancel, report):
+            time.sleep(1.0)
+            return {}
+
+    rec = Recorder(tmp_path)
+    q = JobQueue(rec, threading.Lock(), wait_cap_s=1.0)
+    q.register(StuckBackend())
+    reg = TokenRegistry(rec)
+    a = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=tmp_path,
+                 staging_host=tmp_path)
+    q.submit(a, "stuck", {})
+    time.sleep(0.1)  # let the worker pick the job up before we shrink the join window
+    monkeypatch.setattr(jobs_module, "_SHUTDOWN_JOIN_S", 0.05)
+    with pytest.raises(RuntimeError, match="did not stop"):
+        q.shutdown()
+    q._worker.join(timeout=5)  # let the real work finish so no thread leaks past the test
+
+
+def test_run_cancellable_kills_the_whole_group(tmp_path):
+    """Plan 3 backends launch torch jobs through this; a cancel must not orphan ranks."""
     pidfile = tmp_path / "child.pid"
     cancel = threading.Event()
-
-    def cancel_when_ready() -> None:
-        deadline = time.monotonic() + 60
-        while time.monotonic() < deadline and not pidfile.exists():
-            time.sleep(0.1)
-        cancel.set()
-
-    threading.Thread(target=cancel_when_ready, daemon=True).start()
+    _cancel_once_child_appears(pidfile, cancel)
     code = run_cancellable("autoresearcher", ["bash", "-c", f"sleep 600 & echo $! > {pidfile}; wait"],
                            cwd=tmp_path, cancel=cancel, log_path=tmp_path / "job.log")
     assert code == -15
@@ -142,3 +186,20 @@ def test_run_cancellable_kills_the_whole_group(tmp_path):
         time.sleep(0.2)
     else:
         pytest.fail("grandchild survived the cancel")
+
+
+def test_run_cancellable_records_a_distinct_cancel_event_and_reports_minus_15(tmp_path):
+    """A cancelled GPU job must be distinguishable in telemetry from a normal
+    exit, and must always report -15 to the caller regardless of which signal
+    actually finished the process group off."""
+    pidfile = tmp_path / "child.pid"
+    cancel = threading.Event()
+    _cancel_once_child_appears(pidfile, cancel)
+    rec = Recorder(tmp_path)
+    code = run_cancellable("autoresearcher", ["bash", "-c", f"sleep 600 & echo $! > {pidfile}; wait"],
+                           cwd=tmp_path, cancel=cancel, log_path=tmp_path / "job2.log",
+                           recorder=rec, node="n1", phase="rollout")
+    assert code == -15
+    kinds = [e["type"] for e in rec.read_events("n1")]
+    assert "subproc.cancelled" in kinds, kinds
+    assert "subproc.end" not in kinds, kinds

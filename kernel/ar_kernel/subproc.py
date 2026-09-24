@@ -3,6 +3,7 @@ import os, signal, subprocess, threading, time
 from pathlib import Path
 
 KILL_GRACE_SECONDS = 30
+KILL_FORCE_GRACE_SECONDS = 10
 
 
 class SubprocTimeout(subprocess.TimeoutExpired):
@@ -31,9 +32,13 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
     event is set, the process group is killed the same way a timeout kills it
     (the GPU job queue uses this so `job_cancel` cannot orphan a torch rank).
     A cancellation is reported as its own `subproc.cancelled` event, distinct
-    from `subproc.end`; the returned `CompletedProcess.returncode` is whatever
-    the killed process group actually exited with (-15 for a plain SIGTERM
-    death). Callers that never pass `cancel` see exactly the prior behaviour.
+    from `subproc.end`. The returned `CompletedProcess` carries an extra
+    `.cancelled` bool so a caller can tell a real cancellation apart from a
+    process that happened to exit with a matching returncode on its own,
+    instead of guessing from `returncode` (which is whatever the killed group
+    actually exited with -- SIGTERM's -15 unless the job ignored it and needed
+    SIGKILL). Callers that never pass `cancel` see exactly the prior behaviour,
+    with `.cancelled` always `False`.
 
     Every exit path records an event: subproc.end (or subproc.cancelled), or
     subproc.error on timeout or launch failure, including the output captured
@@ -85,6 +90,7 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
     if log_path is not None:
         stdout, stderr = Path(log_path).read_text(encoding="utf-8", errors="replace"), ""
     result = subprocess.CompletedProcess(command, proc.returncode, stdout or "", stderr or "")
+    result.cancelled = cancelled
     if recorder is not None:
         recorder.event("subproc.cancelled" if cancelled else "subproc.end", node=node, phase=phase,
                        returncode=proc.returncode,
@@ -125,7 +131,7 @@ def _kill_group(proc: subprocess.Popen) -> None:
         pgid = os.getpgid(proc.pid)
     except ProcessLookupError:
         return
-    for sig, wait in ((signal.SIGTERM, KILL_GRACE_SECONDS), (signal.SIGKILL, 10)):
+    for sig, wait in ((signal.SIGTERM, KILL_GRACE_SECONDS), (signal.SIGKILL, KILL_FORCE_GRACE_SECONDS)):
         try:
             os.killpg(pgid, sig)
         except ProcessLookupError:

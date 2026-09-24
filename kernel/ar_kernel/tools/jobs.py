@@ -1,6 +1,7 @@
 """Asynchronous GPU jobs (spec 10). One job at a time, under the run's GPU lock."""
 from __future__ import annotations
 
+import math
 import queue
 import threading
 import time
@@ -12,8 +13,16 @@ from typing import Any, Callable, Protocol
 
 from mcp.server.mcpserver import Context
 
-from ..subproc import run_in_env
+from ..subproc import KILL_FORCE_GRACE_SECONDS, KILL_GRACE_SECONDS, run_in_env
 from .server import ToolError
+
+_DEFAULT_POLL_S = 1.0
+# Worst case a worker thread can be stuck inside a real backend's run_cancellable:
+# one poll interval before a cancel is even noticed, then run_in_env's own
+# SIGTERM grace and SIGKILL grace. shutdown()'s join must outlast this, or a
+# still-running kill sequence gets cut off when the process (its daemon thread
+# included) exits.
+_SHUTDOWN_JOIN_S = _DEFAULT_POLL_S + KILL_GRACE_SECONDS + KILL_FORCE_GRACE_SECONDS + 5
 
 
 class JobBackend(Protocol):
@@ -97,7 +106,14 @@ class JobQueue:
             return self._view(self._own(caller, job_id))
 
     def wait(self, caller, job_id: str, timeout_s: float) -> dict:
-        deadline = time.monotonic() + min(float(timeout_s), self.wait_cap_s)
+        # A lax-mode client (e.g. JSON-RPC "nan") can hand us a non-finite float.
+        # min(nan, cap) is nan whenever nan sorts first -- Python's min() never
+        # raises on it, so `remaining <= 0` never becomes true and this busy-spins
+        # past the cap until the job ends. Route non-finite (and negative) values
+        # through the cap explicitly instead of trusting min()/max() with them.
+        timeout_s = float(timeout_s)
+        capped = self.wait_cap_s if not math.isfinite(timeout_s) else max(0.0, min(timeout_s, self.wait_cap_s))
+        deadline = time.monotonic() + capped
         with self._cond:
             job = self._own(caller, job_id)
             while job.state not in _TERMINAL:
@@ -132,7 +148,12 @@ class JobQueue:
                 if job.state not in _TERMINAL:
                     self._cancel_locked(job)
         self._todo.put(None)
-        self._worker.join(timeout=30)
+        self._worker.join(timeout=_SHUTDOWN_JOIN_S)
+        if self._worker.is_alive():
+            raise RuntimeError(
+                f"GPU job worker did not stop within {_SHUTDOWN_JOIN_S}s of shutdown; "
+                "a job may still be holding a GPU"
+            )
 
     def _loop(self) -> None:
         while True:
@@ -171,17 +192,26 @@ class JobQueue:
 
 
 def run_cancellable(env: str, args: list[str], *, cwd: Path, cancel: threading.Event,
-                    extra_env: dict | None = None, log_path: Path, poll_s: float = 1.0) -> int:
+                    extra_env: dict | None = None, log_path: Path, poll_s: float = _DEFAULT_POLL_S,
+                    recorder=None, node: str = "run", phase: str = "-") -> int:
     """Run a GPU job's command, killing its whole process group on cancel.
 
     Backends must use this, not a subprocess of their own: it is a thin wrapper
     over `run_in_env`'s cancellation hook, so a cancelled job gets exactly the
     same process-group kill and telemetry as a timed-out one (verification
-    finding 6) instead of a second, divergent launcher.
+    finding 6) instead of a second, divergent launcher. `recorder`/`node`/`phase`
+    are passed straight through so the job's subproc.start/end/cancelled events
+    land in the run's telemetry, not just the job.* events the queue itself
+    records.
+
+    Returns the process's exit code, or -15 whenever `cancel` actually caused
+    the kill -- taken from `run_in_env`'s `.cancelled` flag rather than the raw
+    returncode, so a job that ignored SIGTERM and needed SIGKILL (returncode
+    -9) is still reported as the -15 a caller checks for.
     """
     result = run_in_env(env, args, cwd=cwd, extra_env=extra_env, log_path=log_path,
-                        cancel=cancel, poll_s=poll_s)
-    return result.returncode
+                        cancel=cancel, poll_s=poll_s, recorder=recorder, node=node, phase=phase)
+    return -15 if result.cancelled else result.returncode
 
 
 def register_job_tools(mcp, kit, q: JobQueue) -> None:
