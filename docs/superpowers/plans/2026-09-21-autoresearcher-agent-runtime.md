@@ -2411,7 +2411,7 @@ git commit -m "feat(tools): data tools over the kernel -- probe, ingest, query, 
 **Interfaces:**
 - Consumes: `ToolKit`, `ToolError` (Task 6), `to_container` (Task 4).
 - Produces:
-  - `hf_tools.HfTools(cfg, api=None, snapshot=None)`. `api` defaults to `huggingface_hub.HfApi()` and `snapshot` to `huggingface_hub.snapshot_download`; both are injectable for tests.
+  - `hf_tools.HfTools(cfg, private_dir, api=None, snapshot=None)` (`private_dir` added in the final review: downloads land there, then move into staging without following links). `api` defaults to `huggingface_hub.HfApi()` and `snapshot` to `huggingface_hub.snapshot_download`; both are injectable for tests.
   - `.search(caller, query, kind="dataset", limit=20) -> list[dict]`.
   - `.download(caller, repo, revision, patterns, max_bytes=None) -> dict`.
   - `hf_tools.register_hf_tools(mcp, kit, tools)` registers `hf_search` and `hf_download`.
@@ -6464,11 +6464,11 @@ Plan 4's tasks will be written after Plan 3. Plan 4 sequences these Plan 2 piece
 |---|---|---|
 | `RunServices`, `socket_dir_for` | Task 6 | One instance per run: real gateway plus tool server. Start at run start, stop on exit and on force stop. |
 | `create_gateway_app(... upstream=Upstream.from_env(os.environ, timeout_s=..., retries=...), allowed_models=gateway.model_allowlist ∪ {OPENAI_MODEL})` | Tasks 5, 19 | Real LLM route. With no key: `upstream=None`, so every agent call is served by mocks. |
-| `DataTools`, `HfTools`, `JobQueue` + `register_*` | Tasks 7–9 | The real tool server. Plan 3 registers generator backends on the same `JobQueue`. |
+| `DataTools`, `HfTools`, `JobQueue` + `register_*` | Tasks 7–9 | The real tool server. Plan 3 registers generator backends on the same `JobQueue`. `HfTools(cfg, private_dir)` takes a kernel-only download dir under the run dir (e.g. `run_dir / "hf_tmp"`) that is never mounted into a container (final review). |
 | `gpu_lock` shared by `DataTools`, `JobQueue` and training/eval | Tasks 7, 9 | GPU phases never overlap (spec 7). Plan 4 holds it for precache, train, merge, render and eval. |
 | `AgentsRepo` | Task 12 | `init(seed_agent)` at bootstrap; `set_ref(branch_ref(node), commit)` for the passing attempt. |
 | `ContractHarness`, `verify_contract` | Task 14 | Step 4 of the cycle. `report.to_retry()` becomes the next `edit_self` attempt's `retry`. |
-| `run_edit_self`, `run_improve_recipe`, `attempt_dirs` | Task 15 | Steps 3 and 5. Retries pass `base_commit=<failed attempt commit>` and `previous_workspace=<failed attempt workspace>`. |
+| `run_edit_self`, `run_improve_recipe`, `attempt_dirs` | Task 15 | Steps 3 and 5. Retries pass `base_commit=<failed attempt commit>` and `previous_workspace=<failed attempt workspace>`. `run_edit_self` returns `commit=None` when the base commit cannot be checked out or the attempt tree cannot be committed (final review); the retry must then keep the previous `base_commit`. |
 | Context conventions | Task 13 | Plan 4 **writes** `nodes/<n>/recipe.yaml`, `nodes/<n>/rationale.md`, `nodes/<n>/edit.json` (the passing `edit_self` result, including `component`) and `nodes/<n>/eval/aggregates.json`. |
 
 **Plan 4 must:**
