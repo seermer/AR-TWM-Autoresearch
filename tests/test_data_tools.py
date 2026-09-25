@@ -144,3 +144,39 @@ def test_register_names_are_openai_safe():
     import re
     from ar_kernel.tools.data_tools import TOOL_NAMES
     assert all(re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", n) for n in TOOL_NAMES)
+
+
+def test_leakage_checker_is_built_once_across_concurrent_ingests(tmp_path, monkeypatch):
+    """Building it hashes every WBench case image (7.5 s warm, 72 s cold); it was rebuilt per call."""
+    import time
+    built = []
+
+    class CountingChecker:
+        def __init__(self, cfg):
+            built.append(cfg)
+            time.sleep(0.2)                  # widen the race window between the two callers
+
+    monkeypatch.setattr("ar_kernel.data.ingest.LeakageChecker", CountingChecker)
+    monkeypatch.setattr("ar_kernel.tools.data_tools.LeakageChecker", CountingChecker)
+    rec = Recorder(tmp_path)
+    NodeStore(open_db(tmp_path)).create("n1", None, 0)
+    tools = DataTools(CFG, tmp_path, rec, [0, 1, 2, 3], threading.Lock())
+    ws, st = tmp_path / "ws", tmp_path / "staging" / "n1" / "a1"
+    ws.mkdir(), st.mkdir(parents=True)
+    caller = TokenRegistry(rec).issue(node="n1", phase="improve_recipe", attempt=1,
+                                      workspace_host=ws, staging_host=st)
+    # An invalid camera_motion is rejected before any file is touched: this exercises only setup.
+    # Distinct values keep the two rejection payloads distinct (the recorder writes identical
+    # payloads through one shared tmp name, a separate race).
+    def ingest(motion):
+        cand = {"video": "/workspace/staging/v.mp4", "caption": "/workspace/staging/c.json",
+                "camera_motion": motion, "provenance": PROV}
+        results.extend(tools.ingest(caller, [cand]))
+    results = []
+    threads = [threading.Thread(target=ingest, args=(m,)) for m in ("sideways", "upways")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert [r["accepted"] for r in results] == [False, False]
+    assert len(built) == 1

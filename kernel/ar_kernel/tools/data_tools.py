@@ -16,6 +16,7 @@ from ..archive.commits import CommitError, CommitStore
 from ..archive.db import open_db
 from ..archive.nodes import NodeStore
 from ..data.ingest import Candidate, Ingestor
+from ..data.leakage import LeakageChecker
 from ..data.probe import probe_video
 from ..train.gate import Gate
 from .context import PathError, to_host
@@ -29,6 +30,16 @@ class DataTools:
     def __init__(self, cfg, run_dir: Path, recorder, gpus: list[int], gpu_lock: threading.Lock) -> None:
         self.cfg, self.run_dir, self.recorder = cfg, Path(run_dir), recorder
         self.gpus, self.gpu_lock = list(gpus), gpu_lock
+        self._leakage: LeakageChecker | None = None
+        self._leakage_lock = threading.Lock()
+
+    def _leakage_checker(self) -> LeakageChecker:
+        """Built on first ingest and shared: it hashes every WBench case image (7.5 s warm,
+        72 s cold). check() only reads it, so concurrent ingests may share it."""
+        with self._leakage_lock:
+            if self._leakage is None:
+                self._leakage = LeakageChecker(self.cfg)
+            return self._leakage
 
     def _host(self, caller, path: str) -> Path:
         try:
@@ -57,7 +68,8 @@ class DataTools:
                 license=c.get("license"), derived_from=list(c.get("derived_from") or [])))
         conn = open_db(self.run_dir)
         try:
-            results = Ingestor(self.cfg, self.run_dir, conn, self.recorder).ingest(built, node_id=caller.node)
+            ingestor = Ingestor(self.cfg, self.run_dir, conn, self.recorder, self._leakage_checker())
+            results = ingestor.ingest(built, node_id=caller.node)
         finally:
             conn.close()
         return [{"accepted": r.accepted, "clip_id": r.clip_id, "formats": r.formats,
