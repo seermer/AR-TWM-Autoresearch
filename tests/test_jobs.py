@@ -203,3 +203,38 @@ def test_run_cancellable_records_a_distinct_cancel_event_and_reports_minus_15(tm
     kinds = [e["type"] for e in rec.read_events("n1")]
     assert "subproc.cancelled" in kinds, kinds
     assert "subproc.end" not in kinds, kinds
+
+
+def test_job_waiting_for_the_gpu_lock_stays_queued_and_its_gpu_seconds_exclude_the_wait(env):
+    """The GPUs are shared with recipe_check: a job is not running until it holds them."""
+    q, a, _, _ = env
+    with q.gpu_lock:
+        job_id = q.submit(a, "sleepy", {"steps": 1, "dt": 0.01})
+        time.sleep(0.3)
+        view = q.status(a, job_id)
+        assert view["state"] == "queued" and view["started"] is None
+        released = time.time()
+    done = q.wait(a, job_id, 30)
+    assert done["state"] == "done" and done["started"] >= released
+    assert done["finished"] - done["started"] < 0.3      # what job.finished records as gpu_seconds
+
+
+def test_job_cancelled_while_waiting_for_the_gpu_lock_never_reaches_the_backend(env):
+    q, a, _, _ = env
+    calls = []
+
+    class RecordingBackend:
+        name, tool = "recording", "rollout_recording"
+
+        def run(self, job, cancel, report):
+            calls.append(job.id)
+            return {}
+
+    q.register(RecordingBackend())
+    with q.gpu_lock:
+        job_id = q.submit(a, "recording", {})
+        time.sleep(0.3)                      # the worker has dequeued it and waits for the lock
+        assert q.cancel(a, job_id)["state"] == "cancelled"
+    follow_up = q.submit(a, "recording", {})
+    assert q.wait(a, follow_up, 30)["state"] == "done"
+    assert q.status(a, job_id)["state"] == "cancelled" and calls == [follow_up]

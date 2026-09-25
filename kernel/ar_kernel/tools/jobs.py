@@ -162,10 +162,6 @@ class JobQueue:
                 return
             with self._cond:
                 job = self._jobs[job_id]
-                if job.state != "queued":
-                    continue
-                job.state, job.started = "running", time.time()
-                self._cond.notify_all()
             cancel = self._cancel[job_id]
 
             def report(progress: dict, _job=job) -> None:
@@ -175,6 +171,13 @@ class JobQueue:
 
             tb = None
             with self.gpu_lock:
+                # Running starts once the GPUs are held, so gpu_seconds excludes the lock
+                # wait; a job cancelled before or during that wait is already final.
+                with self._cond:
+                    if job.state != "queued":
+                        continue
+                    job.state, job.started = "running", time.time()
+                    self._cond.notify_all()
                 try:
                     result = self._backends[job.backend].run(job, cancel, report)
                     final, error = ("cancelled" if cancel.is_set() else "done"), None
