@@ -216,6 +216,9 @@ AutoResearcher/
 parent's commit. Every attempt (including failed ones) is committed under
 `refs/attempts/<node>/<phase>-<k>` (e.g. `refs/attempts/n7/edit_self-2`). *(Amended
 2026-09-24, Plan 2 as built: the phase is part of the ref, since both phases have attempts.)*
+*(Amended 2026-09-25: attempt refs exist for `edit_self` attempts only. `improve_recipe`
+mounts `/agent` read-only, so its attempts produce no code; the agent commit it ran is
+recorded in telemetry as `code_commit` on its `phase.start` event.)*
 
 ### 5.3 Blob store
 
