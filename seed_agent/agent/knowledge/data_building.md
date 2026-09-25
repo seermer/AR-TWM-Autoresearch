@@ -25,5 +25,12 @@
 
 ## Captions
 
-- caption_clip sends video frames to the agent model, so it needs a vision-capable model; with
-  a text-only model every call returns a tool error, so write captions another way.
+- caption_videos sends each video file to the kernel's local video model (it sees the whole
+  clip, not frames). One job loads the model once (minutes), then takes seconds per clip:
+  batch every clip of a round into one call, then job_wait. The prompt is yours; ask for what
+  the format needs, e.g. "Write one factual caption (1-3 sentences) describing the scene and
+  how the camera moves."
+- The result maps each path to {"caption": ...} or {"error": ...}. Save the caption as
+  `{"caption": "<text>"}` in captions/<id>.json.
+- For timed prompts, caption each segment's trimmed clip and snap the boundaries with
+  snap_timed_prompts.

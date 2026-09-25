@@ -36,6 +36,18 @@ telemetry:
 tools:
   job_wait_max_s: 300
   hf_download_max_bytes: 21474836480   # 20 GiB per hf.download call
+captioner:                       # caption_videos GPU job: a local vLLM server, never the paid agent model
+  env: zhantaoy-vllm             # conda env with vLLM (0.29.0)
+  model: Qwen/Qwen3.8-27B-FP8    # resolved by id through the HF cache (HF_HUB_OFFLINE=1: never downloads)
+  tensor_parallel: null          # null = the number of node GPUs
+  max_model_len: 32768
+  gpu_memory_utilization: 0.85
+  max_tokens: 512                # per caption
+  media_io_kwargs: {video: {num_frames: 64, fps: 2}}   # at most this many frames decoded per clip
+  startup_timeout_s: 1200        # model load + warm-up
+  clip_timeout_s: 300
+  memory_release_timeout_s: 120  # after the server stops, wait up to this long for GPU memory to free
+  extra_args: []                 # more `vllm serve` flags
 gateway:
   model_allowlist: []            # OPENAI_MODEL from the environment is always allowed too
   upstream_timeout_s: 600

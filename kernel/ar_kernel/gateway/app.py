@@ -22,8 +22,8 @@ DEFAULT_BASE_URL = "https://api.openai.com/v1"
 # no visible mime, so it is let through).
 VIDEO_PART_TYPES = {"video_url", "video", "input_video"}
 FILE_PART_TYPES = {"file", "input_file"}
-NO_VIDEO_MESSAGE = ("video content is not accepted by the gateway; use the caption_clip tool "
-                    "(frame extraction + captioning) instead of sending video directly")
+NO_VIDEO_MESSAGE = ("video content is not accepted by the gateway; caption clips with the caption_videos "
+                    "kernel tool (a GPU job) instead of sending video directly")
 
 
 def _is_video_part(part) -> bool:

@@ -17,6 +17,7 @@ from ..gateway.store import CallStore
 from ..sandbox.image import ImageBuildError, ensure_image
 from ..sandbox.runner import Mounts, container_name, run_container
 from ..services import RunServices, socket_dir_for
+from ..tools.captioner import TOOL as CAPTION_TOOL, register_caption_tool
 from ..tools.context import TokenRegistry
 from ..tools.data_tools import register_data_tools
 from ..tools.hf_tools import register_hf_tools
@@ -99,12 +100,22 @@ class _MockHf:
         raise ToolError("mock tool server: downloads are disabled during a smoke run")
 
 
+class _MockCaption:
+    """caption_videos in smoke runs: a queued job like the real one, but it never starts vLLM."""
+    name = tool = CAPTION_TOOL
+
+    def run(self, job, cancel, report):
+        return {"clips": {p: {"caption": "mock caption"} for p in job.args["paths"]}, "load_s": 0.0,
+                "gpu_memory_mib": None, "gpu_memory_released": None}
+
+
 class ContractHarness:
     def __init__(self, cfg, run_dir: Path, recorder) -> None:
         self.cfg, self.recorder = cfg, recorder
         self.registry = TokenRegistry(recorder)
         self.services = RunServices(socket_dir_for(Path(run_dir) / "contract-harness"))
         self.queue = JobQueue(recorder, threading.Lock(), wait_cap_s=5.0)
+        self.queue.register(_MockCaption())
 
     @property
     def socket_dir(self) -> Path:
@@ -115,6 +126,7 @@ class ContractHarness:
         register_data_tools(mcp, kit, _MockData())
         register_hf_tools(mcp, kit, _MockHf())
         register_job_tools(mcp, kit, self.queue)
+        register_caption_tool(mcp, kit, self.queue)
         gateway = create_gateway_app(registry=self.registry, store=CallStore(self.recorder),
                                      allowed_models={MOCK_MODEL}, upstream=None,
                                      mocks=MockBook.default())

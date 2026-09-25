@@ -165,11 +165,12 @@ def _scripts():
 
 @pytest.fixture(scope="module")
 def kernel(tmp_path_factory):
-    from ar_kernel.contract.verify import _MockData, _MockHf
+    from ar_kernel.contract.verify import _MockCaption, _MockData, _MockHf
     from ar_kernel.gateway.app import create_gateway_app
     from ar_kernel.gateway.mock import MockBook
     from ar_kernel.gateway.store import CallStore
     from ar_kernel.services import RunServices, socket_dir_for
+    from ar_kernel.tools.captioner import register_caption_tool
     from ar_kernel.telemetry.recorder import Recorder
     from ar_kernel.tools.context import TokenRegistry
     from ar_kernel.tools.data_tools import register_data_tools
@@ -183,6 +184,8 @@ def kernel(tmp_path_factory):
     register_data_tools(mcp, kit, _MockData())
     register_hf_tools(mcp, kit, _MockHf())
     register_job_tools(mcp, kit, queue)
+    queue.register(_MockCaption())
+    register_caption_tool(mcp, kit, queue)
     book = MockBook.default()
     for name, script in _scripts().items():
         book.add(name, script)

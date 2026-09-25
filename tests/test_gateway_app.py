@@ -101,7 +101,7 @@ def test_chat_completions_rejects_video_content_parts(make, content):
     body = {"model": "gpt-x", "messages": [{"role": "user", "content": [
         {"type": "text", "text": "look at this"}, content]}]}
     r = _post(client, caller.token, body, path="/v1/chat/completions")
-    assert r.status_code == 400 and "caption_clip" in r.json()["error"]["message"]
+    assert r.status_code == 400 and "caption_videos" in r.json()["error"]["message"]
     assert seen == []
 
 
@@ -124,7 +124,7 @@ def test_chat_completions_allows_images(make):
 def test_responses_rejects_video_input_items(make, item):
     client, caller, _, seen = make()
     r = _post(client, caller.token, {"model": "gpt-x", "input": [item]})
-    assert r.status_code == 400 and "caption_clip" in r.json()["error"]["message"]
+    assert r.status_code == 400 and "caption_videos" in r.json()["error"]["message"]
     assert seen == []
 
 

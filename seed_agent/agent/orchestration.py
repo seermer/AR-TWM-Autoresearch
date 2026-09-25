@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 from .entry import (AGENT_ROOT, BRIEF_CHARS, CHECK_ROUNDS, COMPACT_AT, CONTEXT_WINDOW, MODEL,
                     SELFTEST_ROUNDS, WORKSPACE)
 from .harness import build_react_agent
-from .tools import caption_clip, kernel_tools, make_file_tools, result_text, snap_timed_prompts, submit_tool
+from .tools import kernel_tools, make_file_tools, result_text, snap_timed_prompts, submit_tool
 
 AGENT_PKG = Path(__file__).resolve().parent
 REMIND = ("You stopped without calling {tool}. Finish the task, then call {tool} with the result. "
@@ -101,7 +101,7 @@ async def run_task(ctx: RecipeContext) -> RecipeResult:
                 task += ("\n\nTHE LAST RECIPE CHECK FAILED. Fix the data if the failures are about data:\n"
                          + json.dumps(failures))
             await run_role(system_prompt("data_builder", knowledge=("data_building.md",)),
-                           [*ktools, *make_file_tools(WORKSPACE), caption_clip, snap_timed_prompts,
+                           [*ktools, *make_file_tools(WORKSPACE), snap_timed_prompts,
                             build_tool], task, built)
             recipe_tool, draft = submit_tool("submit_recipe", "Submit the training recipe.", RecipeDraft)
             await run_role(system_prompt("recipe_writer"), [recipe_tool], json.dumps(

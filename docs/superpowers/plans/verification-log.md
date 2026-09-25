@@ -594,6 +594,36 @@ Deferred minors (logged in the ledger, not fixed in Plan 2) include: `JobQueue` 
 running before it holds the GPU lock; a backend raising after cancel ends `failed`;
 `run_command` timeout kills only bash; one pre-existing unexplained warning in the suite.
 
+### Follow-up C — `caption_videos`, a vLLM caption job (2026-09-25)
+
+User decisions: captions come from a local video model (Qwen/Qwen3.8-27B-FP8, from the HF
+cache, served by vLLM 0.29.0 from the existing `zhantaoy-vllm` env), never from the paid agent
+model; the model takes the video file itself. `caption_clip` (frames to the agent model) is
+removed from the seed agent; the gateway's video-rejection text now names `caption_videos`.
+
+Verified against the installed vLLM before building: `--allowed-local-media-path` takes one
+directory and vLLM resolves symlinks before checking it, so clips are hard-linked (copy as a
+fallback) into a job-private `runs/<run>/jobs/<job>/media/`; `file://` `video_url` parts are
+accepted for Qwen3.8 (`Qwen3_5ForConditionalGeneration`, `Qwen3VLVideoProcessor`); the chat
+template has a thinking mode, disabled per request with `chat_template_kwargs:
+{enable_thinking: false}`. `CUDA_DEVICE_ORDER=PCI_BUS_ID` keeps CUDA indices equal to the
+nvidia-smi indices used for the memory check.
+
+Real-GPU smoke (`pytest -m gpu tests/test_captioner.py`, `CUDA_VISIBLE_DEVICES=0,1,4,5`;
+GPUs 2 and 3 were busy with another user's jobs), two staged copies of
+`WorldModel/data/examples/{video_caption_camera,video_caption_static}/videos/clip_0001.mp4`
+(15 s, 1280x720, 30 fps), TP=4: PASSED in 227 s.
+- Server load (start to `/health` 200): 206 s, the first time on this machine (weights load
+  10 s; torch.compile 33 s and CUDA-graph capture are now cached under `~/.cache/vllm`).
+- Per-clip latency: 8.2 s (first request, warm-up), 1.0 s.
+- Peak GPU memory: 21,839 MiB on each of GPUs 0, 1, 4, 5 (gpu_memory_utilization 0.85 of
+  24,564 MiB); after the server stopped: 15 MiB each, equal to the pre-job level
+  (`gpu_memory_released: true`).
+- Captions: camera clip: "A person holding a blue umbrella walks across a wet, rain-soaked
+  street lined with parked cars. The camera slowly moves forward, following the pedestrian as
+  they cross from right to left. ..."; static clip: "A man in a red shirt stands in an office,
+  holding and flipping through a white binder. The camera remains stationary, ...".
+
 ### Process note
 
 During this task's doc sync, one text-substitution script was run with the system

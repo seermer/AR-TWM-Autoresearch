@@ -95,7 +95,8 @@ Existing shell variables (e.g. `HF_TOKEN`) take precedence; loaders never overri
 `messages` content part or Responses `input` item carrying video — type `video_url`, `video`,
 `input_video`, or a `file`/`input_file` part whose mime type or data URL says video; images are
 unaffected. The error text tells the agent to caption the clip (`caption_clip`) instead of
-sending video frames/urls directly. See §13.1.)*
+sending video frames/urls directly. See §13.1. Amended again 2026-09-25, Follow-up C: the text
+now names the `caption_videos` kernel tool (§10); `caption_clip` is gone.)*
 
 ### 2.3 Upstream patches (applied by a human/Claude, never by agents)
 
@@ -526,10 +527,10 @@ agent/
                       #   + knowledge + tools, run on the harness), improve_recipe, edit_self
   prompts/            # one Markdown system prompt per role, plus compact.md
   tools.py            # agent-local tools (file read/list/write/edit, bash, ffmpeg/ffprobe;
-                      #   caption_clip: sample frames with ffmpeg and caption them with a
-                      #   vision model through the gateway; timed-prompt helper that snaps
-                      #   segment boundaries to round boundaries), the MCP -> LangChain adapter
-                      #   for kernel tools, and submit_* result tools
+                      #   timed-prompt helper that snaps segment boundaries to round
+                      #   boundaries), the MCP -> LangChain adapter for kernel tools, and
+                      #   submit_* result tools. Captioning is the kernel's caption.videos
+                      #   GPU job (§10; Follow-up C removed the frame-sending caption_clip)
   knowledge/          # reference material that roles read: data_building.md (formats,
                       #   conversion recipes)
   memory/             # agent-owned notes (in the code repo, inherited by children): README.md
@@ -652,9 +653,9 @@ exactly two ways:
   a Docker `--internal` network was tested and still exposes host services on the bridge IP; SSH
   was reachable from inside the sandbox.)*
 - Limits: CPU and memory caps from `kernel.yaml`; no GPU. The image ships `ffmpeg`/
-  `ffprobe`, `numpy`, `opencv-python-headless` and `Pillow`, which is what captioning
-  (frame extraction + a vision model through the gateway), cropping to 16:9, trimming and
-  pose file writing need on CPU. Clips produced by `rollout.*` already carry the
+  `ffprobe`, `numpy`, `opencv-python-headless` and `Pillow`, which is what cropping to 16:9,
+  trimming and pose file writing need on CPU. Captioning is the kernel's `caption.videos` GPU
+  job (§10); video never goes to the agent model. *(Amended 2026-09-25, Follow-up C.)* Clips produced by `rollout.*` already carry the
   generation prompt as their caption.
 - Container names carry the run prefix `ar-<run_id>-`.
 
@@ -677,6 +678,7 @@ conversion, cropping, trimming, captioning, prompt timing) is agent code.
 | `rollout.alayaworld(first_frame, camera, prompt_schedule, frames, variant, seed)` | Renders with the released checkpoint (`variant`: `dmd4` = 4-step student, `ar30` = 30-step teacher) through the `custom_i2v` validation path. `camera` is `{cam_c2w [N,4,4], intrinsics}` or a navigation action list. Output is a staging candidate in standard layout: 24 fps mp4, `cam_c2w` for every frame + intrinsics, caption JSON; with a per-round `prompt_schedule`, `segments` aligned to round boundaries (eligible for `per_chunk`). |
 | `rollout.ltx25(prompt, image?, video?, frames, resolution, seed, variant)` | LTX-2.5 generation (T2V/I2V/V2V; `dev` or `distilled`), 24 fps, 16:9. Output: mp4 + caption JSON (no poses). |
 | `rollout.wan22(prompt, image?, frames, seed)` | Wan 2.2 TI2V-5B, 720p 24 fps. Output: mp4 + caption JSON (no poses). |
+| `caption.videos(paths, prompt)` | *(Added 2026-09-25, Follow-up C.)* Captions clips with a local video model (`captioner` config, §17: Qwen3.8-27B-FP8 served by vLLM from its own conda env), never the paid agent model. A GPU job on the node's GPU set under the GPU lock: it starts `vllm serve` (own session, process-group kill, `127.0.0.1` on a free port, `CUDA_VISIBLE_DEVICES` = the node GPUs, `--allowed-local-media-path` = a job-private directory the clips are hard-linked into), waits for readiness, sends each video file (a `video_url` `file://` part, thinking disabled) with the agent's `prompt`, then always stops the server and waits for GPU memory to return to its pre-job level. `paths` are workspace/staging paths (relative ones resolve against `/workspace`), validated at submit and again when the job starts. Result: `clips: {path: {caption} or {error}}` (a per-clip failure is not a failed job), `load_s`, `gpu_memory_mib {before, peak, after}`, `gpu_memory_released`. A server that exits or is not ready within `startup_timeout_s` fails the job with its log tail. Telemetry: `caption.server_ready`, one `caption.clip` per clip (latency, caption or error), `caption.gpu_not_released`. |
 | `annotate.camera(video)` | Estimates per-frame `cam_c2w [N,4,4]` (N = mp4 frame count, OpenCV convention) and pixel intrinsics; output passes the pose rules of §6.2. Backend per §16.3 item 6. |
 | `video.probe(path)` | Frame count, fps, width, height, duration. |
 | `data.ingest(candidates)` | §5.5. |
@@ -687,7 +689,7 @@ conversion, cropping, trimming, captioning, prompt timing) is agent code.
 | `job.cancel(job_id)` | Stops a queued or running GPU job. |
 | `recipe.check(recipe, data_commit)` | Runs gate checks 1–7 without consuming an attempt (materializing a temporary view). |
 
-**GPU tools are asynchronous jobs.** `rollout.*` and `annotate.camera` return a `job_id`
+**GPU tools are asynchronous jobs.** `rollout.*`, `annotate.camera` and `caption.videos` return a `job_id`
 immediately; the agent polls `job.status(job_id)` or calls `job.wait(job_id, timeout_s)`
 (capped at 300 s per call, returning `running` on expiry). No MCP request ever blocks on a
 multi-minute GPU job, so default HTTP/MCP timeouts cannot kill one. `job.cancel(job_id)`
@@ -1042,6 +1044,7 @@ Three real nodes with small recipes before the first long run.
 | `leakage.phash_max_distance` / `leakage.min_ncc` / `leakage.min_entropy` | 4 / 0.95 / 4.0 bits |
 | `eval.free_ram_before_render_gb` / `eval.ram_wait_alert_min` | 120 / 10 |
 | `tools.job_wait_max_s` | 300 |
+| `captioner` | `env: zhantaoy-vllm`, `model: Qwen/Qwen3.8-27B-FP8` (by id, HF cache, offline), `tensor_parallel: null` (= node GPU count), `max_model_len: 32768`, `gpu_memory_utilization: 0.85`, `max_tokens: 512`, `media_io_kwargs: {video: {num_frames: 64, fps: 2}}`, `startup_timeout_s: 1200`, `clip_timeout_s: 300`, `memory_release_timeout_s: 120`, `extra_args: []` *(added 2026-09-25, Follow-up C)* |
 | `train.resolution_allowlist` | `[[416,736],[352,608]]` |
 | `train.lora_allowlist` | `[[16,16],[32,32],[64,64]]` |
 | `disk.merge_min_free_gb` / `disk.alert_below_gb` | 30 / 50 |

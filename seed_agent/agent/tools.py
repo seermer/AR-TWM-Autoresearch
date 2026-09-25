@@ -1,17 +1,14 @@
-"""The agent's tools: file/shell tools bound to one root, media tools, the kernel tools
-(the MCP tool server) as LangChain tools, and submit_<x> result tools."""
+"""The agent's tools: file/shell tools bound to one root, the timed-prompt helper, the kernel
+tools (the MCP tool server) as LangChain tools, and submit_<x> result tools. Captioning is the
+kernel's caption_videos GPU job."""
 from __future__ import annotations
 
-import base64
 import json
 import subprocess
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from ar_contract.client import chat_model
-from langchain_core.messages import HumanMessage
 from langchain_core.tools import StructuredTool, ToolException, tool
 from pydantic import BaseModel
 
@@ -84,7 +81,7 @@ def make_file_tools(root: str, *, writable: bool = True) -> list:
     return [read_file, list_dir, write_file, edit_file, run_command]
 
 
-# ---- media: timed-prompt snapping and frame captioning ----
+# ---- timed prompts ----
 
 def snap_segments(segments: list[dict], duration: float) -> list[dict]:
     """Snap internal boundaries to 25/24 + k*32/24 s (per_chunk rule), keep the ends,
@@ -108,27 +105,6 @@ def snap_timed_prompts(segments_json: str, duration: float) -> str:
     """Snap timed-prompt segment boundaries to rollout-round boundaries. Input and output: a JSON list of
     {"time_range_s": [start, end], "prompt": str}."""
     return json.dumps(snap_segments(json.loads(segments_json), duration))
-
-
-@tool
-async def caption_clip(video_path: str, hint: str = "") -> str:
-    """Caption a video: samples 4 frames with ffmpeg and asks the agent model (through the kernel
-    gateway) for one factual caption of the scene and the camera motion. Needs a vision-capable
-    model; with a text-only model every call returns a tool error."""
-    duration = float(json.loads(subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", video_path],
-        capture_output=True, text=True, check=True).stdout)["format"]["duration"])
-    content = [{"type": "text", "text": "Write one factual caption (1-3 sentences) describing the "
-                                        "scene and how the camera moves. " + hint}]
-    with tempfile.TemporaryDirectory() as tmp:
-        for i, frac in enumerate((0.1, 0.35, 0.6, 0.85)):
-            frame = Path(tmp) / f"{i}.jpg"
-            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{duration * frac:.3f}",
-                            "-i", video_path, "-frames:v", "1", "-vf", "scale=512:-2", str(frame)], check=True)
-            b64 = base64.b64encode(frame.read_bytes()).decode()
-            content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-    reply = await chat_model().ainvoke([HumanMessage(content=content)])
-    return reply.text.strip()
 
 
 # ---- kernel tools over one MCP session (MCP 2.x: is_error, structured_content, input_schema) ----
