@@ -154,3 +154,19 @@ def test_rotated_clip_is_rejected_with_a_fix_hint(tmp_path):
     result = ing.ingest([cand], node_id="n1")[0]
     assert not result.accepted
     assert any("rotation" in r and "re-encode" in r for r in result.reasons)
+
+
+def test_clip_metadata_records_segments_and_intrinsics(tmp_path):
+    """Spec 5.4: probed metadata includes has_segments and has_intrinsics."""
+    from conftest import write_caption, write_poses
+    ing = _ingestor(tmp_path)
+    plain = _candidate(tmp_path, "plain")
+    timed = _candidate(tmp_path, "timed", seconds=3.0)
+    write_caption(timed.caption, segments=[{"time_range_s": [0.0, 3.0], "prompt": "walk forward"}])
+    write_poses(timed.pose, n_frames=90, intrinsics=False)
+    static = _candidate(tmp_path, "static", seconds=3.5, moving=False)
+    results = ing.ingest([plain, timed, static], node_id="n1")
+    assert all(r.accepted for r in results), [r.reasons for r in results]
+    meta = [ing.clips.get(r.clip_id)["metadata"] for r in results]
+    assert [(m["has_segments"], m["has_intrinsics"]) for m in meta] == [
+        (False, True), (True, False), (False, False)]

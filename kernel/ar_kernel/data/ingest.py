@@ -3,6 +3,8 @@ import hashlib, json, shutil, subprocess, uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
+
 from ..archive.blobs import BlobStore
 from ..archive.clips import ClipStore
 from ..config import KernelConfig, run_config_path
@@ -36,13 +38,14 @@ def _digest(path: Path) -> str:
     return h.hexdigest()
 
 class Ingestor:
-    def __init__(self, cfg: KernelConfig, run_dir: Path, conn, recorder) -> None:
+    def __init__(self, cfg: KernelConfig, run_dir: Path, conn, recorder,
+                 leakage: LeakageChecker | None = None) -> None:
         self.cfg = cfg
         self.run_dir = Path(run_dir)
         self.blobs = BlobStore(run_dir, conn)
         self.clips = ClipStore(conn)
         self.recorder = recorder
-        self.leakage = LeakageChecker(cfg)
+        self.leakage = leakage or LeakageChecker(cfg)
         self.base_recipe = run_config_path(cfg, run_dir, "base_recipe.yaml")
         self.tolerance = float(cfg.get("ingest.aspect_tolerance"))
 
@@ -161,6 +164,11 @@ class Ingestor:
                                 payload={"reasons": reasons})
             return IngestResult(accepted=False, reasons=reasons)
 
+        has_segments = bool(json.loads(caption.read_text(encoding="utf-8")).get("segments"))
+        has_intrinsics = False
+        if pose is not None:
+            with np.load(pose) as arrays:
+                has_intrinsics = "intrinsics" in arrays.files
         video_digest = self.blobs.put(video, "video")
         caption_digest = self.blobs.put(caption, "caption")
         pose_digest = self.blobs.put(pose, "pose") if pose else None
@@ -171,7 +179,8 @@ class Ingestor:
             "clip_id": clip_id, "video_digest": video_digest, "caption_digest": caption_digest,
             "pose_digest": pose_digest, "camera_motion": candidate.camera_motion,
             "metadata": {"frames": info.frames, "fps": info.fps, "width": info.width,
-                         "height": info.height, "duration": info.duration},
+                         "height": info.height, "duration": info.duration,
+                         "has_segments": has_segments, "has_intrinsics": has_intrinsics},
             "formats": formats, "warnings": warnings, "provenance": candidate.provenance,
             "license": candidate.license, "derived_from": candidate.derived_from,
             "ingested_by": node_id,

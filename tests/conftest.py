@@ -20,13 +20,13 @@ def write_caption(path, caption="A camera moves slowly through a bright room.", 
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
 
-def write_poses(path, n_frames, width=736, height=414, moving=True):
+def write_poses(path, n_frames, width=736, height=414, moving=True, intrinsics=True):
     path.parent.mkdir(parents=True, exist_ok=True)
     c2w = np.tile(np.eye(4, dtype=np.float32), (n_frames, 1, 1))
     if moving:
         c2w[:, 2, 3] = np.linspace(0.0, 1.0, n_frames, dtype=np.float32)
     k = np.array([[width, 0, width / 2], [0, height, height / 2], [0, 0, 1]], dtype=np.float32)
-    np.savez(path, cam_c2w=c2w, intrinsics=k)
+    np.savez(path, cam_c2w=c2w, **({"intrinsics": k} if intrinsics else {}))
     return path
 
 @pytest.fixture
