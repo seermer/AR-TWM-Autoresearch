@@ -92,6 +92,7 @@ def test_bootstrap_refuses_to_start_when_wbench_weights_are_broken(tmp_path, mon
                         lambda cfg: ["MegaSAM weights missing: /x/megasam_final.pth"])
     with pytest.raises(run_mod.PreflightError, match="MegaSAM"):
         bootstrap_run(CFG, run_id="broken", env=ENV4)
+    assert not (tmp_path / "broken" / "config" / "run.json").exists()
 
 
 def test_score_node_degrades_and_still_succeeds_without_per_case_scores(tmp_path, monkeypatch):
@@ -117,7 +118,6 @@ def test_score_node_degrades_and_still_succeeds_without_per_case_scores(tmp_path
     warnings = [e for e in ctx.recorder.read_events("n1") if e["type"] == "eval.warning"]
     assert len(warnings) == 1
     assert "per_case" in ctx.recorder.load_payload(warnings[0]["payload"])["message"]
-    assert not (tmp_path / "broken" / "config" / "run.json").exists()
 
 
 def test_bootstrap_records_expected_case_counts_from_the_reference(tmp_path, monkeypatch):
