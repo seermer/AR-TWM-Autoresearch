@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import Mapping
 
@@ -16,6 +17,42 @@ from .store import CallStore
 
 RETRYABLE = {408, 409, 429, 500, 502, 503, 504}
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
+# Chat content parts and Responses input items that carry video. "file"/"input_file" is only
+# a video part when its mime type or a data: URL inside it says so (an uploaded file_id has
+# no visible mime, so it is let through).
+VIDEO_PART_TYPES = {"video_url", "video", "input_video"}
+FILE_PART_TYPES = {"file", "input_file"}
+NO_VIDEO_MESSAGE = ("video content is not accepted by the gateway; use the caption_clip tool "
+                    "(frame extraction + captioning) instead of sending video directly")
+
+
+def _is_video_part(part) -> bool:
+    if not isinstance(part, dict):
+        return False
+    kind = part.get("type")
+    if kind in VIDEO_PART_TYPES:
+        return True
+    return kind in FILE_PART_TYPES and "video/" in json.dumps(part)
+
+
+def _has_video(parts) -> bool:
+    if isinstance(parts, dict):
+        parts = [parts]
+    return isinstance(parts, list) and any(_is_video_part(p) for p in parts)
+
+
+def rejects_video(body: dict) -> bool:
+    """True if a chat `messages` content part, or a Responses `input` item (directly or
+    inside its `content`), carries video. Images stay allowed."""
+    for message in body.get("messages") or []:
+        if isinstance(message, dict) and _has_video(message.get("content")):
+            return True
+    input_ = body.get("input")
+    if isinstance(input_, list):
+        for item in input_:
+            if isinstance(item, dict) and (_is_video_part(item) or _has_video(item.get("content"))):
+                return True
+    return False
 
 
 class Upstream:
@@ -95,6 +132,8 @@ def create_gateway_app(*, registry, store: CallStore, allowed_models: set[str],
             return JSONResponse({"error": {"message": "streaming is not supported by the gateway; "
                                                       "use non-streaming calls"}},
                                 status_code=400)
+        if rejects_video(body):        # rejected like the checks above: not recorded, never forwarded
+            return JSONResponse({"error": {"message": NO_VIDEO_MESSAGE}}, status_code=400)
         if body.get("model") not in allowed_models:
             return JSONResponse({"error": {"message": f"model {body.get('model')!r} is not in the "
                                                       f"allowlist {sorted(allowed_models)}"}},

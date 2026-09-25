@@ -178,7 +178,10 @@ def test_compaction_replaces_history_and_continues():
     summarizer = log["prompts"][1]
     assert [m["type"] for m in summarizer] == ["system", "human", "ai", "tool", "human"]
     assert summarizer[0]["content"] == "sys" and summarizer[-1]["content"] == "COMPACT NOW"
-    assert log["bind"][1][1] == {"tool_choice": "none"}        # the summarizer only writes text
+    # The summarizer reuses the SAME bind as the normal model call (cache-friendly): one
+    # bind per call_model invocation, not a separate tool_choice="none" bind for it.
+    assert len(log["bind"]) == 2
+    assert log["bind"][1][1] == {"tool_choice": None}
     continuation = CONTINUATION.format(summary="SUMMARY TEXT")
     assert [m.type for m in out["messages"]] == ["human", "ai"]
     assert out["messages"][0].content == continuation and log["prompts"][2][1]["content"] == continuation
@@ -207,7 +210,8 @@ def test_compaction_triggers_once_when_parallel_outputs_only_cross_together():
                               compact_at=0.85, compact_prompt="COMPACT NOW")
     out = asyncio.run(agent.ainvoke({"messages": [HumanMessage("task")]}))
     assert len(log["prompts"]) == 3                                       # no call on the old history
-    assert sum(kwargs == {"tool_choice": "none"} for _, kwargs in log["bind"]) == 1  # one summarizer call
+    # One bind per call_model invocation; the summarizer reuses it (no separate summarizer bind).
+    assert len(log["bind"]) == 2 and log["bind"][1][1] == {"tool_choice": None}
     continuation = CONTINUATION.format(summary="SUMMARY TEXT")
     assert [m.type for m in out["messages"]] == ["human", "ai"]
     assert out["messages"][0].content == continuation and out["messages"][-1].content == "done"
@@ -226,10 +230,31 @@ def test_compaction_triggers_once_even_when_one_parallel_output_alone_crosses():
                               compact_at=0.85, compact_prompt="COMPACT NOW")
     out = asyncio.run(agent.ainvoke({"messages": [HumanMessage("task")]}))
     assert len(log["prompts"]) == 3                                       # no model call besides the summarizer
-    assert sum(kwargs == {"tool_choice": "none"} for _, kwargs in log["bind"]) == 1
+    assert len(log["bind"]) == 2 and log["bind"][1][1] == {"tool_choice": None}
     continuation = CONTINUATION.format(summary="SUMMARY TEXT")
     assert [m.type for m in out["messages"]] == ["human", "ai"]
     assert out["messages"][0].content == continuation and out["messages"][-1].content == "done"
+
+
+def test_compaction_falls_back_to_tool_choice_none_when_the_model_calls_a_tool_instead():
+    # The summarizer's first attempt uses the normal bind (tool_choice=None), so a model
+    # that ignores the "do not call tools" instruction can still call one, with no text.
+    # The harness then retries the SAME prompt once, forcing tool_choice="none".
+    script = [_ai("", [("add", {"a": 1, "b": 2}, "c1")], total=900),
+              _ai("", [("add", {"a": 9, "b": 9}, "cX")]),   # summarizer attempt: tool call, no text
+              _ai("SUMMARY TEXT"),                          # fallback retry: plain text
+              _ai("done", total=50)]
+    log = {"bind": [], "prompts": []}
+    agent = build_react_agent(Scripted(script=script, log=log), TOOLS, "sys", context_window=1000,
+                              compact_at=0.85, compact_prompt="COMPACT NOW")
+    out = asyncio.run(agent.ainvoke({"messages": [HumanMessage("task")]}))
+    assert len(log["prompts"]) == 4                          # +1 for the fallback retry
+    assert log["prompts"][1] == log["prompts"][2]            # the identical prompt, retried verbatim
+    assert log["bind"][1][1] == {"tool_choice": None}        # first attempt: the normal bind
+    assert log["bind"][2][1] == {"tool_choice": "none"}      # fallback: forces text
+    continuation = CONTINUATION.format(summary="SUMMARY TEXT")
+    assert out["messages"][0].content == continuation
+    assert out["messages"][-1].content == "done"
 
 
 def test_the_default_compaction_prompt_is_the_seed_prompt_file():

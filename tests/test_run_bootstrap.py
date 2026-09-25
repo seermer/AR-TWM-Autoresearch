@@ -92,6 +92,31 @@ def test_bootstrap_refuses_to_start_when_wbench_weights_are_broken(tmp_path, mon
                         lambda cfg: ["MegaSAM weights missing: /x/megasam_final.pth"])
     with pytest.raises(run_mod.PreflightError, match="MegaSAM"):
         bootstrap_run(CFG, run_id="broken", env=ENV4)
+
+
+def test_score_node_degrades_and_still_succeeds_without_per_case_scores(tmp_path, monkeypatch):
+    """An older WBench report.json (no "per_case") must not crash score_node after the
+    score is already computed (Follow-up B item 5): aggregates come back empty and a
+    warning event is recorded, but score_node still returns a score."""
+    import pytest
+    import ar_kernel.run as run_mod
+    _runs(tmp_path, monkeypatch)
+    ctx = bootstrap_run(CFG, run_id="r-score", env=ENV4)
+    ctx.metric_set = ["aesthetic_quality"]
+    ctx.expected_n = {}
+    fake_report = {"full": {"aesthetic_quality": {"mean": 0.5, "n": 1}}}   # no "per_case"
+    monkeypatch.setattr(run_mod, "build_render_config", lambda *a, **k: object())
+    monkeypatch.setattr(run_mod, "render_proxy", lambda *a, **k: None)
+    monkeypatch.setattr(run_mod, "run_wbench_phases", lambda *a, **k: fake_report)
+
+    score, detail = run_mod.score_node(CFG, ctx, "n1", checkpoint=None, rank=8, alpha=16)
+
+    assert score == pytest.approx(0.5)
+    assert detail["aggregates"] == {"metrics": {}, "dimensions": {},
+                                    "strata": {"interaction_type": {}, "category": {}, "perspective": {}}}
+    warnings = [e for e in ctx.recorder.read_events("n1") if e["type"] == "eval.warning"]
+    assert len(warnings) == 1
+    assert "per_case" in ctx.recorder.load_payload(warnings[0]["payload"])["message"]
     assert not (tmp_path / "broken" / "config" / "run.json").exists()
 
 

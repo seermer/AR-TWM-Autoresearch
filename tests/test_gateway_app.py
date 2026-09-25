@@ -88,6 +88,54 @@ def test_a_body_that_is_not_a_json_object_is_400_and_never_forwarded(make, conte
     assert r.status_code == 400 and "JSON object" in r.json()["error"]["message"]
     assert seen == []
 
+
+@pytest.mark.parametrize("content", [
+    {"type": "video_url", "video_url": {"url": "https://example.com/clip.mp4"}},
+    {"type": "video", "source": {"url": "https://example.com/clip.mp4"}},
+    {"type": "input_video", "video_url": "https://example.com/clip.mp4"},
+    {"type": "file", "file": {"file_data": "data:video/mp4;base64,AAAA", "filename": "clip.mp4"}},
+    {"type": "input_file", "mime_type": "video/mp4", "file_data": "AAAA"},
+], ids=["video_url", "video", "input_video", "file_mime", "input_file_mime"])
+def test_chat_completions_rejects_video_content_parts(make, content):
+    client, caller, _, seen = make()
+    body = {"model": "gpt-x", "messages": [{"role": "user", "content": [
+        {"type": "text", "text": "look at this"}, content]}]}
+    r = _post(client, caller.token, body, path="/v1/chat/completions")
+    assert r.status_code == 400 and "caption_clip" in r.json()["error"]["message"]
+    assert seen == []
+
+
+def test_chat_completions_allows_images(make):
+    client, caller, _, seen = make(handler=lambda r: httpx.Response(
+        200, json={"id": "cc", "choices": [{"message": {"role": "assistant", "content": "k"}}]}))
+    body = {"model": "gpt-x", "messages": [{"role": "user", "content": [
+        {"type": "text", "text": "look"},
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AAAA"}}]}]}
+    assert _post(client, caller.token, body, path="/v1/chat/completions").status_code == 200
+    assert len(seen) == 1
+
+
+@pytest.mark.parametrize("item", [
+    {"type": "video_url", "video_url": {"url": "https://example.com/clip.mp4"}},
+    {"type": "input_video", "video_url": "https://example.com/clip.mp4"},
+    {"type": "message", "role": "user", "content": [
+        {"type": "input_file", "mime_type": "video/mp4", "file_data": "AAAA"}]},
+], ids=["video_url_item", "input_video_item", "nested_video_file"])
+def test_responses_rejects_video_input_items(make, item):
+    client, caller, _, seen = make()
+    r = _post(client, caller.token, {"model": "gpt-x", "input": [item]})
+    assert r.status_code == 400 and "caption_clip" in r.json()["error"]["message"]
+    assert seen == []
+
+
+def test_responses_allows_images(make):
+    client, caller, _, seen = make()
+    body = {"model": "gpt-x", "input": [{"type": "message", "role": "user", "content": [
+        {"type": "input_image", "image_url": "data:image/jpeg;base64,AAAA"}]}]}
+    assert _post(client, caller.token, body).status_code == 200
+    assert len(seen) == 1
+
+
 def test_forwarded_call_is_recorded_and_upstream_key_never_reaches_telemetry(make, tmp_path):
     client, caller, rec, seen = make()
     r = _post(client, caller.token, {"model": "gpt-x", "input": "hi"})

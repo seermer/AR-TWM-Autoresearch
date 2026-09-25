@@ -51,7 +51,10 @@ class Recorder:
         target = self._payloads / f"{digest}.json.zst"
         if not target.exists():
             try:
-                tmp = target.with_name(target.name + ".tmp")
+                # A unique suffix per write: two threads storing the same content-addressed
+                # payload must not share one tmp path, or one's os.replace can lose the race
+                # to the other's rename and hit FileNotFoundError.
+                tmp = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
                 with tmp.open("wb") as handle:
                     handle.write(zstandard.ZstdCompressor(level=10).compress(blob))
                     handle.flush()

@@ -76,9 +76,14 @@ def aggregates(cfg: KernelConfig, report: dict, case_ids: list[str], metric_set:
     Reads report["per_case"], which WBench's generate_report fills after parsing every
     metric's file layout. navigation_trajectory is the mean of its two components, as
     in WBench. No case ids leave this function.
+
+    An older WBench report with no "per_case" degrades to empty aggregates rather than
+    raising: score_node still has a usable score (from report["full"]) and just logs
+    the aggregates as unavailable.
     """
     if "per_case" not in report:
-        raise KeyError("report.json has no per_case scores; WBench predates generate_report writing them")
+        return {"metrics": {}, "dimensions": {},
+                "strata": {"interaction_type": {}, "category": {}, "perspective": {}}}
     wanted = set(metric_set)
     per_metric: dict[str, list[float]] = {}
     per_case_mean: dict[str, float] = {}

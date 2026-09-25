@@ -113,6 +113,33 @@ def test_legacy_uncompressed_payloads_stay_readable(tmp_path):
     assert rec.load_payload("abc123") == {"old": True}
 
 
+def test_concurrent_writes_of_the_same_payload_do_not_race_on_the_tmp_file(tmp_path):
+    """store_payload used one FIXED tmp name: two threads racing to store the SAME
+    content-addressed payload could both write it, and the loser's os.replace would target
+    a tmp path the winner already renamed away -> FileNotFoundError -> TelemetryError."""
+    import threading
+    rec = Recorder(tmp_path)
+    payload = {"prompt": "x" * 200_000}
+    n = 16
+    barrier = threading.Barrier(n)
+    errors = []
+
+    def write():
+        barrier.wait()
+        try:
+            rec.store_payload(payload)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=write) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    assert rec.load_payload(rec.store_payload(payload)) == payload
+
+
 def test_redaction_added_after_construction_applies(tmp_path):
     """Container tokens are issued after the recorder exists."""
     from ar_kernel.telemetry.recorder import Recorder

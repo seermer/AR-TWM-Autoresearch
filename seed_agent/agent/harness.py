@@ -14,10 +14,13 @@ Two deliberate differences from create_agent's default:
      each image counted as a fixed IMAGE_TOKENS), on the merged state -- there is no
      per-Send routing decision, so parallel tool results are never seen in isolation.
      Below compact_at * context_window nothing happens and messages append linearly.
-     At or above it, a dedicated summarizer call (same system prompt, tools and
-     history; tool_choice="none") condenses the history, and the history is replaced
-     by one user message -- a continuation preamble plus the summary -- before the
-     real model call runs on it.
+     At or above it, a dedicated summarizer call branches off the SAME bound model as the
+     normal call (system prompt, tools, tool_choice=None) with one instruction message
+     (prompts/compact.md) appended -- byte-identical to the agent's normal request up to
+     that append, maximizing prompt-cache hits. If the model calls a tool instead of
+     writing the summary, the call is retried once with tool_choice="none" to force text.
+     The history is then replaced by one user message -- a continuation preamble plus the
+     summary -- before the real model call runs on it.
 """
 from __future__ import annotations
 
@@ -129,15 +132,22 @@ def build_react_agent(model: BaseChatModel, tools: list[BaseTool], system_prompt
 
     async def call_model(state: ReactState) -> dict:
         messages, reset = state["messages"], []
+        bound = model.bind_tools(tools, tool_choice=None) if tools else model.bind()
         if needs_compaction(messages, system_prompt, context_window, compact_at):
-            # A dedicated summarizer call sees the same system prompt, tools and history as the
-            # agent, plus the compaction instruction; tool_choice="none" keeps it to writing text.
+            # The summarizer call branches off the ORIGINAL conversation using the SAME
+            # bound model as the normal call, plus one appended instruction message: the
+            # request is byte-identical to the agent's normal request up to that append,
+            # maximizing prompt-cache hits. The instruction tells the model not to call
+            # tools and to answer with the summary text; if it calls one anyway (no text),
+            # retry once forcing tool_choice="none".
             instruction = compact_prompt if compact_prompt is not None else COMPACT_PROMPT.read_text()
-            summarizer = model.bind_tools(tools, tool_choice="none") if tools else model.bind()
-            reply = await summarizer.ainvoke([*system, *messages, HumanMessage(content=instruction)])
+            prompt = [*system, *messages, HumanMessage(content=instruction)]
+            reply = await bound.ainvoke(prompt)
+            if reply.tool_calls and not reply.text.strip():
+                fallback = model.bind_tools(tools, tool_choice="none") if tools else model.bind()
+                reply = await fallback.ainvoke(prompt)
             messages = [HumanMessage(content=CONTINUATION.format(summary=reply.text.strip()))]
             reset = [RemoveMessage(id=REMOVE_ALL_MESSAGES), *messages]
-        bound = model.bind_tools(tools, tool_choice=None) if tools else model.bind()
         return {"messages": [*reset, await bound.ainvoke([*system, *messages])]}
 
     async def call_tool(calls: list[ToolCall]) -> dict:

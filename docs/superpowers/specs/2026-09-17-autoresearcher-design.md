@@ -91,6 +91,12 @@ HGM `hgm.py`, `tree.py`, `hgm_utils.py`, `self_improve_step.py`; HyperAgents
 
 Existing shell variables (e.g. `HF_TOKEN`) take precedence; loaders never override them.
 
+*(Amended 2026-09-25, Follow-up B: the gateway rejects, with 400 and never forwards, any chat
+`messages` content part or Responses `input` item carrying video — type `video_url`, `video`,
+`input_video`, or a `file`/`input_file` part whose mime type or data URL says video; images are
+unaffected. The error text tells the agent to caption the clip (`caption_clip`) instead of
+sending video frames/urls directly. See §13.1.)*
+
 ### 2.3 Upstream patches (applied by a human/Claude, never by agents)
 
 Two small fixes to the sibling repos; both are bug fixes that stand on their own. Agents
@@ -581,14 +587,20 @@ exactly two ways:
    after it, with each image block counted as a fixed 1,500 tokens. Below
    `compact_at × context_window` (`agents.compact_at`, default 0.85, and
    `agents.context_window_tokens`, passed to the container) messages append linearly. At or
-   above it, a dedicated summarizer call (same system prompt, tools and history,
-   `tool_choice="none"`, the instruction in `prompts/compact.md`) writes a structured
-   summary, the history is replaced by one user message (a continuation preamble plus
-   the summary), and the model call runs on it. The graph itself stays exactly
-   `create_agent`'s: there is no separate compaction node. *(Amended 2026-09-24, Plan 2 as
-   built: a routing function on the edge from the tool node runs once per parallel `Send`
-   branch, before their results merge, so it could compact beside a normal model call or
-   skip a due compaction.)*
+   above it, a dedicated summarizer call writes a structured summary, the history is
+   replaced by one user message (a continuation preamble plus the summary), and the model
+   call runs on it. The graph itself stays exactly `create_agent`'s: there is no separate
+   compaction node. *(Amended 2026-09-24, Plan 2 as built: a routing function on the edge
+   from the tool node runs once per parallel `Send` branch, before their results merge, so
+   it could compact beside a normal model call or skip a due compaction.)* *(Amended
+   2026-09-25, Follow-up B: the summarizer call branches off the ORIGINAL conversation using
+   the SAME `bound` model as the normal call (same system prompt, tools, `tool_choice=None`)
+   with one instruction message (`prompts/compact.md`) appended — byte-identical to the
+   agent's normal request up to that append, maximizing prompt-cache hits. A live probe
+   found `tool_choice="none"` on the summarizer alone changes the provider-side prompt (a
+   DeepSeek cache hit fell from 3200 to 2560 of ~3.3k tokens). If the model calls a tool
+   instead of writing the summary, the call is retried once with `tool_choice="none"` to
+   force text.)*
 
 ### 9.2 Fixed contract package (`ar_contract`, kernel-owned, read-only)
 
@@ -800,6 +812,12 @@ root is chosen with P=1; tied values receive equal probability; all probabilitie
    container tokens) are redacted.
 4. Every event carries `ts_wall`, `ts_mono`, `run_id`, `node_id`, `phase`, `attempt`,
    `span_id`, `parent_span_id`, `component`, `type`.
+
+*(Amended 2026-09-25, Follow-up B: a request the gateway refuses before forwarding —
+malformed JSON, an unknown/revoked token, a disallowed model, streaming, or video content in
+`messages`/`input` (§2.1) — returns its error directly and is never persisted to telemetry,
+consistent with the other pre-forward rejections; only requests that reach `store.begin` are
+recorded.)*
 
 ### 13.2 Storage
 
