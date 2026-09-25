@@ -11,6 +11,10 @@ from ar_kernel.context_bundle import (FORMAT_RULES, archive_summary, build_edit_
 from ar_kernel.vcs.agents_repo import AgentsRepo
 
 CFG = KernelConfig.load()
+# The shape score.aggregates() returns and Plan 4 writes to eval/aggregates.json.
+AGGREGATES = {"metrics": {"aesthetic_quality": 0.78}, "dimensions": {"quality": 0.78},
+              "strata": {"interaction_type": {"navigation": 0.8}, "category": {"Nature": 0.8},
+                         "perspective": {"first_person": 0.8}}}
 
 
 @pytest.fixture
@@ -28,7 +32,7 @@ def world(tmp_path):
     nodes.create("n1", "root", 1)
     (tmp_path / "nodes" / "root" / "eval").mkdir(parents=True)
     (tmp_path / "nodes" / "root" / "eval" / "aggregates.json").write_text(
-        json.dumps({"category": {"Nature": 0.8}}))
+        json.dumps(AGGREGATES))
     (tmp_path / "nodes" / "root" / "rationale.md").write_text("released checkpoint")
     (tmp_path / "nodes" / "root" / "edit.json").write_text(json.dumps({"summary": "s", "component": "tools"}))
     return conn, repo, tmp_path
@@ -38,7 +42,7 @@ def test_lineage_is_root_first_and_carries_artifacts(world):
     conn, repo, run = world
     lin = lineage(conn, run, repo, "root")
     assert [e["node_id"] for e in lin] == ["root"]
-    assert lin[0]["score"] == 0.78 and lin[0]["aggregates"] == {"category": {"Nature": 0.8}}
+    assert lin[0]["score"] == 0.78 and lin[0]["aggregates"] == AGGREGATES
     assert lin[0]["rationale"] == "released checkpoint"
     assert lin[0]["edit"] == {"summary": "s", "component": "tools"}
 

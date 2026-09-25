@@ -1,0 +1,229 @@
+{
+  "model": "ar_manual_root_nroot",
+  "n_cases": 3,
+  "n_navi": 2,
+  "full": {
+    "aesthetic_quality": {
+      "mean": 0.516,
+      "n": 3
+    },
+    "background_consistency": {
+      "mean": 0.8757,
+      "n": 3
+    },
+    "dynamic_degree": {
+      "mean": 1.0,
+      "n": 3
+    },
+    "gated_spatial_consistency": {
+      "mean": 0.7207,
+      "n": 2
+    },
+    "geometric_consistency": {
+      "mean": 0.9608,
+      "n": 3
+    },
+    "hpsv3_quality": {
+      "mean": 0.3717,
+      "n": 3
+    },
+    "imaging_quality": {
+      "mean": 0.5791,
+      "n": 3
+    },
+    "motion_smoothness": {
+      "mean": 0.973,
+      "n": 3
+    },
+    "navigation_accuracy": {
+      "mean": 0.6184,
+      "n": 2
+    },
+    "navigation_consistency": {
+      "mean": 0.6183,
+      "n": 2
+    },
+    "perspective_consistency": {
+      "mean": 0.2644,
+      "n": 1
+    },
+    "photometric_consistency": {
+      "mean": 0.8219,
+      "n": 3
+    },
+    "segment_continuity": {
+      "mean": 1.0,
+      "n": 3
+    },
+    "spatial_consistency": {
+      "mean": 0.7207,
+      "n": 2
+    },
+    "subject_consistency": {
+      "mean": 0.8213,
+      "n": 1
+    },
+    "temporal_flickering": {
+      "mean": 0.9384,
+      "n": 3
+    },
+    "navigation_trajectory": {
+      "mean": 0.6183,
+      "n": 2,
+      "n_consistency": 2
+    }
+  },
+  "navi": {
+    "aesthetic_quality": {
+      "mean": 0.5902,
+      "n": 2
+    },
+    "background_consistency": {
+      "mean": 0.8837,
+      "n": 2
+    },
+    "dynamic_degree": {
+      "mean": 1.0,
+      "n": 2
+    },
+    "gated_spatial_consistency": {
+      "mean": 0.7207,
+      "n": 2
+    },
+    "geometric_consistency": {
+      "mean": 0.9571,
+      "n": 2
+    },
+    "hpsv3_quality": {
+      "mean": 0.5166,
+      "n": 2
+    },
+    "imaging_quality": {
+      "mean": 0.589,
+      "n": 2
+    },
+    "motion_smoothness": {
+      "mean": 0.9636,
+      "n": 2
+    },
+    "navigation_accuracy": {
+      "mean": 0.6184,
+      "n": 2
+    },
+    "navigation_consistency": {
+      "mean": 0.6183,
+      "n": 2
+    },
+    "perspective_consistency": {
+      "mean": 0.2644,
+      "n": 1
+    },
+    "photometric_consistency": {
+      "mean": 0.798,
+      "n": 2
+    },
+    "segment_continuity": {
+      "mean": 1.0,
+      "n": 2
+    },
+    "spatial_consistency": {
+      "mean": 0.7207,
+      "n": 2
+    },
+    "subject_consistency": {
+      "mean": 0.8213,
+      "n": 1
+    },
+    "temporal_flickering": {
+      "mean": 0.9202,
+      "n": 2
+    },
+    "navigation_trajectory": {
+      "mean": 0.6183,
+      "n": 2,
+      "n_consistency": 2
+    }
+  },
+  "per_case": {
+    "133": {
+      "aesthetic_quality": 0.3678394243121147,
+      "background_consistency": 0.859641553958257,
+      "dynamic_degree": 1.0,
+      "geometric_consistency": 0.968,
+      "hpsv3_quality": 0.08178856912811654,
+      "imaging_quality": 0.5592093324661256,
+      "motion_smoothness": 0.9917583909652222,
+      "photometric_consistency": 0.8698332684420735,
+      "segment_continuity": 1.0,
+      "temporal_flickering": 0.9746559236563889
+    },
+    "136": {
+      "aesthetic_quality": 0.5044708728790283,
+      "background_consistency": 0.8750790046608966,
+      "dynamic_degree": 1.0,
+      "gated_spatial_consistency": 0.7049,
+      "geometric_consistency": 0.9571,
+      "hpsv3_quality": 0.3274762589921137,
+      "imaging_quality": 0.5166971103350321,
+      "motion_smoothness": 0.9936770776624603,
+      "navigation_accuracy": 0.4925127883304675,
+      "navigation_consistency": 0.6490237081272445,
+      "perspective_consistency": 0.2644,
+      "photometric_consistency": 0.8385641443173514,
+      "segment_continuity": 1.0,
+      "spatial_consistency": 0.7049,
+      "subject_consistency": 0.8213338716641853,
+      "temporal_flickering": 0.9756268164690803
+    },
+    "84": {
+      "aesthetic_quality": 0.6758303001523017,
+      "background_consistency": 0.8922458858259262,
+      "dynamic_degree": 1.0,
+      "gated_spatial_consistency": 0.7365,
+      "geometric_consistency": 0.9572,
+      "hpsv3_quality": 0.7057099182767909,
+      "imaging_quality": 0.6612517333030701,
+      "motion_smoothness": 0.9334704896591451,
+      "navigation_accuracy": 0.744339222781528,
+      "navigation_consistency": 0.5876455994317885,
+      "photometric_consistency": 0.7573389904917585,
+      "segment_continuity": 1.0,
+      "spatial_consistency": 0.7365,
+      "temporal_flickering": 0.8648093279670267
+    }
+  },
+  "dimensions": {
+    "quality": [
+      "aesthetic_quality",
+      "imaging_quality",
+      "temporal_flickering",
+      "dynamic_degree",
+      "motion_smoothness",
+      "hpsv3_quality"
+    ],
+    "consistency": [
+      "background_consistency",
+      "segment_continuity",
+      "perspective_consistency",
+      "subject_consistency",
+      "geometric_consistency",
+      "photometric_consistency",
+      "spatial_consistency",
+      "gated_spatial_consistency"
+    ],
+    "interaction": [
+      "navigation_trajectory",
+      "event_edit_adherence",
+      "subject_action_adherence",
+      "perspective_switch_adherence"
+    ],
+    "setting": [
+      "scene_adherence",
+      "subject_adherence"
+    ],
+    "physical": [
+      "visual_plausibility",
+      "causal_fidelity"
+    ]
+  }
+}

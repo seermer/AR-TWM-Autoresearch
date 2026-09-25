@@ -61,39 +61,57 @@ def score_from_report(report: dict, metric_set: list[str],
                              + ", ".join(f"{m} {got} vs {want}" for m, (got, want) in wrong.items()))
     return sum(per_metric.values()) / len(per_metric), per_metric
 
-def aggregates(cfg: KernelConfig, eval_dir: Path, case_ids: list[str]) -> dict:
-    """Per-metric means plus means by coarse stratum; no case ids leave this function."""
-    cases = {}
-    for case_id in case_ids:
-        path = cfg.wbench / "data" / "cases" / f"case_{case_id}.json"
-        case = json.loads(path.read_text())
-        settings = case.get("settings") or {}
-        cases[case_id] = {
-            "types": sorted({i.get("type") for i in case.get("interactions") or []}),
-            "category": ((settings.get("scene") or {}).get("category")),
-            "perspective": settings.get("perspective"),
-        }
-    per_case: dict[str, dict] = {}
-    for metric_dir in Path(eval_dir).iterdir():
-        if not metric_dir.is_dir():
-            continue
-        for result in metric_dir.glob("case_*.json"):
-            case_id = result.stem.replace("case_", "")
-            data = json.loads(result.read_text())
-            if isinstance(data.get("score"), (int, float)):
-                per_case.setdefault(case_id, {})[metric_dir.name] = float(data["score"])
+NAV_PARTS = ("navigation_accuracy", "navigation_consistency")
+
+
+def _mean(values: list[float]) -> float:
+    return sum(values) / len(values)
+
+
+def aggregates(cfg: KernelConfig, report: dict, case_ids: list[str], metric_set: list[str]) -> dict:
+    """Agent-facing aggregates of one node's WBench report, over the run's metric set:
+    per-metric means, per-dimension means (WBench's grouping) and, per coarse stratum
+    of the case metadata, the mean of each case's metric mean.
+
+    Reads report["per_case"], which WBench's generate_report fills after parsing every
+    metric's file layout. navigation_trajectory is the mean of its two components, as
+    in WBench. No case ids leave this function.
+    """
+    if "per_case" not in report:
+        raise KeyError("report.json has no per_case scores; WBench predates generate_report writing them")
+    wanted = set(metric_set)
+    per_metric: dict[str, list[float]] = {}
+    per_case_mean: dict[str, float] = {}
+    for case_id, scores in report["per_case"].items():
+        for metric, value in scores.items():
+            per_metric.setdefault(metric, []).append(float(value))
+        case_scores = [float(v) for m, v in scores.items() if m in wanted]
+        nav = [float(scores[p]) for p in NAV_PARTS if p in scores]
+        if "navigation_trajectory" in wanted and nav:
+            case_scores.append(_mean(nav))
+        if case_scores:
+            per_case_mean[case_id] = _mean(case_scores)
+    means = {m: _mean(v) for m, v in per_metric.items()}
+    if all(p in means for p in NAV_PARTS):
+        means["navigation_trajectory"] = _mean([means[p] for p in NAV_PARTS])
+    metrics = {m: means[m] for m in metric_set if m in means}
+    dimensions = {dim: _mean([metrics[m] for m in names if m in metrics])
+                  for dim, names in report["dimensions"].items() if any(m in metrics for m in names)}
+
     strata: dict[str, dict[str, list[float]]] = {"interaction_type": {}, "category": {}, "perspective": {}}
-    for case_id, metrics in per_case.items():
-        mean = sum(metrics.values()) / len(metrics) if metrics else None
-        if mean is None or case_id not in cases:
+    for case_id in case_ids:
+        if case_id not in per_case_mean:
             continue
-        facets = cases[case_id]
-        for t in facets["types"]:
+        case = json.loads((cfg.wbench / "data" / "cases" / f"case_{case_id}.json").read_text())
+        settings = case.get("settings") or {}
+        mean = per_case_mean[case_id]
+        for t in sorted({i.get("type") for i in case.get("interactions") or []}, key=str):
             strata["interaction_type"].setdefault(str(t), []).append(mean)
-        strata["category"].setdefault(str(facets["category"]), []).append(mean)
-        strata["perspective"].setdefault(str(facets["perspective"]), []).append(mean)
-    return {axis: {key: sum(v) / len(v) for key, v in buckets.items()}
-            for axis, buckets in strata.items()}
+        strata["category"].setdefault(str((settings.get("scene") or {}).get("category")), []).append(mean)
+        strata["perspective"].setdefault(str(settings.get("perspective")), []).append(mean)
+    return {"metrics": metrics, "dimensions": dimensions,
+            "strata": {axis: {key: _mean(v) for key, v in buckets.items()}
+                       for axis, buckets in strata.items()}}
 
 def cleanup_eval(work_dir: Path, model: str) -> list[str]:
     removed = []

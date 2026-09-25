@@ -151,12 +151,12 @@ def score_node(cfg: KernelConfig, ctx: RunContext, node_id: str, checkpoint: Pat
     render_proxy(cfg, render_config, ctx.gpus, node_id, ctx.recorder, ctx.case_ids)
     report = run_wbench_phases(cfg, work_dir, model, ctx.gpus, ctx.metric_set, ctx.recorder, node_id)
     score, per_metric = score_from_report(report, ctx.metric_set, ctx.expected_n)
-    strata = aggregates(cfg, work_dir / model / "evaluation", ctx.case_ids)
+    agg = aggregates(cfg, report, ctx.case_ids, ctx.metric_set)
     ctx.recorder.event("eval.scored", node=node_id, phase="eval",
-                       payload={"score": score, "metrics": per_metric, "strata": strata})
+                       payload={"score": score, "metrics": per_metric, "aggregates": agg})
     removed = cleanup_eval(work_dir, model)
     if merged is not None and merged.exists():
         shutil.rmtree(merged)
         removed.append("merge_slot")
     ctx.recorder.event("eval.cleanup", node=node_id, phase="eval", payload={"removed": removed})
-    return score, {"metrics": per_metric, "strata": strata, "report": report}
+    return score, {"metrics": per_metric, "aggregates": agg, "report": report}

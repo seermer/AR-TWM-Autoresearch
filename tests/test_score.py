@@ -94,3 +94,59 @@ def test_cleanup_reclaims_megasam_scratch(tmp_path):
     (tmp_path / "m" / "_megasam_tmp" / "megasam_case_1_x").mkdir(parents=True)
     assert "_megasam_tmp" in cleanup_eval(tmp_path, "m")
     assert not (tmp_path / "m" / "_megasam_tmp").exists()
+
+
+# A 3-case report.json written by WBench's generate_report from real per-case metric
+# files of runs/manual_root (cases 136, 84, 133), so every metric file layout is covered.
+FIXTURE_REPORT = json.loads((CFG.repo_root / "tests" / "fixtures" / "wbench_report" / "report.json").read_text())
+FIXTURE_CASES = ["136", "84", "133"]
+FIXTURE_METRICS = [m for m in DIMENSION_METRICS if m in FIXTURE_REPORT["full"]]
+
+
+def _keys(obj):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield k
+            yield from _keys(v)
+
+
+def test_aggregates_cover_every_metric_in_the_run_metric_set():
+    """Review: reading only a top-level "score" per case file missed 9 of 15 metrics
+    (VQ summaries, reconstruction, navigation, ungated spatial)."""
+    from ar_kernel.eval.score import aggregates
+    assert len(FIXTURE_METRICS) == 15
+    agg = aggregates(CFG, FIXTURE_REPORT, FIXTURE_CASES, FIXTURE_METRICS)
+    assert sorted(agg["metrics"]) == sorted(FIXTURE_METRICS)
+    # WBench rounds its means to 4 places, navigation_trajectory twice (components, then theirs).
+    for m in FIXTURE_METRICS:
+        assert agg["metrics"][m] == pytest.approx(FIXTURE_REPORT["full"][m]["mean"], abs=1e-4)
+
+
+def test_aggregates_group_metric_means_by_wbench_dimension():
+    from ar_kernel.eval.score import aggregates
+    agg = aggregates(CFG, FIXTURE_REPORT, FIXTURE_CASES, FIXTURE_METRICS)
+    dims = FIXTURE_REPORT["dimensions"]
+    assert sorted(agg["dimensions"]) == ["consistency", "interaction", "quality"]
+    for dim in ("quality", "consistency"):
+        expected = [agg["metrics"][m] for m in dims[dim]]
+        assert agg["dimensions"][dim] == pytest.approx(sum(expected) / len(expected))
+    assert agg["dimensions"]["interaction"] == agg["metrics"]["navigation_trajectory"]
+
+
+def test_aggregates_strata_use_non_top_level_metrics_and_leak_no_case_ids():
+    from ar_kernel.eval.score import aggregates
+    per_case = FIXTURE_REPORT["per_case"]
+    agg = aggregates(CFG, FIXTURE_REPORT, FIXTURE_CASES, ["spatial_consistency"])
+    # Only cases 136 (Indoor) and 84 (Urban) have the ungated spatial score (ret_sim).
+    assert agg["strata"]["category"] == {"Indoor": per_case["136"]["spatial_consistency"],
+                                         "Urban": per_case["84"]["spatial_consistency"]}
+    full = aggregates(CFG, FIXTURE_REPORT, FIXTURE_CASES, FIXTURE_METRICS)
+    assert sorted(full["strata"]["interaction_type"]) == ["navigation", "subject_action"]
+    assert sorted(full["strata"]["perspective"]) == ["first_person", "third_person"]
+    assert not set(_keys(full)) & set(per_case)
+
+
+def test_aggregates_refuse_a_report_without_per_case_scores():
+    from ar_kernel.eval.score import aggregates
+    with pytest.raises(KeyError, match="per_case"):
+        aggregates(CFG, REPORT, FIXTURE_CASES, FIXTURE_METRICS)
