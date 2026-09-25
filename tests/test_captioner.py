@@ -11,6 +11,7 @@ import pytest
 
 from ar_kernel.config import KernelConfig, resolve_gpus
 from ar_kernel.telemetry.recorder import Recorder
+from ar_kernel.tools import captioner
 from ar_kernel.tools.captioner import CaptionBackend, submit
 from ar_kernel.tools.context import TokenRegistry
 from ar_kernel.tools.jobs import JobQueue
@@ -74,13 +75,19 @@ def test_batch_success_captions_every_clip_then_stops_the_server(make, tmp_path)
     assert out["state"] == "done", out
     assert out["args"]["paths"] == ["/workspace/clips/a.mp4", "/workspace/staging/b.mp4"]
     clips = out["result"]["clips"]
-    assert clips == {"/workspace/clips/a.mp4": {"caption": "Describe the camera motion. [10 bytes, tp=4]"},
-                     "/workspace/staging/b.mp4": {"caption": "Describe the camera motion. [20 bytes, tp=4]"}}
+    assert clips == {
+        "/workspace/clips/a.mp4": {"caption": "Describe the camera motion. [10 bytes, tp=4, gpus=0,1,4,5]"},
+        "/workspace/staging/b.mp4": {"caption": "Describe the camera motion. [20 bytes, tp=4, gpus=0,1,4,5]"}}
     assert out["result"]["load_s"] > 0 and out["result"]["gpu_memory_released"] is True
     assert out["progress"] == {"captioned": 2, "total": 2}
     run = tmp_path / "run"
     assert _pid_gone(run, job) and not (run / "jobs" / job / "media").exists()
+    argv = json.loads((run / "jobs" / job / "fake_vllm.argv.json").read_text())
+    assert argv[argv.index("--allowed-local-media-path") + 1] == str(run / "jobs" / job / "media")
+    assert argv[argv.index("--host") + 1] == "127.0.0.1"
     events = rec.read_events("n1")
+    assert [(e["reason"], e["exit_code"]) for e in events if e["type"] == "caption.server_stopped"] == \
+        [("done", -15)]
     assert [e["ok"] for e in events if e["type"] == "caption.clip"] == [True, True]
     assert all(e["latency_s"] >= 0 for e in events if e["type"] == "caption.clip")
     assert any(e["type"] == "caption.server_ready" for e in events)
@@ -114,6 +121,45 @@ def test_a_clip_swapped_for_a_link_after_submit_is_a_per_clip_error(make, tmp_pa
     assert "escapes its mount" in out["result"]["clips"]["/workspace/b.mp4"]["error"]
 
 
+def test_a_parent_directory_swapped_for_a_link_after_the_check_is_refused(make, tmp_path, monkeypatch):
+    """The agent keeps running during the job: a directory on the path swapped for a link to a
+    host directory between the check and the open must not get host videos captioned."""
+    q, caller, _, ws, _ = make()
+    (ws / "clips" / "a.mp4").write_bytes(b"agent clip")
+    host = tmp_path / "host_videos"
+    host.mkdir()
+    (host / "a.mp4").write_bytes(b"HOST VIDEO")
+    checked = captioner.clip_host_path
+
+    def check_then_swap(c, path):
+        src = checked(c, path)                      # the job's check passes on the real directory
+        (ws / "clips").rename(ws / "clips_moved")
+        (ws / "clips").symlink_to(host)             # then the parent becomes a link to the host
+        return src
+
+    with q.gpu_lock:                                # submit (and its check) before the swap hook
+        job = submit(q, caller, ["clips/a.mp4"], "Caption.")["job_id"]
+        monkeypatch.setattr(captioner, "clip_host_path", check_then_swap)
+    out = q.wait(caller, job, 120)
+    assert out["state"] == "done", out
+    assert "not inside this caller's workspace" in out["result"]["clips"]["/workspace/clips/a.mp4"]["error"]
+    assert out["result"]["load_s"] is None           # nothing staged, so no server was started
+    assert (host / "a.mp4").stat().st_nlink == 1     # never linked into the job's media dir
+
+
+def test_default_tensor_parallel_is_the_largest_power_of_two_within_the_gpus(tmp_path):
+    for gpus, tp in (([0, 1, 2, 3], "4"), ([0, 1, 2, 3, 4, 5], "4"), ([0, 1, 2, 3, 4, 5, 6, 7], "8")):
+        cmd = CaptionBackend(REAL, tmp_path, gpus, None, None).server_command(8000, tmp_path)
+        assert cmd[cmd.index("--tensor-parallel-size") + 1] == tp
+
+
+def test_unreadable_gpu_memory_is_none_not_a_crash(monkeypatch):
+    import subprocess
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
+        a, 0, "0, [N/A]\n1, [Not Supported]\n", ""))
+    assert captioner.gpu_memory_mib([0, 1]) is None
+
+
 def test_cancel_stops_the_server(make, tmp_path):
     q, caller, rec, ws, _ = make(fake_cfg(extra_args=["--fake-mode", "slow"], clip_timeout_s=120))
     (ws / "a.mp4").write_bytes(b"ok")
@@ -128,15 +174,16 @@ def test_cancel_stops_the_server(make, tmp_path):
     out = q.wait(caller, job, 120)
     assert out["state"] == "cancelled" and time.monotonic() - started < 30
     assert _pid_gone(tmp_path / "run", job)
-    assert any(e["type"] == "subproc.cancelled" for e in rec.read_events("n1"))
+    assert [e["reason"] for e in rec.read_events("n1") if e["type"] == "caption.server_stopped"] == ["cancelled"]
 
 
 def test_server_that_dies_during_startup_fails_the_job_with_its_log(make, tmp_path):
-    q, caller, _, ws, _ = make(fake_cfg(extra_args=["--fake-mode", "exit"]))
+    q, caller, rec, ws, _ = make(fake_cfg(extra_args=["--fake-mode", "exit"]))
     (ws / "a.mp4").write_bytes(b"ok")
     out = q.wait(caller, submit(q, caller, ["a.mp4"], "Caption.")["job_id"], 120)
     assert out["state"] == "failed"
     assert "exited during startup" in out["error"] and "CUDA out of memory" in out["error"]
+    assert [e["reason"] for e in rec.read_events("n1") if e["type"] == "caption.server_stopped"] == ["failed"]
 
 
 def test_server_that_never_gets_ready_times_out_and_is_killed(make, tmp_path):

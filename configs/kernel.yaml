@@ -39,7 +39,7 @@ tools:
 captioner:                       # caption_videos GPU job: a local vLLM server, never the paid agent model
   env: zhantaoy-vllm             # conda env with vLLM (0.29.0)
   model: Qwen/Qwen3.8-27B-FP8    # resolved by id through the HF cache (HF_HUB_OFFLINE=1: never downloads)
-  tensor_parallel: null          # null = the number of node GPUs
+  tensor_parallel: null          # null = the largest power of two <= the number of node GPUs
   max_model_len: 32768
   gpu_memory_utilization: 0.85
   max_tokens: 512                # per caption

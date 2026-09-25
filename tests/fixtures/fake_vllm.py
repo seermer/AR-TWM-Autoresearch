@@ -3,7 +3,8 @@
 Called with the real command line minus `vllm serve`. `--fake-mode`: ok (default), exit (dies
 during startup), hang (never becomes ready), slow (every caption takes 60 s). A clip whose bytes
 start with BAD gets a 400, like a video the server cannot decode. Writes its pid to fake_vllm.pid
-in its working directory.
+and its argv to fake_vllm.argv.json in its working directory; refuses to start without
+HF_HUB_OFFLINE=1; captions name the CUDA_VISIBLE_DEVICES it was given.
 """
 import argparse
 import json
@@ -23,6 +24,10 @@ parser.add_argument("--tensor-parallel-size")
 parser.add_argument("--fake-mode", default="ok")
 args, _ = parser.parse_known_args()
 Path("fake_vllm.pid").write_text(str(os.getpid()))
+Path("fake_vllm.argv.json").write_text(json.dumps(sys.argv[1:]))
+if os.environ.get("HF_HUB_OFFLINE") != "1":
+    print("HF_HUB_OFFLINE is not 1: the server could download", flush=True)
+    sys.exit(4)
 if args.fake_mode == "exit":
     print("RuntimeError: CUDA out of memory while loading the model", flush=True)
     sys.exit(3)
@@ -58,7 +63,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(400, {"error": {"message": "failed to decode the video"}})
         if args.fake_mode == "slow":
             time.sleep(60)
-        caption = f"{text['text']} [{len(data)} bytes, tp={args.tensor_parallel_size}]"
+        caption = (f"{text['text']} [{len(data)} bytes, tp={args.tensor_parallel_size}, "
+                   f"gpus={os.environ['CUDA_VISIBLE_DEVICES']}]")
         self.reply(200, {"choices": [{"message": {"role": "assistant", "content": caption}}]})
 
 

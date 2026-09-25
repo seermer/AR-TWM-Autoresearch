@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import socket
+import stat
 import subprocess
 import threading
 import time
@@ -20,7 +21,7 @@ from typing import Any
 import httpx
 from mcp.server.mcpserver import Context
 
-from .context import WORKSPACE, PathError, to_host
+from .context import WORKSPACE, PathError, to_container, to_host
 from .jobs import run_cancellable
 from .server import ToolError
 
@@ -40,14 +41,43 @@ def clip_host_path(caller, path: str) -> Path:
     return host
 
 
+def stage_clip(caller, path: str, dst: Path) -> None:
+    """Hard-link (or copy) the caller's clip to `dst` without trusting the path between check and use.
+
+    The agent keeps running while the job runs, so any directory on the path can be swapped for
+    a link to a host directory after `clip_host_path` checked it. The file is opened with
+    O_NOFOLLOW, the open file's real path must still be inside the caller's mounts, and what
+    lands at `dst` must be that same inode (or a copy read from that open file)."""
+    src = clip_host_path(caller, path)
+    fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)   # NONBLOCK: a swapped-in FIFO
+    try:
+        info = os.fstat(fd)
+        real = os.readlink(f"/proc/self/fd/{fd}")
+        to_container(caller, Path(real))               # PathError if it now lies outside the mounts
+        if not stat.S_ISREG(info.st_mode):
+            raise PathError(f"{path} is not a file")
+        try:
+            os.link(real, dst, follow_symlinks=False)
+        except OSError:                                # e.g. another filesystem: copy the open file
+            with open(os.dup(fd), "rb") as fin, open(dst, "wb") as fout:
+                shutil.copyfileobj(fin, fout)
+            return
+        linked = os.stat(dst, follow_symlinks=False)
+        if (linked.st_dev, linked.st_ino) != (info.st_dev, info.st_ino):
+            dst.unlink()
+            raise PathError(f"{path} changed while it was being staged")
+    finally:
+        os.close(fd)
+
+
 def gpu_memory_mib(gpus: list[int]) -> dict[int, int] | None:
-    """memory.used per GPU (nvidia-smi indices, i.e. PCI bus order), or None without nvidia-smi."""
+    """memory.used per GPU (nvidia-smi indices, i.e. PCI bus order), or None when it cannot be read."""
     try:
         out = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used", "--format=csv,noheader,nounits"],
                              capture_output=True, text=True, timeout=30, check=True).stdout
-    except (OSError, subprocess.SubprocessError):
+        used = {int(i): int(m) for i, m in (line.split(",") for line in out.strip().splitlines())}
+    except (OSError, subprocess.SubprocessError, ValueError):    # ValueError: "[N/A]", "[Not Supported]"
         return None
-    used = {int(i): int(m) for i, m in (line.split(",") for line in out.strip().splitlines())}
     return {g: used[g] for g in gpus if g in used}
 
 
@@ -75,7 +105,7 @@ class CaptionBackend:
         c = self.cfg.get("captioner")
         return ["vllm", "serve", c["model"], "--host", "127.0.0.1", "--port", str(port),
                 "--served-model-name", "captioner",
-                "--tensor-parallel-size", str(c.get("tensor_parallel") or len(self.gpus)),
+                "--tensor-parallel-size", str(c.get("tensor_parallel") or 1 << (len(self.gpus).bit_length() - 1)),
                 "--max-model-len", str(c["max_model_len"]),
                 "--gpu-memory-utilization", str(c["gpu_memory_utilization"]),
                 "--limit-mm-per-prompt", json.dumps({"image": 0, "video": 1}),
@@ -93,13 +123,9 @@ class CaptionBackend:
         clips: dict[str, Path] = {}
         results: dict[str, dict] = {}
         for i, path in enumerate(job.args["paths"]):
+            dst = media / f"{i}{Path(path).suffix}"   # a hard link: the server resolves symlinks
             try:
-                src = clip_host_path(caller, path)      # re-checked now: the agent owns the workspace
-                dst = media / f"{i}{src.suffix}"
-                try:
-                    os.link(src, dst, follow_symlinks=False)   # the server resolves links, so no symlinks
-                except OSError:
-                    shutil.copyfile(src, dst, follow_symlinks=False)
+                stage_clip(caller, path, dst)
                 clips[path] = dst
             except (PathError, OSError) as exc:
                 results[path] = {"error": str(exc)}
@@ -131,9 +157,9 @@ class CaptionBackend:
         server = threading.Thread(target=serve, name=f"ar-captioner-{job.id[:8]}", daemon=True)
         started = time.monotonic()
         server.start()
-        base, load_s = f"http://127.0.0.1:{port}", None
+        base, load_s, outcome = f"http://127.0.0.1:{port}", None, "failed"
         try:
-            with httpx.Client(timeout=float(c["clip_timeout_s"])) as http:
+            with httpx.Client(timeout=float(c["clip_timeout_s"]), trust_env=False) as http:
                 deadline = started + float(c["startup_timeout_s"])
                 while not cancel.is_set():
                     if not server.is_alive():
@@ -166,11 +192,20 @@ class CaptionBackend:
                                         latency_s=latency, ok="caption" in results[path],
                                         payload={"path": path, **results[path]})
                     report({"captioned": n + 1, "total": len(clips)})
+            outcome = "done"
         finally:
             stop.set()
             server.join()
             shutil.rmtree(media, ignore_errors=True)
-        after, released = self._released(before, float(c["memory_release_timeout_s"]))
+            # run_cancellable reports every stop we make as a cancel (-15, subproc.cancelled);
+            # this event says why the server stopped.
+            self.recorder.event("caption.server_stopped", node=job.node, component="tools", job_id=job.id,
+                                reason="cancelled" if cancel.is_set() else outcome,
+                                exit_code=exit_code[0] if exit_code else None)
+        # A cancelled job may be part of JobQueue.shutdown, whose join deadline a full wait would
+        # overrun; Plan 4's check that GPU memory is free before each phase is the real guard.
+        timeout = float(c["memory_release_timeout_s"])
+        after, released = self._released(before, min(timeout, 5.0) if cancel.is_set() else timeout)
         if released is False:
             self.recorder.event("caption.gpu_not_released", node=job.node, component="tools",
                                 job_id=job.id, payload={"before": before, "after": after})
