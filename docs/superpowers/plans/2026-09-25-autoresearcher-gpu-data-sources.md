@@ -12,7 +12,7 @@
 
 The workers are small bridge scripts in `kernel/ar_kernel/bridges/`. Each loads its model once and loops over its shard of items.
 
-AlayaWorld is the one exception to the bridge scripts. It runs WorldModel's own `scripts/finetune/train.sh` in `VALIDATE_ONLY` mode through the `custom_i2v` validation path. A 5-line WorldModel patch lets each image carry its own per-round prompt schedule.
+AlayaWorld is the one exception to the bridge scripts. It renders agent-written, WBench-style cases (image, perspective, per-turn navigation actions and interaction prompts) through the eval's own `scripts/tools/run_wbench.py` path, so the rollouts follow the same code as the eval. A small WorldModel patch saves the camera path that render generates, which gives exact poses.
 
 All caches the kernel's subprocesses create go to the project-local `AutoResearcher/.cache/` (Task 1).
 
@@ -75,14 +75,14 @@ Also read:
 4. **ViGeo** is at `WorldModel/third_party/ViGeo`, with its checkpoint at `checkpoints/ViGeo1.1/vigeo.pt`; the `alayaworld` env already runs it for WorldModel.
    - API: `ViGeo.from_pretrained(<dir>)`, `model.infer(images[T,3,H,W] in [0,1], mode="offline"|"chunk")`.
    - Outputs: `pose_pred [T,3,4]` camera-to-world, OpenCV axes (x right, y down, z forward). Focal comes from `recover_focal_from_xy` (normalized; see `vigeo/utils.py`); `utils/data.py:load_intrinsic` shows the normalization.
-5. **AlayaWorld single-image generation:**
-   - It is `VALIDATE_ONLY=1 ALAYA_USE_FA3=0 LOG_FILTER=all CONFIG_PATH=<cfg> bash scripts/finetune/train.sh`, with cwd `WorldModel`. It uses the `custom_i2v` validation mode (`configs/infer_i2v_camera.yaml` = 4-step DMD student; `configs/infer_i2v_camera_ar.yaml` = 30-step AR teacher, `cfg_scale` 3.0).
-   - Inputs: an image dir, `captions.json` (image name → caption), and `pose.jsonl` (entry i = `{"pose_path": npz with cam_c2w [N,4,4], "intrinsic"?: [fx,fy,cx,cy] normalized}`).
-   - Images are sorted by name, and image i pairs with pose entry i.
-   - `validation.max_samples` limits how many images are rendered (1 in the shipped configs).
-   - Output: `<run.output_dir>/validation/.../<stem>_pred_clean.mp4`, where the stem contains `sample-<idx>`. It is written before any joystick overlay.
-   - `train.sh` sets the rank count from `CUDA_VISIBLE_DEVICES` and defaults `MASTER_PORT` to 29500.
-6. **Per-round prompts in WorldModel.** `RolloutTrainer._validation_prompt_schedule` already switches prompts per round when a sample's metadata has `wbench_prompt_schedule` (index `r // wbench_chunks_per_turn`). Otherwise it uses the mode-wide `prompt_schedule`. `custom_i2v` never sets that metadata key, which is what Task 2 adds.
+5. **AlayaWorld has no action input.** Action conditioning is off in the released configs (`control.candidates: [[]]`). Its only motion signal is a per-frame camera path (`cam_c2w`). For each round (4 latents = 32 frames), the trainer renders its ViGeo 3D memory into each target frame's camera and VAE-encodes the result (`_build_validation_vigeo_bank_spatial_context`, `rollout_trainer.py:3809`). Prompts switch per round (`_validation_prompt_schedule`).
+6. **The WBench render turns actions into that camera path.**
+   - `_build_wbench_camera_trajectory` (`rollout_trainer.py:1764`) holds each turn's action for `wbench_chunks_per_turn` rounds (3 in `configs/wbench_full.yaml`, i.e. 96 frames), using fixed steps: forward 0.16 per latent, yaw/pitch 6° per latent.
+   - First person moves the camera; third person orbits a subject pivot found from the subject mask and depth.
+   - Per-turn prompts come from the case's interactions (`navigation`, `subject_action`, `event_edit`, `perspective_switch`; counts over the 289 cases: 601 / 213 / 183 / 61).
+   - The render writes `case_<id>_combined.mp4` plus a sidecar JSON with `turn_segments` (per-turn frame ranges) and `prompt_schedule`, but **not** the camera path. Task 2 adds it.
+   - `scripts/tools/run_wbench.py --config --gpus --cases` drives it, as `eval/render.py` already does.
+   - WBench's data has no `prompts_training_style.jsonl`, so the eval uses the fallback prompt builder.
 7. **LTX-2.5 weights** are in `AutoResearcher/weights/ltx-2.5` as a split, Comfy-aligned pack:
    - `diffusion_models/ltx-2.5-22b-{dev,distilled}-transformer-bf16.safetensors`: 42 GB each.
    - `text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors`: 26 GB.
@@ -138,7 +138,7 @@ Also read:
 | `configs/kernel.yaml` (modify) | `generators:` reshaped, `annotate:` added |
 | `tests/test_cache_env.py`, `tests/test_gpu_jobs.py`, `tests/test_annotate.py`, `tests/test_rollouts.py` (create) | Unit tests (fake workers) plus one `gpu` test per real backend |
 | `tests/fixtures/fake_gen_worker.py` (create) | Fake worker implementing the bridge protocol |
-| `WorldModel/alaya/data/custom_i2v.py` (modify), `WorldModel/tests/test_custom_i2v_schedule.py` (create) | A caption may be a list of per-round prompts |
+| `WorldModel/alaya/trainer/rollout_trainer.py` (modify), `WorldModel/tests/test_wbench_camera_sidecar.py` (create) | The WBench-mode render also saves the camera path it used (`case_<id>_combined_camera.npz`) |
 | `seed_agent/knowledge/data_building.md` (modify) | Short section on rollouts and annotation (simplicity rule: a few lines) |
 | Spec, Plan 2 contract, `verification-log.md`, `docs/PORTABILITY.md` (modify) | Amendments and measured results |
 
@@ -277,92 +277,60 @@ git commit -m "feat(kernel): project-local caches for every kernel subprocess (A
 
 ---
 
-### Task 2: WorldModel: per-image prompt schedules in `custom_i2v`
+### Task 2: WorldModel: save the generated camera path next to each WBench-mode video
 
 **Files:**
-- Modify: `WorldModel/alaya/data/custom_i2v.py`
-- Test: `WorldModel/tests/test_custom_i2v_schedule.py`
+- Modify: `WorldModel/alaya/trainer/rollout_trainer.py` (`_save_wbench_output_video`)
+- Test: `WorldModel/tests/test_wbench_camera_sidecar.py`
 
 **Interfaces:**
-- Produces: in `captions.json`, a value may be a JSON list of strings, one per rollout round. The sample's caption is then `list[0]` and `metadata["wbench_prompt_schedule"]` is the list. With the mode setting `wbench_chunks_per_turn: 1`, the trainer uses prompt `r` for round `r` (the last prompt repeats). String values behave exactly as before.
+- Produces: beside every `case_<id>_combined.mp4` / `.json`, the WBench-mode render now also writes `case_<id>_combined_camera.npz` containing:
+  - `cam_c2w [F,4,4]` float32: the camera trajectory the render used (`metadata["cam_c2w"]`, built from the case's navigation actions by `_build_wbench_camera_trajectory`), sliced to exactly the F frames written to the mp4, and re-expressed relative to the first written frame (frame 0 = identity);
+  - `intrinsic [3,3]`: the normalized intrinsics the render used for those frames. For uncalibrated sources this is the ViGeo-fitted prefix intrinsic (see `_validation_vigeo_target_cameras`), not the 0.5 placeholder. If the fitted value is not reachable from `_save_wbench_output_video` without restructuring, save only `cam_c2w` and say so in the report.
 
-- [ ] **Step 1: Write the failing test**
+  The sidecar JSON gains `"camera_file": "<name>.npz"`. Nothing else changes, so WBench scoring is unaffected. WBench reads only the mp4 and its own inputs; confirm with `grep -rn "_camera.npz\|combined.json" ../WBench/src ../WBench/main.py`, which must find nothing that would pick up the new file.
 
-```python
-# WorldModel/tests/test_custom_i2v_schedule.py
-import json
+- [ ] **Step 1: Find the frame mapping (read, no code)**
 
-import numpy as np
-from PIL import Image
+`_save_wbench_output_video` decodes `[prefix latents] + pred latents` and drops `prefix_latents * temporal_stride` leading frames, so mp4 frame 0 is the first generated frame. Work out which index of `metadata["cam_c2w"]` that frame corresponds to. The trajectory's own time base starts at pixel 0 of the render's timeline, and actions start at `action_start_pixel` (`_build_wbench_camera_trajectory`); see also `_vigeo_target_prefix_pixel_frames` and `target_base_start` in `_prepare_wbench_validation_metadata`.
 
-from alaya.data.custom_i2v import CustomI2VDataset
+Write the formula into the report and into a comment in the code. Task 5's GPU smoke checks it independently with ViGeo.
 
+- [ ] **Step 2: Write the failing test**
 
-def _inputs(tmp_path, captions):
-    (tmp_path / "images").mkdir()
-    for name in ("0000.png", "0001.png"):
-        Image.new("RGB", (64, 36), (10, 20, 30)).save(tmp_path / "images" / name)
-    np.savez(tmp_path / "cam.npz", cam_c2w=np.tile(np.eye(4, dtype=np.float32), (8, 1, 1)))
-    (tmp_path / "pose.jsonl").write_text(
-        "".join(json.dumps({"pose_path": str(tmp_path / "cam.npz")}) + "\n" for _ in range(2)))
-    (tmp_path / "captions.json").write_text(json.dumps(captions))
-    return CustomI2VDataset(image_dir=str(tmp_path / "images"), pose_jsonl=str(tmp_path / "pose.jsonl"),
-                            annotation_base_dir=None, width=64, height=32, frames=1, traj_frames=8,
-                            captions_json=str(tmp_path / "captions.json"))
+The test builds a minimal fake of what `_save_wbench_output_video` needs:
+- a `RolloutTrainer`-like object via `object.__new__(RolloutTrainer)`, with a `cfg` stub (`sample.temporal_stride=8`, `sample.fps=24`, `layout.sink_latent_frames`, `validation.video_history_latent_frames`);
+- `_decode_latent_to_video_frames` monkeypatched to return `8 * latents` frames of zeros;
+- `_write_video` monkeypatched to record the frame count.
 
+It calls the method with a known `metadata["cam_c2w"]` (a per-frame translation ramp) and asserts:
+- the `.npz` exists and its `cam_c2w` has as many frames as were written;
+- frame 0 is the identity;
+- the translations equal the ramp slice from Step 1's formula, re-expressed relative to that frame;
+- the sidecar JSON names the file.
 
-def test_list_caption_becomes_a_per_round_schedule(tmp_path):
-    ds = _inputs(tmp_path, {"0000": ["walk forward", "turn left"], "0001": "a plain caption"})
-    first, second = ds[0], ds[1]
-    assert first["caption"] == "walk forward"
-    assert first["metadata"]["wbench_prompt_schedule"] == ["walk forward", "turn left"]
-    assert second["caption"] == "a plain caption"
-    assert "wbench_prompt_schedule" not in second["metadata"]
-```
+If building the fake needs more than ~40 lines, factor the slicing into a small pure helper `_wbench_written_camera(metadata, frames_written, prefix_frames) -> np.ndarray` and unit-test that helper directly instead. That is also acceptable.
 
-- [ ] **Step 2: Run it to verify it fails**
+- [ ] **Step 3: Run it to verify it fails**
 
-Run: `cd WorldModel && conda run --no-capture-output -n alayaworld python -m pytest tests/test_custom_i2v_schedule.py -q`
-Expected: FAIL. The list is stringified by `{str(k): str(v)}`, so the caption is `"['walk forward', 'turn left']"`.
+Run: `cd WorldModel && conda run --no-capture-output -n alayaworld python -m pytest tests/test_wbench_camera_sidecar.py -q`
+Expected: FAIL (no npz written).
 
-- [ ] **Step 3: Implement**
+- [ ] **Step 4: Implement, keeping it minimal**
 
-In `__init__`, change the captions load so that list values are kept:
+Right after `self._write_video(output_path, frames)`, save the sliced, re-based trajectory with `np.savez(output_path.with_name(output_path.stem + "_camera.npz"), cam_c2w=..., intrinsic=...)` and add `"camera_file"` to `sidecar`.
 
-```python
-                self.captions = {str(k): ([str(p) for p in v] if isinstance(v, list) else str(v))
-                                 for k, v in json.load(f).items()}
-```
+- [ ] **Step 5: Run the WorldModel tests**
 
-In `__getitem__`, replace the final caption lines with:
+Run: `cd WorldModel && conda run --no-capture-output -n alayaworld python -m pytest tests/test_wbench_camera_sidecar.py tests/test_run_wbench_config_path.py -q` → PASS.
 
-```python
-        # Per-image caption (try stem then file name), falling back to the generic prompt. A list is a
-        # per-round prompt schedule: round r uses entry r (the last one repeats), through the same
-        # metadata key the WBench path uses (set the mode's wbench_chunks_per_turn: 1).
-        caption = self.captions.get(img_path.stem) or self.captions.get(img_path.name) or self.caption
-        if isinstance(caption, list):
-            metadata["wbench_prompt_schedule"] = caption
-            caption = caption[0]
-        return {"video_pixels": video_pixels, "caption": caption, "metadata": metadata}
-```
-
-Then check that the validation dataloader's collate passes the list through for batch size 1. `grep -n "collate" alaya/data/dataloader.py alaya/trainer/rollout_trainer.py`. The WBench dataset already places this list in metadata, so whatever collate WBench validation uses works. If `custom_i2v` goes through a different collate that would turn the list into tuples, handle it the way WBench does and say so in the report. Task 5's GPU smoke confirms the rounds really switch prompts.
-
-- [ ] **Step 4: Run the WorldModel tests that touch data**
-
-Run: `cd WorldModel && conda run --no-capture-output -n alayaworld python -m pytest tests/test_custom_i2v_schedule.py tests/test_standard_dataset.py -q`
-Expected: PASS.
-
-- [ ] **Step 5: Commit (WorldModel `main`)**
+- [ ] **Step 6: Commit (WorldModel `main`)**
 
 ```bash
 cd WorldModel
-git add alaya/data/custom_i2v.py tests/test_custom_i2v_schedule.py
-git commit -m "feat(custom_i2v): a caption may be a per-round prompt list (wbench_prompt_schedule)"
+git add alaya/trainer/rollout_trainer.py tests/test_wbench_camera_sidecar.py
+git commit -m "feat(wbench render): save the generated camera trajectory beside each video"
 ```
-
-Push happens at the end of the plan with the other repos.
 
 ---
 
@@ -400,9 +368,8 @@ annotate:                        # annotate_camera GPU job (spec 10, 16.3 item 6
 generators:                      # rollout_* GPU jobs; a variant is enabled only after its smoke (spec 16.3 item 5)
   alayaworld:
     env: alayaworld
-    variants: {dmd4: {enabled: false, config: configs/infer_i2v_camera.yaml},
-               ar30: {enabled: false, config: configs/infer_i2v_camera_ar.yaml}}
-    max_rounds: 15
+    variants: {dmd4: {enabled: false}, ar30: {enabled: false}}   # dmd4 = configs/wbench_full.yaml as the eval renders
+    max_turns: 9
     max_items: 16
     timeout_s: 43200
     license: LTX-2 Community License (AlayaWorld is an LTX-2 derivative)
@@ -1005,105 +972,119 @@ git commit -m "feat(tools): annotate_camera via ViGeo, verified against the exam
 
 ---
 
-### Task 5: `rollout_alayaworld` (dmd4 / ar30)
+### Task 5: `rollout_alayaworld`: WBench-style cases through the eval's own render path
+
+**Decision (user, 2026-09-25):** render exactly as the WBench eval does, covering the full WBench interaction set, not only navigation.
+- **Per-turn inputs:** each turn has a prompt and an action.
+- **Turn length:** a turn lasts `rounds_per_turn` rounds of 32 frames. The eval uses 3; `rounds_per_turn: 1` gives per-round granularity with no code change, since it is only `wbench_chunks_per_turn`.
+- **No per-latent actions:** the eval holds each action for a whole turn.
+- **No custom camera paths.** The model has no action input; WorldModel turns the actions into a per-frame camera path, and Task 2 saves that path.
 
 **Files:**
 - Create: `kernel/ar_kernel/tools/rollouts.py` (`AlayaWorldBackend`), `tests/test_rollouts.py`
 - Modify: `gpu_jobs.py` (`build_gpu_backends`), `configs/kernel.yaml`
 
 **Interfaces:**
-- Consumes: Task 2 (list captions), Task 3 (`GpuJob`), Task 4 (`AnnotateBackend`, only in the GPU alignment check).
+- Consumes: Task 2 (`case_<id>_combined_camera.npz`), Task 3 (`GpuJob`), Task 4 (`AnnotateBackend`, only in the GPU check), `eval/render.py`'s `build_render_config` pattern.
 - Produces: `AlayaWorldBackend(GpuJob)`, tool `rollout_alayaworld`.
-  - **Job params:** `variant` (`dmd4` | `ar30`, enabled ones only), `rounds` (1..`max_rounds`), `seed` (int).
-  - **Item fields:**
-    - `first_frame`: an image path.
-    - `camera`: either an npz path (`cam_c2w [N,4,4]`, optional `intrinsics [3,3]` in pixels of `first_frame`) or `{"forward": m_per_frame, "yaw": deg_per_frame, "pitch": deg_per_frame}`.
-    - `prompts`: a list of strings, one per round (the last repeats).
-    - `caption`: optional; defaults to `prompts[0]`.
-  - **Candidate:** 24 fps mp4, `pose` npz (`cam_c2w` for every published frame, plus `intrinsics` if given), caption JSON `{"caption", "segments"}`, `camera_motion: "moving"`, provenance generator `alayaworld-<variant>`.
-  - `seed` in provenance is the job seed. Record WorldModel's per-sample seed rule in the report.
+  - **Job params:**
+    - `variant`: `dmd4` (the eval's own setting, `configs/wbench_full.yaml`) or `ar30` (the same config with `paths.dmd_resume: null`, `validation.sampling_steps: 30`, `validation.scheduler: shift`, `validation.cfg_scale: 3.0`, taken from `configs/infer_i2v_camera_ar.yaml`'s differences). Enabled variants only.
+    - `rounds_per_turn`: 1..3, default 3.
+    - `seed`: int.
+  - **Item = one WBench-style case:**
+    - `image`: the first frame, any size (resized as in the eval);
+    - `perspective`: `first_person` | `third_person`;
+    - `environment_prompt`, `character_prompt`, `perspective_prompt`: strings; the last two may be empty;
+    - `subject_mask`: optional image path, used by third-person orbit and subject anchoring as in the eval;
+    - `turns`: a list of 1..`max_turns` objects `{"action": "<WBench navigation action, e.g. W, A, S, D, left, right, up, down, W+left, stop>", "subject_action"?: str, "event_edit"?: str, "perspective_switch"?: str}`.
+  - **The kernel writes each item as a case file**, `case_<index>.json`, in the WBench schema: `interactions` entries of types `navigation`, `subject_action`, `event_edit` and `perspective_switch` per turn, exactly as WBench cases use them (see `WBench/data/cases/case_100.json` and the type counts in the task report). `settings.initial_image` and `settings.subject_mask` point at the staged files, and `metric_list: []`.
+  - **Candidate:**
+    - a 24 fps mp4;
+    - `pose`: npz with `cam_c2w` for every published frame, plus pixel `intrinsics` if Task 2 provides them;
+    - caption JSON: `{"caption": <the round-0 prompt the render used>, "segments": one per round, from the sidecar's prompt_schedule, adjacent equal prompts merged}`;
+    - `camera_motion: "moving"`;
+    - provenance generator `alayaworld-<variant>`.
+    
+    The result item also carries the sidecar's `actions` and `turn_segments`.
 
-- [ ] **Step 1: Kernel input builder + config writer (unit-tested, no GPU)**
+- [ ] **Step 1: Case writer, config writer, submit checks (unit-tested, no GPU)**
 
-`AlayaWorldBackend.produce` writes into `work/`:
-- `inputs/images/<index:04d>.<ext>`, from the staged `first_frame`;
-- `inputs/poses/<index>.npz`: the caller's trajectory, or one synthesized for `rounds*32*3` frames (at least 512). Copy the 15-line `synth_trajectory` from `WorldModel/scripts/infer/prepare_i2v_inputs.py` into `rollouts.py`, with a comment naming the source.
-- `inputs/pose.jsonl`, in image order; `intrinsic` is normalized `[fx/W, fy/H, cx/W, cy/H]` when the caller gave pixel intrinsics;
-- `inputs/captions.json`: `{"<index:04d>": prompts}`;
-- `config.yaml`: the variant's WorldModel config with:
-  - `paths.*` made absolute against `cfg.worldmodel`;
-  - `run.output_dir = work/out_wm` and `run.log_dir = work/logs`;
-  - `run.seed = seed`;
-  - `validation.max_samples = len(items)`;
-  - `validation.save_joystick = false`;
-  - `validation.modes.custom_i2v.rollout_rounds = rounds`;
-  - `…custom_i2v.wbench_chunks_per_turn = 1`;
-  - `…custom_i2v.dataset.{image_dir,captions_json,pose_jsonl}` = the files above.
+`produce` writes into `work/data/`:
+- `cases/case_<index>.json`;
+- `images/case_<index>.<ext>`;
+- `masks/case_<index>_mask.png`, when a mask is given.
 
-It then launches, via `run_workers` with a single group of **all** node GPUs (one torchrun job), `run_cancellable("alayaworld", ["bash", "scripts/finetune/train.sh"], cwd=cfg.worldmodel, extra_env={"CONFIG_PATH": <cfg>, "VALIDATE_ONLY": "1", "ALAYA_USE_FA3": "0", "LOG_FILTER": "all", "MASTER_PORT": <free port>})`.
+It builds the render config the way `eval/render.py:build_render_config` does (read that function first): `configs/wbench_full.yaml`, then:
+- `mode.dataset.root = work/data`;
+- `mode.dataset.case_ids = [indices]`;
+- `mode.wbench_output_dir = work/videos`;
+- `mode.wbench_chunks_per_turn = rounds_per_turn`;
+- `run.output_dir` / `run.log_dir` under `work/`;
+- `run.seed = seed`;
+- `validation.per_sample_seed: true`;
+- `paths.*` absolute;
+- `validation.save_joystick: false`;
+- the ar30 overrides for `ar30`.
 
-After it exits, a kernel step maps each `*sample-<k>*_pred_clean.mp4` to item k and writes `out/<index>.mp4` plus `out/<index>.json` (`{"ok": true}`, or an error when the file is missing). This follows the bridge protocol, so Task 3's `_collect` applies unchanged.
+It launches `scripts/tools/run_wbench.py --config <cfg> --gpus <node gpus> --cases <indices>` in `alayaworld` (cwd WorldModel) through `run_workers` with a single group of all node GPUs, and `MASTER_PORT` set to a free port if `run_wbench.py`/`train.sh` honor it (check).
+
+Do **not** set `WBENCH_REWRITE_JSONL`. WBench's data has no rewrite file, so the eval uses the fallback prompt builder, and synthetic cases must too. After the run, map each `case_<index>_combined.{mp4,json}` plus the camera npz to `out/<index>.*` and the status JSON, per the bridge protocol.
 
 Unit tests in `tests/test_rollouts.py`:
-- The config writer produces the listed fields (load the YAML and assert).
-- `captions.json` has lists.
-- `pose.jsonl` is in image order with normalized intrinsics.
-- The synthesized trajectory for `{"forward": 0.01, "yaw": 0, "pitch": 0}` moves along +z.
-- A wrong `variant` or `rounds` over the max is refused at submit.
+- The case writer emits valid WBench-schema JSON. Load it with WorldModel's own loader in the `alayaworld` env through a tiny script (`WBenchNaviDataset(root=…, case_ids=[…], include_non_navigation=True, …)`, reading `alaya/data/wbench.py` for the class name and args), and assert that loading yields the expected per-turn prompt schedule and actions.
+- The config has the listed fields.
+- ar30 differs from dmd4 only in the four listed keys.
+- Submit refuses: an unknown action token (validate against `_wbench_action_to_nav`'s vocabulary, copied as a constant with a source comment); an empty `turns`; more than `max_turns`; `rounds_per_turn` outside 1..3; `third_person` with a mask that is not an image file.
 
 Run: `conda run --no-capture-output -n autoresearcher python -m pytest tests/test_rollouts.py -q` → PASS.
 
-- [ ] **Step 2: GPU spike to measure the output layout (dmd4, 1 item, 2 rounds)**
+- [ ] **Step 2: GPU spike: output layout and pose check (dmd4)**
 
-Render one item with a real image and a synthesized forward trajectory. Take the image from `WorldModel/data/examples/video_caption_camera`: extract frame 0 with ffmpeg to the scratchpad.
+Render 2 items: one first person and one third person with a mask, 2 turns each, `rounds_per_turn: 3`. Use images that are not WBench's: frame 0 of a `WorldModel/data/examples` clip, and for third person a scene with a person plus a hand-made mask. Record:
+- the mp4 frame count F;
+- the sidecar's `turn_segments` and `prompt_schedule`;
+- the Task 2 npz length, which must equal F;
+- the rounds' frame ranges.
 
-Record:
-- the output mp4's frame count F and fps;
-- which trajectory index output frame 0 corresponds to;
-- where round r's frames start.
+Then run `annotate_camera` on both outputs and compare with the saved `cam_c2w` under the Task 4 thresholds. This independently checks Task 2's index formula, and whether the camera has any effect in round 0 (memory is empty then; `memory_start_round: 1`). Write the findings into `verification-log.md`.
 
-Method for the pose mapping: run `annotate_camera` (Task 4) on the output, then find the offset `o` that minimizes the relative-rotation and Sim(3) error between the ViGeo poses and `traj[o : o + F]`. The expectation is `o = 0`, with output frame 0 being the input image; prove it or correct it.
+Repeat one item with `rounds_per_turn: 1` and confirm the actions and prompts switch every round.
 
-Also confirm the two rounds used the two prompts: the `*_info.txt` or log `Prompt Schedule: chunk0/chunk1` lines should show different prompts.
+- [ ] **Step 3: `finish`: align rounds to the training grid, poses, segments**
 
-Write the findings into `verification-log.md` before coding Step 3.
+With round r occupying mp4 frames `[s + 32r, s + 32(r+1))` (s measured in Step 2; the sidecar's `turn_segments.frame_start` gives it directly):
+- **Trim.** Remove `trim = (s - 25) % 32` leading frames, so that every round boundary lands at `25 + 32k` (spec §6.2 `per_chunk`). Use ffmpeg: `-vf select='gte(n\,trim)',setpts=N/24/TB -r 24 -c:v libx264 -crf 18 -pix_fmt yuv420p -an`.
+- **Poses.** `cam_c2w = saved[trim:]`, re-based so frame 0 is the identity. Probe the trimmed mp4 and assert `len == frames` (Review Focus 4).
+- **Intrinsics.** Normalized to pixels of the mp4, if present.
+- **Segments.** One per round, in seconds of the trimmed clip, from the sidecar's `prompt_schedule` (a round's prompt is the one the render actually used, after the eval's prompt assembly). Adjacent equal prompts are merged, the first segment starts at 0 and the last ends at the duration.
+- **Caption.** The round-0 prompt.
 
-- [ ] **Step 3: `finish`: trim to round boundaries, poses, segments**
-
-Let the measured layout be "round r occupies output frames `[s + 32r, s + 32(r+1))`" (s measured in Step 2). Then:
-- **Trim.** `trim = (s - 25) % 32` leading frames are removed, so every round boundary lands at `25 + 32k` (spec §6.2 `per_chunk`). Do the trim with ffmpeg: `-vf select='gte(n\,trim)',setpts=N/24/TB -r 24 -c:v libx264 -crf 18 -pix_fmt yuv420p`.
-- **Poses.** `cam_c2w = traj[o + trim : o + trim + F']`, where F' is the frame count of the trimmed mp4 **probed after writing**. Assert `len == F'` (Review Focus 4).
-- **Segments.** `[{"time_range_s": [start, end), "prompt": prompts[min(r, len-1)]}]`, one per round, in seconds of the trimmed clip. The first segment starts at 0 and the last ends at the duration. Merge adjacent rounds with identical prompts.
-- **Caption.** `caption = item.get("caption") or prompts[0]`.
-
-Unit-test `finish` with a synthetic mp4 (`make_mp4`) of the measured layout and a fake status. Assert:
-- the trimmed frame count;
-- the pose length equals the probed frames;
-- every internal boundary satisfies `abs(t*24 - (25 + 32k)) <= 0.5` for some k;
-- the candidate passes the kernel checker as `video_timed_prompts_camera:per_chunk`. Run the real `Ingestor` as `tests/test_ingest.py` does; it uses the `alayaworld` env but no GPU.
+Unit-test `finish` with a synthetic mp4 (`make_mp4`) of the measured layout, a fake sidecar and a fake npz. Assert:
+- the trimmed frame count equals the pose length;
+- every internal boundary satisfies `abs(t*24 - (25 + 32k)) <= 0.5`;
+- the candidate passes the real `Ingestor` as `video_timed_prompts_camera:per_chunk` (as `tests/test_ingest.py` does; CPU only).
 
 - [ ] **Step 4: GPU smoke, both variants**
 
-Add a `gpu` test: for each of dmd4 and ar30, render 2 items with different per-round prompts and 3 rounds. Assert:
+Add a `gpu` test: for each of dmd4 and ar30, 2 items (first and third person) with 2 turns each, where one turn carries a `subject_action` and one an `event_edit`. Assert:
 - the job is `done`;
 - both candidates pass `Ingestor` as `video_timed_prompts_camera:per_chunk`;
-- ViGeo poses on the output agree with the published `cam_c2w` under the Task 4 thresholds;
+- ViGeo agrees with the published poses under the Task 4 thresholds;
 - GPU memory is released.
 
-Record the wall time (load plus per item) and the peak memory per variant.
-
-If a variant does not fit or fails, leave it disabled and report why.
+Record the load time, the time per item and the peak memory. If a variant fails, leave it disabled and report why.
 
 - [ ] **Step 5: Enable, record, commit**
 
-- Set `generators.alayaworld.variants.<v>.enabled: true` for each variant that passed.
-- Add `AlayaWorldBackend` to `build_gpu_backends` (it is registered if any variant is enabled).
-- Write the verification-log section (layout, offsets, timings).
+- Enable the variants that passed.
+- Add the `generators.alayaworld` config keys `max_turns: 9` (the longest WBench case) and `max_items: 16`, and remove the `config:` keys of the old sketch.
+- Add the backend to `build_gpu_backends`.
+- Write the verification-log section.
 - Commit:
 
 ```bash
 git add kernel/ar_kernel/tools/rollouts.py kernel/ar_kernel/tools/gpu_jobs.py configs/kernel.yaml tests/test_rollouts.py docs/superpowers/plans/verification-log.md
-git commit -m "feat(tools): rollout_alayaworld through custom_i2v with per-round prompts, poses and per_chunk segments"
+git commit -m "feat(tools): rollout_alayaworld renders WBench-style cases through the eval path, with exact poses"
 ```
 
 ---
