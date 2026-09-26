@@ -80,6 +80,50 @@ size on disk: ~5.7 GB. Weights: `Tongyi-MAI/Z-Image-Turbo` @
 `f332072aa78be7aecdf3ee76d5c247082da564a6` downloaded with `hf download ... --exclude
 "assets/*" --local-dir weights/z-image-turbo` (31 GB, `HF_HOME` under `AutoResearcher/.cache`).
 
+**`gen-wan22`** (Wan2.2 TI2V-5B, `rollout_wan22`): a prefix env at `AutoResearcher/.envs/gen-wan22`,
+python 3.10. The official Wan2.2 code is a separate, gitignored clone at `third_party/Wan2.2`
+(put on `sys.path` by the bridge, not pip-installed), pinned as `generators.wan22.commit`;
+`Wan22Backend` refuses to run when `git -C third_party/Wan2.2 rev-parse HEAD` differs.
+
+```bash
+cd AutoResearcher
+export CONDA_PKGS_DIRS=$PWD/.cache/conda/pkgs PIP_CACHE_DIR=$PWD/.cache/pip
+mkdir -p third_party
+git clone https://github.com/Wan-Video/Wan2.2.git third_party/Wan2.2
+git -C third_party/Wan2.2 checkout 1ea34ff48f87168174e12956e200b1d908b1c5ff   # the pin
+conda create -y -p .envs/gen-wan22 python=3.10
+conda run --no-capture-output -p .envs/gen-wan22 pip install torch==2.7.1 torchvision==0.22.1 \
+  torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu126
+# requirements.txt without flash_attn (a plain `pip install flash_attn` builds from source; see below)
+grep -v flash_attn third_party/Wan2.2/requirements.txt > .cache/wan22_reqs_noflash.txt
+conda run --no-capture-output -p .envs/gen-wan22 pip install -r .cache/wan22_reqs_noflash.txt
+# flash_attn: the prebuilt wheel matching torch 2.7 / CUDA 12 / cp310 / cxx11abi TRUE
+# (check the ABI with: python -c "import torch; print(torch._C._GLIBCXX_USE_CXX11_ABI)")
+mkdir -p .cache/wheels
+curl -sL -o .cache/wheels/flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp310-cp310-linux_x86_64.whl \
+  "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3%2Bcu12torch2.7cxx11abiTRUE-cp310-cp310-linux_x86_64.whl"
+conda run --no-capture-output -p .envs/gen-wan22 pip install \
+  .cache/wheels/flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp310-cp310-linux_x86_64.whl
+# `import wan` eagerly imports every task (S2V, Animate), so it also needs these three
+# (from requirements_s2v.txt / requirements_animate.txt; their heavier deps are not needed)
+conda run --no-capture-output -p .envs/gen-wan22 pip install .cache/wheels/eva_decord-0.6.1-py3-none-manylinux2010_x86_64.whl  # after: pip download --no-deps -d .cache/wheels eva-decord librosa peft
+conda run --no-capture-output -p .envs/gen-wan22 pip check
+```
+
+`decord` is the `eva-decord` fork (same `import decord`): the PyPI `decord==0.6.0` wheel is
+tagged `cp36-cp36m`, so `pip check` fails on it ("not supported on this platform"); with
+`eva-decord` the check is clean ("No broken requirements found.").
+
+Versions (Task 7): Wan2.2 @ `1ea34ff48f87168174e12956e200b1d908b1c5ff` (2026-09-21);
+`torch==2.7.1+cu126`, `torchvision==0.22.1+cu126`, `torchaudio==2.7.1+cu126`,
+`flash_attn==2.8.3` (wheel above; Wan uses FlashAttention-2, FA3 is not installed),
+`diffusers==0.39.0`, `transformers==4.51.3`, `tokenizers==0.21.4`, `accelerate==1.15.0`,
+`opencv-python==4.11.0.86`, `numpy==1.26.4` (requirements.txt caps `numpy<2`), `eva-decord==0.6.1`,
+`librosa==0.11.0`, `peft==0.21.0`. Env size: ~7.2 GB. Weights: `Wan-AI/Wan2.2-TI2V-5B` at
+`weights/wan2.2-ti2v-5b` (32 GB: DiT shards, `models_t5_umt5-xxl-enc-bf16.pth`,
+`Wan2.2_VAE.pth`). Kernel launches set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+(without it the 24 GB card OOMs in the VAE decode; see verification-log, Task 7).
+
 ## What needs doing on a new machine
 
 1. **Create the conda environments** — `alayaworld`, `wbench-main`, `wbench-vp`,

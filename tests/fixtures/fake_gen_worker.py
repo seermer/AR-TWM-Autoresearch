@@ -22,6 +22,11 @@ backend's size check can be tested) and echoes --weights/--steps/--offload.
 
 With --precache or --cases it stands in for WorldModel's prompt precache and run_wbench.py
 instead (wbench mode, see wbench(): neither takes the bridge arguments).
+
+With --frames set it stands in for wan22_generate.py instead (wan mode, see wan(): a T2V or I2V
+item -- an image item has no "video"/"src" for the other modes' argparse-driven dispatch to key
+off, and only this bridge's argv carries --frames): it writes a 1280x704, 24 fps mp4 of --frames
+frames and echoes --repo/--ckpt-dir/--offload-model/--t5-cpu.
 """
 import argparse
 import json
@@ -105,6 +110,12 @@ parser.add_argument("--width", type=int)
 parser.add_argument("--height", type=int)
 parser.add_argument("--steps", type=int)
 parser.add_argument("--offload")
+parser.add_argument("--ckpt-dir")
+parser.add_argument("--frames", type=int)            # set: wan mode (stands in for wan22_generate.py)
+parser.add_argument("--offload-model", dest="offload_model", action="store_true", default=True)
+parser.add_argument("--no-offload-model", dest="offload_model", action="store_false")
+parser.add_argument("--t5-cpu", dest="t5_cpu", action="store_true", default=True)
+parser.add_argument("--no-t5-cpu", dest="t5_cpu", action="store_false")
 args, _ = parser.parse_known_args()
 
 
@@ -125,6 +136,19 @@ def annotate(item, status_path):
     status_path.write_text(json.dumps({"ok": True, "frames": n, "intrinsics": [500.0, 500.0, 368.0, 207.0],
                                        "rank": args.rank, "gpus": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
                                        "repo": args.repo, "checkpoint": args.checkpoint}))
+
+
+def wan(item, status_path):
+    """wan22_generate.py's contract without a model: a synthetic 1280x704 mp4 of --frames frames
+    at 24 fps (an image item is otherwise identical -- there is no real Wan resize to check here)."""
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i",
+                    f"testsrc=size=1280x704:rate=24", "-frames:v", str(args.frames), "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p", str(out / f"{item['index']}.mp4")], check=True)
+    status_path.write_text(json.dumps({"ok": True, "seconds": 0.01, "rank": args.rank,
+                                       "gpus": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
+                                       "repo": args.repo, "ckpt_dir": args.ckpt_dir, "frames": args.frames,
+                                       "offload_model": args.offload_model, "t5_cpu": args.t5_cpu,
+                                       "image": item.get("image")}))
 
 
 def image(item, status_path):
@@ -162,6 +186,9 @@ for item in mine:
         continue
     if args.weights is not None:
         image(item, status_path)
+        continue
+    if args.frames is not None:
+        wan(item, status_path)
         continue
     shutil.copy(item["src"], out / f"{index}.mp4")
     status_path.write_text(json.dumps({"ok": True, "rank": args.rank,

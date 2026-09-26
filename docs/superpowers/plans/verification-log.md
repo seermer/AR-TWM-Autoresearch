@@ -818,3 +818,58 @@ and ~600 s ar30 (the two items run in parallel, so these are also the per-job ti
 Content: dmd4 degrades in the last rounds (blown-out rocks, smears, a ghost figure); ar30 stays
 clean. event_edit / subject_action show up in both (red umbrella, cyclist, waving hiker; the
 snow and clouds events did not appear).
+
+## Plan 3 Task 7 — `rollout_wan22` (Wan2.2 TI2V-5B), 2026-09-26
+
+Env `.envs/gen-wan22` (prefix env, ~7.2 GB; `pip check` clean after swapping PyPI `decord` for
+`eva-decord`), Wan2.2 @ `1ea34ff48f87168174e12956e200b1d908b1c5ff`, flash_attn 2.8.3 prebuilt
+wheel (FA2). `/` had 47 GB free throughout (floor 15 GB). GPUs 0-3 were held by another user's
+vLLM for most of the task; the spike and smoke ran on GPUs 4/5 (24 GB cards, 23.6 GiB usable).
+
+### Step 2 — fit spike (CLI `generate.py`, 1280*704, 121 frames, 50 steps, seed 1)
+
+All runs with `--convert_model_dtype`; wall includes model load (~40-60 s).
+
+| run | flags | GPU | wall | peak nvidia-smi | peak host RSS | result |
+|---|---|---|---|---|---|---|
+| T2V | offload, t5_cpu, default allocator | 0 | 10:50 | — | 30.8 GiB | **OOM in VAE decode** (18.4 GiB allocated + 3.7 GiB fragmented) |
+| T2V | offload, t5_cpu, `expandable_segments` | 0 | 9:24 | 24161 MiB | 30.8 GiB | ok |
+| T2V | offload, **T5 on GPU**, expandable | 4 | 9:41 | 24159 MiB | 30.7 GiB | ok, not faster |
+| T2V | **no offload**, t5_cpu, expandable | 5 | 8:46 | 23383 MiB | 30.7 GiB | **OOM in VAE decode** (21.6 GiB allocated) |
+| I2V (portrait example 800x1088 image) | offload, t5_cpu, expandable | 0 | 9:05 | 24141 MiB | 30.8 GiB | ok, renders **800x1088** |
+| I2V (Z-Image 1280x720 frame) | offload, t5_cpu, expandable | 4 | 9:34 | 24141 MiB | 30.7 GiB | ok, renders **1248x704** |
+| I2V via bridge (same frame, fitted to 1280x704) | offload, t5_cpu, expandable | 5 | 9:59 | 24141 MiB | 30.7 GiB | ok, renders 1280x704; torch peak 22.86 GiB allocated / 23.06 reserved |
+
+(The first two T2V rows and the portrait I2V row are the first Task 7 implementer's runs; logs in
+`.cache/wan_fit/`.) Sampling is ~9.1 s/step on every setting, so the flags only move load and
+transfer time. Chosen: `offload_model: true, t5_cpu: true` plus `PYTORCH_CUDA_ALLOC_CONF=
+expandable_segments:True` (set by the backend). **No setting stays under the 22 GB target**: the
+VAE decode at 1280x704x121 peaks at ~22.9 GiB allocated, i.e. the whole 24 GB card with ~0.05 GiB
+to spare.
+
+Crop: `WanTI2V.i2v` keeps the input image's aspect (`best_output_size`), so a 1280x720 frame
+renders at 1248x704, not 1280x704. The bridge therefore center-crops and resizes every first frame
+to exactly 1280x704 (`fit_first_frame`), after which every clip is 1280x704 and `finish()` crops
+16 px from each side to 1248x704.
+
+### Step 5 — GPU smoke (`AR_TEST_GPUS=4,5`, 2 workers, 2 items each; 0-3 were not available to us)
+
+Two generate_images (Z-Image) frames (barn, coffee cup; 1280x720) feed the two I2V items.
+
+- Run 1: items 0-1 (T2V, first per worker) ok; items 2-3 (second per worker) **OOM**: the
+  previous clip's decoded tensor (fp32, 1.3 GB on the GPU) was still referenced during the next
+  item. Fix: the bridge drops it and calls `gc.collect(); torch.cuda.empty_cache()` after each item.
+- Run 2 (with the fix): **all 4 items ok**, each 1248x704, 24 fps, 121 frames, h264 yuv420p;
+  per-clip generation 519 / 522 / 533 / 534 s (T2V, T2V, I2V, I2V; the I2V items were second on
+  their worker); peak 22.81 GiB allocated (T2V), 22.16 GiB (I2V); `gpu_memory_released: true`
+  (15/15 MiB before and after). **All four ingest as `video_caption_static`.**
+- Run 2's `annotate_camera` leg never ran: the test shut the job queue down before submitting
+  the annotate job (a test bug, fixed: the queue now stays up to the end).
+- Run 3 (GPUs 4/5 again, after the other user released them): **passed**. Wan job 1110 s wall;
+  per clip 513 / 515 / 530 / 530 s; same peaks; all four `video_caption_static`; item 0 through
+  `annotate_camera` then `moving` ingests as `video_caption_camera`; `gpu_memory_released: true`,
+  nvidia-smi back to 15 MiB on 4/5 after the test. **Still owed: a 4-GPU run** (one worker per GPU).
+
+Content: forest path with a distant walker, slow forward drift (T2V); sunset beach with waves
+rolling in (T2V); the barn and the coffee cup (I2V) stay nearly frozen on their first frames
+(no visible cloud or steam) — good `static` material, little motion.

@@ -1,5 +1,7 @@
 """rollout_alayaworld: case/config writers, submit checks, finish (CPU), the real produce with a
-fake worker, plus one real AlayaWorld gpu smoke per variant."""
+fake worker, plus one real AlayaWorld gpu smoke per variant. Also rollout_wan22 (Wan2.2 TI2V-5B):
+submit checks, finish (crop/probe, CPU), the real produce with a fake worker, plus one real Wan
+gpu smoke."""
 import copy
 import json
 import threading
@@ -11,12 +13,13 @@ import yaml
 from PIL import Image
 
 from ar_kernel.config import KernelConfig
+from ar_kernel.data.probe import probe_video
 from ar_kernel.subproc import run_in_env
 from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools import rollouts
 from ar_kernel.tools.context import TokenRegistry
 from ar_kernel.tools.jobs import JobQueue
-from ar_kernel.tools.rollouts import AlayaWorldBackend, case_json, render_config
+from ar_kernel.tools.rollouts import AlayaWorldBackend, Wan22Backend, case_json, render_config
 from ar_kernel.tools.server import ToolError
 from tests.conftest import make_mp4
 
@@ -525,6 +528,7 @@ def test_real_alayaworld_rollout(tmp_path, variant):
         wall = time.monotonic() - t0
         assert out["state"] == "done", out.get("error")
         by = {i["index"]: i for i in out["result"]["items"]}
+        print(json.dumps({"wan_wall_s": round(wall, 1), "items": by}, indent=1))
         assert all("candidate" in by[i] for i in (0, 1)), by
         cands = [by[i]["candidate"] for i in (0, 1)]
         ann = _wait(q, caller, q.backends["annotate_camera"].submit(
@@ -571,3 +575,295 @@ def test_real_alayaworld_rollout(tmp_path, variant):
                       "gpu_memory_mib": out["result"]["gpu_memory_mib"], "rows": rows}, indent=1))
     assert out["result"]["gpu_memory_released"] is True
     assert not failures, failures
+
+
+# ---- Wan22Backend (rollout_wan22, Plan 3 Task 7) ----
+
+def small_wan_cfg(env="autoresearcher", enabled=True, **over):
+    raw = copy.deepcopy(REAL.raw)
+    w = raw["generators"]["wan22"]
+    w["env"] = env
+    w["variants"] = {"ti2v-5b": {"enabled": enabled}}
+    w.update(over)
+    return KernelConfig(raw=raw, repo_root=REAL.repo_root)
+
+
+@pytest.fixture
+def wan_env(tmp_path, monkeypatch):
+    """The real Wan22Backend.produce/run_workers, with wan22_generate.py swapped for the fake
+    worker (wan mode: it writes a synthetic 1280x704, --frames-frame mp4 and echoes the argv)."""
+    monkeypatch.setattr(rollouts, "WAN22_BRIDGE", FAKE)
+    rec = Recorder(tmp_path / "run")
+    reg = TokenRegistry(rec)
+    q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
+    ws, staging = tmp_path / "ws", tmp_path / "staging"
+    ws.mkdir(); staging.mkdir()
+    Image.new("RGB", (640, 360), (10, 20, 30)).save(ws / "frame.png")
+    q.register(Wan22Backend(small_wan_cfg(), tmp_path / "run", [0, 1, 4, 5], reg, rec,
+                            gpu_memory=lambda g: {i: 100 for i in g}))
+    caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
+    yield q, caller, staging
+    q.shutdown()
+
+
+def run_wan(q, caller, items, **params):
+    out = q.wait(caller, q.backends["rollout_wan22"].submit(q, caller, {"items": items, **params})["job_id"], 120)
+    assert out["state"] == "done", out
+    return out["id"], {i["index"]: i for i in out["result"]["items"]}
+
+
+@pytest.mark.parametrize("frames, match", [
+    (120, r"4k\+1"), (1, "1 < frames"), (2, r"4k\+1"), (10000, "1 < frames"), ("x", "1 < frames")])
+def test_wan_bad_frames_are_refused_at_submit(wan_env, frames, match):
+    q, caller, _ = wan_env
+    with pytest.raises(ToolError, match=match):
+        q.backends["rollout_wan22"].submit(q, caller, {"items": [{"prompt": "p", "seed": 1}], "frames": frames})
+
+
+def test_wan_missing_prompt_is_refused_at_submit(wan_env):
+    q, caller, _ = wan_env
+    with pytest.raises(ToolError, match="prompt"):
+        q.backends["rollout_wan22"].submit(q, caller, {"items": [{"seed": 1}]})
+
+
+def test_wan_missing_seed_is_refused_at_submit(wan_env):
+    q, caller, _ = wan_env
+    with pytest.raises(ToolError, match="seed"):
+        q.backends["rollout_wan22"].submit(q, caller, {"items": [{"prompt": "p"}]})
+
+
+def test_wan_image_must_be_a_path(wan_env):
+    q, caller, _ = wan_env
+    with pytest.raises(ToolError, match="image"):
+        q.backends["rollout_wan22"].submit(q, caller, {"items": [{"prompt": "p", "seed": 1, "image": 3}]})
+
+
+def test_wan_limits_come_from_the_generator_config_block(tmp_path):
+    rec = Recorder(tmp_path / "run")
+    b = Wan22Backend(REAL, tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
+    w = REAL.get("generators.wan22")
+    assert (b.max_items, b.timeout_s) == (w["max_items"], w["timeout_s"])
+
+
+def test_wan_produces_and_publishes_a_cropped_candidate_with_no_pose_or_camera_motion(wan_env):
+    q, caller, staging = wan_env
+    prompts = ["a walk in the woods", "a hiker on a ridge"]
+    job, by = run_wan(q, caller, [{"prompt": prompts[0], "seed": 1},
+                                  {"prompt": prompts[1], "image": "frame.png", "seed": 2}])
+    for i, item in by.items():
+        c = item["candidate"]
+        assert c["video"] == f"/workspace/staging/rollouts/{job}/{i}.mp4"
+        assert c["caption"] == f"/workspace/staging/rollouts/{job}/{i}.json"
+        assert "pose" not in c and "camera_motion" not in c
+        assert c["provenance"]["generator"] == "wan2.2-ti2v-5b" and c["provenance"]["seed"] == i + 1
+        assert c["license"] == REAL.get("generators.wan22.license")
+        info = probe_video(staging / "rollouts" / job / f"{i}.mp4")
+        assert (info.width, info.height) == (1248, 704) and round(info.fps) == 24
+        cap = json.loads((staging / "rollouts" / job / f"{i}.json").read_text())
+        assert cap == {"caption": prompts[i]}
+    assert by[1]["worker"]["image"].endswith("_image.png")     # the staged copy, not the workspace path
+    assert by[0]["worker"]["image"] is None
+
+
+def test_wan_frames_default_and_max_come_from_config(wan_env):
+    q, caller, staging = wan_env
+    default, maximum = REAL.get("generators.wan22.frames")
+    job, by = run_wan(q, caller, [{"prompt": "p", "seed": 1}])
+    assert by[0]["worker"]["frames"] == default
+    job, by = run_wan(q, caller, [{"prompt": "p", "seed": 1}], frames=maximum)
+    assert by[0]["worker"]["frames"] == maximum
+
+
+def test_wan_workers_get_one_gpu_each_from_the_configured_repo_and_weights(wan_env):
+    q, caller, staging = wan_env
+    _, by = run_wan(q, caller, [{"prompt": "p", "seed": i} for i in range(5)])
+    for i, item in by.items():
+        assert item["worker"]["gpus"] == str([0, 1, 4, 5][i % 4]) and item["worker"]["rank"] == i % 4
+        assert item["worker"]["repo"] == str(REAL.repo_root / REAL.get("generators.wan22.repo"))
+        assert item["worker"]["ckpt_dir"] == str(REAL.repo_root / REAL.get("generators.wan22.weights"))
+        assert item["worker"]["offload_model"] is True and item["worker"]["t5_cpu"] is True
+
+
+def test_wan_extra_args_can_disable_offload_and_t5_cpu(tmp_path, monkeypatch):
+    monkeypatch.setattr(rollouts, "WAN22_BRIDGE", FAKE)
+    rec = Recorder(tmp_path / "run")
+    reg = TokenRegistry(rec)
+    q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
+    ws, staging = tmp_path / "ws", tmp_path / "staging"
+    ws.mkdir(); staging.mkdir()
+    cfg = small_wan_cfg(extra_args={"offload_model": False, "t5_cpu": False})
+    q.register(Wan22Backend(cfg, tmp_path / "run", [0, 1, 2, 3], reg, rec, gpu_memory=lambda g: {i: 100 for i in g}))
+    caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
+    try:
+        _, by = run_wan(q, caller, [{"prompt": "p", "seed": 1}])
+    finally:
+        q.shutdown()
+    assert by[0]["worker"]["offload_model"] is False and by[0]["worker"]["t5_cpu"] is False
+
+
+def test_wan_build_gpu_backends_includes_it_only_when_a_variant_is_enabled(tmp_path):
+    from ar_kernel.tools.gpu_jobs import build_gpu_backends
+    rec = Recorder(tmp_path / "run")
+    for enabled, present in ((True, True), (False, False)):
+        names = [b.name for b in build_gpu_backends(small_wan_cfg(enabled=enabled), tmp_path / "run",
+                                                     [0, 1, 2, 3], TokenRegistry(rec), rec)]
+        assert ("rollout_wan22" in names) is present
+
+
+@pytest.mark.parametrize("pin", ["0" * 40, None])
+def test_wan_refuses_to_run_off_the_pinned_commit(tmp_path, monkeypatch, pin):
+    """The backend's own git check, not the worker's: produce() must raise before any worker
+    launches, so a silently-updated clone (or a config with no pin) fails the whole job."""
+    monkeypatch.setattr(rollouts, "WAN22_BRIDGE", FAKE)
+    rec = Recorder(tmp_path / "run")
+    reg = TokenRegistry(rec)
+    q = JobQueue(rec, threading.Lock(), wait_cap_s=60)
+    ws, staging = tmp_path / "ws", tmp_path / "staging"
+    ws.mkdir(); staging.mkdir()
+    cfg = small_wan_cfg(repo=".", commit=pin)     # repo_root itself is a real git repo
+    q.register(Wan22Backend(cfg, tmp_path / "run", [0, 1, 2, 3], reg, rec, gpu_memory=lambda g: {i: 100 for i in g}))
+    caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
+    try:
+        job_id = q.backends["rollout_wan22"].submit(q, caller, {"items": [{"prompt": "p", "seed": 1}]})["job_id"]
+        out = q.wait(caller, job_id, 60)
+    finally:
+        q.shutdown()
+    assert out["state"] == "failed" and "commit" in out["error"] and str(pin) in out["error"]
+
+
+def _wan_backend(tmp_path, **over):
+    rec = Recorder(tmp_path / "run")
+    return Wan22Backend(small_wan_cfg(**over), tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
+
+
+def test_finish_refuses_a_non_24fps_render(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    make_mp4(out / "0.mp4", seconds=2, fps=30, width=1280, height=704)
+    with pytest.raises(ValueError, match="fps"):
+        _wan_backend(tmp_path).finish(None, {"index": 0, "prompt": "p"}, out)
+
+
+def test_finish_refuses_a_render_off_the_1280x704_working_size(tmp_path):
+    """A far-from-16:9 'image' makes Wan render at a different resolution (measured: WanTI2V.i2v
+    keeps the image's own aspect, not 1280x704) -- finish() must turn that into a clear item error,
+    not a broken or silently-wrong crop."""
+    out = tmp_path / "out"
+    out.mkdir()
+    make_mp4(out / "0.mp4", seconds=2, fps=24, width=800, height=1088)
+    with pytest.raises(ValueError, match="1280x704"):
+        _wan_backend(tmp_path).finish(None, {"index": 0, "prompt": "p"}, out)
+
+
+def test_finish_crops_to_1248x704_and_writes_the_prompt_caption(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    make_mp4(out / "0.mp4", seconds=2, fps=24, width=1280, height=704)
+    res = _wan_backend(tmp_path).finish(None, {"index": 0, "prompt": "hello there"}, out)
+    info = probe_video(res["video"])
+    assert (info.width, info.height) == (1248, 704) and round(info.fps) == 24
+    assert res["frames"] == info.frames
+    assert json.loads(Path(res["caption"]).read_text()) == {"caption": "hello there"}
+
+
+# ---- real Wan 2.2 TI2V-5B gpu smoke (spec 16.3 item 5) ----
+
+@pytest.mark.gpu
+def test_real_wan22_rollout(tmp_path):
+    """AR_TEST_GPUS=0,1,2,3 pytest tests/test_rollouts.py -m gpu -k wan22 -s --basetemp=.cache/pytest/gpu
+
+    2 T2V + 2 I2V items, one worker per GPU in AR_TEST_GPUS (frames = the configured default). The I2V
+    item's image is a generate_images (Z-Image) frame -- the tools chain. Each candidate then
+    ingests as video_caption_static (camera_motion: static), and one of them, after
+    annotate_camera, ingests as video_caption_camera (camera_motion: moving)."""
+    import os
+    import shutil
+    import time
+    from ar_kernel.archive.db import open_db
+    from ar_kernel.data.ingest import Candidate, Ingestor
+    from ar_kernel.tools.annotate import AnnotateBackend
+    from ar_kernel.tools.images import ImageBackend
+
+    gpus = [int(g) for g in os.environ.get("AR_TEST_GPUS", "0,1,2,3").split(",")]   # one worker per GPU
+    raw = copy.deepcopy(REAL.raw)
+    raw["generators"]["wan22"]["variants"]["ti2v-5b"] = {"enabled": True}
+    cfg = KernelConfig(raw=raw, repo_root=REAL.repo_root)
+    run_dir, ws = tmp_path / "run", tmp_path / "ws"
+    staging = run_dir / "staging"
+    ws.mkdir(parents=True); staging.mkdir(parents=True)
+    rec = Recorder(run_dir)
+    reg = TokenRegistry(rec)
+    q = JobQueue(rec, threading.Lock(), wait_cap_s=3600)
+    for b in (ImageBackend, Wan22Backend, AnnotateBackend):
+        q.register(b(cfg, run_dir, gpus, reg, rec))
+    caller = reg.issue(node="gpu", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
+    host = lambda p: staging / Path(p).relative_to("/workspace/staging")
+    try:
+        img = _wait(q, caller, q.backends["generate_images"].submit(
+            q, caller, {"items": [{"prompt": "a red barn in an open field, photorealistic", "seed": 9},
+                                  {"prompt": "a cup of coffee on a wooden table, photorealistic", "seed": 10}]})["job_id"])
+        assert img["state"] == "done", img.get("error")
+        frames = [i["image"] for i in img["result"]["items"]]
+        items = [
+            {"prompt": "A slow walk through a sunlit forest path, camera steady.", "seed": 1},
+            {"prompt": "Ocean waves gently rolling onto a quiet beach at sunset.", "seed": 2},
+            {"prompt": "The red barn under a slowly moving cloud, camera steady.", "image": frames[0], "seed": 3},
+            {"prompt": "A cup of coffee steaming on a wooden table, camera steady.", "image": frames[1], "seed": 4},
+        ]
+        t0 = time.monotonic()
+        out = _wait(q, caller, q.backends["rollout_wan22"].submit(q, caller, {"items": items})["job_id"])
+        wall = time.monotonic() - t0
+        assert out["state"] == "done", out.get("error")
+        by = {i["index"]: i for i in out["result"]["items"]}
+        print(json.dumps({"wan_wall_s": round(wall, 1), "items": by}, indent=1))
+        assert all("candidate" in by[i] for i in range(4)), by
+        cands = [by[i]["candidate"] for i in range(4)]
+        ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
+        static_rows, failures = [], []
+        for i, c in enumerate(cands):
+            stage = staging / "ingest" / f"static{i}"
+            stage.mkdir(parents=True)
+            shutil.copy(host(c["video"]), stage / "v.mp4")
+            shutil.copy(host(c["caption"]), stage / "c.json")
+            [res] = ing.ingest([Candidate(video=stage / "v.mp4", caption=stage / "c.json", pose=None,
+                                          camera_motion="static", provenance=c["provenance"],
+                                          license=c["license"])], node_id="gpu")
+            static_rows.append({"item": i, "frames": c["frames"], "worker": by[i]["worker"],
+                                "accepted": res.accepted, "formats": res.formats, "reasons": res.reasons})
+            if not (res.accepted and "video_caption_static" in res.formats):
+                failures.append(f"static {i}: {res.reasons}")
+        # one candidate through annotate_camera -> moving -> video_caption_camera
+        ann = _wait(q, caller, q.backends["annotate_camera"].submit(
+            q, caller, {"items": [{"video": cands[0]["video"]}]})["job_id"])
+        assert ann["state"] == "done", ann.get("error")
+        a = ann["result"]["items"][0]
+        assert "error" not in a, a
+        stage = staging / "ingest" / "moving0"
+        stage.mkdir(parents=True)
+        shutil.copy(host(cands[0]["video"]), stage / "v.mp4")
+        shutil.copy(host(cands[0]["caption"]), stage / "c.json")
+        shutil.copy(host(a["pose"]), stage / "p.npz")
+        [mres] = ing.ingest([Candidate(video=stage / "v.mp4", caption=stage / "c.json", pose=stage / "p.npz",
+                                       camera_motion="moving", provenance=cands[0]["provenance"],
+                                       license=cands[0]["license"])], node_id="gpu")
+        if not (mres.accepted and "video_caption_camera" in mres.formats):
+            failures.append(f"moving 0: {mres.reasons}")
+        print(json.dumps({"gpus": gpus, "wall_s": round(wall, 1), "gpu_memory_mib": out["result"]["gpu_memory_mib"],
+                          "static_rows": static_rows, "moving_formats": mres.formats}, indent=1))
+    finally:
+        q.shutdown()
+    assert out["result"]["gpu_memory_released"] is True
+    assert not failures, failures
+
+
+@pytest.mark.parametrize("size", [(1280, 720), (800, 1088), (640, 360), (1280, 704)])
+def test_wan_bridge_fits_any_first_frame_to_1280x704(size):
+    """WanTI2V.i2v keeps the input image's own aspect (best_output_size): a 1280x720 frame would
+    render at 1248x704 and a portrait one at 800x1088. The bridge center-crops/resizes every first
+    frame to exactly 1280x704 first, so Wan's own resize is the identity and every clip is 1280x704."""
+    from ar_kernel.bridges.wan22_generate import fit_first_frame
+    img = Image.new("RGB", size, (200, 10, 10))
+    img.paste((10, 200, 10), (size[0] // 2 - 4, size[1] // 2 - 4, size[0] // 2 + 4, size[1] // 2 + 4))
+    fitted = fit_first_frame(img)
+    assert fitted.size == (1280, 704)
+    assert fitted.getpixel((640, 352))[1] > 150       # centered: the center marker stays at the center

@@ -19,11 +19,13 @@ import numpy as np
 import yaml
 from PIL import Image
 
-from ..data.probe import probe_video
+from ..data.probe import aspect_ok, probe_video
 from .captioner import _free_port
-from .gpu_jobs import GpuJob
+from .gpu_jobs import GpuJob, split_gpus
 from .jobs import run_cancellable
 from .server import ToolError
+
+WAN22_BRIDGE = Path(__file__).resolve().parents[1] / "bridges" / "wan22_generate.py"
 
 # The launches, as argv after "python" (run in the generator env, cwd WorldModel). The tests
 # swap both for the fake worker.
@@ -289,3 +291,95 @@ class AlayaWorldBackend(GpuJob):
         turns = [{**t, "frame_count": t["frame_end_exclusive"] - t["frame_start"]} for t in turns]
         return {"video": trimmed, "caption": caption, "pose": pose, "camera_motion": "moving",
                 "frames": n, "trim": trim, "actions": sidecar["actions"], "turn_segments": turns}
+
+
+class Wan22Backend(GpuJob):
+    """rollout_wan22 (spec 10, Plan 3 Task 7): training clips from Wan2.2 TI2V-5B, the official
+    code in its own env (docs/PORTABILITY.md). Text-to-video, or image-to-video when the item
+    carries a first frame (the bridge fits it to 1280x704). Every render is 1280x704; the published
+    clip is center-cropped to 1248x704 and carries no pose/camera_motion: the agent adds one
+    (annotate_camera then 'moving', or 'static'), like a clip it shot itself."""
+    name = tool = "rollout_wan22"
+    kind = "rollout"
+    generator = "wan2.2-ti2v-5b"
+    config_key = "generators.wan22"      # max_items / timeout_s
+    file_keys = ("image",)
+    description = (
+        "Render training clips with Wan 2.2 TI2V-5B (text-to-video, or image-to-video when an "
+        "item carries a first frame). A GPU job: returns {job_id} at once; collect with job_wait. "
+        "`frames`: 4k+1, at most the configured max (default: the configured default; one value "
+        "for the whole job). Item: {'prompt': str, 'image'?: first frame under /workspace (any "
+        "size; center-cropped to 16:9, e.g. a generate_images frame), 'seed': int}. Each result "
+        "item gives a `candidate` for data_ingest "
+        "(a 1248x704, 24 fps mp4 center-cropped from Wan's 1280x704, caption, provenance); it "
+        "carries no pose/camera_motion -- add one (annotate_camera then 'moving', or 'static') "
+        "before ingesting. Batch many prompts per call.")
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.block = self.cfg.get(self.config_key) or {}
+        self.license = self.block.get("license", "")
+
+    def check_args(self, args):
+        default, maximum = self.block["frames"]
+        frames = args.get("frames", default)
+        if not (isinstance(frames, int) and not isinstance(frames, bool)
+                and 1 < frames <= maximum and frames % 4 == 1):
+            raise ToolError(f"frames must be 4k+1 with 1 < frames <= {maximum}: got {frames!r}")
+        args["frames"] = frames
+        for n, item in enumerate(args["items"]):
+            if not isinstance(item.get("prompt"), str) or not item["prompt"].strip():
+                raise ToolError(f"item {n}: prompt must be a non-empty string")
+            if item.get("image") is not None and not isinstance(item["image"], str):
+                raise ToolError(f"item {n}: image must be a file path")
+            if not isinstance(item.get("seed"), int) or isinstance(item.get("seed"), bool):
+                raise ToolError(f"item {n}: seed must be an int")
+
+    def _checked_repo(self) -> Path:
+        """The pinned Wan2.2 checkout: refuses to run against a clone that has moved off the
+        commit configs/kernel.yaml pins (generators.wan22.commit), so a silent `git pull` there
+        cannot change what this backend renders without a new review."""
+        repo = self.cfg.repo_root / self.block["repo"]
+        pinned = self.block.get("commit")
+        head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        if head != pinned:
+            raise RuntimeError(f"{repo} is at commit {head}, but generators.wan22.commit pins "
+                               f"{pinned}; re-clone the pinned commit or update the pin")
+        return repo
+
+    def produce(self, job, items, work, out, cancel, report):
+        repo = self._checked_repo()
+        ckpt = self.cfg.repo_root / self.block["weights"]
+        extra = self.block.get("extra_args") or {}
+        offload = "--offload-model" if extra.get("offload_model", True) else "--no-offload-model"
+        t5_cpu = "--t5-cpu" if extra.get("t5_cpu", True) else "--no-t5-cpu"
+        groups = split_gpus(self.gpus, int(self.block.get("gpus_per_worker", 1)), self.block.get("workers"))
+        return self.run_workers(self.block["env"], lambda r, w: [
+            "python", str(WAN22_BRIDGE), "--items", str(work / "items.json"), "--out", str(out),
+            "--rank", str(r), "--world", str(w), "--repo", str(repo), "--ckpt-dir", str(ckpt),
+            "--frames", str(job.args["frames"]), offload, t5_cpu], groups,
+            job=job, work=work, out=out, total=len(items), cancel=cancel, report=report,
+            cwd=self.cfg.repo_root,
+            # the fit spike (Task 7) OOM'd at VAE decode with the default caching allocator even
+            # though sampling itself stayed under budget (fragmentation, not a real shortage --
+            # PyTorch's own OOM message suggests exactly this flag).
+            extra_env={"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
+
+    def finish(self, job, item, out):
+        rendered = out / f"{item['index']}.mp4"
+        raw = probe_video(rendered)
+        if (raw.width, raw.height) != (1280, 704):     # the bridge fits every first frame to this
+            raise ValueError(f"rendered clip is {raw.width}x{raw.height}, not 1280x704")
+        cropped = out / f"{item['index']}.cropped.mp4"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(rendered), "-vf",
+                        "crop=1248:704:16:0", "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p",
+                        "-an", str(cropped)], check=True)
+        info = probe_video(cropped)
+        if round(info.fps) != 24:
+            raise ValueError(f"published clip is {info.fps} fps, not 24")
+        if not aspect_ok(info, 0.02):
+            raise ValueError(f"published clip's aspect {info.display_aspect:.4f} is not within "
+                             f"2% of 16:9 ({info.width}x{info.height})")
+        caption = self.write_caption(out, item, {"caption": item["prompt"]})
+        return {"video": cropped, "caption": caption, "frames": info.frames}

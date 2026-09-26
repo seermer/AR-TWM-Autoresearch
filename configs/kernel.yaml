@@ -96,14 +96,17 @@ generators:                       # rollout_* GPU jobs; a variant is enabled onl
     timeout_s: 43200
     license: LTX-2 Community License (AlayaWorld is an LTX-2 derivative)
   wan22:
-    env: gen-wan22
-    repo: third_party/Wan2.2      # relative to the AutoResearcher repo
+    env: .envs/gen-wan22           # a conda-prefix env inside the repo (disk budget; see docs/PORTABILITY.md)
+    repo: third_party/Wan2.2      # relative to the AutoResearcher repo; gitignored, cloned per docs/PORTABILITY.md
+    commit: 1ea34ff48f87168174e12956e200b1d908b1c5ff   # pinned; the backend refuses to run off this commit
     weights: weights/wan2.2-ti2v-5b
-    variants: {ti2v-5b: {enabled: false}}
+    variants: {ti2v-5b: {enabled: true}}   # Task 7 smoke: 2 T2V + 2 I2V pass ingest (verification-log)
     gpus_per_worker: 1
     workers: null                 # null = as many as the GPU list allows
     frames: [121, 121]            # [default, max]; 4k+1
-    extra_args: {}                # set by Task 7 from the fit measurements
+    # Task 7 fit spike (1280x704, 121 frames, 50 steps, 24 GB card): no-offload OOMs in the VAE
+    # decode; T5 on GPU is no faster (9:41 vs 9:24 wall). Peak 22.9 GiB allocated: the whole card.
+    extra_args: {offload_model: true, t5_cpu: true}
     max_items: 16
     timeout_s: 43200
     license: Apache-2.0
