@@ -170,7 +170,8 @@ class GpuJob:
         extra = {k: v for k, v in files.items() if k not in ("video", "caption", "pose")}
         worker = {k: v for k, v in status.items() if k != "ok"}
         if self.kind == "annotation":
-            return {"index": index, **published, **extra, "worker": worker}
+            return {"index": index, "video": job.args["items"][index]["video"], **published, **extra,
+                    "worker": worker}
         params = {k: v for k, v in job.args.items() if k != "items"}
         spec = {k: v for k, v in item.items() if k not in (*self.file_keys, "index", "hashes")}
         inputs_hash = canonical_hash({"generator": self.generator_name(job), "params": params,
@@ -294,6 +295,11 @@ def register_gpu_tools(mcp, kit, q) -> None:
 
 def build_gpu_backends(cfg, run_dir: Path, gpus: list[int], registry, recorder) -> list:
     """The enabled GPU-job backends for this run's `annotate`/`generators` config (spec 10).
-    Empty until Tasks 4-8 add `AnnotateBackend`, `ImageBackend`, `AlayaWorldBackend`,
-    `Wan22Backend` and `Ltx25Backend`, each only when its config says enabled."""
-    return []
+    Tasks 5-8 add `ImageBackend`, `AlayaWorldBackend`, `Wan22Backend` and `Ltx25Backend`,
+    each only when its config says enabled."""
+    from .annotate import AnnotateBackend          # imports this module
+
+    backends = []
+    if cfg.get("annotate.enabled"):
+        backends.append(AnnotateBackend(cfg, run_dir, gpus, registry, recorder))
+    return backends

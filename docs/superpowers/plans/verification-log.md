@@ -629,3 +629,39 @@ GPUs 2 and 3 were busy with another user's jobs), two staged copies of
 During this task's doc sync, one text-substitution script was run with the system
 `python3` instead of the conda env (a rule breach; it only edited the plan Markdown and was
 re-checked). All later scripts and every test ran in the `autoresearcher` env.
+
+## Plan 3 — annotate_camera (ViGeo)
+
+Real-GPU gate (`AR_TEST_GPUS=2,3,4,5 pytest tests/test_annotate.py -m gpu -s`; GPUs 0 and 1
+were running another user's vLLM job): ViGeo 1.1 (`third_party/ViGeo/checkpoints/ViGeo1.1`)
+in `alayaworld`, one worker per GPU, all six `WorldModel/data/examples/video_caption_camera`
+clips (1280x720, 360-450 frames) in one job: PASSED in 210 s wall.
+
+| clip | frames | rot err (median, deg) | ATE / GT path | fx, fy err | s/clip | peak MiB |
+|---|---|---|---|---|---|---|
+| clip_0001 | 450 | 0.017 | 1.8 % | +11.0 %, +9.2 % | 64.2 | 18,275 |
+| clip_0002 | 449 | 0.024 | 3.3 % | +8.1 %, +6.4 % | 62.7 | 18,292 |
+| clip_0003 | 441 | 0.032 | 1.0 % | +11.0 %, +9.2 % | 62.4 | 18,291 |
+| clip_0004 | 450 | 0.047 | 2.4 % | +11.2 %, +9.4 % | 64.1 | 18,257 |
+| clip_0005 | 360 | 0.058 | 7.6 % | -6.6 %, -8.0 % | 48.3 | 18,292 |
+| clip_0006 | 450 | 0.060 | 1.8 % | -1.9 %, -3.5 % | 59.0 | 18,292 |
+
+Gates: (a) every published npz passes the kernel ingest checker as `video_caption_camera`
+with the example caption; (b) median |step-angle difference| < 1 deg; (c) Sim(3)-aligned ATE <
+10 % of the GT path; (d) fx, fy within 15 %. GPU memory after the job equalled the pre-job
+level on all four GPUs (`gpu_memory_released: true`). The ground truth moves little per frame
+(median GT step 0.02-0.04 deg), so (b) is a weak test; the standard relative-rotation error
+(angle of dR_pred^T dR_gt) was also 0.03-0.10 deg.
+
+Two settings were chosen from measurements on these same clips (a risk of fitting to them):
+- **KV-cache budget 786432** (3x WorldModel's `vigeo_cache_budget`). ATE on clip_0005 was
+  26.7 % / 13.9 % / 7.6 % at 262144 / 524288 / 786432; the rest stayed < 7 % at every budget.
+  1M tokens and the unbounded cache OOM on a 24 GB 4090. clip_0005 contains a cross-dissolve
+  between two different shots (frames ~172-205), across which the GT path stays smooth; it
+  has no single true trajectory.
+- **Focal from the first 16-frame chunk**, not the median over all frames. In chunk mode the
+  per-frame focal drifts as the cache is evicted: on clip_0004 (GT fx 793) it rises 881 ->
+  1140 px over the clip, and the all-frame median gave +27.6 % (fails (d)); the first chunk,
+  which ViGeo sees with full attention, gives +11.2 %. Other options measured: 16 frames
+  strided over the clip, run offline, gave +4.4 % on clip_0004 but -21.8 % on clip_0005
+  (it mixes the two shots).

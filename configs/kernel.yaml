@@ -66,7 +66,7 @@ timeouts:                        # soft timeouts (spec 14.5); Plan 2 enforces th
   contract_import_s: 60
   contract_smoke_s: 900
 annotate:                         # annotate_camera GPU job (spec 10, 16.3 item 6)
-  enabled: false                  # Task 4 enables it once ViGeo passes on the example clips
+  enabled: true                   # ViGeo verified on the example clips (Plan 3 Task 4)
   env: alayaworld
   repo: third_party/ViGeo         # relative to paths.worldmodel
   checkpoint: third_party/ViGeo/checkpoints/ViGeo1.1
