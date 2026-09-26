@@ -159,16 +159,18 @@ class GpuJob:
                 return {"index": index, "error": status.get("error", "failed")}
             files = self.finish(job, item, out)
             published = {}
-            for role in ("video", "caption", "pose", "image"):
+            for role in ("video", "caption", "pose", "image", "commanded_camera"):
                 if files.get(role):
                     src = Path(files[role])
-                    rel = f"{self.kind}s/{job.id}/{index}{src.suffix}"
+                    # metadata files get their role in the name, so they never pass for a pose
+                    name = "" if role in ("video", "caption", "pose", "image") else f".{role}"
+                    rel = f"{self.kind}s/{job.id}/{index}{name}{src.suffix}"
                     _move_into(src, caller.staging_host, rel)
                     published[role] = str(STAGING / rel)
         except Exception as exc:            # noqa: BLE001 -- a bad/truncated status or a finish()
             # bug must be this item's error, not a job failure that orphans the others.
             return {"index": index, "error": f"{type(exc).__name__}: {exc}"}
-        extra = {k: v for k, v in files.items() if k not in ("video", "caption", "pose")}
+        extra = {k: v for k, v in files.items() if k not in ("video", "caption", "pose", "commanded_camera")}
         worker = {k: v for k, v in status.items() if k != "ok"}
         if self.kind == "annotation":
             return {"index": index, "video": job.args["items"][index]["video"], **published, **extra,
@@ -197,11 +199,13 @@ class GpuJob:
     # ---- workers ----
     def run_workers(self, env: str, argv_for: Callable[[int, int], list[str]], groups: list[list[int]], *,
                     job, work: Path, out: Path, total: int, cancel, report, cwd: Path | None = None,
-                    extra_env: dict | None = None) -> tuple[list[int | str], dict[int, str]]:
+                    extra_env: dict | None = None,
+                    deadline: float | None = None) -> tuple[list[int | str], dict[int, str]]:
         """One worker per GPU group, in parallel; each handles items with index % world == rank.
         A cancel kills every worker's process group, and so does this backend's own `timeout_s`
         (the deadline is checked in the polling loop, and once passed acts on the workers exactly
-        like an external cancel). An item whose worker died without writing its status becomes an
+        like an external cancel; `deadline`, a time.monotonic() value, replaces the one computed
+        from `timeout_s` when a backend spent part of that budget before its workers). An item whose worker died without writing its status becomes an
         item error carrying the worker's exit code (or "timeout after Ns") and log tail.
 
         Returns (codes, missing): `missing` maps such an item's index to that error message, for
@@ -213,7 +217,8 @@ class GpuJob:
             raise ValueError("run_workers: no GPU groups (check the GPU list, gpus_per_worker and workers)")
         indices = [item["index"] for item in json.loads((work / "items.json").read_text(encoding="utf-8"))]
         codes: list[int | str | None] = [None] * len(groups)
-        deadline = time.monotonic() + self.timeout_s if self.timeout_s else None
+        if deadline is None and self.timeout_s:
+            deadline = time.monotonic() + self.timeout_s
         timed_out = threading.Event()
         worker_cancel = cancel if deadline is None else \
             SimpleNamespace(is_set=lambda: cancel.is_set() or timed_out.is_set())

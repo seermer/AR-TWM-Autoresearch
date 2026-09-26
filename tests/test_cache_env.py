@@ -33,3 +33,12 @@ def test_children_get_cache_env_and_extra_env_wins(monkeypatch, tmp_path):
                       extra_env={"TORCH_HOME": str(tmp_path / "mine")})
     seen = json.loads(proc.stdout.strip().splitlines()[-1])
     assert seen == {"HF_HOME": str(tmp_path / "huggingface"), "TORCH_HOME": str(tmp_path / "mine")}
+
+
+def test_free_port_is_bindable():
+    import socket
+    from ar_kernel.subproc import free_port
+    port = free_port()
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", port))
+    assert 1024 <= port <= 65535

@@ -88,9 +88,10 @@ generators:                       # rollout_* GPU jobs; a variant is enabled onl
   alayaworld:
     env: alayaworld
     # dmd4 = configs/wbench_full.yaml as the eval renders; ar30 = the same without the DMD LoRA, 30 steps.
-    # Both stay disabled: their smoke (Plan 3 Task 6) failed the ViGeo pose gate -- the video does not
-    # make the commanded turns/orbits, so the published (commanded) poses misdescribe those rounds.
-    variants: {dmd4: {enabled: false}, ar30: {enabled: false}}
+    # Clips carry no pose (user decision 2026-09-26: the renders follow commanded turns/orbits only
+    # weakly); agents run annotate_camera for it. Enabled after the Task 6 fix-1 smoke: every clip
+    # ingested as per_chunk with its ViGeo pose.
+    variants: {dmd4: {enabled: true}, ar30: {enabled: true}}
     max_turns: 9
     max_items: 16
     timeout_s: 43200

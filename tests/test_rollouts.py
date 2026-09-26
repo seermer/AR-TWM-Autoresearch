@@ -281,7 +281,8 @@ def test_finish_puts_round_boundaries_on_the_grid(tmp_path, cpt, prompts, first,
     assert res["trim"] == trim and res["frames"] == frames - trim
     from ar_kernel.data.probe import probe_video
     assert probe_video(res["video"]).frames == frames - trim
-    with np.load(res["pose"]) as z:
+    assert "pose" not in res and "camera_motion" not in res      # commanded path is metadata only
+    with np.load(res["commanded_camera"]) as z:
         c2w = z["cam_c2w"]
     assert len(c2w) == frames - trim and np.allclose(c2w[0], np.eye(4))
     assert np.allclose(c2w[:, 0, 3], np.arange(frames - trim) * 0.02, atol=1e-5)   # saved[trim:], re-based
@@ -289,7 +290,7 @@ def test_finish_puts_round_boundaries_on_the_grid(tmp_path, cpt, prompts, first,
     assert cap["caption"] == prompts[0]
     assert [s["prompt"] for s in cap["segments"]] == prompts                     # one per turn, merged
     _check_boundaries(cap["segments"], frames - trim)
-    assert res["camera_motion"] == "moving" and res["actions"] == ["W"] * len(prompts)
+    assert res["actions"] == ["W"] * len(prompts)
     # turn_segments come back in published-clip frames, on the same grid
     starts = [t["frame_start"] for t in res["turn_segments"]]
     assert starts[0] == 0 and all((f - 25) % 32 == 0 for f in starts[1:])
@@ -334,8 +335,11 @@ def test_finished_candidate_passes_the_real_ingestor_as_per_chunk(tmp_path):
     out.mkdir(parents=True)
     _render_output(out, 0, rounds=6, cpt=3, prompts=["A forest trail.", "A forest trail. Rain starts."])
     res = _backend(tmp_path).finish(_job(rounds_per_turn=3), {"index": 0}, out)
+    # the agent's next step: annotate_camera gives a ViGeo-shaped pose, one per published frame
+    from tests.conftest import write_poses
+    pose = write_poses(out / "vigeo.npz", n_frames=res["frames"], width=960, height=544)
     ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
-    [r] = ing.ingest([Candidate(video=Path(res["video"]), caption=Path(res["caption"]), pose=Path(res["pose"]),
+    [r] = ing.ingest([Candidate(video=Path(res["video"]), caption=Path(res["caption"]), pose=pose,
                                 camera_motion="moving", provenance={"kind": "rollout", "generator": "alayaworld-dmd4",
                                 "job_id": "j1", "inputs_hash": "x", "seed": 42})], node_id="n1")
     assert r.accepted, r.reasons
@@ -357,12 +361,14 @@ def test_produce_renders_and_publishes_candidates(env):
         c = item["candidate"]
         assert c["video"] == f"/workspace/staging/rollouts/{job}/{i}.mp4"
         assert c["caption"] == f"/workspace/staging/rollouts/{job}/{i}.json"
-        assert c["pose"] == f"/workspace/staging/rollouts/{job}/{i}.npz"
-        assert c["camera_motion"] == "moving" and c["license"] == REAL.get("generators.alayaworld.license")
+        assert "pose" not in c and "camera_motion" not in c
+        assert c["commanded_camera"] == f"/workspace/staging/rollouts/{job}/{i}.commanded_camera.npz"
+        assert c["license"] == REAL.get("generators.alayaworld.license")
         assert c["provenance"]["generator"] == "alayaworld-dmd4" and c["provenance"]["seed"] == 5
         assert c["frames"] == 2 * 3 * 32 - 7
-        with np.load(staging / "rollouts" / job / f"{i}.npz") as z:
+        with np.load(staging / "rollouts" / job / f"{i}.commanded_camera.npz") as z:
             assert len(z["cam_c2w"]) == c["frames"]
+        assert not (staging / "rollouts" / job / f"{i}.npz").exists()
         cap = json.loads((staging / "rollouts" / job / f"{i}.json").read_text())
         assert len(cap["segments"]) == 2
     assert by[0]["candidate"]["actions"] == ["W", "left"]
@@ -378,6 +384,19 @@ def test_produce_renders_and_publishes_candidates(env):
     cfg = yaml.safe_load((work / "render_config.yaml").read_text())
     assert cfg["run"]["seed"] == 5 and cfg["runtime"]["text_embed_cache_dir"] == str(run_dir / "cache" / "text_embed")
     assert not (work / "data").exists() and not (work / "videos").exists()
+
+
+def test_precache_is_charged_to_the_job_timeout(env):
+    """A hung prompt precache is killed at the job's timeout_s, not left running forever."""
+    import time
+    q, caller, _, run_dir = env
+    q.backends["rollout_alayaworld"].timeout_s = 2
+    t0 = time.monotonic()
+    job = submit(q, caller, [first_person(environment_prompt="PRECACHE_HANG street")])["job_id"]
+    out = q.wait(caller, job, 60)
+    assert out["state"] == "failed" and "timed out" in out["error"], out
+    assert time.monotonic() - t0 < 30
+    assert not (run_dir / "jobs" / job / "fake_wbench.json").exists()        # never reached the render
 
 
 def test_rounds_per_turn_1_gives_a_segment_per_round(env):
@@ -467,8 +486,9 @@ def test_real_alayaworld_rollout(tmp_path, variant):
     """AR_TEST_GPUS=0,1,2,3 pytest tests/test_rollouts.py -m gpu -s --basetemp=.cache/pytest/gpu
 
     First person: frame 0 of an example clip. Third person: a generate_images (Z-Image) frame with a
-    hand-drawn mask (the tools chain). Both published candidates must ingest as per_chunk, and
-    ViGeo run on the published videos must agree with the published poses."""
+    hand-drawn mask (the tools chain). The candidates carry no pose; each must ingest as per_chunk
+    with the pose annotate_camera (ViGeo) gives it. Agreement with the commanded camera path is
+    printed as a diagnostic only."""
     import os
     import shutil
     import subprocess
@@ -538,38 +558,41 @@ def test_real_alayaworld_rollout(tmp_path, variant):
     ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
     rows, failures = [], []
     for i, c in enumerate(cands):
-        with np.load(host(c["pose"])) as z:
-            pub = _rel0(z["cam_c2w"])
+        assert "pose" not in c and "camera_motion" not in c, c
         a = ann["result"]["items"][i]
         assert "error" not in a, a
         with np.load(host(a["pose"])) as z:
-            est = _rel0(z["cam_c2w"])
-        rot = float(np.median(_relative_rotation_errors(est, pub)))
-        path = float(np.linalg.norm(np.diff(pub[:, :3, 3], axis=0), axis=1).sum())
-        ate = _umeyama_ate(est[:, :3, 3], pub[:, :3, 3]) / path if path > 0 else None
-        # final heading about the vertical, published vs ViGeo: the per-step rotation gate cannot
-        # see a turn the video only half makes (0.75 deg/frame commanded is under its 1 deg bound)
+            vigeo = z["cam_c2w"]
+        with np.load(host(c["commanded_camera"])) as z:
+            commanded = z["cam_c2w"]
+        if len(vigeo) != c["frames"]:
+            failures.append(f"{i}: ViGeo pose has {len(vigeo)} frames, the clip {c['frames']}")
+        if len(commanded) != c["frames"]:
+            failures.append(f"{i}: commanded camera has {len(commanded)} frames, the clip {c['frames']}")
+        # Diagnostics only (user decision 2026-09-26): how far the video strays from the commanded path.
+        est, cmd = _rel0(vigeo), _rel0(commanded)
+        rot = float(np.median(_relative_rotation_errors(est, cmd)))
+        path = float(np.linalg.norm(np.diff(cmd[:, :3, 3], axis=0), axis=1).sum())
+        ate = _umeyama_ate(est[:, :3, 3], cmd[:, :3, 3]) / path if path > 0 else None
         heading = lambda m: round(float(np.degrees(np.arctan2(m[-1, 0, 2], m[-1, 2, 2]))), 1)
-        # copy: ingest moves the files into the archive
+        # the agent's route: ViGeo's pose + camera_motion 'moving' (copies: ingest moves files)
         stage = staging / "ingest" / str(i)
         stage.mkdir(parents=True)
-        for role in ("video", "caption", "pose"):
-            shutil.copy(host(c[role]), stage / Path(c[role]).name)
-        [res] = ing.ingest([Candidate(video=stage / Path(c["video"]).name, caption=stage / Path(c["caption"]).name,
-                                      pose=stage / Path(c["pose"]).name, camera_motion=c["camera_motion"],
-                                      provenance=c["provenance"], license=c["license"])], node_id="gpu")
+        shutil.copy(host(c["video"]), stage / "v.mp4")
+        shutil.copy(host(c["caption"]), stage / "c.json")
+        shutil.copy(host(a["pose"]), stage / "p.npz")
+        [res] = ing.ingest([Candidate(video=stage / "v.mp4", caption=stage / "c.json", pose=stage / "p.npz",
+                                      camera_motion="moving", provenance=c["provenance"], license=c["license"])],
+                           node_id="gpu")
         caption = json.loads(host(c["caption"]).read_text())
-        rows.append({"item": i, "frames": c["frames"], "trim": c["trim"], "rot_err_deg": round(rot, 4),
-                     "ate_frac": ate and round(ate, 4), "path": round(path, 3),
-                     "heading_deg_published_vs_vigeo": [heading(pub), heading(est)],
+        rows.append({"item": i, "frames": c["frames"], "trim": c["trim"],
+                     "diag_vs_commanded": {"rot_err_deg": round(rot, 4), "ate_frac": ate and round(ate, 4),
+                                           "heading_deg_commanded_vs_vigeo": [heading(cmd), heading(est)]},
                      "segments": [[round(t * 24, 2) for t in s["time_range_s"]] for s in caption["segments"]],
-                     "ingest_formats": res.formats, "generator": c["provenance"]["generator"]})
+                     "ingest_formats": res.formats, "ingest_reasons": res.reasons,
+                     "generator": c["provenance"]["generator"]})
         if not (res.accepted and "video_timed_prompts_camera:per_chunk" in res.formats):
             failures.append(f"{i}: ingest {res.reasons}")
-        if rot >= 1.0:
-            failures.append(f"{i}: rotation error {rot:.3f} deg >= 1")
-        if ate is not None and ate >= 0.10:
-            failures.append(f"{i}: ATE {ate:.1%} of path >= 10%")
     print(json.dumps({"variant": variant, "gpus": gpus, "wall_s": round(wall, 1), "peak_mib": peak,
                       "gpu_memory_mib": out["result"]["gpu_memory_mib"], "rows": rows}, indent=1))
     assert out["result"]["gpu_memory_released"] is True

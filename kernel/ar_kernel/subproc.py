@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, signal, subprocess, threading, time
+import os, signal, socket, subprocess, threading, time
 from pathlib import Path
 
 from .config import REPO_ROOT
@@ -11,6 +11,13 @@ CACHE_VARS = {"HF_HOME": "huggingface", "XDG_CACHE_HOME": "", "TORCH_HOME": "tor
               "TRITON_CACHE_DIR": "triton", "TORCHINDUCTOR_CACHE_DIR": "torchinductor",
               "VLLM_CACHE_ROOT": "vllm", "CUDA_CACHE_PATH": "nv", "PIP_CACHE_DIR": "pip",
               "UV_CACHE_DIR": "uv"}
+
+
+def free_port() -> int:
+    """A free local TCP port (for MASTER_PORT, a vLLM server, ...)."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 def cache_dir() -> Path:

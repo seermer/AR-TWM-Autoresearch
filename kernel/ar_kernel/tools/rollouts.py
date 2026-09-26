@@ -3,9 +3,13 @@ the WBench eval's own render path (WorldModel scripts/tools/run_wbench.py, confi
 
 The agent writes cases (first frame, perspective, prompts, per-turn actions). The kernel stages
 them as WBench case files, pre-encodes their prompts (the eval runs with the text encoder off),
-renders them, and publishes each as a training clip: the mp4 trimmed so every round boundary
-lands on the per_chunk grid (25 + 32k frames), the camera path the render used (WorldModel
-saves it beside the video), and one caption segment per round from the prompts the render used.
+renders them, and publishes each clip with its round boundaries on the per_chunk grid (25 + 32k
+frames) and one caption segment per round from the prompts the render used.
+
+No pose is published (user decision 2026-09-26): the renders follow the commanded translation
+but only weakly the commanded turns and orbits (Task 6 smoke), so the commanded camera path is
+not a pose label. It is published as metadata (`commanded_camera`); the agent runs
+annotate_camera (ViGeo) on the clip for the pose it ingests with.
 """
 from __future__ import annotations
 
@@ -13,14 +17,16 @@ import copy
 import json
 import shutil
 import subprocess
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import yaml
 from PIL import Image
 
 from ..data.probe import aspect_ok, probe_video
-from .captioner import _free_port
+from ..subproc import free_port
 from .gpu_jobs import GpuJob, split_gpus
 from .jobs import run_cancellable
 from .server import ToolError
@@ -125,11 +131,15 @@ class AlayaWorldBackend(GpuJob):
         "(.jpg/.png/..., any size), 'perspective': 'first_person'|'third_person', 'environment_prompt', "
         "'character_prompt'?, 'perspective_prompt'?, 'subject_mask'? (image, white = subject), 'turns': "
         "[{'action': WBench navigation action (W, A, S, D, left, right, up, down, stop, or combined like "
-        "'W+left'), 'subject_action'?, 'event_edit'?, 'perspective_switch'?: text}, ...]}. The camera path "
-        "comes from the actions; each turn holds its action and prompt for all its rounds. Each result "
-        "item gives a `candidate` for data_ingest (mp4, caption with one segment per round, pose npz, "
-        "camera_motion 'moving', provenance) plus the render's `actions` and `turn_segments` (frame ranges in "
-        "the published clip).")
+        "'W+left'), 'subject_action'?: text, 'event_edit'?: text, 'perspective_switch'?: a WBench code such as "
+        "'fp_to_tp', 'tp_to_fp', 'fp_to_scope', or 'tp_to_tp: <new view>'}, ...]}. Each turn holds its action "
+        "and prompt for all its rounds. Actions steer translation reliably, rotation (turns, orbits) only "
+        "weakly. Each result item gives a `candidate` (mp4, caption with one segment per round, "
+        "provenance) with NO pose and no camera_motion: run annotate_camera on candidate.video, then "
+        "data_ingest it with that pose and camera_motion 'moving' (eligible for "
+        "video_timed_prompts_camera:per_chunk). Metadata, not labels: `commanded_camera` (npz of the camera "
+        "path the actions commanded, one pose per frame; not what the video shows), `actions` and "
+        "`turn_segments` (frame ranges in the published clip).")
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -219,25 +229,33 @@ class AlayaWorldBackend(GpuJob):
             seed=job.args["seed"], indices=indices, work=work, text_cache=self.run_dir / "cache" / "text_embed"),
             sort_keys=True), encoding="utf-8")
         env, wm = self.block["env"], self.cfg.worldmodel
+        # One timeout_s budget for precache + render: the precache is killed at the deadline like a
+        # cancel, and the render gets what is left.
+        deadline = time.monotonic() + self.timeout_s if self.timeout_s else None
+        late = SimpleNamespace(is_set=lambda: deadline is not None and time.monotonic() > deadline)
         try:
             # The eval renders with the text encoder off (a 24 GB card cannot hold Gemma next to the
             # DiT), so every prompt of these cases is encoded first, into the run's prompt cache.
             code = run_cancellable(
                 env, ["python", *PRECACHE, "--config", str(config), "--device-map", "auto"], cwd=wm,
-                cancel=cancel, log_path=work / "precache.log", recorder=self.recorder, node=job.node,
+                cancel=SimpleNamespace(is_set=lambda: cancel.is_set() or late.is_set()),
+                log_path=work / "precache.log", recorder=self.recorder, node=job.node,
                 phase=self.tool, extra_env={"CUDA_VISIBLE_DEVICES": ",".join(map(str, self.gpus[:2])),
                                             "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
                                             "ALAYA_GEMMA_MAX_MEMORY": "0=13GiB,1=13GiB"})
             if cancel.is_set():
                 return None
+            if late.is_set():
+                raise RuntimeError(f"prompt precache timed out (job timeout_s {self.timeout_s}s)")
             if code != 0:
                 raise RuntimeError(f"prompt precache failed (exit {code}):\n"
                                    f"{(work / 'precache.log').read_text(errors='replace')[-2000:]}")
             # run_wbench.py sets CUDA_VISIBLE_DEVICES from --gpus itself (PCI order is inherited).
             codes, missing = self.run_workers(env, lambda r, w: [
                 "python", *RUN_WBENCH, "--config", str(config), "--gpus", ",".join(map(str, self.gpus)),
-                "--cases", ",".join(map(str, indices)), "--master-port", str(_free_port())],
-                [self.gpus], job=job, work=work, out=out, total=len(items), cancel=cancel, report=report, cwd=wm)
+                "--cases", ",".join(map(str, indices)), "--master-port", str(free_port())],
+                [self.gpus], job=job, work=work, out=out, total=len(items), cancel=cancel, report=report, cwd=wm,
+                deadline=deadline)
             videos = work / "videos"
             for i in indices:
                 src = videos / f"case_{i}_combined"
@@ -280,8 +298,8 @@ class AlayaWorldBackend(GpuJob):
         poses = saved[trim:]
         if n != len(poses):
             raise ValueError(f"trimmed video has {n} frames, the poses {len(poses)}")
-        pose = out / f"{i}.pose.npz"
-        np.savez(pose, cam_c2w=(np.linalg.inv(poses[0]) @ poses).astype(np.float32))
+        commanded = out / f"{i}.commanded.npz"     # metadata, never the pose (see the module docstring)
+        np.savez(commanded, cam_c2w=(np.linalg.inv(poses[0]) @ poses).astype(np.float32))
         schedule = sidecar["prompt_schedule"]
         caption = self.write_caption(out, item, {
             "caption": schedule[0]["prompt"], "segments": round_segments(schedule, first, trim, n)})
@@ -289,8 +307,7 @@ class AlayaWorldBackend(GpuJob):
                   "frame_end_exclusive": min(n, first + ROUND_FRAMES * t["chunk_end_exclusive"] - trim)}
                  for t in sidecar["turn_segments"]]
         turns = [{**t, "frame_count": t["frame_end_exclusive"] - t["frame_start"]} for t in turns]
-        return {"video": trimmed, "caption": caption, "pose": pose, "camera_motion": "moving",
-                "frames": n, "trim": trim, "actions": sidecar["actions"], "turn_segments": turns}
+        return {"video": trimmed, "caption": caption, "commanded_camera": commanded, "frames": n, "trim": trim, "actions": sidecar["actions"], "turn_segments": turns}
 
 
 class Wan22Backend(GpuJob):

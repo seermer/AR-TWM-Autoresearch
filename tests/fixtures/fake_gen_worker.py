@@ -44,7 +44,8 @@ def wbench():
     run_wbench.py (--cases) without a model. For each case it writes what the eval writes, in the
     layout measured in Plan 3 Task 6 Step 2: case_<id>_combined.mp4 of rounds x 32 - 7 frames
     (960x544, 24 fps, round r = frames [32r - 7, 32r + 25)), the sidecar JSON (actions, nominal
-    turn_segments as WorldModel writes them, prompt_schedule) and the camera npz (one pose per frame, frame 0 identity). A case whose
+    turn_segments as WorldModel writes them, prompt_schedule) and the camera npz. A case prompt containing PRECACHE_HANG makes the
+    precache hang (the timeout test) (one pose per frame, frame 0 identity). A case whose
     environment_prompt contains NO_VIDEO renders nothing."""
     import numpy as np
     import yaml
@@ -58,6 +59,9 @@ def wbench():
               "gemma": os.environ.get("ALAYA_GEMMA_MAX_MEMORY")}
     (Path(a.config).parent / ("fake_precache.json" if a.precache else "fake_wbench.json")).write_text(json.dumps(record))
     if a.precache:
+        cases = Path(cfg["validation"]["modes"]["wbench"]["dataset"]["root"]) / "cases"
+        if any("PRECACHE_HANG" in c.read_text() for c in cases.glob("case_*.json")):
+            time.sleep(600)
         return
     mode = cfg["validation"]["modes"]["wbench"]
     root, videos, cpt = Path(mode["dataset"]["root"]), Path(mode["wbench_output_dir"]), mode["wbench_chunks_per_turn"]

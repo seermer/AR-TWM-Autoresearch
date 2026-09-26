@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import socket
 import stat
 import subprocess
 import threading
@@ -22,6 +21,7 @@ import httpx
 from mcp.server.mcpserver import Context
 
 from .context import WORKSPACE, PathError, to_container, to_host
+from ..subproc import free_port
 from .jobs import run_cancellable
 from .server import ToolError
 
@@ -79,12 +79,6 @@ def gpu_memory_mib(gpus: list[int]) -> dict[int, int] | None:
     except (OSError, subprocess.SubprocessError, ValueError):    # ValueError: "[N/A]", "[Not Supported]"
         return None
     return {g: used[g] for g in gpus if g in used}
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 def _tail(path: Path, limit: int = 3000) -> str:
@@ -153,7 +147,7 @@ class CaptionBackend:
 
         if not clips:
             return {"clips": results, "load_s": None, "gpu_memory_mib": None, "gpu_memory_released": None}
-        port, stop, exit_code = _free_port(), threading.Event(), []
+        port, stop, exit_code = free_port(), threading.Event(), []
         log = work / "vllm.log"
 
         def serve() -> None:

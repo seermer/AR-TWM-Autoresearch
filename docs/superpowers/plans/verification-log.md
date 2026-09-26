@@ -735,6 +735,9 @@ to their pre-job level. `images.enabled` set to `true` after this smoke, per Tas
 
 ## Plan 3 — rollout_alayaworld (AlayaWorld through the WBench render path)
 
+> **Superseded in part (fix round 1, 2026-09-26, below):** the clips no longer carry the commanded
+> camera path as their pose ("exact poses" was wrong for turns and orbits). See "Fix round 1".
+
 **Setup.** GPUs 0,1,2,3 (all six free throughout; 24 GB RTX 4090s). Non-WBench first frames:
 frame 0 of `data/examples/video_caption_camera` clip_0005 (forest trail, first person) and
 clip_0003 (Christmas street, third person, hand-drawn mask around the man with a cane) for the
@@ -818,6 +821,36 @@ and ~600 s ar30 (the two items run in parallel, so these are also the per-job ti
 Content: dmd4 degrades in the last rounds (blown-out rocks, smears, a ghost figure); ar30 stays
 clean. event_edit / subject_action show up in both (red umbrella, cyclist, waving hiker; the
 snow and clouds events did not appear).
+
+### Fix round 1 — no commanded pose; ViGeo pose via annotate_camera; both variants enabled (2026-09-26)
+
+**User decision (2026-09-26):** rollout_alayaworld publishes the clip WITHOUT a pose and without
+camera_motion (like Wan/LTX). The commanded camera path is metadata only: it is published as
+`<i>.commanded_camera.npz` (role `commanded_camera`, a distinct name that cannot pass for a pose),
+beside `actions` and `turn_segments` (published-clip frames). Agents run annotate_camera on the
+clip and ingest with ViGeo's pose and camera_motion 'moving'. This supersedes "exact poses" above.
+Also: the prompt precache now shares the job's `timeout_s` budget with the render (killed at the
+deadline like a cancel; `run_workers` takes the remaining `deadline`), and `free_port` moved to
+`ar_kernel.subproc` (captioner and rollouts import it there).
+
+GPU smoke re-run (`AR_TEST_GPUS=0,1,2,3 pytest tests/test_rollouts.py -m gpu -k alayaworld -s
+--basetemp=.cache/pytest/gpu`; all six GPUs free, used 0-3), same items and chain (generate_images
+-> rollout_alayaworld -> annotate_camera -> ingest). Gate: job done, no pose/camera_motion on the
+candidate, ViGeo pose length = commanded length = clip frames (185), ingest accepted with
+`video_timed_prompts_camera:per_chunk`, `gpu_memory_released`. **PASSED for both variants.**
+
+| variant | job wall | peak MiB GPU 0-3 | item | per_chunk (ViGeo pose) | diag vs commanded: rel-rot / ATE / heading cmd vs ViGeo |
+|---|---|---|---|---|---|
+| dmd4 | 899 s | 24123/24063/24017/24123 | fp | yes | 0.103 deg / 12.7 % / -72.0 vs -44.3 |
+| | | | tp | yes | 0.467 deg / 9.2 % / -72.0 vs -9.2 |
+| ar30 | 1064 s | 24097/24095/24058/24063 | fp | yes | 0.562 deg / 13.1 % / -72.0 vs +3.1 |
+| | | | tp | yes | 0.557 deg / 8.8 % / -72.0 vs -5.1 |
+
+GPU memory before = after on every GPU for both jobs (15/15/112-113/15 MiB). The dmd4 job wall
+(899 s vs 447 s in the first smoke) includes a slower model load this time; generation is
+unchanged. The diagnostics match the first smoke (seeded): translation is followed, turns and
+orbits weakly. `generators.alayaworld.variants`: dmd4 and ar30 enabled. Full default suite
+(`--junit-xml`): 509 tests, 0 failures, 0 errors.
 
 ## Plan 3 Task 7 — `rollout_wan22` (Wan2.2 TI2V-5B), 2026-09-26
 

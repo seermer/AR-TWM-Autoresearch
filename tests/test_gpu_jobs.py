@@ -195,3 +195,21 @@ def test_registration_exposes_only_tools_for_backends_on_the_queue(env):
     names = {t.name for t in asyncio.run(mcp.list_tools())}
     assert "rollout_wan22" in names                     # registered backend: the tool appears
     assert "annotate_camera" not in names and "generate_images" not in names   # not registered: absent
+
+
+def test_commanded_camera_is_published_under_its_own_name_not_as_pose(env):
+    """rollout_alayaworld's commanded camera path is metadata: its own file, never the pose role."""
+    import numpy as np
+    q, caller, rec, ws, staging, run = env
+    backend = q.backends["rollout_fake"]
+
+    def finish(job, item, out):
+        np.savez(out / f"{item['index']}.cmd.npz", cam_c2w=np.tile(np.eye(4), (3, 1, 1)))
+        return {**FakeJob.finish(backend, job, item, out), "commanded_camera": out / f"{item['index']}.cmd.npz"}
+    backend.finish = finish
+    out = q.wait(caller, submit(q, caller, [{"src": "a.mp4", "seed": 1}])["job_id"], 120)
+    assert out["state"] == "done", out
+    c, job = out["result"]["items"][0]["candidate"], out["id"]
+    assert c["commanded_camera"] == f"/workspace/staging/rollouts/{job}/0.commanded_camera.npz"
+    assert (staging / "rollouts" / job / "0.commanded_camera.npz").is_file()
+    assert "pose" not in c and c["video"] == f"/workspace/staging/rollouts/{job}/0.mp4"
