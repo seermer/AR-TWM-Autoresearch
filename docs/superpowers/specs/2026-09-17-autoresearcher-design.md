@@ -125,6 +125,17 @@ by the LTX-2.x license (the "train other models" restriction applies to commerci
 exempts Derivatives of LTX-2; entities with >= $10M annual revenue need a commercial
 license). Wan 2.2 is Apache-2.0 with no output restrictions.
 
+### 2.4 Caches
+
+Large caches stay inside the project (user rule, 2026-09-25): `ar_kernel.subproc.cache_env()`
+sets `HF_HOME`, `XDG_CACHE_HOME`, `TORCH_HOME`, `TRITON_CACHE_DIR`, `TORCHINDUCTOR_CACHE_DIR`,
+`VLLM_CACHE_ROOT`, `CUDA_CACHE_PATH`, `PIP_CACHE_DIR` and `UV_CACHE_DIR` on every
+`run_in_env` child (an `extra_env` override still wins) and on the `ar` CLI process itself
+at startup, all rooted at `cache_dir()` -- `AutoResearcher/.cache/` (gitignored) by default,
+or `AR_CACHE_DIR` to relocate the whole tree; a new machine needs the captioner model
+(`Qwen/Qwen3.8-27B-FP8`, ~29 GB) copied or downloaded into
+`AutoResearcher/.cache/huggingface/hub/` before the captioner can start.
+
 ---
 
 ## 3. Glossary

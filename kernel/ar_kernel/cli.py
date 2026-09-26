@@ -6,8 +6,10 @@ from .archive.nodes import NodeStore
 from .config import KernelConfig, load_dotenv
 from .doctor import report, run_checks
 from .run import RunNotFound, attach_run, bootstrap_run, score_node
+from .subproc import cache_env
 
 def main(argv: list[str] | None = None) -> int:
+    os.environ.update(cache_env())
     parser = argparse.ArgumentParser(prog="ar")
     sub = parser.add_subparsers(dest="command", required=True)
     init = sub.add_parser("init-run", help="create a run directory and record versions")

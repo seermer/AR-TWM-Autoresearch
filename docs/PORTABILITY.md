@@ -32,6 +32,25 @@ Keep them relative. An absolute path here pins the tree to one machine, and
   `../AutoResearcher/.env`. Keep them relative; `ar doctor` fails an absolute one.
 - **Generated run configs.** Written per run under `runs/`, regenerated each time.
 
+## Caches
+
+Large caches stay inside the project (user rule, 2026-09-25): `AutoResearcher/.cache/`
+(gitignored) holds model downloads, compile caches and package caches instead of the
+usual dotfiles under `$HOME`. `ar_kernel.subproc.cache_env()` sets `HF_HOME`,
+`XDG_CACHE_HOME`, `TORCH_HOME`, `TRITON_CACHE_DIR`, `TORCHINDUCTOR_CACHE_DIR`,
+`VLLM_CACHE_ROOT`, `CUDA_CACHE_PATH`, `PIP_CACHE_DIR` and `UV_CACHE_DIR`, all rooted at
+`cache_dir()` (`AutoResearcher/.cache` by default). Every `run_in_env` child gets these
+(a caller's `extra_env` can still override one), and `ar`'s own `main()` applies them to
+its own process too, so in-process `huggingface_hub` calls (e.g. HfTools) also use the
+project cache. Set `AR_CACHE_DIR` to relocate the whole cache tree elsewhere (a symlink
+farm on a bigger disk, say) without touching any of the variable names above.
+
+On a new machine, `AutoResearcher/.cache/` starts empty, so the captioner's model
+(`Qwen/Qwen3.8-27B-FP8`, ~29 GB) needs to be copied from an existing `~/.cache/huggingface/hub/`
+or downloaded fresh into `AutoResearcher/.cache/huggingface/hub/` before the captioner can
+start; the first captioner start after that also rebuilds the vLLM compile cache under
+`.cache/vllm` and is slower than subsequent ones.
+
 ## What needs doing on a new machine
 
 1. **Create the conda environments** — `alayaworld`, `wbench-main`, `wbench-vp`,

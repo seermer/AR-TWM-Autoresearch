@@ -2,8 +2,26 @@ from __future__ import annotations
 import os, signal, subprocess, threading, time
 from pathlib import Path
 
+from .config import REPO_ROOT
+
 KILL_GRACE_SECONDS = 30
 KILL_FORCE_GRACE_SECONDS = 10
+
+CACHE_VARS = {"HF_HOME": "huggingface", "XDG_CACHE_HOME": "", "TORCH_HOME": "torch",
+              "TRITON_CACHE_DIR": "triton", "TORCHINDUCTOR_CACHE_DIR": "torchinductor",
+              "VLLM_CACHE_ROOT": "vllm", "CUDA_CACHE_PATH": "nv", "PIP_CACHE_DIR": "pip",
+              "UV_CACHE_DIR": "uv"}
+
+
+def cache_dir() -> Path:
+    """Where model downloads, compile caches and package caches go: inside the project
+    (AutoResearcher/.cache), or AR_CACHE_DIR. The user's rule: large files stay in the project."""
+    return Path(os.environ.get("AR_CACHE_DIR") or REPO_ROOT / ".cache")
+
+
+def cache_env() -> dict[str, str]:
+    root = cache_dir()
+    return {var: str(root / sub) if sub else str(root) for var, sub in CACHE_VARS.items()}
 
 
 class SubprocTimeout(subprocess.TimeoutExpired):
@@ -45,7 +63,7 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
     so far.
     """
     command = ["conda", "run", "--no-capture-output", "-n", env, *args]
-    process_env = {**os.environ, **(extra_env or {})}
+    process_env = {**os.environ, **cache_env(), **(extra_env or {})}
     if recorder is not None:
         recorder.event("subproc.start", node=node, phase=phase,
                        payload={"env": env, "args": args, "cwd": str(cwd),
