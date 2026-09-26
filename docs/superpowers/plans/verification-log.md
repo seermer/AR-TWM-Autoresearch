@@ -653,6 +653,31 @@ level on all four GPUs (`gpu_memory_released: true`). The ground truth moves lit
 (median GT step 0.02-0.04 deg), so (b) is a weak test; the standard relative-rotation error
 (angle of dR_pred^T dR_gt) was also 0.03-0.10 deg.
 
+### Fix round 1: gate (b) replaced with the relative-rotation error
+
+`tests/test_annotate.py` gate (b) previously compared the per-step rotation *magnitudes*
+between prediction and ground truth (`|angle(dR_pred)| - |angle(dR_gt)|`), which does not
+penalize a turn about the wrong axis or in the wrong direction. It now computes the standard
+relative-rotation error, the angle of `dR_pred^T @ dR_gt` per consecutive-frame step (median
+over the clip), matching the number reported as "standard relative-rotation error" in the
+first run above. Results are paired with clips via `clips[item["index"]]` (not zip order).
+
+Re-run (`AR_TEST_GPUS=0,1,2,3 pytest tests/test_annotate.py -m gpu -s`, all four GPUs free):
+PASSED, gate (b) threshold (median < 1 deg) unchanged and not loosened.
+
+| clip | frames | rel-rot err (median, deg) | ATE / GT path | fx, fy err | s/clip | peak MiB |
+|---|---|---|---|---|---|---|
+| clip_0001 | 450 | 0.0335 | 1.80 % | +10.96 %, +9.23 % | 63.6 | 18,275 |
+| clip_0002 | 449 | 0.0484 | 3.27 % | +8.13 %, +6.44 % | 63.4 | 18,292 |
+| clip_0003 | 441 | 0.0439 | 1.02 % | +10.95 %, +9.22 % | 62.3 | 18,291 |
+| clip_0004 | 450 | 0.0857 | 2.40 % | +11.16 %, +9.42 % | 62.6 | 18,257 |
+| clip_0005 | 360 | 0.1025 | 7.58 % | -6.55 %, -8.01 % | 47.9 | 18,292 |
+| clip_0006 | 450 | 0.0807 | 1.80 % | -1.92 %, -3.45 % | 59.9 | 18,261 |
+
+All under the 1 deg gate by a wide margin (max 0.1025 deg). GPU memory before/after the job
+was identical on GPUs 0, 1, 3 (15 MiB) and within 1 MiB on GPU 2 (112 -> 113 MiB, background
+Xorg jitter, not this job); `gpu_memory_released: true`.
+
 Two settings were chosen from measurements on these same clips (a risk of fitting to them):
 - **KV-cache budget 786432** (3x WorldModel's `vigeo_cache_budget`). ATE on clip_0005 was
   26.7 % / 13.9 % / 7.6 % at 262144 / 524288 / 786432; the rest stayed < 7 % at every budget.
