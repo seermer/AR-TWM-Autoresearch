@@ -304,10 +304,13 @@ def build_gpu_backends(cfg, run_dir: Path, gpus: list[int], registry, recorder) 
     each only when its config says enabled."""
     from .annotate import AnnotateBackend          # imports this module
     from .images import ImageBackend
+    from .rollouts import AlayaWorldBackend
 
     backends = []
     if cfg.get("annotate.enabled"):
         backends.append(AnnotateBackend(cfg, run_dir, gpus, registry, recorder))
     if cfg.get("images.enabled"):
         backends.append(ImageBackend(cfg, run_dir, gpus, registry, recorder))
+    if any((v or {}).get("enabled") for v in (cfg.get("generators.alayaworld.variants") or {}).values()):
+        backends.append(AlayaWorldBackend(cfg, run_dir, gpus, registry, recorder))
     return backends

@@ -1,0 +1,291 @@
+"""rollout_alayaworld (spec 10, Plan 3 Task 6): WBench-style cases rendered by AlayaWorld through
+the WBench eval's own render path (WorldModel scripts/tools/run_wbench.py, configs/wbench_full.yaml).
+
+The agent writes cases (first frame, perspective, prompts, per-turn actions). The kernel stages
+them as WBench case files, pre-encodes their prompts (the eval runs with the text encoder off),
+renders them, and publishes each as a training clip: the mp4 trimmed so every round boundary
+lands on the per_chunk grid (25 + 32k frames), the camera path the render used (WorldModel
+saves it beside the video), and one caption segment per round from the prompts the render used.
+"""
+from __future__ import annotations
+
+import copy
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
+import numpy as np
+import yaml
+from PIL import Image
+
+from ..data.probe import probe_video
+from .captioner import _free_port
+from .gpu_jobs import GpuJob
+from .jobs import run_cancellable
+from .server import ToolError
+
+# The launches, as argv after "python" (run in the generator env, cwd WorldModel). The tests
+# swap both for the fake worker.
+PRECACHE = ["-m", "scripts.tools.precache_wbench_text_embeds"]
+RUN_WBENCH = ["scripts/tools/run_wbench.py"]
+
+# Action tokens WorldModel understands, from alaya/trainer/rollout_trainer.py
+# (_wbench_action_to_nav: its `single` and `aliases` keys, lower-case wasd and the arrows).
+# An action is one token or several joined by "+" (or ","); WorldModel silently ignores an
+# unknown token, so it is refused here instead.
+ACTION_TOKENS = frozenset({
+    "W", "S", "A", "D", "w", "a", "s", "d", "left", "right", "up", "down", "stop",
+    "forward", "backward", "cam_left", "cam_right", "cam_up", "cam_down", "look_left", "look_right",
+    "look_up", "look_down", "pitch_up", "pitch_down", "yaw_left", "yaw_right", "->", "→", "<-", "←"})
+TURN_TYPES = ("subject_action", "event_edit", "perspective_switch")     # WBench interaction types
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")                 # alaya/data/wbench.py _IMAGE_EXTS
+PERSPECTIVES = ("first_person", "third_person")
+VARIANTS = ("dmd4", "ar30")
+# ar30 = the AR teacher without the DMD LoRA, sampled as configs/infer_i2v_camera_ar.yaml does.
+AR30 = {("paths", "dmd_resume"): None, ("validation", "sampling_steps"): 30,
+        ("validation", "scheduler"): "shift", ("validation", "cfg_scale"): 3.0}
+ROUND_FRAMES = 32           # one rollout round: 4 latents x temporal stride 8
+GRID = 25                   # per_chunk round boundaries sit at 25 + 32k frames (spec 6.2)
+FPS = 24
+
+
+def valid_action(action) -> bool:
+    parts = str(action).replace(",", "+").split("+") if isinstance(action, str) else [""]
+    return all(p.strip() in ACTION_TOKENS for p in parts)
+
+
+def case_json(index: int, item: dict, image_rel: str, mask_rel: str | None) -> dict:
+    """One item as a WBench case (the schema of WBench/data/cases/*.json): a navigation entry per
+    turn, plus that turn's subject_action / event_edit / perspective_switch."""
+    interactions = []
+    for turn, t in enumerate(item["turns"], 1):
+        interactions.append({"type": "navigation", "action": t["action"], "turn": turn})
+        interactions += [{"type": k, "action": t[k], "turn": turn} for k in TURN_TYPES if t.get(k)]
+    return {"id": str(index), "environment_prompt": item["environment_prompt"],
+            "character_prompt": item.get("character_prompt", ""),
+            "perspective_prompt": item.get("perspective_prompt", ""),
+            "settings": {"perspective": item["perspective"], "subject": {"type": "unknown", "desc": ""},
+                         "tracking_object": None, "initial_image": image_rel, "subject_mask": mask_rel},
+            "interactions": interactions, "metric_list": []}
+
+
+def render_config(cfg, *, variant: str, rounds_per_turn: int, seed: int, indices: list[int], work: Path,
+                  text_cache: Path) -> dict:
+    """configs/wbench_full.yaml as eval/render.py:build_render_config adapts it, pointed at this
+    job's cases. The prompt cache is the run's (the eval's own holds only WBench's prompts)."""
+    wm = cfg.worldmodel
+    c = copy.deepcopy(yaml.safe_load((wm / "configs" / "wbench_full.yaml").read_text(encoding="utf-8")))
+    for key, value in c["paths"].items():
+        if isinstance(value, str) and value:
+            c["paths"][key] = str(wm / value)
+    c["run"].update(output_dir=str(work / "rollout"), log_dir=str(work / "logs"), seed=int(seed))
+    c["runtime"]["text_embed_cache_dir"] = str(text_cache)
+    c["validation"].update(per_sample_seed=True, save_joystick=False)
+    mode = c["validation"]["modes"]["wbench"]
+    mode["dataset"].update(root=str(work / "data"), case_ids=[str(i) for i in indices])
+    mode["wbench_output_dir"] = str(work / "videos")
+    mode["wbench_chunks_per_turn"] = int(rounds_per_turn)
+    if variant == "ar30":
+        for (section, key), value in AR30.items():
+            c[section][key] = value
+    return c
+
+
+def round_segments(schedule: list[dict], first: int, trim: int, frames: int) -> list[dict]:
+    """One caption segment per round (rounds start at mp4 frame first + 32r), in seconds of the
+    trimmed clip; adjacent equal prompts merged; spans [0, frames/24]."""
+    segs: list[dict] = []
+    for entry in sorted(schedule, key=lambda e: e["round"]):
+        start = max(0, first + ROUND_FRAMES * int(entry["round"]) - trim)
+        if start >= frames:
+            break
+        if segs and segs[-1]["prompt"] == entry["prompt"]:
+            continue
+        if segs:
+            segs[-1]["time_range_s"][1] = start / FPS
+        segs.append({"time_range_s": [0.0 if not segs else start / FPS, None], "prompt": entry["prompt"]})
+    segs[-1]["time_range_s"][1] = frames / FPS
+    return segs
+
+
+class AlayaWorldBackend(GpuJob):
+    name = tool = "rollout_alayaworld"
+    kind = "rollout"
+    config_key = "generators.alayaworld"      # max_items / timeout_s
+    file_keys = ("image", "subject_mask")
+    max_turns = 9
+    description = (
+        "Render WBench-style cases with AlayaWorld exactly as the WBench eval does. A GPU job: returns "
+        "{job_id} at once; collect with job_wait. Params: `variant` ('dmd4': the eval's 4-step student; "
+        "'ar30': the 30-step AR teacher; enabled variants only), `rounds_per_turn` 1..3 (default 3; a round "
+        "is 32 frames at 24 fps), `seed` (int, default 42). Item: {'image': first frame under /workspace "
+        "(.jpg/.png/..., any size), 'perspective': 'first_person'|'third_person', 'environment_prompt', "
+        "'character_prompt'?, 'perspective_prompt'?, 'subject_mask'? (image, white = subject), 'turns': "
+        "[{'action': WBench navigation action (W, A, S, D, left, right, up, down, stop, or combined like "
+        "'W+left'), 'subject_action'?, 'event_edit'?, 'perspective_switch'?: text}, ...]}. The camera path "
+        "comes from the actions; each turn holds its action and prompt for all its rounds. Each result "
+        "item gives a `candidate` for data_ingest (mp4, caption with one segment per round, pose npz, "
+        "camera_motion 'moving', provenance) plus the render's `actions` and `turn_segments` (frame ranges in "
+        "the published clip).")
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.block = self.cfg.get(self.config_key) or {}
+        self.max_turns = int(self.block.get("max_turns", self.max_turns))
+        self.license = self.block.get("license", "")
+
+    def enabled_variants(self) -> list[str]:
+        return [v for v in VARIANTS if (self.block.get("variants", {}).get(v) or {}).get("enabled")]
+
+    def check_args(self, args):
+        args.setdefault("variant", "dmd4")
+        args.setdefault("rounds_per_turn", 3)
+        args.setdefault("seed", 42)
+        if args["variant"] not in self.enabled_variants():
+            raise ToolError(f"variant must be one of the enabled variants {self.enabled_variants()}: "
+                            f"got {args['variant']!r}")
+        rpt = args["rounds_per_turn"]
+        if not (isinstance(rpt, int) and not isinstance(rpt, bool) and 1 <= rpt <= 3):
+            raise ToolError(f"rounds_per_turn must be an int in 1..3: got {rpt!r}")
+        if not isinstance(args["seed"], int) or isinstance(args["seed"], bool):
+            raise ToolError(f"seed must be an int: got {args['seed']!r}")
+        for n, item in enumerate(args["items"]):
+            self._check_item(n, item)
+
+    def _check_item(self, n: int, item: dict) -> None:
+        def bad(msg):
+            raise ToolError(f"item {n}: {msg}")
+        if not str(item.get("image", "")).lower().endswith(IMAGE_EXTS):
+            bad(f"image must be an image file ({', '.join(IMAGE_EXTS)}): got {item.get('image')!r}")
+        if item.get("perspective") not in PERSPECTIVES:
+            bad(f"perspective must be one of {PERSPECTIVES}: got {item.get('perspective')!r}")
+        if not isinstance(item.get("environment_prompt"), str) or not item["environment_prompt"].strip():
+            bad("environment_prompt must be a non-empty string")
+        for key in ("character_prompt", "perspective_prompt"):
+            if not isinstance(item.get(key, ""), str):
+                bad(f"{key} must be a string")
+        mask = item.get("subject_mask")
+        if mask is not None and not str(mask).lower().endswith(IMAGE_EXTS):
+            bad(f"subject_mask must be an image file ({', '.join(IMAGE_EXTS)}): got {mask!r}")
+        turns = item.get("turns")
+        if not isinstance(turns, list) or not turns:
+            bad("turns must be a non-empty list")
+        if len(turns) > self.max_turns:
+            bad(f"at most {self.max_turns} turns: got {len(turns)}")
+        for t, turn in enumerate(turns, 1):
+            if not isinstance(turn, dict):
+                bad(f"turn {t} must be an object")
+            if not valid_action(turn.get("action")):
+                bad(f"turn {t}: unknown action {turn.get('action')!r}; use W, A, S, D, left, right, up, "
+                    f"down or stop, alone or joined with '+'")
+            for key, value in turn.items():
+                if key != "action" and (key not in TURN_TYPES or not isinstance(value, str)):
+                    bad(f"turn {t}: {key!r} is not one of {TURN_TYPES} with a text value")
+
+    def generator_name(self, job) -> str:
+        return f"alayaworld-{job.args['variant']}"
+
+    def produce(self, job, items, work, out, cancel, report):
+        data = work / "data"
+        for sub in ("cases", "images", "masks"):
+            (data / sub).mkdir(parents=True, exist_ok=True)
+        indices = []
+        for item in items:
+            i = item["index"]
+            item["seed"] = job.args["seed"]         # provenance: cases are seeded from run.seed + case id
+            try:
+                image = f"images/case_{i}{Path(item['image']).suffix.lower()}"
+                with Image.open(item["image"]) as im:
+                    im.convert("RGB").save(data / image)
+                mask = None
+                if item.get("subject_mask"):
+                    mask = f"masks/case_{i}_mask.png"
+                    with Image.open(item["subject_mask"]) as im:
+                        im.convert("L").save(data / mask)
+            except OSError as exc:
+                (out / f"{i}.json").write_text(json.dumps({"ok": False, "error": f"input: {exc}"}))
+                continue
+            (data / "cases" / f"case_{i}.json").write_text(
+                json.dumps(case_json(i, item, image, mask), ensure_ascii=False, indent=1), encoding="utf-8")
+            indices.append(i)
+        if not indices:
+            return None
+        config = work / "render_config.yaml"
+        config.write_text(yaml.safe_dump(render_config(
+            self.cfg, variant=job.args["variant"], rounds_per_turn=job.args["rounds_per_turn"],
+            seed=job.args["seed"], indices=indices, work=work, text_cache=self.run_dir / "cache" / "text_embed"),
+            sort_keys=True), encoding="utf-8")
+        env, wm = self.block["env"], self.cfg.worldmodel
+        try:
+            # The eval renders with the text encoder off (a 24 GB card cannot hold Gemma next to the
+            # DiT), so every prompt of these cases is encoded first, into the run's prompt cache.
+            code = run_cancellable(
+                env, ["python", *PRECACHE, "--config", str(config), "--device-map", "auto"], cwd=wm,
+                cancel=cancel, log_path=work / "precache.log", recorder=self.recorder, node=job.node,
+                phase=self.tool, extra_env={"CUDA_VISIBLE_DEVICES": ",".join(map(str, self.gpus[:2])),
+                                            "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+                                            "ALAYA_GEMMA_MAX_MEMORY": "0=13GiB,1=13GiB"})
+            if cancel.is_set():
+                return None
+            if code != 0:
+                raise RuntimeError(f"prompt precache failed (exit {code}):\n"
+                                   f"{(work / 'precache.log').read_text(errors='replace')[-2000:]}")
+            # run_wbench.py sets CUDA_VISIBLE_DEVICES from --gpus itself (PCI order is inherited).
+            codes, missing = self.run_workers(env, lambda r, w: [
+                "python", *RUN_WBENCH, "--config", str(config), "--gpus", ",".join(map(str, self.gpus)),
+                "--cases", ",".join(map(str, indices)), "--master-port", str(_free_port())],
+                [self.gpus], job=job, work=work, out=out, total=len(items), cancel=cancel, report=report, cwd=wm)
+            videos = work / "videos"
+            for i in indices:
+                src = videos / f"case_{i}_combined"
+                if src.with_suffix(".mp4").exists() and src.with_suffix(".json").exists():
+                    shutil.move(src.with_suffix(".mp4"), out / f"{i}.mp4")
+                    shutil.move(src.with_suffix(".json"), out / f"{i}.sidecar.json")
+                    camera = src.with_name(src.name + "_camera.npz")
+                    if camera.exists():
+                        shutil.move(camera, out / f"{i}.camera.npz")
+                    (out / f"{i}.json").write_text(json.dumps({"ok": True}))
+                elif codes[0] == 0:
+                    (out / f"{i}.json").write_text(json.dumps({"ok": False, "error": "no video rendered"}))
+            return codes, missing
+        finally:
+            shutil.rmtree(data, ignore_errors=True)
+            shutil.rmtree(work / "videos", ignore_errors=True)
+
+    def finish(self, job, item, out):
+        i = item["index"]
+        sidecar = json.loads((out / f"{i}.sidecar.json").read_text(encoding="utf-8"))
+        video = out / f"{i}.mp4"
+        frames = probe_video(video).frames
+        with np.load(out / f"{i}.camera.npz") as z:
+            saved = z["cam_c2w"].astype(np.float64)
+        if len(saved) != frames:
+            raise ValueError(f"camera path has {len(saved)} frames, the video {frames}")
+        # Round r occupies mp4 frames [first + 32r, first + 32r + 32). The first latent of the
+        # rollout decodes to one frame, so the mp4 starts 7 frames into round 0 (first = -7,
+        # measured in Task 6 Step 2); turn_segments' frame ranges are nominal and ignore this.
+        first = frames - ROUND_FRAMES * int(sidecar["output_rounds"])
+        if not -ROUND_FRAMES < first <= 0:
+            raise ValueError(f"{frames} frames for {sidecar['output_rounds']} rounds of {ROUND_FRAMES}")
+        trim = (first - GRID) % ROUND_FRAMES
+        trimmed = video if trim == 0 else out / f"{i}.trim.mp4"     # no re-encode when already aligned
+        if trim:
+            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(video), "-vf",
+                            f"select='gte(n\\,{trim})',setpts=N/{FPS}/TB", "-r", str(FPS), "-c:v", "libx264",
+                            "-crf", "18", "-pix_fmt", "yuv420p", "-an", str(trimmed)], check=True)
+        n = probe_video(trimmed).frames
+        poses = saved[trim:]
+        if n != len(poses):
+            raise ValueError(f"trimmed video has {n} frames, the poses {len(poses)}")
+        pose = out / f"{i}.pose.npz"
+        np.savez(pose, cam_c2w=(np.linalg.inv(poses[0]) @ poses).astype(np.float32))
+        schedule = sidecar["prompt_schedule"]
+        caption = self.write_caption(out, item, {
+            "caption": schedule[0]["prompt"], "segments": round_segments(schedule, first, trim, n)})
+        turns = [{**t, "frame_start": max(0, first + ROUND_FRAMES * t["chunk_start"] - trim),
+                  "frame_end_exclusive": min(n, first + ROUND_FRAMES * t["chunk_end_exclusive"] - trim)}
+                 for t in sidecar["turn_segments"]]
+        turns = [{**t, "frame_count": t["frame_end_exclusive"] - t["frame_start"]} for t in turns]
+        return {"video": trimmed, "caption": caption, "pose": pose, "camera_motion": "moving",
+                "frames": n, "trim": trim, "actions": sidecar["actions"], "turn_segments": turns}

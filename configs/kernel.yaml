@@ -87,7 +87,10 @@ images:                           # generate_images GPU job (Z-Image-Turbo first
 generators:                       # rollout_* GPU jobs; a variant is enabled only after its smoke (spec 16.3 item 5)
   alayaworld:
     env: alayaworld
-    variants: {dmd4: {enabled: false}, ar30: {enabled: false}}   # dmd4 = configs/wbench_full.yaml as the eval renders
+    # dmd4 = configs/wbench_full.yaml as the eval renders; ar30 = the same without the DMD LoRA, 30 steps.
+    # Both stay disabled: their smoke (Plan 3 Task 6) failed the ViGeo pose gate -- the video does not
+    # make the commanded turns/orbits, so the published (commanded) poses misdescribe those rounds.
+    variants: {dmd4: {enabled: false}, ar30: {enabled: false}}
     max_turns: 9
     max_items: 16
     timeout_s: 43200

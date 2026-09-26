@@ -732,3 +732,89 @@ at exactly 1280x720; `gpu_memory_mib.before == .after` on all four GPUs (`{0: 15
 job); `gpu_memory_released: true`. Per-image seconds: 16.9-18.7 (offload: model, matching the
 fit spike). Confirmed again via `nvidia-smi` after the test process exited: all six GPUs back
 to their pre-job level. `images.enabled` set to `true` after this smoke, per Task 5's config.
+
+## Plan 3 — rollout_alayaworld (AlayaWorld through the WBench render path)
+
+**Setup.** GPUs 0,1,2,3 (all six free throughout; 24 GB RTX 4090s). Non-WBench first frames:
+frame 0 of `data/examples/video_caption_camera` clip_0005 (forest trail, first person) and
+clip_0003 (Christmas street, third person, hand-drawn mask around the man with a cane) for the
+spike; clip_0001 (rainy street, first person) and a `generate_images` Z-Image frame (hiker on a
+ridge, seed 3, hand-drawn mask) for the smoke, so the smoke chains generate_images ->
+rollout_alayaworld -> annotate_camera -> ingest. Weights: `alaya-world-ar` (25 GB) and
+`alaya-world-dmd` (2.5 GB) are both present, so both variants could be tried.
+
+**Prompt precache (not in the brief).** `run_wbench.py` sets `ALAYA_SKIP_TEXT_ENCODER=1` (Gemma
+does not fit next to the DiT on a 24 GB card); a prompt missing from `runtime.text_embed_cache_dir`
+raises. The backend therefore runs `python -m scripts.tools.precache_wbench_text_embeds` on the
+job's config first (2 GPUs, `ALAYA_GEMMA_MAX_MEMORY 0=13GiB,1=13GiB`, as the train runner does),
+into the run's `cache/text_embed` (8 MB per prompt). 20 s-2 min per job.
+
+### Step 2 — output layout (dmd4, rounds_per_turn 3, 2 turns = 6 rounds)
+
+| | case 0 (fp: W, left) | case 1 (tp + mask: W, right + event_edit) |
+|---|---|---|
+| mp4 frames F (960x544, 24 fps) | **185** = 6x32 - 7 | **185** |
+| camera npz length | 185 (= F) | 185 (= F) |
+| sidecar turn_segments (frame_start, end) | (0, 96), (96, 185) | (0, 96), (96, 185) |
+| prompt_schedule | 6 rounds, turn = r // 3 | 6 rounds; turn 2 adds the event text |
+
+- The first rollout latent decodes to a single frame, so the mp4 starts 7 frames into round 0:
+  **round r = mp4 frames [32r - 7, 32r + 25)**, round 0 is 25 frames, and every round boundary is
+  already at 25 + 32k. So `trim = (s - 25) % 32 = 0` with s = -7; `finish` derives s from
+  `F - 32 * output_rounds` and re-encodes only when trim > 0.
+- **The sidecar's `turn_segments` frame ranges are nominal** (they ignore the 7 dropped frames):
+  turn 2 says frame 96, but the camera path switches from translation to yaw at mp4 frame 89
+  (translation steps end at 87->88, yaw starts 88->89). `finish` returns turn_segments rewritten
+  into published-clip frames. WBench metrics that read these ranges would be 7 frames off (not
+  fixed here: WorldModel/WBench code, reported).
+- **rounds_per_turn 1** (case 1): F = 57 = 2x32 - 7, npz 57, actions ['W', 'right'], the yaw
+  starts at mp4 frame 25 and prompt_schedule switches to the event prompt at round 1: actions and
+  prompts switch every round, no code change.
+- Wall: 547 s for the 2 cases (about 390 s model load: 4 ranks load serially), peak 24.1 GB per GPU;
+  memory back to baseline (15/15/113/15 MiB).
+- Frame differences show no discontinuity at round boundaries (per-frame mean |diff| at the
+  boundaries 8-25 vs median 16-19).
+
+**ViGeo cross-check of Task 2's index** (annotate bridge on the two mp4s; 185 frames each):
+
+| | rel-rot err (median) | ATE / path | ViGeo heading at end vs saved | best lag |
+|---|---|---|---|---|
+| case 0 (fp) | 0.112 deg | 10.4 % | -54.3 vs -72.0 deg | onset ~4-6 frames late |
+| case 1 (tp) | 0.085 deg | 1.8 % | -69.9 vs -72.0 deg | +1 (0..+3 flat; lag -7 gives 5.6 deg vs 0.6) |
+
+Case 1 pins Task 2's mapping (mp4 frame i = trajectory pixel 25 + 7 + i = 32 + i) to within 1-2 frames;
+an off-by-7 would show as lag -7. Case 0 turns late and short (the model's response), not an
+index error. **Round 0: the camera acts** (memory_start_round 1 notwithstanding): ViGeo's
+round-0 speed on case 0 is 0.0204 vs 0.0215/0.0207 in rounds 1-2 (saved 0.02 per frame each),
+displacement direction cosine 1.00 with the saved path.
+
+### Step 4 — GPU smoke: both variants FAIL the pose gate, both left disabled
+
+`AR_TEST_GPUS=0,1,2,3 pytest tests/test_rollouts.py -m gpu -s --basetemp=.cache/pytest/gpu`. Items:
+fp rainy street [W + event_edit "red umbrella", left + subject_action "cyclist"], tp hiker [W +
+subject_action "waves", right + event_edit "low clouds"]; seed 42; rounds_per_turn 3.
+
+| variant | job wall (incl. precache) | peak MiB (GPU 0-3) | item | rel-rot err | ATE/path | heading published vs ViGeo | per_chunk ingest |
+|---|---|---|---|---|---|---|---|
+| dmd4 | 447 s | 24123/24095/24157/24123 | 0 fp | 0.100 deg | **12.7 %** | -72.0 vs -44.8 | yes |
+| | | | 1 tp | 0.467 deg | 9.2 % | -72.0 vs -9.2 | yes |
+| ar30 | 994 s | 24097/24155/24019/24063 | 0 fp | 0.640 deg | **13.2 %** | -72.0 vs +2.9 | yes |
+| | | | 1 tp | 0.557 deg | 8.8 % | -72.0 vs -5.1 | yes |
+
+Everything else passed: job done, both candidates accepted as `video_caption_camera`,
+`:segment` and `:per_chunk` (segments [0, 89/24], [89/24, 185/24]), trim 0, pose length = F,
+`gpu_memory_released: true` for both jobs (before = after = 15/15/112/15 MiB).
+
+Why it fails: the renders obey translation (turn 1 "W": ATE over turn 1 alone 0.7 % dmd4,
+2.7 % ar30) but not rotation. In the pure-yaw turn the first-person video keeps moving forward
+(ViGeo speed 0.016-0.036 per frame where the commanded path has 0) and turns 45 deg (dmd4) or
+not at all (ar30) of the commanded 72; the third-person orbit ("right") is mostly not made (the
+view stays behind the walking hiker). The published poses are the commanded path, so they
+misdescribe those rounds. The Task 4 per-step rotation gate (median < 1 deg) passes anyway: a
+0.75 deg/frame turn that is not made is under its bound, so heading at the end is printed too.
+
+Timing: model load ~390 s (spike, serial 4-rank load); generation of a 6-round case ~155 s dmd4
+and ~600 s ar30 (the two items run in parallel, so these are also the per-job times less load).
+Content: dmd4 degrades in the last rounds (blown-out rocks, smears, a ghost figure); ar30 stays
+clean. event_edit / subject_action show up in both (red umbrella, cyclist, waving hiker; the
+snow and clouds events did not appear).
