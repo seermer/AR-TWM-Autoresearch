@@ -1,4 +1,4 @@
-"""annotate_camera: a fake in-process worker for the plumbing, plus one real ViGeo gpu test."""
+"""annotate_camera: the real backend with a fake subprocess worker, plus one real ViGeo gpu test."""
 import copy
 import json
 import os
@@ -12,8 +12,8 @@ import pytest
 from ar_kernel.archive.db import open_db
 from ar_kernel.config import KernelConfig, resolve_gpus
 from ar_kernel.data.ingest import Candidate, Ingestor
-from ar_kernel.data.probe import probe_video
 from ar_kernel.telemetry.recorder import Recorder
+from ar_kernel.tools import annotate
 from ar_kernel.tools.annotate import AnnotateBackend
 from ar_kernel.tools.context import TokenRegistry
 from ar_kernel.tools.gpu_jobs import build_gpu_backends
@@ -24,32 +24,20 @@ from tests.conftest import make_mp4
 REAL = KernelConfig.load()
 
 
-def small_cfg(max_frames=60):
+FAKE = Path(__file__).parent / "fixtures" / "fake_gen_worker.py"
+
+
+def small_cfg(max_frames=60, env="alayaworld"):
     raw = copy.deepcopy(REAL.raw)
-    raw["annotate"]["max_frames"] = max_frames
+    raw["annotate"].update(max_frames=max_frames, env=env)
     return KernelConfig(raw=raw, repo_root=REAL.repo_root)
 
 
-class FakeAnnotate(AnnotateBackend):
-    """Stands in for the ViGeo worker: honors max_frames, writes identity poses of the probed
-    length (or `extra_frames` more, to exercise the frame-count check)."""
-
-    def produce(self, job, items, work, out, cancel, report):
-        max_frames = int(self.cfg.get("annotate.max_frames"))
-        for item in items:
-            n = probe_video(Path(item["video"])).frames
-            if n > max_frames:
-                status = {"ok": False, "error": f"{n} frames > max_frames"}
-            else:
-                k = np.array([[500, 0, 368], [0, 500, 207], [0, 0, 1]], dtype=np.float32)
-                c2w = np.tile(np.eye(4, dtype=np.float32), (n + item.get("extra_frames", 0), 1, 1))
-                np.savez(out / f"{item['index']}.npz", cam_c2w=c2w, intrinsics=k)
-                status = {"ok": True, "frames": n, "intrinsics": [500.0, 500.0, 368.0, 207.0], "seconds": 0.1}
-            (out / f"{item['index']}.json").write_text(json.dumps(status))
-
-
 @pytest.fixture
-def env(tmp_path):
+def env(tmp_path, monkeypatch):
+    """The real AnnotateBackend.produce/run_workers, with the ViGeo bridge swapped for the fake
+    worker (annotate mode: it honors --max-frames and echoes --repo/--checkpoint)."""
+    monkeypatch.setattr(annotate, "BRIDGE", FAKE)
     rec = Recorder(tmp_path / "run")
     reg = TokenRegistry(rec)
     q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
@@ -57,8 +45,8 @@ def env(tmp_path):
     ws.mkdir(); staging.mkdir()
     make_mp4(ws / "a.mp4", seconds=2, fps=24)           # 48 frames
     make_mp4(ws / "long.mp4", seconds=3, fps=24)        # 72 frames > max_frames 60
-    q.register(FakeAnnotate(small_cfg(), tmp_path / "run", [0, 1, 4, 5], reg, rec,
-                            gpu_memory=lambda g: {i: 100 for i in g}))
+    q.register(AnnotateBackend(small_cfg(env="autoresearcher"), tmp_path / "run", [0, 1, 4, 5], reg, rec,
+                               gpu_memory=lambda g: {i: 100 for i in g}))
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
     yield q, caller, staging
     q.shutdown()
@@ -92,8 +80,18 @@ def test_a_pose_with_the_wrong_frame_count_is_an_item_error(env):
 def test_a_clip_over_max_frames_fails_alone(env):
     q, caller, staging = env
     _, by = run(q, caller, [{"video": "long.mp4"}, {"video": "a.mp4"}, {"video": "a.mp4"}])
-    assert by[0]["error"] == "72 frames > max_frames"
+    assert by[0]["error"] == "72 frames > max_frames (60)"
     assert "pose" in by[1] and "pose" in by[2]
+
+
+def test_workers_get_the_annotate_config_and_one_gpu_each(env):
+    q, caller, staging = env
+    _, by = run(q, caller, [{"video": "a.mp4"} for _ in range(5)])
+    wm = REAL.worldmodel
+    for i, item in by.items():
+        assert item["worker"]["repo"] == str(wm / REAL.get("annotate.repo"))
+        assert item["worker"]["checkpoint"] == str(wm / REAL.get("annotate.checkpoint"))
+        assert item["worker"]["gpus"] == str([0, 1, 4, 5][i % 4]) and item["worker"]["rank"] == i % 4
 
 
 def test_non_mp4_is_refused_at_submit(env):
@@ -126,9 +124,15 @@ def _rel0(c2w):
     return np.linalg.inv(c2w[0]) @ c2w
 
 
-def _step_angles(c2w):
-    tr = np.einsum("nij,nij->n", c2w[:-1, :3, :3], c2w[1:, :3, :3])       # trace(R_i^T R_{i+1})
-    return np.degrees(np.arccos(np.clip((tr - 1) / 2, -1, 1)))
+def _rot_angle(r):
+    return np.degrees(np.arccos(np.clip((np.trace(r, axis1=-2, axis2=-1) - 1) / 2, -1, 1)))
+
+
+def _relative_rotation_errors(pred, gt):
+    """Per consecutive-frame step: the angle of dR_pred^T dR_gt, dR = R_i^T R_{i+1} (so a turn
+    about the wrong axis or in the wrong direction counts, not only its magnitude)."""
+    step = lambda c2w: np.swapaxes(c2w[:-1, :3, :3], 1, 2) @ c2w[1:, :3, :3]
+    return _rot_angle(np.swapaxes(step(pred), 1, 2) @ step(gt))
 
 
 def _umeyama_ate(src, dst):
@@ -171,14 +175,15 @@ def test_real_vigeo_matches_the_example_poses(tmp_path):
     assert out["state"] == "done", out["error"]
     ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
     rows, failures = [], []
-    for item, c in zip(out["result"]["items"], clips):
+    for item in out["result"]["items"]:
+        c = clips[item["index"]]
         assert "error" not in item, item
         pose = staging / Path(item["pose"]).relative_to("/workspace/staging")
         with np.load(pose) as z:
             pred, k = _rel0(z["cam_c2w"]), z["intrinsics"]
         with np.load(examples / "poses" / f"{c}.npz") as z:
             gt, k_gt = _rel0(z["cam_c2w"]), (z["intrinsics"] if "intrinsics" in z.files else None)
-        rot = float(np.median(np.abs(_step_angles(pred) - _step_angles(gt))))
+        rot = float(np.median(_relative_rotation_errors(pred, gt)))
         path = float(np.linalg.norm(np.diff(gt[:, :3, 3], axis=0), axis=1).sum())
         ate = _umeyama_ate(pred[:, :3, 3], gt[:, :3, 3]) / path
         f_err = [float(k[i, i] / k_gt[i, i] - 1) for i in (0, 1)] if k_gt is not None else None
