@@ -65,6 +65,27 @@ def test_split_gpus():
     assert split_gpus([0, 1, 2], 2, None) == [[0, 1]]
 
 
+def test_run_workers_refuses_empty_gpu_groups(env):
+    q, caller, rec, ws, staging, run = env
+    backend = q.backends["rollout_fake"]
+    with pytest.raises(ValueError):
+        backend.run_workers("autoresearcher", lambda r, w: [], [], job=None, work=run, out=run,
+                            total=0, cancel=threading.Event(), report=lambda p: None)
+
+
+def test_max_items_and_timeout_come_from_the_backends_config_block(tmp_path):
+    rec = Recorder(tmp_path / "run")
+    reg = TokenRegistry(rec)
+
+    class ConfiguredJob(FakeJob):
+        config_key = "annotate"        # configs/kernel.yaml: max_items: 64, timeout_s: 21600
+
+    backend = ConfiguredJob(KernelConfig.load(), tmp_path / "run", [0, 1, 4, 5], reg, rec)
+    assert backend.max_items == 64
+    assert backend.timeout_s == 21600
+    assert FakeJob(KernelConfig.load(), tmp_path / "run", [0, 1, 4, 5], reg, rec).timeout_s is None
+
+
 def test_items_fan_out_one_worker_per_gpu_and_publish_candidates(env):
     q, caller, rec, ws, staging, run = env
     items = [{"src": "a.mp4", "prompt": f"p{i}", "seed": i} for i in range(6)]
@@ -105,6 +126,25 @@ def test_per_item_failure_and_worker_crash_are_item_errors(env):
     assert "exit code 3" in by[2]["error"] and "log tail" in by[2]["error"]
 
 
+def test_a_truncated_status_file_is_an_item_error_not_a_job_failure(env):
+    q, caller, rec, ws, staging, run = env
+    items = [{"src": "a.mp4"}, {"src": "a.mp4"}, {"src": "a.mp4", "truncated": True}, {"src": "a.mp4"}]
+    out = q.wait(caller, submit(q, caller, items)["job_id"], 120)
+    assert out["state"] == "done", out
+    by = {i["index"]: i for i in out["result"]["items"]}
+    assert "candidate" in by[0] and "candidate" in by[1] and "candidate" in by[3]
+    assert "error" in by[2] and "JSONDecodeError" in by[2]["error"]
+
+
+def test_run_workers_kills_workers_past_its_own_timeout(env):
+    q, caller, rec, ws, staging, run = env
+    q.backends["rollout_fake"].timeout_s = 1
+    job_id = submit(q, caller, [{"src": "a.mp4", "sleep": 60}])["job_id"]
+    out = q.wait(caller, job_id, 60)
+    assert out["state"] == "done", out
+    assert "timeout" in out["result"]["items"][0]["error"]
+
+
 def test_missing_or_escaping_input_is_refused_at_submit(env):
     q, caller, rec, ws, staging, run = env
     with pytest.raises(ToolError):
@@ -142,9 +182,16 @@ def test_cancel_kills_every_worker(env):
             os.kill(pid, 0)
 
 
-def test_registration_only_exposes_tools_for_backends_on_the_queue(env):
+def test_registration_exposes_only_tools_for_backends_on_the_queue(env):
     q, caller, rec, ws, staging, run = env
+
+    class Wan22Fake(FakeJob):
+        name = tool = "rollout_wan22"
+
+    q.register(Wan22Fake(KernelConfig.load(), run, [0, 1, 4, 5], TokenRegistry(rec), rec,
+                         gpu_memory=lambda g: {i: 100 for i in g}))
     kit, mcp = ToolKit(TokenRegistry(rec), rec), new_mcp()
     register_gpu_tools(mcp, kit, q)
     names = {t.name for t in asyncio.run(mcp.list_tools())}
-    assert "rollout_wan22" not in names and "annotate_camera" not in names and "generate_images" not in names
+    assert "rollout_wan22" in names                     # registered backend: the tool appears
+    assert "annotate_camera" not in names and "generate_images" not in names   # not registered: absent

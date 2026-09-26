@@ -14,6 +14,7 @@ import shutil
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 
 from mcp.server.mcpserver import Context
@@ -48,16 +49,22 @@ def _tail(path: Path, limit: int = 2000) -> str:
 
 class GpuJob:
     """Base JobQueue backend. Subclasses set name/tool, kind ("rollout" | "annotation"),
-    generator (provenance name), license, file_keys (item fields naming workspace files) and
-    implement check_args, produce and finish."""
-    name = tool = kind = generator = license = description = ""
+    generator (provenance name), license, file_keys (item fields naming workspace files),
+    optionally config_key (a dotted kernel.yaml path whose "max_items"/"timeout_s" override
+    the class defaults below) and implement check_args, produce and finish."""
+    name = tool = kind = generator = license = description = config_key = ""
     file_keys: tuple[str, ...] = ()
     max_items = 16
+    timeout_s: float | None = None   # per-job wall-clock cap enforced by run_workers; None = no cap
 
     def __init__(self, cfg, run_dir: Path, gpus: list[int], registry, recorder,
                  gpu_memory=gpu_memory_mib) -> None:
         self.cfg, self.run_dir, self.gpus = cfg, Path(run_dir), list(gpus)
         self.registry, self.recorder, self.gpu_memory = registry, recorder, gpu_memory
+        block = cfg.get(self.config_key) if self.config_key else None
+        if isinstance(block, dict):
+            self.max_items = int(block.get("max_items", self.max_items))
+            self.timeout_s = block.get("timeout_s", self.timeout_s)
 
     # ---- submit (tool call; fast; ToolError goes back to the agent) ----
     def submit(self, q, caller, args: dict) -> dict:
@@ -143,10 +150,12 @@ class GpuJob:
         status_path = out / f"{index}.json"
         if not status_path.exists():
             return {"index": index, "error": missing.get(index, "no output (cancelled or not reached)")}
-        status = json.loads(status_path.read_text(encoding="utf-8"))
-        if not status.get("ok"):
-            return {"index": index, "error": status.get("error", "failed")}
         try:
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            if not isinstance(status, dict):
+                raise ValueError(f"status is a {type(status).__name__}, not an object")
+            if not status.get("ok"):
+                return {"index": index, "error": status.get("error", "failed")}
             files = self.finish(job, item, out)
             published = {}
             for role in ("video", "caption", "pose"):
@@ -155,7 +164,8 @@ class GpuJob:
                     rel = f"{self.kind}s/{job.id}/{index}{src.suffix}"
                     _move_into(src, caller.staging_host, rel)
                     published[role] = str(STAGING / rel)
-        except (OSError, RuntimeError, ValueError, PathError) as exc:
+        except Exception as exc:            # noqa: BLE001 -- a bad/truncated status or a finish()
+            # bug must be this item's error, not a job failure that orphans the others.
             return {"index": index, "error": f"{type(exc).__name__}: {exc}"}
         extra = {k: v for k, v in files.items() if k not in ("video", "caption", "pose")}
         worker = {k: v for k, v in status.items() if k != "ok"}
@@ -183,21 +193,29 @@ class GpuJob:
                     job, work: Path, out: Path, total: int, cancel, report, cwd: Path | None = None,
                     extra_env: dict | None = None) -> tuple[list[int | str], dict[int, str]]:
         """One worker per GPU group, in parallel; each handles items with index % world == rank.
-        A cancel kills every worker's process group. An item whose worker died without writing
-        its status becomes an item error carrying the worker's exit code and log tail.
+        A cancel kills every worker's process group, and so does this backend's own `timeout_s`
+        (the deadline is checked in the polling loop, and once passed acts on the workers exactly
+        like an external cancel). An item whose worker died without writing its status becomes an
+        item error carrying the worker's exit code (or "timeout after Ns") and log tail.
 
         Returns (codes, missing): `missing` maps such an item's index to that error message, for
         `run` to pass into `_collect`. The staged items' indices are read back from
         `work/items.json` (items that failed staging never reach here); `total` is only the
         progress-report denominator.
         """
+        if not groups:
+            raise ValueError("run_workers: no GPU groups (check the GPU list, gpus_per_worker and workers)")
         indices = [item["index"] for item in json.loads((work / "items.json").read_text(encoding="utf-8"))]
         codes: list[int | str | None] = [None] * len(groups)
+        deadline = time.monotonic() + self.timeout_s if self.timeout_s else None
+        timed_out = threading.Event()
+        worker_cancel = cancel if deadline is None else \
+            SimpleNamespace(is_set=lambda: cancel.is_set() or timed_out.is_set())
 
         def one(rank: int, group: list[int]) -> None:
             try:
                 codes[rank] = run_cancellable(
-                    env, argv_for(rank, len(groups)), cwd=cwd or work, cancel=cancel,
+                    env, argv_for(rank, len(groups)), cwd=cwd or work, cancel=worker_cancel,
                     extra_env={**(extra_env or {}), "CUDA_VISIBLE_DEVICES": ",".join(map(str, group)),
                                "CUDA_DEVICE_ORDER": "PCI_BUS_ID"},
                     log_path=work / f"worker{rank}.log", recorder=self.recorder, node=job.node, phase=self.tool)
@@ -209,17 +227,20 @@ class GpuJob:
         for t in threads:
             t.start()
         while any(t.is_alive() for t in threads):
+            if deadline is not None and time.monotonic() > deadline:
+                timed_out.set()
             report({"done": len([p for p in out.glob("*.json") if p.stem.isdigit()]), "total": total})
-            time.sleep(2.0)
+            time.sleep(0.2)             # short poll so a finished job returns promptly
         for t in threads:
             t.join()
         report({"done": len([p for p in out.glob("*.json") if p.stem.isdigit()]), "total": total})
         world = len(groups)
         missing: dict[int, str] = {}
         for index in indices:
-            code = codes[index % world] if world else "no GPU group"
+            code = codes[index % world]
             if code not in (0, None) and not (out / f"{index}.json").exists():
-                missing[index] = (f"worker {index % world} failed (exit code {code}); log tail:\n"
+                reason = f"timeout after {self.timeout_s}s" if timed_out.is_set() else f"exit code {code}"
+                missing[index] = (f"worker {index % world} failed ({reason}); log tail:\n"
                                   f"{_tail(work / f'worker{index % world}.log')}")
         return codes, missing
 

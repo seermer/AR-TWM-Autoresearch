@@ -6,9 +6,10 @@ python fake_gen_worker.py --items items.json --out DIR --rank R --world W
 For each item with index % world == rank, in index order, it copies item["src"] to
 <out>/<index>.mp4 and writes <out>/<index>.json with {"ok": true, "rank": R, "gpus":
 CUDA_VISIBLE_DEVICES}. Special item fields: "fail": true writes {"ok": false, "error": "boom"}
-instead; "crash": true exits the process with code 3 before writing anything; "sleep": s sleeps
-first (the cancel test uses this). It writes its pid to <out>/worker<rank>.pid before processing
-any item.
+instead; "crash": true exits the process with code 3 before writing anything; "truncated": true
+writes an incomplete status file (as an OOM-killed worker might, mid-write); "sleep": s sleeps
+first (the cancel and timeout tests use this). It writes its pid to <out>/worker<rank>.pid before
+processing any item.
 """
 import argparse
 import json
@@ -37,6 +38,9 @@ for item in mine:
     if item.get("crash"):
         sys.exit(3)
     status_path = out / f"{index}.json"
+    if item.get("truncated"):
+        status_path.write_text('{"ok": true, "ran')      # deliberately incomplete JSON
+        continue
     if item.get("fail"):
         status_path.write_text(json.dumps({"ok": False, "error": "boom"}))
         continue
