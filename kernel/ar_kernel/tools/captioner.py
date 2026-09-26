@@ -91,6 +91,27 @@ def _tail(path: Path, limit: int = 3000) -> str:
     return path.read_text(encoding="utf-8", errors="replace")[-limit:] if path.exists() else ""
 
 
+def wait_gpu_release(gpu_memory, gpus: list[int], before: dict | None,
+                     timeout_s: float) -> tuple[dict | None, bool | None]:
+    """Wait until every GPU is back within RELEASE_SLACK_MIB of its pre-job memory.
+
+    (None, None) when GPU memory cannot be read. Shared by every GPU job backend
+    (captioner and the GpuJob subclasses), not just this one.
+    """
+    if before is None:
+        return None, None
+    deadline = time.monotonic() + timeout_s
+    while True:
+        after = gpu_memory(gpus)
+        if after is None:
+            return None, None
+        if all(after.get(g, 0) <= used + RELEASE_SLACK_MIB for g, used in before.items()):
+            return after, True
+        if time.monotonic() > deadline:
+            return after, False
+        time.sleep(1.0)
+
+
 class CaptionBackend:
     """JobQueue backend for caption_videos. Args: {"paths": [container paths], "prompt": str}.
     Result: {"clips": {path: {"caption"} | {"error"}}, "load_s", "gpu_memory_mib", "gpu_memory_released"}."""
@@ -232,20 +253,7 @@ class CaptionBackend:
         return {"caption": text.strip()} if text and text.strip() else {"error": "empty caption"}
 
     def _released(self, before: dict | None, timeout_s: float) -> tuple[dict | None, bool | None]:
-        """Wait until every GPU is back within RELEASE_SLACK_MIB of its pre-job memory.
-        (None, None) when GPU memory cannot be read."""
-        if before is None:
-            return None, None
-        deadline = time.monotonic() + timeout_s
-        while True:
-            after = self.gpu_memory(self.gpus)
-            if after is None:
-                return None, None
-            if all(after.get(g, 0) <= used + RELEASE_SLACK_MIB for g, used in before.items()):
-                return after, True
-            if time.monotonic() > deadline:
-                return after, False
-            time.sleep(1.0)
+        return wait_gpu_release(self.gpu_memory, self.gpus, before, timeout_s)
 
 
 def submit(q, caller, paths: list[str], prompt: str) -> dict:

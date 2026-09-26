@@ -65,7 +65,43 @@ timeouts:                        # soft timeouts (spec 14.5); Plan 2 enforces th
   improve_recipe_s: 86400
   contract_import_s: 60
   contract_smoke_s: 900
-generators:                      # every variant disabled until Plan 3 verifies it (spec 16.3 item 5)
-  alayaworld: {dmd4: {enabled: false}, ar30: {enabled: false}}
-  ltx25: {dev: {enabled: false}, distilled: {enabled: false}}
-  wan22: {ti2v-5b: {enabled: false}}
+annotate:                         # annotate_camera GPU job (spec 10, 16.3 item 6)
+  enabled: false                  # Task 4 enables it once ViGeo passes on the example clips
+  env: alayaworld
+  repo: third_party/ViGeo         # relative to paths.worldmodel
+  checkpoint: third_party/ViGeo/checkpoints/ViGeo1.1
+  max_frames: 1200                # longer clips are refused per clip (memory)
+  max_items: 64
+  timeout_s: 21600
+generators:                       # rollout_* GPU jobs; a variant is enabled only after its smoke (spec 16.3 item 5)
+  alayaworld:
+    env: alayaworld
+    variants: {dmd4: {enabled: false}, ar30: {enabled: false}}   # dmd4 = configs/wbench_full.yaml as the eval renders
+    max_turns: 9
+    max_items: 16
+    timeout_s: 43200
+    license: LTX-2 Community License (AlayaWorld is an LTX-2 derivative)
+  wan22:
+    env: gen-wan22
+    repo: third_party/Wan2.2      # relative to the AutoResearcher repo
+    weights: weights/wan2.2-ti2v-5b
+    variants: {ti2v-5b: {enabled: false}}
+    gpus_per_worker: 1
+    workers: null                 # null = as many as the GPU list allows
+    frames: [121, 121]            # [default, max]; 4k+1
+    extra_args: {}                # set by Task 7 from the fit measurements
+    max_items: 16
+    timeout_s: 43200
+    license: Apache-2.0
+  ltx25:
+    env: gen-ltx25
+    repo: third_party/LTX-2
+    weights: weights/ltx-2.5
+    variants: {distilled: {enabled: false}, dev: {enabled: false}}
+    gpus_per_worker: 1
+    workers: null                 # Task 8 sets it from host-RAM measurements
+    frames: [121, 241]            # [default, max]; 8k+1
+    resolutions: [[576, 1024]]    # [height, width], each divisible by 32, 16:9
+    max_items: 16
+    timeout_s: 43200
+    license: LTX-2 Community License
