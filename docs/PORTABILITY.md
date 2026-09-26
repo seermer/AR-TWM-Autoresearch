@@ -104,15 +104,18 @@ curl -sL -o .cache/wheels/flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp310-cp310-
   "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3%2Bcu12torch2.7cxx11abiTRUE-cp310-cp310-linux_x86_64.whl"
 conda run --no-capture-output -p .envs/gen-wan22 pip install \
   .cache/wheels/flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp310-cp310-linux_x86_64.whl
-# `import wan` eagerly imports every task (S2V, Animate), so it also needs these three
-# (from requirements_s2v.txt / requirements_animate.txt; their heavier deps are not needed)
-conda run --no-capture-output -p .envs/gen-wan22 pip install .cache/wheels/eva_decord-0.6.1-py3-none-manylinux2010_x86_64.whl  # after: pip download --no-deps -d .cache/wheels eva-decord librosa peft
+# `import wan` eagerly imports every task (S2V, Animate), so it also needs decord, librosa and
+# peft (from requirements_s2v.txt / requirements_animate.txt; their heavier deps are not needed).
+# decord comes from the eva-decord fork (same `import decord`), from PyPI, with its dependencies:
+conda run --no-capture-output -p .envs/gen-wan22 pip install eva-decord==0.6.1 librosa==0.11.0 peft==0.21.0
 conda run --no-capture-output -p .envs/gen-wan22 pip check
 ```
 
 `decord` is the `eva-decord` fork (same `import decord`): the PyPI `decord==0.6.0` wheel is
 tagged `cp36-cp36m`, so `pip check` fails on it ("not supported on this platform"); with
-`eva-decord` the check is clean ("No broken requirements found.").
+`eva-decord` the check is clean ("No broken requirements found."). Every distribution that
+`import wan` loads (checked against `sys.modules` after the import) comes from torch, the trimmed
+requirements.txt, flash_attn or the line above, or their dependencies.
 
 Versions (Task 7): Wan2.2 @ `1ea34ff48f87168174e12956e200b1d908b1c5ff` (2026-09-21);
 `torch==2.7.1+cu126`, `torchvision==0.22.1+cu126`, `torchaudio==2.7.1+cu126`,

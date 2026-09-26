@@ -528,7 +528,6 @@ def test_real_alayaworld_rollout(tmp_path, variant):
         wall = time.monotonic() - t0
         assert out["state"] == "done", out.get("error")
         by = {i["index"]: i for i in out["result"]["items"]}
-        print(json.dumps({"wan_wall_s": round(wall, 1), "items": by}, indent=1))
         assert all("candidate" in by[i] for i in (0, 1)), by
         cands = [by[i]["candidate"] for i in (0, 1)]
         ann = _wait(q, caller, q.backends["annotate_camera"].submit(
@@ -729,6 +728,29 @@ def test_wan_refuses_to_run_off_the_pinned_commit(tmp_path, monkeypatch, pin):
     finally:
         q.shutdown()
     assert out["state"] == "failed" and "commit" in out["error"] and str(pin) in out["error"]
+
+
+def test_wan_missing_clone_fails_the_job_with_a_clear_message(tmp_path, monkeypatch):
+    """An uncloned third_party/Wan2.2 must say which path and where the setup is documented, not
+    surface a bare CalledProcessError."""
+    monkeypatch.setattr(rollouts, "WAN22_BRIDGE", FAKE)
+    rec = Recorder(tmp_path / "run")
+    reg = TokenRegistry(rec)
+    q = JobQueue(rec, threading.Lock(), wait_cap_s=60)
+    ws, staging = tmp_path / "ws", tmp_path / "staging"
+    ws.mkdir(); staging.mkdir()
+    missing = tmp_path / "no_such_clone"
+    cfg = small_wan_cfg(repo=str(missing))
+    q.register(Wan22Backend(cfg, tmp_path / "run", [0, 1, 2, 3], reg, rec, gpu_memory=lambda g: {i: 100 for i in g}))
+    caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
+    try:
+        job_id = q.backends["rollout_wan22"].submit(q, caller, {"items": [{"prompt": "p", "seed": 1}]})["job_id"]
+        out = q.wait(caller, job_id, 60)
+    finally:
+        q.shutdown()
+    assert out["state"] == "failed"
+    assert str(missing) in out["error"] and "PORTABILITY.md" in out["error"]
+    assert "CalledProcessError" not in out["error"]
 
 
 def _wan_backend(tmp_path, **over):

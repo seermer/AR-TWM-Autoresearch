@@ -309,9 +309,9 @@ class Wan22Backend(GpuJob):
         "item carries a first frame). A GPU job: returns {job_id} at once; collect with job_wait. "
         "`frames`: 4k+1, at most the configured max (default: the configured default; one value "
         "for the whole job). Item: {'prompt': str, 'image'?: first frame under /workspace (any "
-        "size; center-cropped to 16:9, e.g. a generate_images frame), 'seed': int}. Each result "
-        "item gives a `candidate` for data_ingest "
-        "(a 1248x704, 24 fps mp4 center-cropped from Wan's 1280x704, caption, provenance); it "
+        "size; center-cropped and resized to 1280x704, e.g. a generate_images frame), 'seed': "
+        "int}. Each result item gives a `candidate` for data_ingest "
+        "(a 1248x704 (~16:9), 24 fps mp4 center-cropped from Wan's 1280x704, caption, provenance); it "
         "carries no pose/camera_motion -- add one (annotate_camera then 'moving', or 'static') "
         "before ingesting. Batch many prompts per call.")
 
@@ -341,8 +341,11 @@ class Wan22Backend(GpuJob):
         cannot change what this backend renders without a new review."""
         repo = self.cfg.repo_root / self.block["repo"]
         pinned = self.block.get("commit")
-        head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
-                              capture_output=True, text=True, check=True).stdout.strip()
+        git = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True)
+        if git.returncode != 0:
+            raise RuntimeError(f"no Wan2.2 checkout at {repo} (git: {git.stderr.strip()}); clone it at "
+                               f"commit {pinned} as described in docs/PORTABILITY.md")
+        head = git.stdout.strip()
         if head != pinned:
             raise RuntimeError(f"{repo} is at commit {head}, but generators.wan22.commit pins "
                                f"{pinned}; re-clone the pinned commit or update the pin")

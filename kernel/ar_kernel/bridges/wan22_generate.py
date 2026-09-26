@@ -69,8 +69,8 @@ def main() -> int:
         index, t0 = item["index"], time.monotonic()
         status_path = out / f"{index}.json"
         video = None
-        torch.cuda.reset_peak_memory_stats()
         try:
+            torch.cuda.reset_peak_memory_stats()
             img = fit_first_frame(Image.open(item["image"])) if item.get("image") else None
             video = pipe.generate(
                 item["prompt"], img=img, size=SIZE_CONFIGS["1280*704"],
