@@ -13,6 +13,12 @@ processing any item.
 
 With --max-frames it stands in for vigeo_poses.py instead (annotate mode, see annotate()); it
 also accepts and echoes that bridge's --repo and --checkpoint.
+
+With --weights set it stands in for zimage_generate.py instead (image mode, see image(): --weights
+is the one flag only that bridge's argv carries, so its presence alone selects the mode -- an
+image item has no "video"/"src" for the other modes' argparse-driven dispatch to key off): it
+writes a PNG of --width x --height (item["bad_size"]: true writes one pixel larger, so the
+backend's size check can be tested) and echoes --weights/--steps/--offload.
 """
 import argparse
 import json
@@ -31,6 +37,11 @@ parser.add_argument("--world", type=int, required=True)
 parser.add_argument("--max-frames", type=int)        # set: annotate mode (stands in for vigeo_poses.py)
 parser.add_argument("--repo")
 parser.add_argument("--checkpoint")
+parser.add_argument("--weights")                     # set: image mode (stands in for zimage_generate.py)
+parser.add_argument("--width", type=int)
+parser.add_argument("--height", type=int)
+parser.add_argument("--steps", type=int)
+parser.add_argument("--offload")
 args, _ = parser.parse_known_args()
 
 
@@ -53,6 +64,18 @@ def annotate(item, status_path):
                                        "repo": args.repo, "checkpoint": args.checkpoint}))
 
 
+def image(item, status_path):
+    """zimage_generate.py's contract without a model: a solid PNG of the requested size."""
+    from PIL import Image
+    w, h = args.width, args.height
+    if item.get("bad_size"):
+        w, h = w + 1, h
+    Image.new("RGB", (w, h), color=(100, 150, 200)).save(out / f"{item['index']}.png")
+    status_path.write_text(json.dumps({"ok": True, "seconds": 0.01, "rank": args.rank,
+                                       "gpus": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
+                                       "weights": args.weights, "steps": args.steps, "offload": args.offload}))
+
+
 out = Path(args.out)
 (out / f"worker{args.rank}.pid").write_text(str(os.getpid()))
 items = json.loads(Path(args.items).read_text(encoding="utf-8"))
@@ -73,6 +96,9 @@ for item in mine:
         continue
     if args.max_frames is not None:
         annotate(item, status_path)
+        continue
+    if args.weights is not None:
+        image(item, status_path)
         continue
     shutil.copy(item["src"], out / f"{index}.mp4")
     status_path.write_text(json.dumps({"ok": True, "rank": args.rank,

@@ -690,3 +690,45 @@ Two settings were chosen from measurements on these same clips (a risk of fittin
   which ViGeo sees with full attention, gives +11.2 %. Other options measured: 16 frames
   strided over the clip, run offline, gave +4.4 % on clip_0004 but -21.8 % on clip_0005
   (it mixes the two shots).
+
+## Plan 3 — generate_images (Z-Image-Turbo)
+
+**Disk before starting** (controller ruling: stop and report BLOCKED if `/` would drop below
+15 GB free): `/` 27 GB free / 1.3 TB (98% used), `/mnt/biometrics` 2.0 TB free / 15 TB (86%
+used). The env (`.envs/gen-zimage`, ~5.7 GB) and weights (`weights/z-image-turbo`, 31 GB) both
+live under `AutoResearcher` on `/mnt/biometrics`; `/` was unaffected throughout (still 27 GB
+free after).
+
+**Env** (`.envs/gen-zimage`, conda-prefix, python 3.11, `CONDA_PKGS_DIRS`/`PIP_CACHE_DIR` under
+`AutoResearcher/.cache`): `torch==2.7.1+cu126`, `torchvision==0.22.1+cu126`, `diffusers==0.40.0`,
+`transformers==5.17.0`, `accelerate==1.15.0`, `safetensors==0.8.0`. Env size on disk: 5.7 GB.
+`from diffusers import ZImagePipeline` imports cleanly.
+
+**Weights**: `hf download Tongyi-MAI/Z-Image-Turbo --revision
+f332072aa78be7aecdf3ee76d5c247082da564a6 --exclude "assets/*" --local-dir
+weights/z-image-turbo`, `HF_HOME` under `AutoResearcher/.cache/huggingface`: 31 GB on disk.
+
+**Fit spike** (GPU 0 free; script + images under `.cache/scratch/`, not `/tmp`): 4 prompts at
+1280x720, 1 at 960x544, 1 at 1920x1088 (not 1920x1080 — 1080 is not a multiple of 16 and the
+pipeline itself refuses it, matching the tool's own width/height contract).
+
+- `offload: none` (`.to("cuda")`): fits the first 5 images (peaked near 21+ GB by 960x544) but
+  **OOMs at 1920x1088** ("Tried to allocate 1020.00 MiB ... 22.64 GiB memory in use" on a
+  23.6 GiB card). GPU memory returned to baseline (15 MiB) after the crashed process exited.
+- `offload: model` (`enable_model_cpu_offload()`): load 1.09 s (offload is lazy), all six sizes
+  succeed, peak 12,806 MiB, 10.2-17.8 s/image (bigger sizes slower, as expected). Images:
+  plausible photorealistic scenes, no NaN or black frames (see below) — chosen for the config.
+
+Two images inspected directly (Read tool, PNG): a red fox standing in snow, forest bokeh
+background, sharp fur detail, natural pose and lighting (1280x720); two yellow six-axis robot
+arms over a die-cast model car on a lab bench, correct joint geometry, plausible depth of field,
+readable background lab equipment (1920x1088, the largest allowed size). Both are coherent,
+well-composed, and show no generation artifacts.
+
+**GPU smoke** (`AR_TEST_GPUS=0,1,2,3 pytest tests/test_images.py -m gpu -s`, all 6 GPUs free,
+picked the default 4): 8 prompts, one worker per GPU, 1280x720: PASSED. Every item's PNG opened
+at exactly 1280x720; `gpu_memory_mib.before == .after` on all four GPUs (`{0: 15, 1: 15, 2: 112,
+3: 15}` both before and after — GPU 2's 112 MiB is pre-existing Xorg/background usage, not this
+job); `gpu_memory_released: true`. Per-image seconds: 16.9-18.7 (offload: model, matching the
+fit spike). Confirmed again via `nvidia-smi` after the test process exited: all six GPUs back
+to their pre-job level. `images.enabled` set to `true` after this smoke, per Task 5's config.

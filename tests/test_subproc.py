@@ -11,10 +11,26 @@ import time
 
 import pytest
 
-from ar_kernel.subproc import SubprocTimeout, run_in_env
+from ar_kernel.config import REPO_ROOT
+from ar_kernel.subproc import SubprocTimeout, conda_command, run_in_env
 from ar_kernel.telemetry.recorder import Recorder
 
 ENV = "autoresearcher"
+
+
+def test_conda_command_by_name_uses_dash_n():
+    assert conda_command("autoresearcher", ["python", "-c", "1"]) == \
+        ["conda", "run", "--no-capture-output", "-n", "autoresearcher", "python", "-c", "1"]
+
+
+def test_conda_command_with_a_slash_is_a_repo_relative_prefix():
+    assert conda_command(".envs/gen-zimage", ["x"]) == \
+        ["conda", "run", "--no-capture-output", "-p", str(REPO_ROOT / ".envs" / "gen-zimage"), "x"]
+
+
+def test_conda_command_with_an_absolute_path_is_used_as_is():
+    assert conda_command("/tmp/some/env", ["x"]) == \
+        ["conda", "run", "--no-capture-output", "-p", "/tmp/some/env", "x"]
 
 
 def _alive(pid: int) -> bool:

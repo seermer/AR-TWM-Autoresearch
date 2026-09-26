@@ -7,6 +7,7 @@ __pycache__/
 runs/
 .recovery/
 .cache/
+.envs/
 third_party/
 *.swp
 .*.swp

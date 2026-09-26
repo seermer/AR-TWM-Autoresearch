@@ -24,6 +24,17 @@ def cache_env() -> dict[str, str]:
     return {var: str(root / sub) if sub else str(root) for var, sub in CACHE_VARS.items()}
 
 
+def conda_command(env: str, args: list[str]) -> list[str]:
+    """`conda run` argv for `env`: a plain name runs `-n <env>` as before; a value containing
+    "/" is a conda-prefix env instead and runs `-p <path>` (repo-relative unless absolute) --
+    how the generator envs that don't fit `~/miniforge3` (disk budget) are named in config."""
+    if "/" in env:
+        path = Path(env)
+        path = path if path.is_absolute() else REPO_ROOT / path
+        return ["conda", "run", "--no-capture-output", "-p", str(path), *args]
+    return ["conda", "run", "--no-capture-output", "-n", env, *args]
+
+
 class SubprocTimeout(subprocess.TimeoutExpired):
     """A phase exceeded its timeout; its whole process group has been killed.
 
@@ -62,7 +73,7 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
     subproc.error on timeout or launch failure, including the output captured
     so far.
     """
-    command = ["conda", "run", "--no-capture-output", "-n", env, *args]
+    command = conda_command(env, args)
     process_env = {**os.environ, **cache_env(), **(extra_env or {})}
     if recorder is not None:
         recorder.event("subproc.start", node=node, phase=phase,

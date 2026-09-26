@@ -1,4 +1,5 @@
-"""Shared plumbing for the GPU data-source jobs (spec 10): rollout_* and annotate_camera.
+"""Shared plumbing for the GPU data-source jobs (spec 10): rollout_*, annotate_camera and
+generate_images.
 
 A backend stages the agent's input files into a kernel-private job dir (never trusting the
 path between check and use), runs one worker per GPU group in the generator's own conda env
@@ -48,7 +49,7 @@ def _tail(path: Path, limit: int = 2000) -> str:
 
 
 class GpuJob:
-    """Base JobQueue backend. Subclasses set name/tool, kind ("rollout" | "annotation"),
+    """Base JobQueue backend. Subclasses set name/tool, kind ("rollout" | "annotation" | "image"),
     generator (provenance name), license, file_keys (item fields naming workspace files),
     optionally config_key (a dotted kernel.yaml path whose "max_items"/"timeout_s" override
     the class defaults below) and implement check_args, produce and finish."""
@@ -158,7 +159,7 @@ class GpuJob:
                 return {"index": index, "error": status.get("error", "failed")}
             files = self.finish(job, item, out)
             published = {}
-            for role in ("video", "caption", "pose"):
+            for role in ("video", "caption", "pose", "image"):
                 if files.get(role):
                     src = Path(files[role])
                     rel = f"{self.kind}s/{job.id}/{index}{src.suffix}"
@@ -171,6 +172,10 @@ class GpuJob:
         worker = {k: v for k, v in status.items() if k != "ok"}
         if self.kind == "annotation":
             return {"index": index, "video": job.args["items"][index]["video"], **published, **extra,
+                    "worker": worker}
+        if self.kind == "image":
+            return {"index": index, "image": published["image"], "prompt": item.get("prompt"),
+                    "seed": item.get("seed"), "generator": self.generator_name(job), "license": self.license,
                     "worker": worker}
         params = {k: v for k, v in job.args.items() if k != "items"}
         spec = {k: v for k, v in item.items() if k not in (*self.file_keys, "index", "hashes")}
@@ -298,8 +303,11 @@ def build_gpu_backends(cfg, run_dir: Path, gpus: list[int], registry, recorder) 
     Tasks 5-8 add `ImageBackend`, `AlayaWorldBackend`, `Wan22Backend` and `Ltx25Backend`,
     each only when its config says enabled."""
     from .annotate import AnnotateBackend          # imports this module
+    from .images import ImageBackend
 
     backends = []
     if cfg.get("annotate.enabled"):
         backends.append(AnnotateBackend(cfg, run_dir, gpus, registry, recorder))
+    if cfg.get("images.enabled"):
+        backends.append(ImageBackend(cfg, run_dir, gpus, registry, recorder))
     return backends

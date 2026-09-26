@@ -51,11 +51,40 @@ or downloaded fresh into `AutoResearcher/.cache/huggingface/hub/` before the cap
 start; the first captioner start after that also rebuilds the vLLM compile cache under
 `.cache/vllm` and is slower than subsequent ones.
 
+## Prefix envs (envs that don't fit `~/miniforge3`)
+
+Named envs live in `~/miniforge3/envs` (disk budget: `/home` has limited free space, each
+named env is ~8-12 GB). A generator env that would tip that over instead lives inside the
+project as a **conda-prefix** env, `AutoResearcher/.envs/<name>` (gitignored). `ar_kernel.subproc`
+tells the two apart by the env value: a plain name (`"autoresearcher"`) runs `conda run -n
+<name>`; a value containing "/" (`".envs/gen-zimage"`) is a prefix env instead — repo-relative
+unless absolute — and runs `conda run -p <path>` (`conda_command()` in `subproc.py`, tested in
+`tests/test_subproc.py` without needing conda). `configs/kernel.yaml`'s `<block>.env` is just
+this string, so a backend's `produce()` never needs to know which kind it got.
+
+**`gen-zimage`** (Z-Image-Turbo, `generate_images`): created at
+`AutoResearcher/.envs/gen-zimage`, python 3.11.
+
+```bash
+cd AutoResearcher
+export CONDA_PKGS_DIRS=$PWD/.cache/conda/pkgs PIP_CACHE_DIR=$PWD/.cache/pip
+conda create -y -p .envs/gen-zimage python=3.11
+conda run --no-capture-output -p .envs/gen-zimage pip install torch==2.7.1 torchvision==0.22.1 \
+  --index-url https://download.pytorch.org/whl/cu126
+conda run --no-capture-output -p .envs/gen-zimage pip install "diffusers>=0.36" transformers accelerate safetensors
+```
+
+Pinned/measured versions (Task 5): `torch==2.7.1+cu126`, `torchvision==0.22.1+cu126`,
+`diffusers==0.40.0`, `transformers==5.17.0`, `accelerate==1.15.0`, `safetensors==0.8.0`. Env
+size on disk: ~5.7 GB. Weights: `Tongyi-MAI/Z-Image-Turbo` @
+`f332072aa78be7aecdf3ee76d5c247082da564a6` downloaded with `hf download ... --exclude
+"assets/*" --local-dir weights/z-image-turbo` (31 GB, `HF_HOME` under `AutoResearcher/.cache`).
+
 ## What needs doing on a new machine
 
 1. **Create the conda environments** — `alayaworld`, `wbench-main`, `wbench-vp`,
-   `autoresearcher`. Never use `base` or the system Python. `ar doctor` lists any
-   that are missing.
+   `autoresearcher`, plus the prefix envs above (`.envs/gen-zimage`, ...). Never use `base` or
+   the system Python. `ar doctor` lists any named env that is missing.
 2. **System tools on PATH:** `ffmpeg`, `ffprobe`, `conda`, `git`.
 3. **Weights are not in git.** Re-download or copy:
    `WorldModel/weights/` (LTX-2.3 transformer, `alaya-world-ar`, VAE, Gemma),

@@ -73,6 +73,17 @@ annotate:                         # annotate_camera GPU job (spec 10, 16.3 item 
   max_frames: 1200                # longer clips are refused per clip (memory)
   max_items: 64
   timeout_s: 21600
+images:                           # generate_images GPU job (Z-Image-Turbo first frames, Plan 3 Task 5)
+  enabled: true                   # verified: 8 prompts on 4 GPUs, gpu_memory_released true (Task 5 report)
+  env: .envs/gen-zimage           # a conda-prefix env inside the repo (disk budget; see docs/PORTABILITY.md)
+  weights: weights/z-image-turbo
+  revision: f332072aa78be7aecdf3ee76d5c247082da564a6
+  steps: 9
+  offload: model                  # from the fit spike: `none` OOMs at 1920x1088 (peaks > 24 GB);
+                                   # `model` (enable_model_cpu_offload) fits every allowed size, peak 12.8 GB
+  max_items: 64
+  timeout_s: 7200
+  license: Apache-2.0
 generators:                       # rollout_* GPU jobs; a variant is enabled only after its smoke (spec 16.3 item 5)
   alayaworld:
     env: alayaworld
