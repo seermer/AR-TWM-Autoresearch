@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Agents can request generated training clips (`rollout_alayaworld`, `rollout_wan22`, `rollout_ltx25`) and per-frame camera poses (`annotate_camera`) as asynchronous GPU jobs. Every output lands in the agent's staging directory as a ready-to-ingest candidate, and every variant is smoke-verified on this machine before it is enabled.
+**Goal:** Agents can request generated first-frame images (`generate_images`), generated training clips (`rollout_alayaworld`, `rollout_wan22`, `rollout_ltx25`) and per-frame camera poses (`annotate_camera`) as asynchronous GPU jobs. Every output lands in the agent's staging directory as a ready-to-ingest candidate, and every variant is smoke-verified on this machine before it is enabled.
 
 **Architecture:** Each tool is a `JobQueue` backend (Plan 2, Task 9) built on one shared base, `GpuJob` in `kernel/ar_kernel/tools/gpu_jobs.py`, which does four things:
 - It stages the agent's input files race-free into a kernel-private job directory.
@@ -51,6 +51,7 @@ Also read:
   - WorldModel and ViGeo: `alayaworld`.
   - Wan: `gen-wan22` (new).
   - LTX: `gen-ltx25` (new).
+  - Z-Image: `gen-zimage` (new).
   - Do not use or modify the `gen-alaya` env: it is not ours.
 - **Large files stay inside the project** (user rule, 2026-09-25): models, datasets, compile caches and package caches.
   - Kernel subprocesses get `HF_HOME`, `XDG_CACHE_HOME` and the other cache variables pointing at `AutoResearcher/.cache/` (Task 1).
@@ -130,6 +131,7 @@ Also read:
 | `.gitignore` (modify) | `.cache/`, `third_party/` |
 | `kernel/ar_kernel/tools/captioner.py` (modify) | Extract `wait_gpu_release()` for reuse (behavior unchanged) |
 | `kernel/ar_kernel/tools/gpu_jobs.py` (create) | `GpuJob` base: submit validation, staging, `run_workers`, publishing, candidates, provenance; tool registration for every GPU data tool; `build_gpu_backends(cfg, …)` |
+| `kernel/ar_kernel/tools/images.py` (create), `kernel/ar_kernel/bridges/zimage_generate.py` (create) | `ImageBackend` (`generate_images`) and its worker in `gen-zimage` (Z-Image-Turbo) |
 | `kernel/ar_kernel/tools/annotate.py` (create) | `AnnotateBackend` (`annotate_camera`) |
 | `kernel/ar_kernel/tools/rollouts.py` (create) | `AlayaWorldBackend`, `Wan22Backend`, `Ltx25Backend` |
 | `kernel/ar_kernel/bridges/vigeo_poses.py` (create) | Worker in `alayaworld`: video → `cam_c2w [N,4,4]` + pixel intrinsics |
@@ -294,7 +296,7 @@ git commit -m "feat(kernel): project-local caches for every kernel subprocess (A
 
 `_save_wbench_output_video` decodes `[prefix latents] + pred latents` and drops `prefix_latents * temporal_stride` leading frames, so mp4 frame 0 is the first generated frame. Work out which index of `metadata["cam_c2w"]` that frame corresponds to. The trajectory's own time base starts at pixel 0 of the render's timeline, and actions start at `action_start_pixel` (`_build_wbench_camera_trajectory`); see also `_vigeo_target_prefix_pixel_frames` and `target_base_start` in `_prepare_wbench_validation_metadata`.
 
-Write the formula into the report and into a comment in the code. Task 5's GPU smoke checks it independently with ViGeo.
+Write the formula into the report and into a comment in the code. Task 6's GPU smoke checks it independently with ViGeo.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -349,12 +351,12 @@ git commit -m "feat(wbench render): save the generated camera trajectory beside 
   - `canonical_hash(obj) -> str`, `file_sha256(path) -> str`.
   - `class GpuJob`: a `JobQueue` backend. The subclass sets `name`/`tool`/`kind` (`"rollout"`/`"annotation"`) and implements `check_args(args)`, `produce(job, items, work, out, cancel, report)` and `finish(job, item, out) -> dict`.
   - The job result: `{"items": [ {"index", ...published} | {"index", "error"} ], "gpu_memory_mib": {...}, "gpu_memory_released": bool|None}`.
-  - `register_gpu_tools(mcp, kit, q)`: registers `annotate_camera` / `rollout_alayaworld` / `rollout_wan22` / `rollout_ltx25` only for backends registered on `q`.
-  - `build_gpu_backends(cfg, run_dir, gpus, registry, recorder) -> list`: the enabled backends, filled in by Tasks 4–7.
+  - `register_gpu_tools(mcp, kit, q)`: registers `annotate_camera` / `generate_images` (Task 5) / `rollout_alayaworld` / `rollout_wan22` / `rollout_ltx25` only for backends registered on `q`.
+  - `build_gpu_backends(cfg, run_dir, gpus, registry, recorder) -> list`: the enabled backends, filled in by Tasks 4–8.
 
 - [ ] **Step 1: Config shape**
 
-Replace the `generators:` block in `configs/kernel.yaml` with the block below. Everything stays disabled; Tasks 4–7 enable what their smokes verify.
+Replace the `generators:` block in `configs/kernel.yaml` with the block below. Everything stays disabled; Tasks 4–8 enable what their smokes verify.
 
 ```yaml
 annotate:                        # annotate_camera GPU job (spec 10, 16.3 item 6)
@@ -381,7 +383,7 @@ generators:                      # rollout_* GPU jobs; a variant is enabled only
     gpus_per_worker: 1
     workers: null                # null = as many as the GPU list allows
     frames: [121, 121]           # [default, max]; 4k+1
-    extra_args: {}               # set by Task 6 from the fit measurements
+    extra_args: {}               # set by Task 7 from the fit measurements
     max_items: 16
     timeout_s: 43200
     license: Apache-2.0
@@ -391,7 +393,7 @@ generators:                      # rollout_* GPU jobs; a variant is enabled only
     weights: weights/ltx-2.5
     variants: {distilled: {enabled: false}, dev: {enabled: false}}
     gpus_per_worker: 1
-    workers: null                # Task 7 sets it from host-RAM measurements
+    workers: null                # Task 8 sets it from host-RAM measurements
     frames: [121, 241]           # [default, max]; 8k+1
     resolutions: [[576, 1024]]   # [height, width], each divisible by 32, 16:9
     max_items: 16
@@ -800,8 +802,9 @@ def register_gpu_tools(mcp, kit, q) -> None:
     # its job-level params plus `items: list[dict]`, and its description lists the enabled variants.
 ```
 
-Write out all four registrations explicitly, with typed parameters, so the MCP schema is precise:
-- `rollout_alayaworld(items, variant, rounds, seed)`
+Write out all five registrations explicitly, with typed parameters, so the MCP schema is precise (each is added by the task that builds its backend):
+- `rollout_alayaworld(items, variant, rounds_per_turn, seed)`
+- `generate_images(items, width, height)`
 - `rollout_wan22(items, frames)`
 - `rollout_ltx25(items, variant, frames, height, width)`
 
@@ -811,7 +814,7 @@ Each backend exposes a `description` string that states:
 - where outputs land and that each result item carries a ready `candidate` for `data_ingest`;
 - that rollouts without poses need `annotate_camera` (or `camera_motion: static`) before ingest.
 
-`build_gpu_backends(cfg, run_dir, gpus, registry, recorder)` returns `[]` for now. Tasks 4–7 each add their backend when its config says enabled.
+`build_gpu_backends(cfg, run_dir, gpus, registry, recorder)` returns `[]` for now. Tasks 4–8 each add their backend when its config says enabled.
 
 Add a registration test: a queue holding only `FakeJob` exposes no `rollout_wan22`. Use `new_mcp()` plus `await mcp.list_tools()`, the way `tests/test_tool_server.py` lists tools.
 
@@ -972,7 +975,96 @@ git commit -m "feat(tools): annotate_camera via ViGeo, verified against the exam
 
 ---
 
-### Task 5: `rollout_alayaworld`: WBench-style cases through the eval's own render path
+### Task 5: `generate_images` (Z-Image-Turbo)
+
+**Why (user, 2026-09-25):** AlayaWorld, Wan I2V and LTX I2V all start from an image, so agents need a way to make first frames.
+
+**Files:**
+- Create: `kernel/ar_kernel/bridges/zimage_generate.py`, `kernel/ar_kernel/tools/images.py` (`ImageBackend`), `tests/test_images.py`
+- Modify: `gpu_jobs.py` (`_collect` gets an `image` kind; `register_gpu_tools`; `build_gpu_backends`), `configs/kernel.yaml`, `docs/PORTABILITY.md`
+
+**Interfaces:**
+- Produces: tool `generate_images`, backend `ImageBackend(GpuJob)` with `kind = "image"`.
+  - **Job params:** `width`, `height` (multiples of 16, each 256..1920; default 1280×720, 16:9).
+  - **Items:** `{"prompt": str, "seed": int}`, with up to `images.max_items` (64) per job.
+  - **Result items:** `{"index", "image": "/workspace/staging/images/<job>/<i>.png", "prompt", "seed", "generator": "z-image-turbo", "license": "Apache-2.0"}` or `{"index", "error"}`.
+  
+  Images are inputs to rollouts, not training clips, so they carry no ingest candidate. A clip made from one is a rollout whose `inputs_hash` includes the image's hash (Task 3), and ingest's leakage check still compares its frames with WBench.
+
+**Facts (checked 2026-09-25):**
+- `Tongyi-MAI/Z-Image-Turbo` @ `f332072aa78be7aecdf3ee76d5c247082da564a6`, Apache-2.0, `diffusers:ZImagePipeline`.
+- Contents: `transformer/` 24.6 GB (6B parameters stored in fp32), `text_encoder/` 8.0 GB (Qwen3-4B, bf16), `vae/` 0.17 GB, tokenizer and scheduler.
+- Loaded in bf16, the model is about 12 GB (transformer) plus 8 GB (text encoder), which is tight on 24 GB but fits with the text encoder offloaded after encoding.
+- Turbo runs 8 DiT steps (`num_inference_steps=9`, `guidance_scale=0.0`, as on the model card; re-read the card at the pinned revision).
+
+- [ ] **Step 1: Weights and env**
+
+```bash
+cd AutoResearcher
+HF_HOME=$PWD/.cache/huggingface conda run --no-capture-output -n autoresearcher \
+  hf download Tongyi-MAI/Z-Image-Turbo --revision f332072aa78be7aecdf3ee76d5c247082da564a6 \
+  --exclude "assets/*" --local-dir weights/z-image-turbo
+du -sh weights/z-image-turbo
+export PIP_CACHE_DIR=$PWD/.cache/pip
+conda create -y -n gen-zimage python=3.11
+conda run --no-capture-output -n gen-zimage pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu126
+conda run --no-capture-output -n gen-zimage pip install "diffusers>=0.36" transformers accelerate safetensors
+conda run --no-capture-output -n gen-zimage python -c "from diffusers import ZImagePipeline"
+```
+
+If `hf` is not available in `autoresearcher`, use `huggingface_hub.snapshot_download` with the same arguments. Record the exact versions installed (`pip freeze | grep -iE "diffusers|transformers|torch"`), the env size and the commands in `PORTABILITY.md`. Pin `images.revision` in the config.
+
+- [ ] **Step 2: Fit spike (one GPU)**
+
+A 10-line script in the scratchpad:
+1. `ZImagePipeline.from_pretrained(weights, torch_dtype=torch.bfloat16)`.
+2. Try `.to("cuda")` first; if it OOMs, use `enable_model_cpu_offload()`.
+3. Render 4 prompts at 1280×720, then one at 960×544 and one at 1920×1080.
+
+Record the load time, the seconds per image and peak GPU memory, and look at the images: they should show plausible scenes with no NaN or black frames. Put the result in `verification-log.md`. Choose `offload: none | model` for the config from this measurement.
+
+- [ ] **Step 3: Bridge `zimage_generate.py`**
+
+- **Arguments:** the bridge protocol plus `--weights --width --height --steps --offload`.
+- **Setup:** load the pipeline once.
+- **Per item:** `pipe(prompt=item["prompt"], width, height, num_inference_steps=steps, guidance_scale=0.0, generator=torch.Generator("cuda").manual_seed(item["seed"])).images[0].save(<out>/<index>.png)`, then write the status `{"ok": true, "seconds": t}`.
+
+- [ ] **Step 4: `ImageBackend` + `_collect` image kind + unit tests**
+
+- **`check_args`:** width and height are multiples of 16 within 256..1920; every item has a non-empty `prompt` and an int `seed`.
+- **`produce`:** `run_workers(images.env, …, split_gpus(gpus, 1, None))`.
+- **`finish`:** returns `{"image": out/<i>.png}` after checking that PIL opens it at the requested size.
+- **`_collect`:** publishes the `image` role like the others. For `kind == "image"` it returns `{"index", "image", "prompt", "seed", "generator", "license"}`.
+
+Unit tests with the fake worker (extend `fake_gen_worker.py` with `--kind image`, which writes a PNG of the requested size via PIL) check:
+- the publish path and size;
+- a size that is not a multiple of 16 is refused at submit;
+- the tool is registered only when enabled.
+
+- [ ] **Step 5: GPU smoke, enable, commit**
+
+Add a `gpu` test: 8 prompts on 4 GPUs at 1280×720. All succeed and the sizes are right. One image is then used as the `image` input of a Wan or LTX item and as an AlayaWorld case image in those tasks' smoke tests, so the pipelines are shown to chain.
+
+Config:
+
+```yaml
+images:                          # generate_images GPU job
+  enabled: false                 # set true after the smoke
+  env: gen-zimage
+  weights: weights/z-image-turbo
+  revision: f332072aa78be7aecdf3ee76d5c247082da564a6
+  steps: 9
+  offload: none                  # from the fit spike
+  max_items: 64
+  timeout_s: 7200
+  license: Apache-2.0
+```
+
+`git commit -m "feat(tools): generate_images (Z-Image-Turbo) for first frames"`
+
+---
+
+### Task 6: `rollout_alayaworld`: WBench-style cases through the eval's own render path
 
 **Decision (user, 2026-09-25):** render exactly as the WBench eval does, covering the full WBench interaction set, not only navigation.
 - **Per-turn inputs:** each turn has a prompt and an action.
@@ -1089,7 +1181,7 @@ git commit -m "feat(tools): rollout_alayaworld renders WBench-style cases throug
 
 ---
 
-### Task 6: `rollout_wan22` (TI2V-5B)
+### Task 7: `rollout_wan22` (TI2V-5B)
 
 **Files:**
 - Create: `kernel/ar_kernel/bridges/wan22_generate.py`; `Wan22Backend` in `tools/rollouts.py`; tests in `tests/test_rollouts.py`
@@ -1169,7 +1261,7 @@ Commit the config (`ti2v-5b.enabled: true`, `extra_args` from the spike, `commit
 
 ---
 
-### Task 7: `rollout_ltx25` (distilled, then dev)
+### Task 8: `rollout_ltx25` (distilled, then dev)
 
 **Files:**
 - Create: `kernel/ar_kernel/bridges/ltx25_generate.py`; `Ltx25Backend` in `tools/rollouts.py`; tests
@@ -1192,7 +1284,7 @@ conda create -y -n gen-ltx25 python=3.12
 
 Install `ltx-core` (with the `natten` extra that pins torch 2.13.0 cu132) and `ltx-pipelines` editable into the env. Use the package indexes from `packages/ltx-core/pyproject.toml`. Prefer `uv pip install --python $(conda run -n gen-ltx25 which python) -e "third_party/LTX-2/packages/ltx-core[<natten extra name>]" -e third_party/LTX-2/packages/ltx-pipelines`, reading the extra's exact name and index URLs from that pyproject. `ltx-kernels` is **not** needed: it is only for multi-GPU SP, which does not help on 24 GB cards (fact 7).
 
-Then run `pip check`, `python -c "import ltx_pipelines.distilled"`, and record the commands, the SHA and the env size in `PORTABILITY.md`. Pin the SHA as `generators.ltx25.commit`, the same way as Task 6.
+Then run `pip check`, `python -c "import ltx_pipelines.distilled"`, and record the commands, the SHA and the env size in `PORTABILITY.md`. Pin the SHA as `generators.ltx25.commit`, the same way as Task 7.
 
 - [ ] **Step 2: Single-GPU fit spike, distilled**
 
@@ -1243,7 +1335,7 @@ Add a `gpu` test with 2 items per enabled variant (1 T2V, 1 I2V) on the chosen w
 
 ---
 
-### Task 8: Integration, agent knowledge, docs, full verification, merge
+### Task 9: Integration, agent knowledge, docs, full verification, merge
 
 **Files:**
 - Modify: `kernel/ar_kernel/tools/gpu_jobs.py` (`build_gpu_backends` complete), `seed_agent/knowledge/data_building.md`, spec §10/§5.4/§16.3/§17, the Plan 2 plan's Plan 4 contract table, `verification-log.md`
@@ -1261,7 +1353,7 @@ A tool-server test lists tools over MCP: disabled tools are absent, and each ena
 - [ ] **Step 2: Agent knowledge (keep it short: simplicity rule)**
 
 Add at most about 15 lines to `seed_agent/knowledge/data_building.md`:
-- which rollout tools exist;
+- which rollout tools exist, and `generate_images` for making first frames (images for AlayaWorld cases and I2V items);
 - that they are slow GPU jobs, so batch items;
 - that AlayaWorld rollouts come back with poses and per-round segments (eligible for `per_chunk`);
 - that Wan/LTX clips need `annotate_camera` before ingesting as `moving`, or are ingested as `static` only when the camera truly does not move;
@@ -1305,15 +1397,15 @@ Then:
 ## Self-review
 
 - **Spec coverage.**
-  - §10 `rollout.alayaworld` → Task 5; `rollout.wan22` → Task 6; `rollout.ltx25` → Task 7; `annotate.camera` → Task 4.
+  - §10 `rollout.alayaworld` → Task 6; `rollout.wan22` → Task 7; `rollout.ltx25` → Task 8; `annotate.camera` → Task 4; `generate_images` (new, user request) → Task 5.
   - "Disabled variants omitted from schemas" → Tasks 3 and 8.
   - §5.4 rollout provenance → Task 3.
   - §6.2 standard-format rules → the `finish` steps plus ingest checks in each GPU smoke.
-  - §16.3 item 5 → the smokes in Tasks 5–7; item 6 → Task 4 Step 5.
+  - §16.3 item 5 → the smokes in Tasks 6–8; item 6 → Task 4 Step 5.
   - §17 → Task 3 Step 1.
   - The user's cache rule → Task 1.
   - The WorldModel patch → Task 2.
-  - Intentionally dropped: LTX V2V (amended in Task 8).
+  - Intentionally dropped: LTX V2V (amended in Task 9).
 - **Placeholder scan.**
   - The GPU tasks deliberately measure before they code: the AlayaWorld frame layout and offset, the LTX flag names and RAM-based worker count, and the Wan memory settings. Each is a concrete measurement step with a written decision rule, not a TBD.
   - The exact library call signatures (Wan `generate`, LTX pipeline constructors, ViGeo focal normalization) are read from the pinned code in a named step, because guessing them is how bugs slip in.
@@ -1321,5 +1413,5 @@ Then:
   - `GpuJob.submit(q, caller, args)` → `{job_id}`.
   - Result items are `{index, candidate | error, worker}` for rollouts and `{index, video, pose, frames, intrinsics | error}` for annotation.
   - The bridge protocol is the same for the three bridges and the fake worker.
-  - `split_gpus` and `run_workers` signatures match across Tasks 3–7.
-- **Review Focus.** Each of the five lines has a test in its owning task (Task 3: links, cancel, crash; Tasks 4/5: frame-count mismatch; Task 4: `max_frames`).
+  - `split_gpus` and `run_workers` signatures match across Tasks 3–8.
+- **Review Focus.** Each of the five lines has a test in its owning task (Task 3: links, cancel, crash; Tasks 4/6: frame-count mismatch; Task 4: `max_frames`).
