@@ -74,7 +74,7 @@ HGM `hgm.py`, `tree.py`, `hgm_utils.py`, `self_improve_step.py`; HyperAgents
 | GPUs | This machine: 6x RTX 4090 (24 GB). **GPU policy (identical for every GPU task: precache, training, rendering, eval, rollouts, camera annotation):** if `CUDA_VISIBLE_DEVICES` is set when the loop starts, the kernel uses exactly that list; if unset it falls back to `gpus.default` from `kernel.yaml`. Any indices are allowed. Fewer than `gpus.min_count` GPUs is refused at run start. Nothing in the kernel assumes a GPU count, index set or card model: the list length flows into the rank count (`train.sh`), `--gpus` for WBench, and the two-GPU slice used for prompt precache; larger or different hardware needs only the config values changed. |
 | Host RAM | 251 GB |
 | Conda envs (existing) | `alayaworld` (training, rendering, rollouts, data checks), `wbench-main` (WBench metrics), `wbench-vp` (visual plausibility) |
-| Conda env (new) | `autoresearcher` (Python 3.12): kernel, gateway, tool server, dashboard |
+| Conda env (new) | `autoresearcher` (Python 3.12): kernel, gateway, tool server *(2026-09-27, Plan 4 as built / user decision: no dashboard, §13.4)* |
 | Generator envs (new, Plan 3) | *(Added 2026-09-26.)* `gen-zimage`, `gen-wan22`, `gen-ltx25` are conda-**prefix** envs inside the repo, `AutoResearcher/.envs/<name>` (gitignored), not named envs in `~/miniforge3/envs` (disk ruling: `/` had too little free space; large files stay in the project). A config `env:` value containing `/` is a repo-relative prefix path (absolute also accepted), and `subproc.run_in_env` then runs `conda run -p <REPO_ROOT/path>`; a plain name still runs `conda run -n <name>`. Recreate commands: `docs/PORTABILITY.md`. `annotate_camera` and `rollout_alayaworld` use the existing `alayaworld` env. |
 | Docker | 27.3.1, user in `docker` group, `nvidia` runtime available (agent containers are CPU-only) |
 | Secrets | `AutoResearcher/.env` (mode 600, git-ignored), symlinked as `WorldModel/.env` and `WBench/.env` |
@@ -167,7 +167,7 @@ or `AR_CACHE_DIR` to relocate the whole tree; a new machine needs the captioner 
                           │                     │                                          ▼               │
                           │   archive (SQLite, agents.git, blob store)   train ─► merge ─► render ─► eval  │
                           │   telemetry (JSONL + payloads + SQLite index) ◄── every component              │
-                          │   gateway (OpenAI proxy)      tools (MCP server)      dashboard                │
+                          │   gateway (OpenAI proxy)      tools (MCP server)                               │
                           └───────▲──────────────────────────▲─────────────────────────────────────────────┘
                                   │ LLM calls                │ privileged tools
                           ┌───────┴──────────────────────────┴──────┐
@@ -184,7 +184,7 @@ or `AR_CACHE_DIR` to relocate the whole tree; a new machine needs the captioner 
 AutoResearcher/
   kernel/                 # Python package ar_kernel (mechanism only)
     archive/  select/  sandbox/  gateway/  tools/  contract/  train/  eval/
-    telemetry/  control/  dashboard/
+    telemetry/  control/
   contract/               # Python package ar_contract (mounted read-only into containers)
   seed_agent/             # initial agent repo content (becomes the root node's code)
   docker/                 # agent base image
@@ -798,7 +798,9 @@ Stored in `configs/proxy_cases.txt`; fixed for the run.
 ### 11.4 Best node and full evaluation
 
 - `ar status` reports the best node by highest own proxy score.
-- `ar full-eval <node>` (manual only) runs the full 289-case WBench for a node.
+- `ar full-eval <node>` *(amended 2026-09-27, Plan 4 as built: not implemented — there is no
+  full 289-case WBench command)*. `ar score-node --run-id <id> --node <node>` scores a node
+  on the 40-case proxy set (§11.1), the same path the loop itself uses.
 
 ---
 
@@ -1018,7 +1020,7 @@ list.)*
 
 - **Start-time GPU visibility** (`guards.check_visible`): the run's GPU list (§2, frozen at
   run start in the run's own config) must all be visible to `nvidia-smi`; checked before a
-  new run bootstraps and again before the loop attaches to an existing one. Missing GPUs
+  new run bootstraps and again before the loop starts on an existing one. Missing GPUs
   refuse the run before any run directory or config snapshot is created.
 - **Merge disk check** (inside `merge_lora`, not a separate guard): requires ≥
   `disk.merge_min_free_gb` (default 30) GB free; below that the merge phase fails, which
