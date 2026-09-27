@@ -112,6 +112,8 @@ def test_root_then_one_scored_child(make_loop):
     assert json.loads((run / "nodes" / "n1" / "eval" / "aggregates.json").read_text())["metrics"]["m"] == 0.9
     assert nodes["root"]["subtree_value"] == pytest.approx(0.7 * 0.7 + 0.3 * (0.7 + 0.5 * 0.9) / 1.5)
     assert not (run / "staging" / "n1").exists()
+    passed = NodeStore(loop.ctx.conn).attempts("n1", "improve_recipe")[-1]["detail"]
+    assert passed["checkpoint"].startswith("nodes/n1/")          # run-relative, never absolute
 
 
 def test_contract_failure_retries_with_the_report(make_loop):
@@ -261,3 +263,22 @@ def test_interrupted_nodes_do_not_count_and_ids_are_never_reused(make_loop):
     assert {k: v["status"] for k, v in nodes.items()} == {"root": "scored", "n1": "interrupted", "n2": "scored"}
     assert nodes["n2"]["parent_id"] == "root"                  # an interrupted node is never a parent
     assert (run / "nodes" / "n1" / "edit.json").exists()       # and keeps its files
+
+
+def test_root_missing_agent_commit_is_set_on_resume(make_loop):
+    run, make = make_loop
+    loop = make(Script(run), max_nodes=0)
+    NodeStore(loop.ctx.conn).create("root", None, 0)            # killed before agent_commit was set
+    loop.run()
+    root = NodeStore(loop.ctx.conn).get("root")
+    assert root["agent_commit"] and root["status"] == "scored"
+
+
+def test_root_score_failure_alerts_and_leaves_root_running(make_loop):
+    run, make = make_loop
+    loop = make(Script(run, score=[RuntimeError("wbench down")]))
+    with pytest.raises(RuntimeError):
+        loop.run()
+    assert NodeStore(loop.ctx.conn).get("root")["status"] == "running"
+    alerts = [e for e in loop.ctx.recorder.read_events() if e["type"] == "alert"]
+    assert alerts[-1]["kind"] == "root_failed" and "wbench down" in alerts[-1]["message"]

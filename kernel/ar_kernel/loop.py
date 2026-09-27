@@ -140,15 +140,20 @@ class Loop:
         try:
             root = self.nodes.get("root")
         except KeyError:
+            self.nodes.create("root", None, 0)
+            root = self.nodes.get("root")
+        if not root["agent_commit"]:            # also after a kill between create and set_fields
             commit = self.repo.resolve(self.repo.branch_ref("root")) or \
                 self.repo.init(self.cfg.repo_root / "seed_agent")
-            self.nodes.create("root", None, 0)
             self.nodes.set_fields("root", agent_commit=commit)
-            root = self.nodes.get("root")
         if root["status"] == "scored":
             return
         self._state("root", "eval")
-        score, detail = self.phases.score(self, "root", None, None)   # a failure here ends the run
+        try:
+            score, detail = self.phases.score(self, "root", None, None)
+        except Exception as exc:                # ends the run; root stays running
+            alert(self.ctx.recorder, "root_failed", f"{type(exc).__name__}: {exc}", node_id="root")
+            raise
         self._record_score("root", score, detail)
 
     def cycle(self) -> None:
@@ -262,7 +267,8 @@ class Loop:
                 alert(self.ctx.recorder, "train_failed", f"{child} attempt {k}: {trained.failure} "
                       f"{trained.detail}".strip(), level="warning", node_id=child)
                 continue
-            self.nodes.add_attempt(child, "improve_recipe", k, "passed", {"checkpoint": str(trained.checkpoint)})
+            self.nodes.add_attempt(child, "improve_recipe", k, "passed",
+                                   {"checkpoint": run_rel(self.ctx.run_dir, trained.checkpoint)})
             self.nodes.set_fields(child, checkpoint_path=run_rel(self.ctx.run_dir, trained.checkpoint))
             return (trained.checkpoint, gate.resolved_path), "scored", None
         return None, status, f"improve_recipe retries exhausted; last failure: {json.dumps(retry)[:2000]}"
