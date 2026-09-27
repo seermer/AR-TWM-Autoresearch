@@ -126,3 +126,47 @@ def test_resume_refuses_a_run_whose_root_was_never_scored(tmp_path, monkeypatch,
     assert "cannot be resumed" in capsys.readouterr().err
     assert Control(run).alive_pid() is None                        # refused before claiming the run
     assert (run / "nodes" / "root" / "debug.txt").read_text() == "kept"   # nothing cleaned up
+
+
+def test_a_new_run_with_an_unreachable_git_remote_creates_nothing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli.KernelConfig, "runs_dir", property(lambda self: tmp_path))
+    monkeypatch.setattr(cli, "load_dotenv", lambda path, env: [])
+    monkeypatch.setattr(cli, "check_visible", lambda gpus: None)
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("OPENAI_MODEL", "m")
+    missing = tmp_path / "no_such_repo.git"
+    assert cli.main(["run", "--run-id", "r2", "--max-nodes", "1", "--git-remote", str(missing)]) == 2
+    assert "cannot reach --git-remote" in capsys.readouterr().err and not (tmp_path / "r2").exists()
+
+
+def test_resume_pushes_to_the_git_remote_the_run_was_started_with(tmp_path, monkeypatch):
+    run = _existing_run(tmp_path, monkeypatch)
+    Control(run).save_args(git_remote="git@example.com:me/runs.git")
+    monkeypatch.setattr(cli, "check_visible", lambda gpus: None)
+    made = []
+
+    class FakeRepo:
+        check_remote = staticmethod(lambda url: None)
+
+        def __init__(self, path, **kw):
+            made.append(kw)
+
+        def push(self):
+            made.append("pushed")
+    monkeypatch.setattr(cli, "AgentsRepo", FakeRepo)
+
+    def cleanup(control):
+        raise Reached
+    monkeypatch.setattr(cli, "kill_recorded_groups", cleanup)
+    with pytest.raises(Reached):
+        cli.main(["run", "--run-id", "r1", "--resume"])
+    assert made[0]["remote"] == "git@example.com:me/runs.git" and made[0]["namespace"] == "r1"
+    assert made[1] == "pushed"
+
+
+def test_resume_refuses_when_the_runs_git_remote_is_unreachable(tmp_path, monkeypatch, capsys):
+    run = _existing_run(tmp_path, monkeypatch)
+    Control(run).save_args(git_remote=str(tmp_path / "gone.git"))
+    assert cli.main(["run", "--run-id", "r1", "--resume"]) == 2
+    assert "cannot reach the run's git remote" in capsys.readouterr().err
+    assert Control(run).alive_pid() is None

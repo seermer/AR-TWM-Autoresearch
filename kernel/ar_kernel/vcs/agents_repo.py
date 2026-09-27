@@ -7,6 +7,7 @@ import subprocess
 import tarfile
 import tempfile
 from pathlib import Path
+from typing import Callable
 
 _IDENT = ["-c", "user.name=AutoResearcher kernel", "-c", "user.email=kernel@autoresearcher.local"]
 
@@ -15,9 +16,19 @@ class CheckoutError(Exception):
     """A committed tree cannot be extracted safely, e.g. an agent committed a symlink that leaves the tree."""
 
 
+def _remote_env() -> dict:
+    """A push never waits for a password or a host-key prompt: without a loaded key it fails."""
+    return {**os.environ, "GIT_TERMINAL_PROMPT": "0",
+            "GIT_SSH_COMMAND": os.environ.get("GIT_SSH_COMMAND", "ssh") + " -o BatchMode=yes"}
+
+
 class AgentsRepo:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, remote: str | None = None, namespace: str = "",
+                 on_push_error: Callable[[str], None] | None = None) -> None:
+        """With `remote`, every ref update is pushed there, under branches named `<namespace>/...`
+        so several runs can share one repo. A failed push goes to `on_push_error`, never raises."""
         self.path = Path(path)
+        self.remote, self.namespace, self.on_push_error = remote, namespace, on_push_error
 
     def _git(self, *args: str, work_tree: Path | None = None, index: Path | None = None,
              input: bytes | None = None, check: bool = True) -> subprocess.CompletedProcess:
@@ -45,6 +56,33 @@ class AgentsRepo:
 
     def set_ref(self, ref: str, commit: str) -> None:
         self._git("update-ref", ref, commit)
+        self.push()
+
+    @staticmethod
+    def check_remote(url: str) -> str | None:
+        """None if `url` is a reachable git repo, else why not."""
+        try:
+            r = subprocess.run(["git", "ls-remote", "--heads", url], capture_output=True, text=True,
+                               env=_remote_env(), timeout=60)
+        except subprocess.TimeoutExpired:
+            return f"git ls-remote {url} timed out"
+        return None if r.returncode == 0 else r.stderr.strip() or f"git ls-remote exited {r.returncode}"
+
+    def push(self) -> None:
+        """Push every node branch and attempt ref. Refs are only ever added, so each push also
+        catches up any earlier push that failed."""
+        if not self.remote:
+            return
+        specs = [f"refs/heads/node/*:refs/heads/{self.namespace}/node/*",
+                 f"refs/attempts/*:refs/heads/{self.namespace}/attempts/*"]
+        cmd = ["git", "--git-dir", str(self.path), "push", "--quiet", self.remote, *specs]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, env=_remote_env(), timeout=120)
+            error = None if r.returncode == 0 else r.stderr.strip() or f"git push exited {r.returncode}"
+        except subprocess.TimeoutExpired:
+            error = "git push timed out after 120 s"
+        if error and self.on_push_error:
+            self.on_push_error(f"push to {self.remote} failed: {error}")
 
     @staticmethod
     def attempt_ref(node: str, phase: str, attempt: int) -> str:

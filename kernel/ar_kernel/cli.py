@@ -6,7 +6,7 @@ from .archive.nodes import NodeStore
 from .config import KernelConfig, load_dotenv, resolve_gpus
 from .control import Control, drive, kill_recorded_groups, mark_interrupted
 from .doctor import report, run_checks
-from .guards import check_visible
+from .guards import alert, check_visible
 from .loop import Loop
 from .monitor import Monitor
 from .run import RunNotFound, attach_run, bootstrap_run, score_node
@@ -34,6 +34,9 @@ def main(argv: list[str] | None = None) -> int:
     runp.add_argument("--run-id", default=None)
     runp.add_argument("--max-nodes", type=int, default=None)
     runp.add_argument("--resume", action="store_true")
+    runp.add_argument("--git-remote", default=None, metavar="URL",
+                      help="push every agent branch of the run to this git repo (kept for --resume); "
+                           "without it the branches stay local in runs/<run>/agents.git")
     stop = sub.add_parser("stop", help="stop a running loop")
     stop.add_argument("--run-id", required=True)
     stop.add_argument("--force", action="store_true")
@@ -116,6 +119,9 @@ def _run(cfg, args) -> int:
                 print(f"error: {key} is empty; set it in AutoResearcher/.env before `ar run`", file=sys.stderr)
                 return 2
         check_visible(resolve_gpus(cfg, os.environ))          # the live config is what the run will freeze
+        if args.git_remote and (error := AgentsRepo.check_remote(args.git_remote)):
+            print(f"error: cannot reach --git-remote {args.git_remote}: {error}", file=sys.stderr)
+            return 2
     ctx = attach_run(cfg, args.run_id, os.environ) if args.resume else bootstrap_run(cfg, args.run_id, os.environ)
     if args.resume:
         try:
@@ -127,6 +133,10 @@ def _run(cfg, args) -> int:
                   "Start a new run; this one is kept as is.", file=sys.stderr)
             return 2
     control = Control(ctx.run_dir)
+    remote = args.git_remote or control.args().get("git_remote")
+    if args.resume and remote and (error := AgentsRepo.check_remote(remote)):
+        print(f"error: cannot reach the run's git remote {remote}: {error}", file=sys.stderr)
+        return 2
     try:
         control.claim()        # before touching any run file: a second resume must not clean up a live loop
     except RuntimeError as exc:
@@ -134,6 +144,8 @@ def _run(cfg, args) -> int:
         return 2
     if args.max_nodes is not None:
         control.save_args(max_nodes=args.max_nodes)
+    if args.git_remote:
+        control.save_args(git_remote=args.git_remote)
     max_nodes = control.args().get("max_nodes")
     if max_nodes is None:
         print("error: --max-nodes is required for a new run", file=sys.stderr)
@@ -141,7 +153,10 @@ def _run(cfg, args) -> int:
     run_cfg = KernelConfig.for_run(ctx.run_dir)
     ctx.gpus = resolve_gpus(run_cfg, os.environ)              # one config per run: never the live one
     check_visible(ctx.gpus)
-    repo = AgentsRepo(ctx.run_dir / "agents.git")
+    repo = AgentsRepo(ctx.run_dir / "agents.git", remote=remote, namespace=ctx.run_dir.name,
+                      on_push_error=lambda error: alert(ctx.recorder, "git_push_failed", error, level="warning"))
+    if args.resume:
+        repo.push()                                     # catch up pushes a stopped kernel missed
     killed = kill_recorded_groups(control)              # GPU jobs a killed kernel left running
     slot = ctx.run_dir / "merge_slot"                   # ~52 GB run-level transient (spec 15), not node data
     removed_slot = slot.exists()

@@ -238,6 +238,13 @@ parent's commit. Every attempt (including failed ones) is committed under
 *(Amended 2026-09-25: attempt refs exist for `edit_self` attempts only. `improve_recipe`
 mounts `/agent` read-only, so its attempts produce no code; the agent commit it ran is
 recorded in telemetry as `code_commit` on its `phase.start` event.)*
+*(Amended 2026-09-27, user decision: `ar run --git-remote URL` pushes the run's refs to URL
+after every ref update, as branches `<run>/node/<id>` and `<run>/attempts/<node>/<phase>-<k>`,
+so several runs can share one repo. The URL is kept in `control/run_args.json` for `--resume`,
+which first pushes whatever an earlier push missed. The URL is checked with `git ls-remote`
+before a new run is created or a run resumes; a push failure during the run is a
+`git_push_failed` warning alert and never stops the run. Without the option nothing leaves the
+machine. Only agent code is pushed; checkpoints, videos and the archive stay local.)*
 
 ### 5.3 Blob store
 

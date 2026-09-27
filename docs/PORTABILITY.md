@@ -255,7 +255,8 @@ distilled LoRA). Kernel launches set `PYTORCH_CUDA_ALLOC_CONF=expandable_segment
    built)* `ar run` for a **new** run additionally requires `OPENAI_API_KEY` and
    `OPENAI_MODEL` to be non-empty, checked before the run directory is created; `ar
    init-run`, `ar run --resume` and `ar status` do not need them until an agent phase
-   actually runs.
+   actually runs. With `--git-remote URL`, the shell that runs `ar run` needs git access to
+   URL without a prompt (e.g. an SSH key loaded in `ssh-agent`); pushes never prompt.
 5. **Run `ar doctor`,** then the unit suites.
 
 ## The failure that motivated this
