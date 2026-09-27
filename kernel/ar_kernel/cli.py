@@ -102,6 +102,9 @@ def _run(cfg, args) -> int:
     if args.resume and not existing:
         print(f"error: no run {args.run_id!r} to resume", file=sys.stderr)
         return 2
+    if not args.resume and args.max_nodes is None:           # before bootstrap_run creates the run
+        print("error: --max-nodes is required for a new run", file=sys.stderr)
+        return 2
     ctx = attach_run(cfg, args.run_id, os.environ) if args.resume else bootstrap_run(cfg, args.run_id, os.environ)
     control = Control(ctx.run_dir)
     if control.alive_pid() not in (None, os.getpid()):       # before touching any run file

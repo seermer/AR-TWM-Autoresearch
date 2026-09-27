@@ -125,10 +125,13 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
         marker.write_text(proc_start_time(proc.pid) or "")
 
     cancelled = False
+    ended = False           # the wait or the kill sequence finished: the group is gone
     try:
         stdout, stderr, cancelled = _wait(proc, timeout, cancel, poll_s, liveness)
+        ended = True
     except subprocess.TimeoutExpired:
         _kill_group(proc)
+        ended = True
         stdout, stderr = proc.communicate()
         if sink is not None:
             sink.close()
@@ -139,11 +142,12 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
         raise SubprocTimeout(command, timeout, output=stdout, stderr=stderr) from None
     except BaseException:
         _kill_group(proc)          # e.g. KeyboardInterrupt: never leave the job running
+        ended = True
         raise
     finally:
         if sink is not None and not sink.closed:
             sink.close()
-        if marker is not None:
+        if marker is not None and ended:     # an interrupted kill keeps its record for resume
             marker.unlink(missing_ok=True)
 
     if log_path is not None:

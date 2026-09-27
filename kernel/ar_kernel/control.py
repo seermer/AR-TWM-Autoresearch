@@ -70,25 +70,28 @@ class Control:
 
 def kill_recorded_groups(control: Control) -> list[int]:
     """Kill every process group the kernel started and never saw end (the subproc registry).
-    Only groups whose leader still has the recorded start time: a recycled pid is left alone."""
+    A group whose leader is gone is still killed (its workers can outlive `conda run`, finding 6);
+    only a live process with pid == pgid and another start time -- a recycled pid -- is left alone."""
     folder = control.dir / "pgids"
     killed = []
     for marker in sorted(folder.glob("*")) if folder.is_dir() else []:
         pgid, started = int(marker.name), marker.read_text().strip()
-        if started and proc_start_time(pgid) == started:
+        current = proc_start_time(pgid)
+        if started and (current is None or current == started):
             for sig, wait in ((signal.SIGTERM, 30.0), (signal.SIGKILL, 10.0)):
                 try:
                     os.killpg(pgid, sig)
-                except ProcessLookupError:
+                except (ProcessLookupError, PermissionError):
                     break
+                if sig == signal.SIGTERM:
+                    killed.append(pgid)
                 deadline = time.monotonic() + wait
                 while time.monotonic() < deadline:
                     try:
                         os.killpg(pgid, 0)
-                    except ProcessLookupError:
+                    except (ProcessLookupError, PermissionError):
                         break
                     time.sleep(0.2)
-            killed.append(pgid)
         marker.unlink(missing_ok=True)
     return killed
 
@@ -124,18 +127,25 @@ def drive(loop, kit, control: Control, recorder) -> str:
     control.claim()
     os.environ["AR_PGID_DIR"] = str(control.dir / "pgids")     # run_in_env records every group here
     control.clear_stop()
-    presses = {"n": 0}
+    state = {"presses": 0, "forced": False}      # forced: never raise again (cleanup must finish)
+
+    def force(why: str) -> None:
+        if state["forced"]:
+            recorder.event("control", payload={"command": f"ignored during stop ({why})"})
+            return
+        state["forced"] = True
+        raise ForceStop(why)
 
     def on_int(signum, frame):
-        presses["n"] += 1
-        if presses["n"] == 1:
+        state["presses"] += 1
+        if state["presses"] == 1:
             loop.graceful.set()
             recorder.event("control", payload={"command": "graceful stop (SIGINT)"})
         else:
-            raise ForceStop("second Ctrl-C")
+            force("second Ctrl-C")
 
     def on_term(signum, frame):
-        raise ForceStop("SIGTERM")
+        force("SIGTERM")
 
     old = {s: signal.signal(s, h) for s, h in ((signal.SIGINT, on_int), (signal.SIGTERM, on_term))}
     done = threading.Event()
@@ -153,7 +163,11 @@ def drive(loop, kit, control: Control, recorder) -> str:
     except ForceStop as exc:
         reason = f"force stop ({exc})"
         kill_run_containers(Path(loop.ctx.run_dir).name)
+    except Exception as exc:
+        reason = f"crashed: {type(exc).__name__}: {exc}"
+        raise
     finally:
+        state["forced"] = True                  # a signal from here on only logs
         done.set()
         try:
             kit.stop()

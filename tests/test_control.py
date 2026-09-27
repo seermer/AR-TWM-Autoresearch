@@ -1,12 +1,16 @@
 import os
+import signal
 import subprocess
 import sys
+import threading
+import time
+from types import SimpleNamespace
 
 import pytest
 
 from ar_kernel.archive.db import open_db
 from ar_kernel.archive.nodes import NodeStore
-from ar_kernel.control import Control, kill_recorded_groups, mark_interrupted
+from ar_kernel.control import Control, drive, kill_recorded_groups, mark_interrupted
 from ar_kernel.run import RunContext
 from ar_kernel.subproc import proc_start_time
 from ar_kernel.telemetry.recorder import Recorder
@@ -54,6 +58,7 @@ def test_recorded_orphan_groups_are_killed_and_recycled_pids_are_not(tmp_path):
     try:
         (c.dir / "pgids" / str(orphan.pid)).write_text(proc_start_time(orphan.pid))
         (c.dir / "pgids" / str(bystander.pid)).write_text("1")          # recycled pid: start time differs
+        threading.Thread(target=orphan.wait, daemon=True).start()       # reap it as init would
         assert kill_recorded_groups(c) == [orphan.pid]
         assert orphan.wait(timeout=40) is not None and bystander.poll() is None
         assert not any((c.dir / "pgids").iterdir())
@@ -85,3 +90,76 @@ def test_resume_marks_unfinished_nodes_interrupted_and_keeps_their_files(tmp_pat
     assert killed == ["n1"] and nodes.get("root")["status"] == "scored"
     (event,) = [e for e in rec.read_events() if e["type"] == "node.interrupted"]
     assert rec.load_payload(event["payload"])["phase_reached"] == "train"
+
+
+def test_workers_of_a_dead_leader_are_still_killed(tmp_path):
+    """Verification-log finding 6: `conda run` (the leader) exits, its workers keep the GPU."""
+    c = Control(tmp_path)
+    (c.dir / "pgids").mkdir(parents=True)
+    code = ("import subprocess, sys\n"
+            "w = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "print(w.pid, flush=True)\n")
+    leader = subprocess.Popen([sys.executable, "-c", code], start_new_session=True,
+                              stdout=subprocess.PIPE, text=True)
+    started = proc_start_time(leader.pid)
+    try:
+        worker = int(leader.stdout.readline())
+        leader.wait()
+        leader.stdout.close()
+        (c.dir / "pgids" / str(leader.pid)).write_text(started)
+        assert proc_start_time(leader.pid) is None and proc_start_time(worker) is not None
+        assert kill_recorded_groups(c) == [leader.pid]
+        deadline = time.monotonic() + 5
+        while proc_start_time(worker) is not None and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert proc_start_time(worker) is None
+    finally:
+        try:
+            os.killpg(leader.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+class _FakeLoop:
+    def __init__(self, run_dir, run):
+        self.graceful, self.ctx, self.run = threading.Event(), SimpleNamespace(run_dir=run_dir), run
+
+
+class _Kit:
+    def __init__(self, stop=lambda: None):
+        self.start, self.stop = (lambda: None), stop
+
+
+def _stopped(rec):
+    return [rec.load_payload(e["payload"])["reason"] for e in rec.read_events() if e["type"] == "run.stopped"]
+
+
+def test_a_signal_during_cleanup_does_not_abort_it(tmp_path, monkeypatch):
+    monkeypatch.setattr("ar_kernel.control.kill_run_containers", lambda run_id, node=None: [])
+    rec, c = Recorder(tmp_path), Control(tmp_path)
+
+    def run():
+        os.kill(os.getpid(), signal.SIGTERM)
+        time.sleep(5)
+        return "not reached"
+
+    def slow_stop():                             # the operator keeps pressing while cleanup runs
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGINT):
+            os.kill(os.getpid(), sig)
+        time.sleep(0.3)
+
+    before = signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)
+    assert drive(_FakeLoop(tmp_path, run), _Kit(slow_stop), c, rec) == "force stop (SIGTERM)"
+    assert _stopped(rec) == ["force stop (SIGTERM)"]
+    assert c.alive_pid() is None and not (c.dir / "loop.pid").exists()
+    assert (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)) == before
+
+
+def test_a_crash_is_recorded_and_reraised(tmp_path):
+    rec, c = Recorder(tmp_path), Control(tmp_path)
+
+    def run():
+        raise ValueError("boom")
+    with pytest.raises(ValueError):
+        drive(_FakeLoop(tmp_path, run), _Kit(), c, rec)
+    assert _stopped(rec) == ["crashed: ValueError: boom"] and c.alive_pid() is None

@@ -120,3 +120,20 @@ def test_process_groups_are_recorded_while_running(tmp_path, monkeypatch):
     run_in_env(ENV, ["python", "-c", "import time; time.sleep(6)"], cwd=tmp_path)
     t.join()
     assert len(seen) == 1 and not any((tmp_path / "pgids").iterdir())
+
+
+def test_an_interrupted_kill_keeps_the_group_record(tmp_path, monkeypatch):
+    """A second Ctrl-C during the kill sequence: the group may still be alive, so the record
+    must stay for kill_recorded_groups on resume."""
+    import signal
+    from ar_kernel import subproc
+    monkeypatch.setenv("AR_PGID_DIR", str(tmp_path / "pgids"))
+
+    def interrupted(*a, **k):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(subproc, "_wait", interrupted)
+    monkeypatch.setattr(subproc, "_kill_group", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        run_in_env(ENV, ["python", "-c", "import time; time.sleep(60)"], cwd=tmp_path)
+    (marker,) = (tmp_path / "pgids").iterdir()
+    os.killpg(int(marker.name), signal.SIGKILL)
