@@ -153,6 +153,40 @@ def test_score_node_cleans_up_the_merge_slot_even_when_wbench_fails(tmp_path, mo
     assert len(cleanups) == 1
 
 
+def test_score_node_skips_cleanup_on_a_base_exception(tmp_path, monkeypatch):
+    """An interrupted node's files are never deleted (memory: no-pause / interrupted
+    nodes). A KeyboardInterrupt (or the loop's force-stop signal) during scoring is not
+    an Exception, so it must leave merge_slot and the eval dirs in place and propagate,
+    unlike an ordinary Exception failure (the test above), which does clean up."""
+    import pytest
+    import ar_kernel.run as run_mod
+    _runs(tmp_path, monkeypatch)
+    ctx = bootstrap_run(CFG, run_id="r-interrupt", env=ENV4)
+    ctx.metric_set = ["aesthetic_quality"]
+    ctx.expected_n = {}
+    checkpoint = tmp_path / "checkpoint-2"
+    checkpoint.mkdir()
+
+    def fake_merge_lora(cfg, checkpoint, rank, alpha, run_dir, recorder, node_id):
+        slot = Path(run_dir) / "merge_slot"
+        slot.mkdir(parents=True)
+        return slot
+    monkeypatch.setattr(run_mod, "merge_lora", fake_merge_lora)
+    monkeypatch.setattr(run_mod, "build_render_config", lambda *a, **k: object())
+    monkeypatch.setattr(run_mod, "render_proxy", lambda *a, **k: None)
+
+    def fake_run_wbench_phases(*a, **k):
+        raise KeyboardInterrupt()
+    monkeypatch.setattr(run_mod, "run_wbench_phases", fake_run_wbench_phases)
+
+    with pytest.raises(KeyboardInterrupt):
+        run_mod.score_node(CFG, ctx, "n1", checkpoint=checkpoint, rank=8, alpha=16)
+
+    assert (ctx.run_dir / "merge_slot").exists()
+    cleanups = [e for e in ctx.recorder.read_events("n1") if e["type"] == "eval.cleanup"]
+    assert len(cleanups) == 0
+
+
 def test_bootstrap_records_expected_case_counts_from_the_reference(tmp_path, monkeypatch):
     _runs(tmp_path, monkeypatch)
     ctx = bootstrap_run(CFG, run_id="r_n", env=ENV4)

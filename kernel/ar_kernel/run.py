@@ -143,6 +143,15 @@ def score_node(cfg: KernelConfig, ctx: RunContext, node_id: str, checkpoint: Pat
     model = f"ar_{ctx.run_dir.name}_n{node_id}"
     videos_dir = work_dir / model / "videos"
     merged = None
+
+    def cleanup() -> None:
+        removed = cleanup_eval(work_dir, model)
+        slot = ctx.run_dir / "merge_slot"
+        if slot.exists():
+            shutil.rmtree(slot)
+            removed.append("merge_slot")
+        ctx.recorder.event("eval.cleanup", node=node_id, phase="eval", payload={"removed": removed})
+
     try:
         if checkpoint is None:
             history = cfg.worldmodel / "weights/alaya-world-ar/history_encoder.pt"
@@ -159,11 +168,11 @@ def score_node(cfg: KernelConfig, ctx: RunContext, node_id: str, checkpoint: Pat
         agg = aggregates(cfg, report, ctx.case_ids, ctx.metric_set)
         ctx.recorder.event("eval.scored", node=node_id, phase="eval",
                            payload={"score": score, "metrics": per_metric, "aggregates": agg})
-        return score, {"metrics": per_metric, "aggregates": agg, "report": report}
-    finally:
-        removed = cleanup_eval(work_dir, model)
-        slot = ctx.run_dir / "merge_slot"
-        if slot.exists():
-            shutil.rmtree(slot)
-            removed.append("merge_slot")
-        ctx.recorder.event("eval.cleanup", node=node_id, phase="eval", payload={"removed": removed})
+    except Exception:
+        # A BaseException that is not an Exception (KeyboardInterrupt, SystemExit, the
+        # loop's force-stop signal) skips this: an interrupted node's files are never
+        # deleted, only a real eval/scoring failure's transient dirs are.
+        cleanup()
+        raise
+    cleanup()
+    return score, {"metrics": per_metric, "aggregates": agg, "report": report}
