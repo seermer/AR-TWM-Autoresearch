@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from .archive.db import open_db
@@ -77,5 +78,5 @@ def format_status(d: dict) -> str:
         lines.append(f"  {'  ' * n['depth']}{n['node_id']:<6} {n['status']:<14} {score}{p}{extra}{err}")
     if d["alerts"]:
         lines.append("alerts (latest last):")
-        lines += [f"  [{a['level']}] {a['kind']}: {a['message']}" for a in d["alerts"]]
+        lines += [f"  {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(a['ts']))} [{a['level']}] {a['kind']}: {a['message']}" for a in d["alerts"]]
     return "\n".join(lines)
