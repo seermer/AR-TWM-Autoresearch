@@ -4,6 +4,7 @@ from pathlib import Path
 import yaml
 
 from ..config import KernelConfig
+from ..liveness import Liveness, tree_mark
 from ..subproc import run_in_env, _tail
 
 def build_render_config(cfg: KernelConfig, merged: Path | None, history_encoder: Path,
@@ -31,11 +32,13 @@ def render_proxy(cfg: KernelConfig, render_config: Path, gpus: list[int], node_i
                       ["validation"]["modes"]["wbench"]["wbench_output_dir"])
     videos_dir.mkdir(parents=True, exist_ok=True)
     with recorder.span("render", node=node_id, phase="render", payload={"cases": case_ids}):
+        liveness = Liveness.from_config(cfg, float(cfg.get("timeouts.eval_s")),
+                                        signals=[lambda: tree_mark(videos_dir, render_config.parent / "logs")])
         proc = run_in_env(
             "alayaworld",
             ["python", "scripts/tools/run_wbench.py", "--config", str(render_config),
              "--gpus", ",".join(str(g) for g in gpus), "--cases", ",".join(case_ids)],
-            cwd=cfg.worldmodel, timeout=int(12 * 3600), recorder=recorder, node=node_id,
+            cwd=cfg.worldmodel, timeout=None, liveness=liveness, recorder=recorder, node=node_id,
             phase="render")
     if proc.returncode != 0:
         raise RuntimeError(f"render failed (rc={proc.returncode}): {_tail(proc)}")

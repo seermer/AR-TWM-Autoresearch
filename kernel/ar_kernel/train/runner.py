@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..config import KernelConfig
+from ..liveness import Liveness, tree_mark
 from ..subproc import SubprocTimeout, run_in_env, _tail
 
 RECIPE_SIGNATURES = (
@@ -59,25 +60,6 @@ def final_failure(log: str, returncode: int, checkpoint_exists: bool) -> str:
     return "recipe" if failure == "none" and not checkpoint_exists else failure
 
 
-TRAIN_TIMEOUT_SECONDS = 48 * 3600
-
-
-def classify_timeout(log: str, timeout_s: int) -> tuple[str, str]:
-    """Classify a training run that hit the phase timeout.
-
-    Training length is the agent's decision, so max_steps is not capped. If the
-    run was still making [Train] progress when time ran out, the recipe asked for
-    more training than fits: a recipe failure the agent can act on. No progress
-    at all means the job hung -- infra.
-    """
-    rows = parse_train_lines(log)
-    if rows:
-        last = rows[-1]["step"]
-        return "recipe", (f"training was still progressing (reached step {last}) when it hit the "
-                          f"{timeout_s // 3600} h limit; reduce optimizer.max_steps")
-    return "infra", f"training made no [Train] progress before the {timeout_s // 3600} h limit (hang)"
-
-
 def parse_train_lines(log: str) -> list[dict]:
     rows = []
     for match in TRAIN_LINE.finditer(log):
@@ -116,6 +98,8 @@ class TrainRunner:
         output_dir = Path(config["run"]["output_dir"])
         log_path = Path(node_dir) / "train" / "train.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        liveness = Liveness.from_config(self.cfg, float(self.cfg.get("timeouts.train_s")),
+                                        signals=[lambda: tree_mark(log_path)])
         with self.recorder.span("train", node=node_id, phase="train",
                                 payload={"config": str(resolved), "gpus": gpus}):
             try:
@@ -128,18 +112,20 @@ class TrainRunner:
                                "CUDA_VISIBLE_DEVICES": ",".join(str(g) for g in gpus),
                                "LOG_FILTER": "all", "ALAYA_LOG_MEMORY": "1",
                                "ALAYA_DATASET_CACHE_DIR": str(Path(node_dir) / "dataset_cache")},
-                    timeout=TRAIN_TIMEOUT_SECONDS, recorder=self.recorder, node=node_id,
+                    timeout=None, liveness=liveness, recorder=self.recorder, node=node_id,
                     phase="train", log_path=log_path)
             except SubprocTimeout as exc:
                 log = exc.output or ""
-                failure, detail = classify_timeout(log, TRAIN_TIMEOUT_SECONDS)
-                return TrainOutcome(checkpoint=None, failure=failure, log_path=log_path,
-                                    metrics=parse_train_lines(log), detail=detail)
+                return TrainOutcome(checkpoint=None, failure="infra", log_path=log_path,
+                                    metrics=parse_train_lines(log),
+                                    detail=f"training stalled: {liveness.reason}")
         log = proc.stdout
         checkpoint = newest_checkpoint(output_dir)
         failure = final_failure(log, proc.returncode, checkpoint is not None)
         detail = ""
         if failure == "recipe" and proc.returncode == 0 and checkpoint is None:
             detail = "training exited cleanly but wrote no checkpoint"
+        if checkpoint is not None and failure == "none":
+            (checkpoint / "trainer_state.pt").unlink(missing_ok=True)     # spec 7.3.5 / 15
         return TrainOutcome(checkpoint=checkpoint, failure=failure, log_path=log_path,
                             metrics=parse_train_lines(log), detail=detail)

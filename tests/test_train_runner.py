@@ -1,5 +1,11 @@
+import subprocess
 from pathlib import Path
-from ar_kernel.train.runner import classify_failure, classify_timeout, parse_train_lines, newest_checkpoint
+from ar_kernel.train.runner import classify_failure, parse_train_lines, newest_checkpoint
+from ar_kernel.config import KernelConfig
+from ar_kernel.subproc import SubprocTimeout
+from ar_kernel.train import runner as runner_mod
+from ar_kernel.train.runner import TrainRunner
+from ar_kernel.telemetry.recorder import Recorder
 
 CUDA_OOM = "torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB"
 NCCL = "RuntimeError: NCCL communicator was aborted on rank 2"
@@ -71,21 +77,6 @@ def test_real_successful_run_log_parses_its_train_lines():
     assert rows[0]["loss"] == 0.431641 and rows[1]["loss"] == 0.251953
 
 
-def test_timeout_while_still_training_is_a_recipe_failure():
-    """Training length is the agent's call, so max_steps is not capped; running
-    out of time while still progressing means the recipe asked for too much."""
-    log = (Path(__file__).parent / "fixtures" / "real_successful_train.log").read_text()
-    failure, detail = classify_timeout(log, 48 * 3600)
-    assert failure == "recipe"
-    assert "max_steps" in detail and "step 2" in detail
-
-
-def test_timeout_with_no_training_progress_is_infra():
-    failure, detail = classify_timeout("[Setup] rank 0/4 loading model components serially\n", 48 * 3600)
-    assert failure == "infra"
-    assert "hang" in detail
-
-
 def test_clean_exit_with_checkpoint_is_not_overridden_by_a_loose_log_token():
     """Review minor: signatures were checked before the return code even when rc=0
     and a checkpoint existed, so e.g. a benign 'Killed' line in a healthy log
@@ -104,3 +95,40 @@ def test_nonzero_exit_still_goes_through_signature_classification():
     from ar_kernel.train.runner import final_failure
     assert final_failure("torch.OutOfMemoryError: CUDA out of memory", 1, checkpoint_exists=False) == "recipe"
     assert final_failure("NCCL error: unhandled system error", 1, checkpoint_exists=False) == "infra"
+
+
+def _resolved(tmp_path):
+    out = tmp_path / "node" / "train" / "outputs"
+    cfg = tmp_path / "train_config.yaml"
+    cfg.write_text(f"run: {{output_dir: {out}}}\n")
+    return cfg, out
+
+
+def test_a_stalled_training_run_is_an_infra_failure_reported_to_the_agent(tmp_path, monkeypatch):
+    resolved, _ = _resolved(tmp_path)
+    seen = {}
+
+    def fake_run(env, args, **kw):
+        seen.update(kw)
+        kw["liveness"].reason = "no sign of progress for 600s after the 172800s soft timeout"
+        raise SubprocTimeout(args, 0, output="[Setup] rank 0/4\n")
+    monkeypatch.setattr(runner_mod, "run_in_env", fake_run)
+    out = TrainRunner(KernelConfig.load(), Recorder(tmp_path)).train(resolved, [0, 1, 2, 3], "n1", tmp_path / "node")
+    assert seen["timeout"] is None and seen["liveness"].soft_s == 172800
+    assert (out.checkpoint, out.failure) == (None, "infra") and "stalled" in out.detail
+
+
+def test_trainer_state_is_deleted_after_success(tmp_path, monkeypatch):
+    resolved, outputs = _resolved(tmp_path)
+
+    def fake_run(env, args, **kw):
+        ck = outputs / "checkpoint-2"
+        ck.mkdir(parents=True)
+        for name in ("lora.safetensors", "history_encoder.pt", "trainer_state.pt"):
+            (ck / name).write_text("x")
+        kw["log_path"].write_text("[Train] step=2 epoch=0 loss=0.25 grad=0.05 lr=5.00e-05 time=7.8s\n")
+        return subprocess.CompletedProcess(args, 0, kw["log_path"].read_text(), "")
+    monkeypatch.setattr(runner_mod, "run_in_env", fake_run)
+    out = TrainRunner(KernelConfig.load(), Recorder(tmp_path)).train(resolved, [0, 1, 2, 3], "n1", tmp_path / "node")
+    assert out.failure == "none" and not (out.checkpoint / "trainer_state.pt").exists()
+    assert (out.checkpoint / "lora.safetensors").exists()

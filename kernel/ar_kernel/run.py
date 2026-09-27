@@ -142,24 +142,28 @@ def score_node(cfg: KernelConfig, ctx: RunContext, node_id: str, checkpoint: Pat
     work_dir = node_dir / "eval" / "work_dirs"
     model = f"ar_{ctx.run_dir.name}_n{node_id}"
     videos_dir = work_dir / model / "videos"
-    if checkpoint is None:
-        merged, history = None, cfg.worldmodel / "weights/alaya-world-ar/history_encoder.pt"
-    else:
-        merged = merge_lora(cfg, checkpoint, rank, alpha, ctx.run_dir, ctx.recorder, node_id)
-        history = Path(checkpoint) / "history_encoder.pt"
-    render_config = build_render_config(cfg, merged, history, videos_dir, ctx.case_ids, node_dir)
-    render_proxy(cfg, render_config, ctx.gpus, node_id, ctx.recorder, ctx.case_ids)
-    report = run_wbench_phases(cfg, work_dir, model, ctx.gpus, ctx.metric_set, ctx.recorder, node_id)
-    score, per_metric = score_from_report(report, ctx.metric_set, ctx.expected_n)
-    if "per_case" not in report:
-        ctx.recorder.event("eval.warning", node=node_id, phase="eval", payload={
-            "message": "report.json has no per_case scores (older WBench); aggregates are empty"})
-    agg = aggregates(cfg, report, ctx.case_ids, ctx.metric_set)
-    ctx.recorder.event("eval.scored", node=node_id, phase="eval",
-                       payload={"score": score, "metrics": per_metric, "aggregates": agg})
-    removed = cleanup_eval(work_dir, model)
-    if merged is not None and merged.exists():
-        shutil.rmtree(merged)
-        removed.append("merge_slot")
-    ctx.recorder.event("eval.cleanup", node=node_id, phase="eval", payload={"removed": removed})
-    return score, {"metrics": per_metric, "aggregates": agg, "report": report}
+    merged = None
+    try:
+        if checkpoint is None:
+            history = cfg.worldmodel / "weights/alaya-world-ar/history_encoder.pt"
+        else:
+            merged = merge_lora(cfg, checkpoint, rank, alpha, ctx.run_dir, ctx.recorder, node_id)
+            history = Path(checkpoint) / "history_encoder.pt"
+        render_config = build_render_config(cfg, merged, history, videos_dir, ctx.case_ids, node_dir)
+        render_proxy(cfg, render_config, ctx.gpus, node_id, ctx.recorder, ctx.case_ids)
+        report = run_wbench_phases(cfg, work_dir, model, ctx.gpus, ctx.metric_set, ctx.recorder, node_id)
+        score, per_metric = score_from_report(report, ctx.metric_set, ctx.expected_n)
+        if "per_case" not in report:
+            ctx.recorder.event("eval.warning", node=node_id, phase="eval", payload={
+                "message": "report.json has no per_case scores (older WBench); aggregates are empty"})
+        agg = aggregates(cfg, report, ctx.case_ids, ctx.metric_set)
+        ctx.recorder.event("eval.scored", node=node_id, phase="eval",
+                           payload={"score": score, "metrics": per_metric, "aggregates": agg})
+        return score, {"metrics": per_metric, "aggregates": agg, "report": report}
+    finally:
+        removed = cleanup_eval(work_dir, model)
+        slot = ctx.run_dir / "merge_slot"
+        if slot.exists():
+            shutil.rmtree(slot)
+            removed.append("merge_slot")
+        ctx.recorder.event("eval.cleanup", node=node_id, phase="eval", payload={"removed": removed})

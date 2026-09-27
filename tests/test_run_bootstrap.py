@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from ar_kernel.config import KernelConfig
 from ar_kernel.run import bootstrap_run, preflight_metrics
 
@@ -118,6 +119,38 @@ def test_score_node_degrades_and_still_succeeds_without_per_case_scores(tmp_path
     warnings = [e for e in ctx.recorder.read_events("n1") if e["type"] == "eval.warning"]
     assert len(warnings) == 1
     assert "per_case" in ctx.recorder.load_payload(warnings[0]["payload"])["message"]
+
+
+def test_score_node_cleans_up_the_merge_slot_even_when_wbench_fails(tmp_path, monkeypatch):
+    """score_node must not leak the merge_slot (large merged weights) or the
+    regenerable eval dirs when a later phase (WBench) blows up on GPU."""
+    import pytest
+    import ar_kernel.run as run_mod
+    _runs(tmp_path, monkeypatch)
+    ctx = bootstrap_run(CFG, run_id="r-cleanup", env=ENV4)
+    ctx.metric_set = ["aesthetic_quality"]
+    ctx.expected_n = {}
+    checkpoint = tmp_path / "checkpoint-2"
+    checkpoint.mkdir()
+
+    def fake_merge_lora(cfg, checkpoint, rank, alpha, run_dir, recorder, node_id):
+        slot = Path(run_dir) / "merge_slot"
+        slot.mkdir(parents=True)
+        return slot
+    monkeypatch.setattr(run_mod, "merge_lora", fake_merge_lora)
+    monkeypatch.setattr(run_mod, "build_render_config", lambda *a, **k: object())
+    monkeypatch.setattr(run_mod, "render_proxy", lambda *a, **k: None)
+
+    def fake_run_wbench_phases(*a, **k):
+        raise RuntimeError("wbench gpu failed")
+    monkeypatch.setattr(run_mod, "run_wbench_phases", fake_run_wbench_phases)
+
+    with pytest.raises(RuntimeError, match="wbench gpu failed"):
+        run_mod.score_node(CFG, ctx, "n1", checkpoint=checkpoint, rank=8, alpha=16)
+
+    assert not (ctx.run_dir / "merge_slot").exists()
+    cleanups = [e for e in ctx.recorder.read_events("n1") if e["type"] == "eval.cleanup"]
+    assert len(cleanups) == 1
 
 
 def test_bootstrap_records_expected_case_counts_from_the_reference(tmp_path, monkeypatch):

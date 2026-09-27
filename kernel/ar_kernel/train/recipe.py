@@ -113,6 +113,10 @@ def build_resolved_config(cfg: KernelConfig, base_recipe: Path, recipe: dict,
         mode.setdefault("dataset", {})["source"] = first
     return resolved
 
+def lora_of(resolved: Path) -> tuple[int, int]:
+    lora = yaml.safe_load(Path(resolved).read_text(encoding="utf-8"))["lora"]
+    return int(lora["rank"]), int(lora["alpha"])
+
 def write_resolved_config(cfg: KernelConfig, base_recipe: Path, recipe: dict,
                           roots: dict[str, Path], manifest: dict, node_id: str,
                           node_dir: Path, run_dir: Path) -> Path:

@@ -1,6 +1,6 @@
 import pytest, yaml
 from ar_kernel.config import KernelConfig
-from ar_kernel.train.recipe import build_resolved_config, steps_per_epoch
+from ar_kernel.train.recipe import build_resolved_config, steps_per_epoch, lora_of
 
 CFG = KernelConfig.load()
 BASE = CFG.repo_root / "configs" / "base_recipe.yaml"
@@ -38,3 +38,9 @@ def test_steps_per_epoch_is_zero_for_a_tiny_dataset():
     manifest = {"datasets": {"a": {"format": "video_caption_camera", "prompt_mode": None,
                                    "weight": 1.0, "clips": ["x"] * 12}}}
     assert steps_per_epoch(manifest, n_gpus=4, grad_accum=4) == (12, 0)
+
+
+def test_lora_of_reads_the_resolved_config(tmp_path):
+    p = tmp_path / "train_config.yaml"
+    p.write_text("lora: {rank: 32, alpha: 16}\n")
+    assert lora_of(p) == (32, 16)
