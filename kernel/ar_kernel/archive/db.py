@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS nodes (
   resolved_config_path TEXT, checkpoint_path TEXT,
   lora_rank INTEGER, lora_alpha INTEGER,
   score REAL, metric_set TEXT, metrics TEXT, subtree_value REAL,
-  phase_timings TEXT, rationale_path TEXT
+  phase_timings TEXT, rationale_path TEXT,
+  edit_component TEXT, recipe_path TEXT, attempt_counts TEXT, error TEXT
 );
 CREATE TABLE IF NOT EXISTS attempts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,6 +37,11 @@ CREATE TABLE IF NOT EXISTS data_commits (
   commit_id TEXT PRIMARY KEY, parent_commit TEXT, node_id TEXT, attempt INTEGER,
   manifest TEXT NOT NULL, message TEXT NOT NULL, created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS selection_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  child_id TEXT NOT NULL, chosen TEXT NOT NULL, seed INTEGER NOT NULL,
+  candidates TEXT NOT NULL, created_at REAL NOT NULL
+);
 """
 
 def open_db(run_dir: Path) -> sqlite3.Connection:
@@ -48,4 +54,17 @@ def open_db(run_dir: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
+
+
+# Columns added after Plan 1; CREATE TABLE IF NOT EXISTS never adds columns to an existing table.
+NODE_COLUMNS_ADDED = {"edit_component": "TEXT", "recipe_path": "TEXT", "attempt_counts": "TEXT",
+                      "error": "TEXT"}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(nodes)")}
+    for column, kind in NODE_COLUMNS_ADDED.items():
+        if column not in have:
+            conn.execute(f"ALTER TABLE nodes ADD COLUMN {column} {kind}")

@@ -1,6 +1,8 @@
+import sqlite3
+
 import pytest
 from ar_kernel.archive.db import open_db
-from ar_kernel.archive.nodes import NodeStore
+from ar_kernel.archive.nodes import NodeStore, run_abs, run_rel
 
 def test_create_and_read_node(tmp_path):
     store = NodeStore(open_db(tmp_path))
@@ -63,3 +65,41 @@ def test_node_id_that_is_unsafe_as_a_path_is_rejected(tmp_path):
     for bad in ("../escape", "a/b", "", "x" * 80, ".hidden"):
         with pytest.raises(ValueError):
             store.create(bad, None, 0)
+
+
+def test_new_fields_and_eval_failed(tmp_path):
+    nodes = NodeStore(open_db(tmp_path))
+    nodes.create("n1", None, 0)
+    nodes.set_fields("n1", edit_component="prompts", recipe_path="nodes/n1/recipe.yaml",
+                     attempt_counts='{"edit_self": 2}', error="render failed")
+    nodes.set_status("n1", "eval_failed")
+    got = nodes.get("n1")
+    assert (got["edit_component"], got["error"], got["status"]) == ("prompts", "render failed", "eval_failed")
+
+
+def test_old_database_gains_the_new_columns(tmp_path):
+    old = sqlite3.connect(tmp_path / "archive.db")
+    old.execute("CREATE TABLE nodes (node_id TEXT PRIMARY KEY, parent_id TEXT, depth INTEGER NOT NULL, "
+                "created_at REAL NOT NULL, status TEXT NOT NULL, agent_commit TEXT, data_commit TEXT, "
+                "recipe_hash TEXT, resolved_config_path TEXT, checkpoint_path TEXT, lora_rank INTEGER, "
+                "lora_alpha INTEGER, score REAL, metric_set TEXT, metrics TEXT, subtree_value REAL, "
+                "phase_timings TEXT, rationale_path TEXT)")
+    old.commit(), old.close()
+    conn = open_db(tmp_path)
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(nodes)")}
+    assert {"edit_component", "recipe_path", "attempt_counts", "error"} <= cols
+    assert conn.execute("SELECT count(*) FROM selection_events").fetchone()[0] == 0
+
+
+def test_interrupted_is_a_status(tmp_path):
+    nodes = NodeStore(open_db(tmp_path))
+    nodes.create("n1", None, 0)
+    nodes.set_status("n1", "interrupted")
+    assert nodes.get("n1")["status"] == "interrupted"
+
+
+def test_run_relative_paths(tmp_path):
+    p = tmp_path / "nodes" / "n1" / "train" / "checkpoint-2"
+    assert run_rel(tmp_path, p) == "nodes/n1/train/checkpoint-2"
+    assert run_abs(tmp_path / "moved", "nodes/n1/x") == tmp_path / "moved" / "nodes/n1/x"
+    assert run_abs(tmp_path, None) is None

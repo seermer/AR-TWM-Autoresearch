@@ -29,6 +29,13 @@ class KernelConfig:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
         return cls(raw=raw, repo_root=repo_root)
 
+    @classmethod
+    def for_run(cls, run_dir: Path) -> "KernelConfig":
+        """The run's frozen kernel.yaml (spec 17: snapshotted at run start), with THIS checkout as
+        the repo root. load(path) would take runs/<id> as the root and break every sibling path."""
+        raw = yaml.safe_load((Path(run_dir) / "config" / "kernel.yaml").read_text(encoding="utf-8"))
+        return cls(raw=raw, repo_root=REPO_ROOT)
+
     def get(self, dotted: str, default: Any = None) -> Any:
         node: Any = self.raw
         for part in dotted.split("."):

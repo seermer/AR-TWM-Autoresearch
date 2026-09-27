@@ -63,7 +63,9 @@ def lineage(conn, run_dir: Path, repo, node_id: str) -> list[dict]:
         rationale = _node_file(run_dir, node["node_id"], "rationale.md")
         parent_commit = chain[i - 1]["agent_commit"] if i else None
         out.append({
-            "node_id": node["node_id"], "status": node["status"], "score": node["score"],
+            "node_id": node["node_id"], "status": node["status"],
+            "component": node["edit_component"], "error": node["error"],
+            "score": node["score"],
             "metrics": node["metrics"], "data": _data_stats(conn, node["data_commit"]),
             "recipe": yaml.safe_load(recipe_path.read_text()) if recipe_path.exists() else None,
             "rationale": rationale.read_text() if rationale.exists() else None,
@@ -80,7 +82,8 @@ def archive_summary(conn) -> dict:
     scored = [n for n in nodes if n["status"] == "scored" and n["score"] is not None]
     best = max(scored, key=lambda n: n["score"], default=None)
     return {"nodes": [{"node_id": n["node_id"], "parent_id": n["parent_id"], "status": n["status"],
-                       "score": n["score"], "subtree_value": n["subtree_value"], "depth": n["depth"]}
+                       "score": n["score"], "subtree_value": n["subtree_value"], "depth": n["depth"],
+                       "error": n["error"], "component": n["edit_component"]}
                       for n in nodes],
             "n_scored": len(scored),
             "best": {"node_id": best["node_id"], "score": best["score"]} if best else None}

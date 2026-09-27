@@ -1,5 +1,5 @@
 import pytest
-from ar_kernel.config import KernelConfig, GpuPolicyError, resolve_gpus
+from ar_kernel.config import REPO_ROOT, KernelConfig, GpuPolicyError, resolve_gpus
 
 def test_loads_defaults_and_resolves_paths():
     cfg = KernelConfig.load()
@@ -54,3 +54,11 @@ def test_duplicate_gpu_indices_are_rejected():
     from ar_kernel.config import GpuPolicyError, resolve_gpus
     with pytest.raises(GpuPolicyError, match="duplicate"):
         resolve_gpus(KernelConfig.load(), {"CUDA_VISIBLE_DEVICES": "0,0,0,0"})
+
+
+def test_for_run_reads_the_frozen_snapshot_with_this_checkout_as_root(tmp_path):
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "kernel.yaml").write_text("budget: {max_usd: 5}\npaths: {runs_dir: runs}\n")
+    cfg = KernelConfig.for_run(tmp_path)
+    assert cfg.get("budget.max_usd") == 5
+    assert cfg.repo_root == REPO_ROOT                       # not runs/<id>: sibling paths still resolve

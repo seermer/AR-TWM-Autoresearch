@@ -1,9 +1,22 @@
 from __future__ import annotations
 import json, re, sqlite3, time
+from pathlib import Path
 
-STATUSES = {"running", "scored", "invalid_code", "invalid_recipe", "train_failed", "crashed"}
+# interrupted: unfinished when the loop stopped (forced stop, kernel death, spent budget); kept
+# untouched, never resumed, never a parent, not counted toward max_nodes (user decision 2026-09-27).
+STATUSES = {"running", "scored", "invalid_code", "invalid_recipe", "train_failed", "eval_failed",
+            "crashed", "interrupted"}
 # node_id becomes a directory name and a telemetry file name.
 NODE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+
+
+def run_rel(run_dir: Path, path: Path | str) -> str:
+    """A path under the run, stored relative to it so a moved run still resolves."""
+    return str(Path(path).resolve().relative_to(Path(run_dir).resolve()))
+
+
+def run_abs(run_dir: Path, value: str | None) -> Path | None:
+    return None if value is None else Path(run_dir) / value
 
 class NodeStore:
     def __init__(self, conn: sqlite3.Connection) -> None:
@@ -31,7 +44,8 @@ class NodeStore:
     def set_fields(self, node_id: str, **fields: object) -> None:
         allowed = {"agent_commit", "data_commit", "recipe_hash", "resolved_config_path",
                    "checkpoint_path", "lora_rank", "lora_alpha", "subtree_value",
-                   "phase_timings", "rationale_path"}
+                   "phase_timings", "rationale_path", "edit_component", "recipe_path",
+                   "attempt_counts", "error"}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"unknown node fields: {sorted(unknown)}")

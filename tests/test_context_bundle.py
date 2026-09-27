@@ -77,6 +77,18 @@ def test_recipe_context_carries_rules_allowlists_and_retry(world, tmp_path):
     assert json.loads((tmp_path / "ctx2" / "retry.json").read_text()) == retry
 
 
+def test_lineage_and_archive_summary_carry_component_and_error(world):
+    conn, repo, run = world
+    nodes = NodeStore(conn)
+    nodes.set_status("n1", "invalid_code")
+    nodes.set_fields("n1", edit_component="tools", error="contract import failed")
+    lin = lineage(conn, run, repo, "n1")
+    assert lin[-1]["component"] == "tools" and lin[-1]["error"] == "contract import failed"
+    summary_nodes = {n["node_id"]: n for n in archive_summary(conn)["nodes"]}
+    assert summary_nodes["n1"]["error"] == "contract import failed"
+    assert summary_nodes["root"]["error"] is None
+
+
 def test_parent_recipe_is_read_from_the_node_artifact(world):
     conn, repo, run = world
     (run / "nodes" / "root" / "recipe.yaml").write_text(yaml.safe_dump({"optimizer.lr": 2e-5}))

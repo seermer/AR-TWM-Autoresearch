@@ -8,13 +8,25 @@ gpus:
 retries:
   edit_self: 3
   improve_recipe: 3
-selection:
-  gamma: 0.5
-  lambda: 0.5
-  slope: 6
-  top_k_mid: 3
-  child_penalty_scale: 8
-  epsilon: 0.2
+budget:                          # run-wide LLM spend cap in dollars, enforced by the gateway (user decision 2026-09-27)
+  max_usd: null                  # null = no cap (the default)
+  usd_per_mtok: {input: null, cached_input: null, output: null}   # needed for max_usd and for cost in `ar status`
+liveness:                        # spec 14.5
+  probe_window_min: 10
+  extension_frac: 0.25
+  probe_every_s: 30              # during a probe window, read the progress signals at most this often
+alerts:                          # spec 13.4
+  stall_min: 30
+  gateway_error_rate: 0.2
+  gateway_error_window_min: 5
+selection:                       # continuous softmax parent selection (Task 3; user decision 2026-09-27)
+  decay: 0.5                     # weight per generation below a node: child 1x decay, grandchild decay^2 ...
+  prior_weight: 1.0               # the node's own score as one virtual child: pulls the subtree mean toward it
+  subtree_share: 0.3              # value = (1 - share) * own score + share * subtree mean
+  size_scale: 4                   # size penalty 1 / (1 + size / scale); size = descendants, decayed per generation
+  temperature: 2.0                # softmax temperature, in units of the spread of values across candidates
+  noise_floor: 4.4e-4              # the spread never counts as smaller than proxy noise (verification-log finding 5)
+  epsilon: 0.2                    # this share of probability is spread uniformly over all candidates
 ingest:
   aspect_tolerance: 0.02
 leakage:
@@ -52,7 +64,9 @@ gateway:
   model_allowlist: []            # OPENAI_MODEL from the environment is always allowed too
   upstream_timeout_s: 600
   upstream_retries: 5            # 429/5xx, exponential backoff 1, 2, 4, ... s
-  upstream_outage_pause_min: 15
+  outage_error_rate: 0.8         # stop the run (option A, no pause) when an agent attempt fails while at least
+  outage_window_min: 10          #   this share of the LLM calls in this window failed upstream (429/5xx/connection)
+  outage_min_calls: 3            #   and at least this many calls were made in the window
 agents:                          # passed to agent containers as AR_CONTEXT_WINDOW / AR_COMPACT_AT
   context_window_tokens: 128000  # set to the agent model's context window
   compact_at: 0.85               # the harness auto-compacts at this fraction of the window
@@ -65,6 +79,8 @@ timeouts:                        # soft timeouts (spec 14.5); Plan 2 enforces th
   improve_recipe_s: 86400
   contract_import_s: 60
   contract_smoke_s: 900
+  train_s: 172800                # 48 h soft; liveness = train.log growth (spec 14.5)
+  eval_s: 43200                  # 12 h soft per render / WBench phase; liveness = output files
 annotate:                         # annotate_camera GPU job (spec 10, 16.3 item 6)
   enabled: true                   # ViGeo verified on the example clips (Plan 3 Task 4)
   env: alayaworld
