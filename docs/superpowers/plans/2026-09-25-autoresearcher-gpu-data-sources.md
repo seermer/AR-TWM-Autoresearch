@@ -8,11 +8,11 @@
 - It stages the agent's input files race-free into a kernel-private job directory.
 - It runs one worker process per GPU group, in the generator's own conda env.
 - It post-processes outputs to the standard layout (spec §6).
-- It publishes them into `/workspace/staging/{rollouts,annotations}/<job_id>/` without following links the agent planted.
+- It publishes them into `/workspace/staging/{rollouts,annotations,images}/<job_id>/` without following links the agent planted.
 
 The workers are small bridge scripts in `kernel/ar_kernel/bridges/`. Each loads its model once and loops over its shard of items.
 
-AlayaWorld is the one exception to the bridge scripts. It renders agent-written, WBench-style cases (image, perspective, per-turn navigation actions and interaction prompts) through the eval's own `scripts/tools/run_wbench.py` path, so the rollouts follow the same code as the eval. A small WorldModel patch saves the camera path that render generates, which gives exact poses.
+AlayaWorld is the one exception to the bridge scripts. It renders agent-written, WBench-style cases (image, perspective, per-turn navigation actions and interaction prompts) through the eval's own `scripts/tools/run_wbench.py` path, so the rollouts follow the same code as the eval. A small WorldModel patch saves the camera path that render generates. *(Amended 2026-09-26, as built: that path is what the actions commanded, not what the video shows; AlayaWorld follows translation reliably but rotation only weakly (Task 6 ViGeo check). By user decision the candidate carries no pose: the commanded path is published as metadata (`commanded_camera`), and agents take the pose from `annotate_camera` (ViGeo), then ingest the clip as `moving`.)*
 
 All caches the kernel's subprocesses create go to the project-local `AutoResearcher/.cache/` (Task 1).
 
@@ -1065,6 +1065,8 @@ images:                          # generate_images GPU job
 ---
 
 ### Task 6: `rollout_alayaworld`: WBench-style cases through the eval's own render path
+
+*(Amended 2026-09-26, as built: the "exact poses" below were dropped. The commanded camera path does not match the rendered motion (rotation is followed only weakly), so the candidate has no `pose` and no `camera_motion`; the saved path is published as metadata `commanded_camera`, and agents run `annotate_camera` (ViGeo poses) before ingesting as `moving`. No trim was needed: F = 32·rounds − 7 already puts round boundaries on the `25 + 32k` grid. See the verification-log section "Plan 3 — rollout_alayaworld".)*
 
 **Decision (user, 2026-09-25):** render exactly as the WBench eval does, covering the full WBench interaction set, not only navigation.
 - **Per-turn inputs:** each turn has a prompt and an action.

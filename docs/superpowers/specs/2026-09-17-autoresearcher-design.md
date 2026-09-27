@@ -75,6 +75,7 @@ HGM `hgm.py`, `tree.py`, `hgm_utils.py`, `self_improve_step.py`; HyperAgents
 | Host RAM | 251 GB |
 | Conda envs (existing) | `alayaworld` (training, rendering, rollouts, data checks), `wbench-main` (WBench metrics), `wbench-vp` (visual plausibility) |
 | Conda env (new) | `autoresearcher` (Python 3.12): kernel, gateway, tool server, dashboard |
+| Generator envs (new, Plan 3) | *(Added 2026-09-26.)* `gen-zimage`, `gen-wan22`, `gen-ltx25` are conda-**prefix** envs inside the repo, `AutoResearcher/.envs/<name>` (gitignored), not named envs in `~/miniforge3/envs` (disk ruling: `/` had too little free space; large files stay in the project). A config `env:` value containing `/` is a repo-relative prefix path (absolute also accepted), and `subproc.run_in_env` then runs `conda run -p <REPO_ROOT/path>`; a plain name still runs `conda run -n <name>`. Recreate commands: `docs/PORTABILITY.md`. `annotate_camera` and `rollout_alayaworld` use the existing `alayaworld` env. |
 | Docker | 27.3.1, user in `docker` group, `nvidia` runtime available (agent containers are CPU-only) |
 | Secrets | `AutoResearcher/.env` (mode 600, git-ignored), symlinked as `WorldModel/.env` and `WBench/.env` |
 | WorldModel revision | Recorded per run (git SHA + `git status --porcelain` hash). The kernel warns at run start if WorldModel has uncommitted changes. |
@@ -261,7 +262,10 @@ A **clip** row stores:
   `video_timed_prompts_camera:segment`, `video_timed_prompts_camera:per_chunk`,
   `video_caption_static`, each with the checker's warnings.
 - Provenance (required): `{"kind": "hf_dataset", "repo", "revision", "files"}`,
-  `{"kind": "rollout", "generator": "alayaworld-dmd4|alayaworld-ar30|ltx-2.5-dev|ltx-2.5-distilled|wan2.2-ti2v-5b", "job_id", "inputs_hash", "seed"}`,
+  `{"kind": "rollout", "generator": "alayaworld-dmd4|alayaworld-ar30|ltx-2.5-dev|ltx-2.5-distilled|wan2.2-ti2v-5b", "job_id", "inputs_hash", "seed"}`
+  *(amended 2026-09-26, Plan 3 as built: `seed` is the item's seed; for AlayaWorld, whose seed is a
+  job-level param, it is the job seed. `inputs_hash` = sha256 of the canonical JSON of the generator,
+  the job params, the item's non-file fields and its input files' hashes)*,
   or `{"kind": "derived", "from": [clip_ids], "transform": "<agent description>"}`.
 - License (from the HF dataset card/tag or the generator's license), `derived_from`,
   `ingested_by_node`.
@@ -686,11 +690,12 @@ conversion, cropping, trimming, captioning, prompt timing) is agent code.
 |---|---|
 | `hf.search(query, kind)` | Hugging Face dataset search; returns ids, license, tags, download counts and last-modified time. *(Amended 2026-09-24, Plan 2 as built: no sizes, which need a per-repo metadata call; `hf.download` checks them against the byte cap before transferring. `kind` other than `dataset` is refused: models are not training data.)* |
 | `hf.download(repo, revision, patterns, max_bytes)` | Downloads into `/workspace/staging/hf/...`; records repo, revision, files, bytes, license. |
-| `rollout.alayaworld(first_frame, camera, prompt_schedule, frames, variant, seed)` | Renders with the released checkpoint (`variant`: `dmd4` = 4-step student, `ar30` = 30-step teacher) through the `custom_i2v` validation path. `camera` is `{cam_c2w [N,4,4], intrinsics}` or a navigation action list. Output is a staging candidate in standard layout: 24 fps mp4, `cam_c2w` for every frame + intrinsics, caption JSON; with a per-round `prompt_schedule`, `segments` aligned to round boundaries (eligible for `per_chunk`). |
-| `rollout.ltx25(prompt, image?, video?, frames, resolution, seed, variant)` | LTX-2.5 generation (T2V/I2V/V2V; `dev` or `distilled`), 24 fps, 16:9. Output: mp4 + caption JSON (no poses). |
-| `rollout.wan22(prompt, image?, frames, seed)` | Wan 2.2 TI2V-5B, 720p 24 fps. Output: mp4 + caption JSON (no poses). |
+| `rollout.alayaworld(items, variant, rounds_per_turn, seed)` | *(Amended 2026-09-26, Plan 3 as built.)* Renders agent-written WBench-style cases through the eval's own `run_wbench.py` path (`dmd4` = the eval's 4-step student, `ar30` = the 30-step AR teacher; both passed §16.3 item 5). Job-level params: `variant` (enabled variants only; default the first), `rounds_per_turn` 1..3 (default 3; a round is 32 frames), `seed` (default 42). Item: `{image, perspective: first_person|third_person, environment_prompt, character_prompt?, perspective_prompt?, subject_mask?, turns: [{action (a WBench navigation action), subject_action?, event_edit?, perspective_switch?}]}` (1..`max_turns` turns). Output under `/workspace/staging/rollouts/<job_id>/`: a 24 fps mp4 with F = 32·rounds − 7 frames (round boundaries already on the `25 + 32k` grid) and a caption JSON with one segment per round (eligible for `per_chunk`). **No pose and no `camera_motion`** (user decision 2026-09-26): the renders follow translation reliably but rotation only weakly, so the agent runs `annotate.camera` and ingests as `moving`. Metadata only: `commanded_camera` (npz of the commanded path), `actions`, `turn_segments`. |
+| `rollout.ltx25(items, variant, frames, height, width)` | *(Amended 2026-09-26, Plan 3 as built.)* LTX-2.5 T2V, or I2V when an item carries `image`. **V2V dropped** (YAGNI: no agent flow needs it). Job-level params: `variant` (`distilled` passed §16.3 item 5 and is enabled; `dev` fits but is 5.8x slower and stays disabled), `frames` (8k+1, default 121, max 241), `height`/`width` (one of `generators.ltx25.resolutions`, default 576x1024). Item: `{prompt, image?, seed}`. One worker per GPU (fp8-cast weights + CPU offload), the worker count capped by host RAM. Output under `/workspace/staging/rollouts/<job_id>/`: a 24 fps, 16:9, silent mp4 + caption JSON, no pose/`camera_motion`. |
+| `rollout.wan22(items, frames)` | *(Amended 2026-09-26, Plan 3 as built.)* Wan 2.2 TI2V-5B (`ti2v-5b` passed §16.3 item 5), T2V, or I2V when an item carries `image` (fitted to 1280x704). Job-level `frames` (4k+1, default and max 121). Item: `{prompt, image?, seed}`. One worker per GPU. Output under `/workspace/staging/rollouts/<job_id>/`: a 1248x704 (center-cropped from 1280x704) 24 fps mp4 + caption JSON, no pose/`camera_motion`. |
+| `generate_images(items, width, height)` | *(Added 2026-09-26, Plan 3.)* Z-Image-Turbo first frames for AlayaWorld cases and I2V items. Job-level `width`/`height` (multiples of 16 in 256..1920, default 1280x720). Item: `{prompt, seed}`. Output: a png per item under `/workspace/staging/images/<job_id>/`. |
 | `caption.videos(paths, prompt)` | *(Added 2026-09-25, Follow-up C.)* Captions clips with a local video model (`captioner` config, §17: Qwen3.8-27B-FP8 served by vLLM from its own conda env), never the paid agent model. A GPU job on the node's GPU set under the GPU lock: it starts `vllm serve` (own session, process-group kill, `127.0.0.1` on a free port, `CUDA_VISIBLE_DEVICES` = the node GPUs, `--allowed-local-media-path` = a job-private directory the clips are hard-linked into), waits for readiness, sends each video file (a `video_url` `file://` part, thinking disabled) with the agent's `prompt`, then always stops the server and waits for GPU memory to return to its pre-job level. `paths` are workspace/staging paths (relative ones resolve against `/workspace`), validated at submit and again when the job starts, where each file is opened with `O_NOFOLLOW`, its real path re-checked against the caller's mounts and the staged link verified to be that same inode (a directory swapped for a link after the check is refused). Result: `clips: {path: {caption} or {error}}` (a per-clip failure is not a failed job), `load_s`, `gpu_memory_mib {before, peak, after}`, `gpu_memory_released`. A server that exits or is not ready within `startup_timeout_s` fails the job with its log tail. Telemetry: `caption.server_ready`, one `caption.clip` per clip (latency, caption or error), `caption.server_stopped` (`reason` done/cancelled/failed; the launcher logs every stop as `subproc.cancelled`), `caption.gpu_not_released`. A cancelled job waits at most 5 s for the memory (so `JobQueue.shutdown` keeps its deadline); the pre-phase GPU check is the real guard. |
-| `annotate.camera(video)` | Estimates per-frame `cam_c2w [N,4,4]` (N = mp4 frame count, OpenCV convention) and pixel intrinsics; output passes the pose rules of §6.2. Backend per §16.3 item 6. |
+| `annotate.camera(paths)` | Estimates per-frame `cam_c2w [N,4,4]` (N = mp4 frame count, OpenCV convention) and pixel intrinsics; output passes the pose rules of §6.2. Backend per §16.3 item 6. *(Amended 2026-09-26, Plan 3 as built: the backend is **ViGeo** (it passed item 6); batched `paths` (mp4s under `/workspace`, at most `annotate.max_frames` frames each); output per item under `/workspace/staging/annotations/<job_id>/`: an npz with `cam_c2w` (first frame identity) and `intrinsics` `[fx, fy, cx, cy]`, ready to pass as `pose` to `data.ingest`.)* |
 | `video.probe(path)` | Frame count, fps, width, height, duration. |
 | `data.ingest(candidates)` | §5.5. |
 | `data.query(filter)` | Any clip in the run's pool, with provenance, metadata, eligible formats, ingesting node and the scores of nodes that used it. |
@@ -707,6 +712,12 @@ multi-minute GPU job, so default HTTP/MCP timeouts cannot kill one. `job.cancel(
 stops a job. The kernel runs jobs one at a time on its GPU list while the container waits.
 Tool errors (e.g. OOM) return to the agent and are not node failures. Disabled generator
 variants (§16.3 item 5) are omitted from tool schemas.
+*(Amended 2026-09-26, Plan 3 as built: `generate_images` is also a GPU job. Every Plan 3 tool
+takes a batch of items and returns one result item per input, `{index, candidate | error, worker}`
+for rollouts, where `candidate` = `{video, caption, provenance (§5.4), license, ...metadata}` is
+ready for `data.ingest` once the agent adds `camera_motion` (and a pose for `moving`); a per-item
+failure is an item error, not a failed job. A disabled tool is not registered at all, and each
+tool's description lists only its enabled variants.)*
 
 ---
 
@@ -1013,12 +1024,16 @@ discard leaves one record).
    dev/distilled, `rollout.wan22` ti2v-5b) produces a clip on the GPU list that passes
    ingest (with poses from `annotate.camera` for generated moving-camera clips). A variant
    that cannot fit is set `enabled: false` under `generators` in `kernel.yaml`.
+   *(Results 2026-09-26: `verification-log.md`, sections "Plan 3 — rollout_alayaworld" (dmd4, ar30
+   enabled), "Plan 3 Task 7 — rollout_wan22" (ti2v-5b enabled), "Plan 3 Task 8 — rollout_ltx25"
+   (distilled enabled; dev disabled as 5.8x slower), and the Plan 3 Task 9 full GPU run.)*
 6. **Camera annotation backend:** ViGeo (`WorldModel/third_party/ViGeo`) if it yields
    per-frame camera-to-world poses and intrinsics that pass §6.2 on the
    `video_caption_camera` example clips (compared against their provided poses);
    otherwise Depth-Anything-3 (installed under `AutoResearcher/third_party/`). If neither
    passes, `annotate.camera` is disabled, and generated clips can only be ingested as
    `camera_motion: static`.
+   *(Result 2026-09-26: ViGeo passed; see `verification-log.md`, "Plan 3 — annotate_camera (ViGeo)".)*
 7. **Allowlist preflight:** each resolution pair in `train.resolution_allowlist` combined
    with the largest rank in `train.lora_allowlist` completes 10 steps without OOM; pairs
    that fail are removed from the allowlist before the first run.
@@ -1062,7 +1077,9 @@ Three real nodes with small recipes before the first long run.
 | `telemetry.gpu_sample_sec` | 5 |
 | `agents.context_window_tokens` / `agents.compact_at` | 128000 (set to the agent model's window) / 0.85 |
 | `alerts.stall_min` / `gateway_error_rate` | 30 / 0.2 |
-| `generators` | `alayaworld: {dmd4, ar30}`, `ltx25: {dev, distilled}`, `wan22: {ti2v-5b}`, each `enabled` per §16.3 item 5 |
+| `generators` | `alayaworld: {dmd4, ar30}`, `ltx25: {dev, distilled}`, `wan22: {ti2v-5b}`, each `enabled` per §16.3 item 5 *(amended 2026-09-26, Plan 3 as built: enabled = dmd4, ar30, ti2v-5b, distilled. Each block has `env` (a name or a repo-relative prefix env), `variants: {<v>: {enabled}}`, `max_items`, `timeout_s`, `license`; alayaworld `max_turns: 9`; wan22/ltx25 `repo` + pinned `commit` (the backend refuses other commits), `weights`, `frames: [default, max]` (wan22 `[121, 121]`, ltx25 `[121, 241]`), `workers`; wan22 `gpus_per_worker: 1`, `extra_args: {offload_model: true, t5_cpu: true}`; ltx25 `quantization: fp8-cast`, `offload: cpu`, per-variant `peak_rss_gib: 40`, `host_reserve_gib: 60`, `resolutions: [[576, 1024]]`)* |
+| `annotate` | *(Added 2026-09-26, Plan 3.)* `enabled: true`, `env: alayaworld`, `repo`/`checkpoint` (ViGeo under `WorldModel/third_party/ViGeo`), `max_frames: 1200`, `max_items: 64`, `timeout_s: 21600` |
+| `images` | *(Added 2026-09-26, Plan 3.)* `enabled: true`, `env: .envs/gen-zimage`, `weights: weights/z-image-turbo` + pinned `revision`, `steps: 9`, `offload: model`, `max_items: 64`, `timeout_s: 7200`, `license: Apache-2.0` |
 
 All values are snapshotted into `runs/<run>/config/` at run start and logged.
 

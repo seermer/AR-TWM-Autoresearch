@@ -34,3 +34,18 @@
   `{"caption": "<text>"}` in captions/<id>.json.
 - For timed prompts, caption each segment's trimmed clip and snap the boundaries with
   snap_timed_prompts.
+
+## Generated clips
+
+- GPU tools: rollout_alayaworld (WBench-style cases), rollout_wan22 and rollout_ltx25 (text or
+  first-frame to video), generate_images (first frames for AlayaWorld cases and image-to-video
+  items), annotate_camera (poses for a video). Each is a slow GPU job: batch many items per call,
+  then job_wait.
+- Each result item carries a ready `candidate` (video, caption, provenance) for data_ingest.
+- No clip comes back with a pose. Run annotate_camera on candidate.video, then ingest it with
+  that pose as 'moving'.
+- Never label a clip 'static' from its prompt: the models ignore "camera steady". Run
+  annotate_camera, or check the frames, first.
+- AlayaWorld follows translation actions reliably, rotation (turns, orbits) only weakly. Its
+  captions have one segment per round, so its clips are eligible for
+  video_timed_prompts_camera:per_chunk.

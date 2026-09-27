@@ -51,6 +51,7 @@ TURN_TYPES = ("subject_action", "event_edit", "perspective_switch")     # WBench
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")                 # alaya/data/wbench.py _IMAGE_EXTS
 PERSPECTIVES = ("first_person", "third_person")
 VARIANTS = ("dmd4", "ar30")
+VARIANT_TEXT = {"dmd4": "the eval's 4-step student", "ar30": "the 30-step AR teacher"}
 # ar30 = the AR teacher without the DMD LoRA, sampled as configs/infer_i2v_camera_ar.yaml does.
 AR30 = {("paths", "dmd_resume"): None, ("validation", "sampling_steps"): 30,
         ("validation", "scheduler"): "shift", ("validation", "cfg_scale"): 3.0}
@@ -149,8 +150,8 @@ class AlayaWorldBackend(GpuJob):
     max_turns = 9
     description = (
         "Render WBench-style cases with AlayaWorld exactly as the WBench eval does. A GPU job: returns "
-        "{job_id} at once; collect with job_wait. Params: `variant` ('dmd4': the eval's 4-step student; "
-        "'ar30': the 30-step AR teacher; enabled variants only), `rounds_per_turn` 1..3 (default 3; a round "
+        "{job_id} at once; collect with job_wait. Params: `variant` ({variants}; default the first), "
+        "`rounds_per_turn` 1..3 (default 3; a round "
         "is 32 frames at 24 fps), `seed` (int, default 42). Item: {'image': first frame under /workspace "
         "(.jpg/.png/..., any size), 'perspective': 'first_person'|'third_person', 'environment_prompt', "
         "'character_prompt'?, 'perspective_prompt'?, 'subject_mask'? (image, white = subject), 'turns': "
@@ -170,12 +171,14 @@ class AlayaWorldBackend(GpuJob):
         self.block = self.cfg.get(self.config_key) or {}
         self.max_turns = int(self.block.get("max_turns", self.max_turns))
         self.license = self.block.get("license", "")
+        variants = "; ".join(f"'{v}': {VARIANT_TEXT[v]}" for v in self.enabled_variants())
+        self.description = self.description.replace("{variants}", variants)   # disabled variants omitted
 
     def enabled_variants(self) -> list[str]:
         return [v for v in VARIANTS if (self.block.get("variants", {}).get(v) or {}).get("enabled")]
 
     def check_args(self, args):
-        args.setdefault("variant", "dmd4")
+        args.setdefault("variant", (self.enabled_variants() or ["dmd4"])[0])
         args.setdefault("rounds_per_turn", 3)
         args.setdefault("seed", 42)
         if args["variant"] not in self.enabled_variants():

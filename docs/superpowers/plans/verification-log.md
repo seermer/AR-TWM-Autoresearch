@@ -955,3 +955,26 @@ The worker rule is now computed at job start from free memory, not MemTotal:
 that and fails only below 1 (a 1-item job charges 1 worker). `timeout_s` is 10800. `finish` also
 checks the frame count. Both tool descriptions (LTX, Wan) now warn that camera instructions are
 often ignored, so a clip must not be labelled static from its prompt.
+
+## Plan 3 Task 9 — full verification, 2026-09-26
+
+Branch `feat/gpu-data-sources`. All six GPUs were free at the start; the run used `AR_TEST_GPUS=0,1,2,3`
+(`CUDA_VISIBLE_DEVICES=0,1,2,3` for the captioner test). Each `gpu` test ran alone, one after another,
+with `--basetemp=.cache/pytest/gpu_<name>`. GPU memory was read with nvidia-smi before and 5 s after
+each test: every test returned to its baseline (15 MiB; GPU 2 idles at 111-113 MiB).
+
+| suite / test | result | wall | notes |
+|---|---|---|---|
+| unit (`pytest -q`) | 548 passed, 0 failed | 599 s | |
+| docker (`-m docker`) | 14 passed | 80 s | Docker 27.3.1 |
+| captioner `real_model` | passed | 335 s | vLLM load 323 s; `gpu_memory_released` true |
+| `annotate_camera` (ViGeo) | passed | 220 s | example clips, e.g. rot 0.03-0.05°, ATE 1.8-3.3% |
+| `generate_images` (Z-Image) | passed | 181 s | 8 images, 4 workers |
+| `rollout_wan22` ti2v-5b | passed | 895 s | **first 4-GPU run** (owed since Task 7): 4 workers, ~540-560 s/clip, peak 22.8 GiB alloc per GPU; 2 T2V + 2 I2V ingest static, one ingests moving after annotate_camera |
+| `rollout_ltx25` distilled | passed | 990 s | 4 workers, ~900 s/clip (cold; Task 8 measured ~404 s cold, ~100 s warm), peak 11.9-13.3 GiB; `dev` skipped (disabled) |
+| `rollout_alayaworld` dmd4 | passed | 937 s | 185 frames, trim 0, per_chunk ingest with ViGeo pose; peak ~24.1 GiB of 24.5 |
+| `rollout_alayaworld` ar30 | passed | 1100 s | same checks |
+
+Notes: the Wan smoke is now verified on 4 GPUs (one worker each). LTX's per-clip time was
+about 2x the Task 8 cold figure on this run; the clips passed, so this is recorded, not acted on
+(possibly the LTX weights were evicted from the page cache by the Wan and Z-Image runs before it; not measured).

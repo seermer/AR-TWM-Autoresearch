@@ -304,14 +304,16 @@ def register_gpu_tools(mcp, kit, q) -> None:
 
 
 def build_gpu_backends(cfg, run_dir: Path, gpus: list[int], registry, recorder) -> list:
-    """The enabled GPU-job backends for this run's `annotate`/`generators` config (spec 10).
-    Tasks 5-8 add `ImageBackend`, `AlayaWorldBackend`, `Wan22Backend` and `Ltx25Backend`,
-    each only when its config says enabled."""
+    """Every GPU data backend a run gets (spec 10): the captioner always, the others only when
+    their `annotate`/`images`/`generators` config enables them (a generator needs an enabled
+    variant). The caller registers each on the run's JobQueue, then calls `register_gpu_tools`
+    and `register_caption_tool`."""
     from .annotate import AnnotateBackend          # imports this module
+    from .captioner import CaptionBackend
     from .images import ImageBackend
     from .rollouts import AlayaWorldBackend, Ltx25Backend, Wan22Backend
 
-    backends = []
+    backends = [CaptionBackend(cfg, run_dir, gpus, registry, recorder)]
     if cfg.get("annotate.enabled"):
         backends.append(AnnotateBackend(cfg, run_dir, gpus, registry, recorder))
     if cfg.get("images.enabled"):
