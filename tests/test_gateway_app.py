@@ -4,6 +4,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from ar_kernel.budget import Budget
 from ar_kernel.gateway.app import Upstream, create_gateway_app
 from ar_kernel.gateway.mock import MockBook, function_call, message
 from ar_kernel.gateway.store import CallStore
@@ -352,3 +353,37 @@ def test_mock_mode_serves_chat_completions(tmp_path):
     assert second["choices"][0]["finish_reason"] == "stop"
     assert second["choices"][0]["message"] == {"role": "assistant", "content": "done"}
     assert set(first["usage"]) >= {"prompt_tokens", "completion_tokens", "total_tokens"}
+
+
+def test_budget_cap_blocks_further_real_calls_but_not_mock_calls(tmp_path):
+    """The stub's usage (1 input token + 1 output token, priced at $1/Mtok each) costs
+    more than the $0.000001 cap, so the cap is reached after the very first real call."""
+    seen = []
+    rec = Recorder(tmp_path)
+    reg, store = TokenRegistry(rec), CallStore(rec)
+    real = reg.issue(node="n1", phase="edit_self", attempt=1, workspace_host=tmp_path,
+                     staging_host=tmp_path)
+    mocked = reg.issue(node="n1", phase="edit_self", attempt=1, workspace_host=tmp_path,
+                       staging_host=tmp_path, mock_script="smoke")
+    upstream = _upstream_that(_ok, seen)
+    budget = Budget(max_usd=1e-6, prices={"input": 1, "cached_input": 1, "output": 1})
+    app = create_gateway_app(registry=reg, store=store, allowed_models={"gpt-x"}, upstream=upstream,
+                             mocks=MockBook.default(), budget=budget)
+    client = TestClient(app)
+
+    r1 = _post(client, real.token, {"model": "gpt-x", "input": "hi"})
+    assert r1.status_code == 200
+    responses = [e for e in rec.read_events("n1") if e["type"] == "llm.response"]
+    assert responses[-1]["cost_usd"] > 0 and responses[-1]["mock"] is False
+    assert len(seen) == 1
+
+    r2 = _post(client, real.token, {"model": "gpt-x", "input": "hi again"})
+    assert r2.status_code == 402 and "budget" in r2.json()["error"]["message"]
+    assert len(seen) == 1                                           # upstream never saw the 2nd call
+    requests = [e for e in rec.read_events("n1") if e["type"] == "llm.request"]
+    assert len(requests) == 1                                       # no 2nd llm.request event
+
+    r3 = _post(client, mocked.token, {"model": "gpt-x", "input": "hi"})
+    assert r3.status_code == 200
+    responses = [e for e in rec.read_events("n1") if e["type"] == "llm.response"]
+    assert responses[-1]["mock"] is True

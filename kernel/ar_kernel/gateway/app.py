@@ -10,6 +10,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from ..budget import Budget
 from ..telemetry.recorder import TelemetryError
 from ..tools.context import bearer
 from .mock import MockBook
@@ -111,7 +112,8 @@ class Upstream:
 
 
 def create_gateway_app(*, registry, store: CallStore, allowed_models: set[str],
-                       upstream: Upstream | None, mocks: MockBook) -> FastAPI:
+                       upstream: Upstream | None, mocks: MockBook,
+                       budget: Budget | None = None) -> FastAPI:
     # Bounds CallStore's memory to live containers (Task 4 ruling): once a token is
     # revoked, its linking state is dropped along with it.
     registry.on_revoke(store.forget)
@@ -139,6 +141,10 @@ def create_gateway_app(*, registry, store: CallStore, allowed_models: set[str],
                                                       f"allowlist {sorted(allowed_models)}"}},
                                 status_code=403)
         mock = bool(caller.mock_script) or upstream is None
+        if not mock and budget is not None:
+            why = budget.exhausted()
+            if why:       # rejected like the checks above: not recorded, never forwarded
+                return JSONResponse({"error": {"message": why}}, status_code=402)
         if not mock:
             body = upstream.enforce(upstream_path, body)   # before begin: record what is forwarded
         try:
@@ -155,9 +161,12 @@ def create_gateway_app(*, registry, store: CallStore, allowed_models: set[str],
                 status, payload, attempts = await upstream.post(upstream_path, body)
         except Exception as exc:  # noqa: BLE001 -- the request is recorded; its failure must be too
             status, payload, attempts = 502, {"error": {"message": f"gateway: {type(exc).__name__}: {exc}"}}, 1
+        cost = budget.record(status, payload.get("usage") if isinstance(payload, dict) else None) \
+            if (budget is not None and not mock) else None
         try:
             store.end(meta, caller, status=status, body=payload,
-                      latency_s=time.monotonic() - started, attempts=attempts)
+                      latency_s=time.monotonic() - started, attempts=attempts,
+                      cost_usd=cost, mock=mock)
         except TelemetryError as exc:
             return JSONResponse({"error": {"message": f"telemetry unavailable: {exc}"}}, status_code=500)
         return JSONResponse(payload, status_code=status)

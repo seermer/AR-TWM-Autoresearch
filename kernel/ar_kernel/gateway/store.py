@@ -111,7 +111,7 @@ class CallStore:
             return meta
 
     def end(self, meta: dict, caller, *, status: int, body: dict, latency_s: float,
-            attempts: int) -> None:
+            attempts: int, cost_usd: float | None = None, mock: bool = False) -> None:
         with self._lock:
             self._rec.event("llm.response", node=caller.node, phase=caller.phase,
                             attempt=caller.attempt, component="gateway",
@@ -119,7 +119,8 @@ class CallStore:
                                      "attempts": attempts, **meta},
                             call_id=meta["call_id"], conversation_id=meta["conversation_id"],
                             status=status, latency_s=latency_s, attempts=attempts,
-                            usage=body.get("usage") if isinstance(body, dict) else None)
+                            usage=body.get("usage") if isinstance(body, dict) else None,
+                            cost_usd=cost_usd, mock=mock)
             call = self._calls.get(meta["call_id"])
             if call is None:
                 # The caller's token was forgotten (revoked) while this call was in
