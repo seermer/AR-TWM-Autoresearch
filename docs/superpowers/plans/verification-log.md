@@ -982,3 +982,25 @@ each test: every test returned to its baseline (15 MiB; GPU 2 idles at 111-113 M
 Notes: the Wan smoke is now verified on 4 GPUs (one worker each). LTX's per-clip time was
 about 2x the Task 8 cold figure on this run; the clips passed, so this is recorded, not acted on
 (possibly the LTX weights were evicted from the page cache by the Wan and Z-Image runs before it; not measured).
+
+## Plan 4 Task 13 — real verification and first real-LLM node, 2026-09-27
+
+Branch `feat/loop`. GPUs 0-3 (another user's vLLM was on GPU 5). Run `loopcheck_20260927`.
+
+| check | result |
+|---|---|
+| unit suite (`pytest`) | 655 passed, 28 deselected (final, after all fixes) |
+| docker suite (`-m docker`) | 16 passed; no `ar-*` containers left |
+| `ar run --max-nodes 0`, then `ar stop --force` during the root render | `run.stopped` "force stop (SIGTERM)" about 4 s after the stop; render process group killed; `control/pgids/` empty; GPUs 0-3 back to idle |
+| `ar run --resume` (re-score root) | **failed**: "rendered 31 of 40 proxy cases". The killed render had created an empty `wbench_t02` bucket and WorldModel skips existing buckets. Fixed in `3f44cbf` (`score_node` clears `eval/rollout` and `work_dir/<model>` before scoring) |
+| resume again | root scored 0.78836 |
+| root score check | 15 metrics (VLM metrics excluded: `VLM_API_KEY` empty; `visual_plausibility` weights missing). The 0.7833 reference is the 17-metric score, so it is not comparable. Like-for-like against `manual_root` (15 metrics, 0.78688): delta 0.00148 < 2e-3. Deterministic metrics agree to ~1e-4; the spread is in the MegaSAM pose metrics |
+| `ar status` and `gpu.jsonl` during the run | worked (5 s samples, live P, spend) |
+
+**First real-LLM child (n1)**, `deepseek-flash`, `--max-nodes 1`, run-snapshot cap `max_usd: 3.0` with placeholder prices (in 1.0 / cached 0.2 / out 4.0 $/Mtok, deliberately high):
+- edit_self passed the contract on attempt 1 (orchestration: the planner now gets a clip-pool summary). improve_recipe passed the gate on attempt 1: 50 RealEstate10K clips from `MuteApo/RealCam-Vid` with poses, rank-32 LoRA at 416x736, 200 steps. Training took 39 min and was stable.
+- 85 LLM calls, 3.92 M tokens, $1.24 at the placeholder prices (real cost lower). 79 kernel tool calls, 22 tool errors, all recovered by the agent.
+- Ended `eval_failed`: `hpsv3_quality` 34 of 40 cases (transient CUDA OOM on two WBench workers; another ~20 GB process was on the same GPU). Reproduced 1 of 3 standalone runs; the source of the extra process was not identified. WBench's GPU phase re-runs only failed cases (verified: 6 recomputed in 40 s), so the kernel now runs the GPU phase twice (`8acdc9f`).
+- Report: `https://claude.ai/artifact/MMXe9ttWY2mFLJSWUTLviY` (private).
+
+`ar status` alert lines now carry local timestamps (`e5ccde8`).
