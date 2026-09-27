@@ -1,0 +1,82 @@
+"""Everything a run serves to its agents, built from the run's config (Plan 2 contract items 8-9)."""
+from __future__ import annotations
+
+import threading
+from dataclasses import dataclass
+from pathlib import Path
+
+from .budget import Budget
+from .contract.verify import ContractHarness
+from .gateway.app import Upstream, create_gateway_app
+from .gateway.mock import MockBook
+from .gateway.store import CallStore
+from .guards import alert
+from .services import RunServices, socket_dir_for
+from .tools.captioner import register_caption_tool
+from .tools.context import TokenRegistry
+from .tools.data_tools import DataTools, register_data_tools
+from .tools.gpu_jobs import build_gpu_backends, register_gpu_tools
+from .tools.hf_tools import HfTools, register_hf_tools
+from .tools.jobs import JobQueue, register_job_tools
+from .tools.server import ToolKit, build_tool_app, new_mcp
+
+
+@dataclass
+class RunKit:
+    registry: TokenRegistry
+    queue: JobQueue
+    gpu_lock: threading.Lock
+    budget: Budget
+    services: RunServices
+    harness: ContractHarness
+    socket_dir: Path
+    default_model: str
+    gateway_app: object
+    tools_app: object
+    recorder: object
+
+    def start(self) -> None:
+        self.services.start(self.gateway_app, self.tools_app)
+        self.harness.start()
+
+    def stop(self) -> None:
+        try:
+            self.queue.shutdown()
+        except RuntimeError as exc:           # a job may still hold a GPU; recorded, never fatal
+            alert(self.recorder, "shutdown", str(exc))
+        finally:
+            try:
+                self.services.stop()        # raises if a service thread will not join
+            finally:
+                self.harness.stop()
+
+
+def build_run_kit(cfg, run_dir: Path, gpus: list[int], recorder, environ) -> RunKit:
+    for key in ("OPENAI_API_KEY", "OPENAI_MODEL"):
+        if not environ.get(key, "").strip():
+            raise ValueError(f"{key} is empty; set it in AutoResearcher/.env before `ar run`")
+    budget = Budget.from_config(cfg)
+    budget.load(run_dir)
+    registry = TokenRegistry(recorder)
+    gpu_lock = threading.Lock()
+    queue = JobQueue(recorder, gpu_lock, wait_cap_s=float(cfg.get("tools.job_wait_max_s")))
+    for backend in build_gpu_backends(cfg, run_dir, gpus, registry, recorder):
+        queue.register(backend)
+    kit, mcp = ToolKit(registry, recorder), new_mcp()
+    register_data_tools(mcp, kit, DataTools(cfg, run_dir, recorder, gpus, gpu_lock))
+    register_hf_tools(mcp, kit, HfTools(cfg, Path(run_dir) / "hf_tmp"))
+    register_job_tools(mcp, kit, queue)
+    register_gpu_tools(mcp, kit, queue)
+    register_caption_tool(mcp, kit, queue)
+    model = environ["OPENAI_MODEL"]
+    gateway = create_gateway_app(
+        registry=registry, store=CallStore(recorder),
+        allowed_models=set(cfg.get("gateway.model_allowlist") or []) | {model},
+        upstream=Upstream.from_env(environ, timeout_s=float(cfg.get("gateway.upstream_timeout_s")),
+                                   retries=int(cfg.get("gateway.upstream_retries"))),
+        mocks=MockBook.default(), budget=budget)
+    socket_dir = socket_dir_for(run_dir)
+    return RunKit(registry=registry, queue=queue, gpu_lock=gpu_lock, budget=budget,
+                  services=RunServices(socket_dir), harness=ContractHarness(cfg, run_dir, recorder),
+                  socket_dir=socket_dir, default_model=model, gateway_app=gateway,
+                  tools_app=build_tool_app(mcp), recorder=recorder)
