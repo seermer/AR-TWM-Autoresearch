@@ -100,3 +100,10 @@ def test_update_values_writes_the_value(tmp_path):
     update_values(conn, CFG)
     assert nodes.get("root")["subtree_value"] == pytest.approx(0.7 * 0.7 + 0.3 * (0.7 + 0.45) / 1.5)
     assert nodes.get("n1")["subtree_value"] == pytest.approx(0.9)
+
+
+def test_descendants_of_an_interrupted_node_count_nowhere():
+    tree = [node("a", None, score=0.8), node("a1", "a", status="interrupted"),
+            node("a11", "a1", score=0.2), node("a12", "a1", status="crashed")]
+    row = by_id(candidates(tree, CFG))["a"]
+    assert row["value"] == pytest.approx(0.8) and row["size"] == 0
