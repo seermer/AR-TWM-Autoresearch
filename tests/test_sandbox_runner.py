@@ -11,7 +11,8 @@ import pytest
 from ar_kernel.config import KernelConfig
 from ar_kernel.liveness import Liveness
 from ar_kernel.sandbox.image import ensure_image
-from ar_kernel.sandbox.runner import Mounts, container_name, diff, run_container, snapshot
+from ar_kernel.sandbox.runner import (Mounts, container_name, container_prefix, diff,
+                                       kill_run_containers, run_container, snapshot)
 from ar_kernel.telemetry.recorder import Recorder
 
 CFG = KernelConfig.load()
@@ -21,6 +22,23 @@ def test_container_name_is_prefixed_and_docker_safe():
     name = container_name("20260921_1200", "n/7 x", "improve_recipe", 2)
     assert name.startswith("ar-20260921_1200-n-7-x-improve_recipe-2-")
     assert all(c.isalnum() or c in "_.-" for c in name)
+
+
+def test_container_prefix_matches_container_name():
+    assert container_name("r:1", "n2", "edit_self", 1).startswith(container_prefix("r:1", "n2"))
+    assert container_prefix("r:1") == "ar-r-1-"
+
+
+def test_kill_run_containers_removes_only_the_prefix(monkeypatch):
+    calls = []
+
+    def fake_run(args, **kw):
+        calls.append(args)
+        out = "ar-r1-n2-edit_self-1-abc\nar-r10-n2-edit_self-1-def\nother\n" if args[1] == "ps" else ""
+        return subprocess.CompletedProcess(args, 0, out, "")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert kill_run_containers("r1", "n2") == ["ar-r1-n2-edit_self-1-abc"]
+    assert ["docker", "rm", "-f", "ar-r1-n2-edit_self-1-abc"] in calls
 
 
 def test_snapshot_diff_reports_changes(tmp_path):

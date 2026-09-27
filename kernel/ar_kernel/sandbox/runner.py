@@ -46,6 +46,23 @@ def container_name(run_id: str, node: str, phase: str, attempt: int) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "-", raw)
 
 
+def container_prefix(run_id: str, node: str | None = None) -> str:
+    raw = f"ar-{run_id}-" + (f"{node}-" if node else "")
+    return re.sub(r"[^A-Za-z0-9_.-]+", "-", raw)
+
+
+def kill_run_containers(run_id: str, node: str | None = None) -> list[str]:
+    """Force-remove this run's (or node's) containers: on force stop, and on resume for what a
+    killed kernel left running (spec 14.4). Files are never touched."""
+    prefix = container_prefix(run_id, node)
+    listed = subprocess.run(["docker", "ps", "-a", "--filter", f"name={prefix}", "--format", "{{.Names}}"],
+                            capture_output=True, text=True).stdout
+    names = [n for n in listed.split() if n.startswith(prefix)]
+    for name in names:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+    return names
+
+
 def snapshot(root: Path, hash_files: bool) -> dict[str, str]:
     """path -> fingerprint. Hash small code trees; use size+mtime for workspaces
     that may hold gigabytes of video. Only regular files count (never a FIFO or
