@@ -255,7 +255,8 @@ def test_dry_run_against_the_kernel_services(kernel, tmp_path, kind):
 
 def test_improve_recipe_full_flow(kernel, tmp_path):
     rec = kernel[0]
-    ctx = {**BASE, "tunable_rules": {"optimizer.max_steps": {"type": "int"}, "optimizer.lr": {"type": "float"}}}
+    ctx = {**BASE, "tunable_rules": {"optimizer.max_steps": {"type": "int"}, "optimizer.lr": {"type": "float"}},
+           "resolution_allowlist": [[352, 640]]}
     proc, body, _ = _run(kernel, tmp_path, "improve_recipe", "recipe", "n-recipe", ctx)
     assert proc.returncode == 0 and body["ok"], (body, proc.stderr[-2000:])
     assert body["result"]["data_commit"] == C0
@@ -269,6 +270,10 @@ def test_improve_recipe_full_flow(kernel, tmp_path):
     assert "tool.call" in kinds and "tool.error" in kinds                        # kernel-side records
     turns = [e["turn_index"] for e in rec.read_events("n-recipe") if e["type"] == "llm.request"]
     assert max(turns) >= 2                     # the harness's resent chat history links (Task 19)
+    builder_tasks = [m["content"] for e in rec.read_events("n-recipe") if e["type"] == "llm.request"
+                     for m in rec.load_payload(e["payload"])["body"]["messages"]
+                     if m.get("role") == "user" and str(m["content"]).startswith("PLAN:")]
+    assert builder_tasks and all('"resolution_allowlist": [[352, 640]]' in t for t in builder_tasks)
 
 
 def test_edit_self_plans_exactly_one_component(kernel, tmp_path):

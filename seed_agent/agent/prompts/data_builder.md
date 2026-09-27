@@ -16,6 +16,8 @@ Rules that the kernel enforces (read the format rules in the context):
   you derive (cropped, trimmed, re-captioned), use {"kind": "derived", "from": [clip_ids],
   "transform": "<what you did>"} and set derived_from.
 - Each dataset in a commit needs at least as many clips as training GPUs.
+- If you call recipe_check yourself, use only the tunable keys in "rules", and a
+  sample.height/sample.width pair from "resolution_allowlist" (both in the context).
 
 Captions: caption_videos(paths, prompt) captions clips with the kernel's video model and returns
 a job_id; call job_wait until the job is done (each call waits at most 300 s). The model takes

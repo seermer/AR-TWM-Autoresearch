@@ -86,7 +86,10 @@ async def run_task(ctx: RecipeContext) -> RecipeResult:
             return RecipeResult(data_commit=ctx.parent_data_commit or "dry-run", recipe={},
                                 rationale=f"dry run: {len(ktools)} kernel tools, model said "
                                           f"{messages[-1].text!r}")
-        context = json.dumps({"lineage": ctx.lineage, "archive": ctx.archive, "n_gpus": ctx.n_gpus,
+        recipe_rules = {"rules": ctx.tunable_rules, "resolution_allowlist": ctx.resolution_allowlist,
+                        "lora_allowlist": ctx.lora_allowlist}      # first, so the length cap never cuts them
+        context = json.dumps({**recipe_rules,
+                              "lineage": ctx.lineage, "archive": ctx.archive, "n_gpus": ctx.n_gpus,
                               "parent_data_commit": ctx.parent_data_commit, "parent_recipe": ctx.parent_recipe,
                               "clip_pool_size": len(ctx.clip_pool), "tools": ctx.tools, "retry": ctx.retry,
                               "format_rules": ctx.format_rules}, default=str)[:BRIEF_CHARS]
@@ -105,8 +108,7 @@ async def run_task(ctx: RecipeContext) -> RecipeResult:
                             build_tool], task, built)
             recipe_tool, draft = submit_tool("submit_recipe", "Submit the training recipe.", RecipeDraft)
             await run_role(system_prompt("recipe_writer"), [recipe_tool], json.dumps(
-                {"rules": ctx.tunable_rules, "resolution_allowlist": ctx.resolution_allowlist,
-                 "lora_allowlist": ctx.lora_allowlist, "n_gpus": ctx.n_gpus, "data_notes": built.value.notes,
+                {**recipe_rules, "n_gpus": ctx.n_gpus, "data_notes": built.value.notes,
                  "parent_recipe": ctx.parent_recipe, "previous_failures": failures}), draft)
             recipe = {key: int(round(value)) if ctx.tunable_rules.get(key, {}).get("type") == "int"
                       else float(value) for key, value in draft.value.recipe.items()}
