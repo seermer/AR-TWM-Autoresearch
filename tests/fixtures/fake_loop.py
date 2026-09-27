@@ -28,7 +28,7 @@ def outcome(ok, attempt_dir, result=None, error=None, commit=None):
 
 class Script:
     """Scripted phases: each list is consumed per call; default is success.
-    slow: None, a phase name (that phase sleeps up to 600 s) or "pace" (every phase sleeps 0.5 s)."""
+    slow: None, a phase name (that phase sleeps up to 600 s) or "pace" (every phase sleeps 1.2 s)."""
     def __init__(self, tmp, edit=(), contract=(), recipe=(), gate=(), train=(), score=(), slow=None):
         self.tmp, self.q = tmp, {k: list(v) for k, v in dict(edit=edit, contract=contract, recipe=recipe,
                                                                gate=gate, train=train, score=score).items()}
@@ -38,8 +38,8 @@ class Script:
         return self.q[key].pop(0) if self.q[key] else default
 
     def _wait(self, phase):
-        if self.slow == "pace":
-            time.sleep(0.5)
+        if self.slow == "pace":            # 6 phases: ~7 s per node, well over the 2 s stop-file poll
+            time.sleep(1.2)
         elif self.slow == phase:
             for _ in range(1200):                    # short steps: a signal is handled within 0.5 s
                 time.sleep(0.5)

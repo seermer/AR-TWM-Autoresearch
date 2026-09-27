@@ -36,11 +36,11 @@ def spawn():
             proc.wait()
 
 
-def wait_phase(run, phase, timeout=60):
+def wait_phase(run, phase, timeout=60, key="phase"):
     state = run / "control" / "state.json"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if state.exists() and json.loads(state.read_text()).get("phase") == phase:
+        if state.exists() and json.loads(state.read_text()).get(key) == phase:
             return
         time.sleep(0.2)
     raise AssertionError(f"never reached {phase}")
@@ -99,8 +99,8 @@ def test_kill_9_then_resume_starts_a_fresh_cycle_with_a_new_id(tmp_path, spawn):
 
 def test_graceful_stop_file_finishes_the_current_node(tmp_path, spawn):
     run = tmp_path / "run"
-    proc = spawn(run, 5, "pace")                       # ~3 s per node, so the request lands in n1
-    wait_phase(run, "edit_self")
+    proc = spawn(run, 5, "pace")                       # ~7 s per node, so the request lands in n1
+    wait_phase(run, "n1", key="node")                  # as soon as n1 starts
     (run / "control" / "stop").touch()
     assert proc.wait(timeout=120) == 0
     statuses = {n["node_id"]: n["status"] for n in NodeStore(open_db(run)).all()}
