@@ -56,7 +56,7 @@ Also read:
 - **Large files stay inside the project** (user rule, 2026-09-25): models, datasets, compile caches and package caches.
   - Kernel subprocesses get `HF_HOME`, `XDG_CACHE_HOME` and the other cache variables pointing at `AutoResearcher/.cache/` (Task 1).
   - Env installs set `PIP_CACHE_DIR`/`UV_CACHE_DIR` there too.
-  - Conda envs themselves stay in `~/miniforge3/envs` (named envs; `/home` has ~91 GB free; each new env is ~8–12 GB).
+  - `autoresearcher` and `alayaworld` stay named envs in `~/miniforge3/envs`. (As built, 2026-09-26: `/` ran short of space, 27 GB free, so the new generator envs — `gen-zimage`, `gen-wan22`, `gen-ltx25` — are instead conda-prefix envs under `AutoResearcher/.envs/<name>`, created with `conda create -p` and run with `conda run -p` via `ar_kernel.subproc.run_in_env`, which accepts repo-relative prefix paths. See `docs/PORTABILITY.md`.)
 - **Disk.** Disk is the binding constraint. Ask before freeing space, and never delete anything outside the project folder. Copying into the project is fine; the originals stay where they are.
 - **Portability.** No absolute paths in tracked code or config; everything resolves from `KernelConfig` / `REPO_ROOT` (`docs/PORTABILITY.md`).
 - **Tests.** The default unit suite uses no GPU and no network. Real-model tests are marked `gpu` and run explicitly and alone.
@@ -1012,6 +1012,8 @@ conda run --no-capture-output -n gen-zimage pip install "diffusers>=0.36" transf
 conda run --no-capture-output -n gen-zimage python -c "from diffusers import ZImagePipeline"
 ```
 
+(as built: prefix env `.envs/gen-zimage`, `conda create -p`/`conda run -p`, see docs/PORTABILITY.md)
+
 If `hf` is not available in `autoresearcher`, use `huggingface_hub.snapshot_download` with the same arguments. Record the exact versions installed (`pip freeze | grep -iE "diffusers|transformers|torch"`), the env size and the commands in `PORTABILITY.md`. Pin `images.revision` in the config.
 
 - [ ] **Step 2: Fit spike (one GPU)**
@@ -1207,10 +1209,12 @@ conda run --no-capture-output -n gen-wan22 pip install -r third_party/Wan2.2/req
 conda run --no-capture-output -n gen-wan22 pip check
 ```
 
+(as built: prefix env `.envs/gen-wan22`, `conda create -p`/`conda run -p`, see docs/PORTABILITY.md)
+
 Record in `docs/PORTABILITY.md`:
 - the exact commands;
 - the Wan2.2 commit SHA;
-- the env size (`du -sh ~/miniforge3/envs/gen-wan22`).
+- the env size (`du -sh .envs/gen-wan22`; as built, not `~/miniforge3/envs/gen-wan22`).
 
 Pin that SHA in `configs/kernel.yaml` as `generators.wan22.commit`. The backend refuses to run when `git -C <repo> rev-parse HEAD` differs, so a silently updated clone cannot change outputs.
 
@@ -1221,6 +1225,8 @@ CUDA_VISIBLE_DEVICES=0 conda run --no-capture-output -n gen-wan22 python third_p
   --task ti2v-5B --size 1280*704 --ckpt_dir weights/wan2.2-ti2v-5b --offload_model True --convert_model_dtype --t5_cpu \
   --prompt "A slow walk through a sunlit forest path" --base_seed 1 --save_file <scratchpad>/wan_t2v.mp4
 ```
+
+(as built: `-n gen-wan22` is `-p .envs/gen-wan22`, see docs/PORTABILITY.md)
 
 Run it with cwd `AutoResearcher`. Then run the same command with `--image <frame.png>`.
 
@@ -1284,7 +1290,9 @@ export PIP_CACHE_DIR=$PWD/.cache/pip UV_CACHE_DIR=$PWD/.cache/uv
 conda create -y -n gen-ltx25 python=3.12
 ```
 
-Install `ltx-core` (with the `natten` extra that pins torch 2.13.0 cu132) and `ltx-pipelines` editable into the env. Use the package indexes from `packages/ltx-core/pyproject.toml`. Prefer `uv pip install --python $(conda run -n gen-ltx25 which python) -e "third_party/LTX-2/packages/ltx-core[<natten extra name>]" -e third_party/LTX-2/packages/ltx-pipelines`, reading the extra's exact name and index URLs from that pyproject. `ltx-kernels` is **not** needed: it is only for multi-GPU SP, which does not help on 24 GB cards (fact 7).
+(as built: prefix env `.envs/gen-ltx25`, `conda create -p`/`conda run -p`, see docs/PORTABILITY.md)
+
+Install `ltx-core` (with the `natten` extra that pins torch 2.13.0 cu132) and `ltx-pipelines` editable into the env. Use the package indexes from `packages/ltx-core/pyproject.toml`. Prefer `uv pip install --python $(conda run -p .envs/gen-ltx25 which python) -e "third_party/LTX-2/packages/ltx-core[<natten extra name>]" -e third_party/LTX-2/packages/ltx-pipelines`, reading the extra's exact name and index URLs from that pyproject. `ltx-kernels` is **not** needed: it is only for multi-GPU SP, which does not help on 24 GB cards (fact 7).
 
 Then run `pip check`, `python -c "import ltx_pipelines.distilled"`, and record the commands, the SHA and the env size in `PORTABILITY.md`. Pin the SHA as `generators.ltx25.commit`, the same way as Task 7.
 
@@ -1301,6 +1309,8 @@ CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True conda ru
   --quantization fp8-cast --offload cpu --num-frames 121 --width 1024 --height 576 \
   --prompt "A slow walk through a sunlit forest path" --seed 1 --output-path <scratchpad>/ltx_distilled.mp4
 ```
+
+(as built: `-n gen-ltx25` is `-p .envs/gen-ltx25`, see docs/PORTABILITY.md)
 
 Check the real flag names with `--help` first (for example `--offload` versus `--offload-mode`, and whether `--width`/`--height` apply to the final or stage-1 size). Measure:
 - wall time, split into load and generation;

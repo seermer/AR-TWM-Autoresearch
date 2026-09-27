@@ -213,6 +213,14 @@ def test_submit_refuses_a_disabled_variant(tmp_path):
         b.check_args({"items": [first_person()], "variant": "ar30"})
 
 
+def test_submit_with_only_ar30_enabled_defaults_to_ar30(tmp_path):
+    rec = Recorder(tmp_path / "run")
+    b = AlayaWorldBackend(small_cfg(enabled=("ar30",)), tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
+    args = {"items": [first_person()]}
+    b.check_args(args)
+    assert args["variant"] == "ar30"
+
+
 def test_submit_accepts_every_wbench_action_and_fills_defaults(tmp_path):
     rec = Recorder(tmp_path / "run")
     b = AlayaWorldBackend(small_cfg(), tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
