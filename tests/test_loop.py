@@ -5,82 +5,18 @@ from types import SimpleNamespace
 
 import pytest
 
-from ar_kernel.agent_phase import PhaseOutcome
 from ar_kernel.archive.db import open_db
 from ar_kernel.archive.nodes import NodeStore
 from ar_kernel.budget import Budget
 from ar_kernel.config import KernelConfig
-from ar_kernel.contract.verify import ContractReport
-from ar_kernel.loop import Loop, Phases
+from ar_kernel.loop import Loop
 from ar_kernel.run import RunContext
 from ar_kernel.telemetry.recorder import Recorder
-from ar_kernel.train.gate import GateResult
-from ar_kernel.train.runner import TrainOutcome
 from ar_kernel.vcs.agents_repo import AgentsRepo
+from fixtures.fake_loop import Script
 
 CFG = KernelConfig.load()
 SEED = Path(__file__).resolve().parents[1] / "seed_agent"
-
-
-def outcome(ok, attempt_dir, result=None, error=None, commit=None):
-    return PhaseOutcome(ok, result, error, 0, False, commit, attempt_dir, 1.0)
-
-
-class Script:
-    """Scripted phases: each list is consumed per call; default is success."""
-    def __init__(self, tmp, edit=(), contract=(), recipe=(), gate=(), train=(), score=()):
-        self.tmp, self.q = tmp, {k: list(v) for k, v in dict(edit=edit, contract=contract, recipe=recipe,
-                                                               gate=gate, train=train, score=score).items()}
-        self.retries = []
-
-    def _next(self, key, default):
-        return self.q[key].pop(0) if self.q[key] else default
-
-    def edit_self(self, env, *, node, base_commit, attempt, retry, **kw):
-        self.retries.append(("edit_self", node, attempt, retry))
-        d = self.tmp / "nodes" / node / "attempts" / f"edit_self-{attempt}"
-        (d / "workspace").mkdir(parents=True, exist_ok=True)
-        ok = self._next("edit", True)
-        return outcome(ok, d, {"summary": "s", "component": "prompts"} if ok else None,
-                       None if ok else "agent failed", commit=base_commit)
-
-    def contract(self, *, node, attempt, **kw):
-        return ContractReport(ok=self._next("contract", True))
-
-    def improve_recipe(self, env, *, node, attempt, retry, **kw):
-        self.retries.append(("improve_recipe", node, attempt, retry))
-        d = self.tmp / "nodes" / node / "attempts" / f"improve_recipe-{attempt}"
-        (d / "workspace").mkdir(parents=True, exist_ok=True)
-        ok = self._next("recipe", True)
-        return outcome(ok, d, {"data_commit": "c" * 64, "recipe": {"optimizer.max_steps": 2},
-                               "rationale": "why"} if ok else None, None if ok else "no commit")
-
-    def gate(self, loop, recipe, data_commit, parent_commit, node, attempt_dir):
-        if not self._next("gate", True):
-            return GateResult(ok=False, failures=["dataset d has 1 clips, fewer than 4 GPUs"])
-        resolved = attempt_dir / "train_config.yaml"
-        resolved.write_text("lora: {rank: 16, alpha: 16}\n")
-        return GateResult(ok=True, resolved_path=resolved)
-
-    def train(self, loop, resolved, node, attempt_dir):
-        log = attempt_dir / "train" / "train.log"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text("CUDA out of memory\n")
-        if not self._next("train", True):
-            return TrainOutcome(None, "recipe", log, detail="CUDA OOM")
-        ck = attempt_dir / "train" / "outputs" / "checkpoint-2"
-        ck.mkdir(parents=True)
-        return TrainOutcome(ck, "none", log)
-
-    def score(self, loop, node, checkpoint, resolved):
-        s = self._next("score", 0.8)
-        if isinstance(s, Exception):
-            raise s
-        return s, {"metrics": {"m": s}, "aggregates": {"metrics": {"m": s}}}
-
-    def phases(self):
-        return Phases(edit_self=self.edit_self, contract=self.contract, improve_recipe=self.improve_recipe,
-                      gate=self.gate, train=self.train, score=self.score)
 
 
 @pytest.fixture
