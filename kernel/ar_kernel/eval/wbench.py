@@ -11,6 +11,10 @@ def run_wbench_phases(cfg: KernelConfig, work_dir: Path, model: str, gpus: list[
                       metric_set: list[str], recorder, node_id: str) -> dict:
     gpu_arg = ",".join(str(g) for g in gpus)
     phases = ["precompute", "gpu"]
+    # Run gpu phase a second time to handle transient CUDA OOM errors.
+    # The second pass recomputes only cases whose first attempt failed (e.g. a transient CUDA OOM),
+    # and costs seconds when nothing failed.
+    phases.append("gpu")
     if any(m in VLM_METRICS for m in metric_set):
         phases.append("vlm")
     phases.append("report")
