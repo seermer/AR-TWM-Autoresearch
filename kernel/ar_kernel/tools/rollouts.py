@@ -246,7 +246,8 @@ class AlayaWorldBackend(GpuJob):
             except Exception as exc:            # noqa: BLE001 -- a bad image/mask (e.g. PIL raising
                 # DecompressionBombError, SyntaxError or ValueError on a broken file) must be this
                 # item's error, not a job failure that orphans the others.
-                (out / f"{i}.json").write_text(json.dumps({"ok": False, "error": f"input: {exc}"}))
+                (out / f"{i}.json").write_text(json.dumps(
+                    {"ok": False, "error": f"input: {type(exc).__name__}: {exc}"}))
                 continue
             (data / "cases" / f"case_{i}.json").write_text(
                 json.dumps(case_json(i, item, image, mask), ensure_ascii=False, indent=1), encoding="utf-8")

@@ -136,3 +136,15 @@ def test_broken_link_under_wbench_weights_is_reported(tmp_path):
     os.symlink("/home/old-checkout/WBench/weights/torch_hub", str(weights / "hub" / "torchhub"))
     cfg = KernelConfig.load(root / "configs" / "kernel.yaml")
     assert any("torchhub" in p for p in wbench_weight_problems(cfg))
+
+
+def test_missing_prefix_env_of_an_enabled_tool_is_a_failure(tmp_path):
+    from ar_kernel.doctor import _prefix_envs
+    cfg = KernelConfig(raw={"images": {"enabled": True, "env": ".envs/gen-zimage"},
+                            "generators": {"wan22": {"env": ".envs/gen-wan22",
+                                                     "variants": {"ti2v-5b": {"enabled": False}}}}},
+                       repo_root=tmp_path)
+    found = {f.check: f.level for f in _prefix_envs(cfg)}
+    assert found == {"env.images": "fail"}                # disabled wan22 is not checked
+    (tmp_path / ".envs" / "gen-zimage" / "conda-meta").mkdir(parents=True)
+    assert {f.check: f.level for f in _prefix_envs(cfg)} == {"env.images": "ok"}

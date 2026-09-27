@@ -159,6 +159,26 @@ def _dotenv(cfg: KernelConfig) -> list[Finding]:
     return out
 
 
+def _prefix_envs(cfg: KernelConfig) -> list[Finding]:
+    """Enabled tools whose `env` is a conda-prefix path inside the repo (Plan 3 disk ruling)."""
+    blocks = {"annotate": cfg.get("annotate") or {}, "images": cfg.get("images") or {},
+              **{f"generators.{k}": v for k, v in (cfg.get("generators") or {}).items()}}
+    out = []
+    for name, block in blocks.items():
+        env = str(block.get("env") or "")
+        variants = block.get("variants")
+        enabled = (any((v or {}).get("enabled") for v in variants.values()) if variants
+                   else bool(block.get("enabled")))
+        if "/" not in env or not enabled:
+            continue
+        path = Path(env) if Path(env).is_absolute() else cfg.repo_root / env
+        out.append(Finding("ok", f"env.{name.split('.')[-1]}", str(path))
+                   if (path / "conda-meta").is_dir()
+                   else Finding("fail", f"env.{name.split('.')[-1]}",
+                                f"prefix env missing at {path}; see docs/PORTABILITY.md"))
+    return out
+
+
 def run_checks(cfg: KernelConfig | None = None) -> list[Finding]:
     cfg = cfg or KernelConfig.load()
     findings: list[Finding] = []
@@ -166,6 +186,7 @@ def run_checks(cfg: KernelConfig | None = None) -> list[Finding]:
     findings += _siblings(cfg)
     findings += _tools()
     findings += _envs()
+    findings += _prefix_envs(cfg)
     findings += _dotenv(cfg)
     findings += _symlinks(cfg)
     findings += _wbench_weights(cfg)

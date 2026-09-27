@@ -9,8 +9,8 @@ writes <out>/<index>.png then <out>/<index>.json ({"ok": true, "seconds": t} or
 {"ok": false, "error": "..."}). The model loads once, before the first item. Turbo runs
 `num_inference_steps` DiT steps with `guidance_scale=0.0` (model card, pinned revision).
 
-`--offload none` keeps the whole bf16 pipeline on the GPU (fits a 24 GB card per the Task 5 fit
-spike); `--offload model` calls `enable_model_cpu_offload()` for a tighter card instead.
+`--offload model` (the kernel default) calls `enable_model_cpu_offload()`: every allowed size fits
+(peak 12.8 GB). `--offload none` keeps the pipeline on the GPU and OOMs at 1920x1088 (Task 5 spike).
 """
 from __future__ import annotations
 
@@ -26,8 +26,9 @@ from diffusers import ZImagePipeline
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    for name in ("--items", "--out", "--weights", "--offload"):
+    for name in ("--items", "--out", "--weights"):
         ap.add_argument(name, required=True)
+    ap.add_argument("--offload", required=True, choices=("none", "model"))
     for name in ("--rank", "--world", "--width", "--height", "--steps"):
         ap.add_argument(name, type=int, required=True)
     args = ap.parse_args()

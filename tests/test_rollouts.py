@@ -424,6 +424,7 @@ def test_a_case_without_video_and_a_bad_image_fail_alone(env):
                                 first_person()])
     assert by[0]["error"] == "no video rendered"
     assert by[1]["error"].startswith("input:")
+    assert "Error" in by[1]["error"].split(":")[1]     # the exception type is named
     assert "candidate" in by[2]
 
 
@@ -436,7 +437,8 @@ def test_a_non_oserror_from_pil_fails_only_its_own_item(env, monkeypatch):
     monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 20000)   # tiny.png (10k px) stays under 2x this;
     _, by = run_job(q, caller, [first_person(image="tiny.png"), first_person(), first_person(image="tiny.png")])
     assert "candidate" in by[0] and "candidate" in by[2]
-    assert by[1]["error"].startswith("input:") and "decompression bomb" in by[1]["error"].lower()
+    assert by[1]["error"].startswith("input:") and "Error" in by[1]["error"].split(":")[1]     # the exception type is named
+    assert "decompression bomb" in by[1]["error"].lower()
 
 
 def test_ar30_job_is_named_after_its_variant(env):
