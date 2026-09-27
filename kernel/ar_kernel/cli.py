@@ -3,7 +3,7 @@ import argparse, json, os, shutil, signal, sys
 from pathlib import Path
 
 from .archive.nodes import NodeStore
-from .config import KernelConfig, load_dotenv
+from .config import KernelConfig, load_dotenv, resolve_gpus
 from .control import Control, drive, kill_recorded_groups, mark_interrupted
 from .doctor import report, run_checks
 from .guards import check_visible
@@ -70,6 +70,8 @@ def main(argv: list[str] | None = None) -> int:
             os.kill(pid, signal.SIGTERM)
         else:
             control.request_stop()
+            if control.alive_pid() is None:
+                print("no loop is running for this run; the stop request was written anyway")
         return 0
 
     # status / score-node act on an EXISTING run: attach, never create or rewrite it.
@@ -105,13 +107,21 @@ def _run(cfg, args) -> int:
     if args.resume and not existing:
         print(f"error: no run {args.run_id!r} to resume", file=sys.stderr)
         return 2
-    if not args.resume and args.max_nodes is None:           # before bootstrap_run creates the run
-        print("error: --max-nodes is required for a new run", file=sys.stderr)
-        return 2
+    if not args.resume:                                      # before bootstrap_run creates the run
+        if args.max_nodes is None:
+            print("error: --max-nodes is required for a new run", file=sys.stderr)
+            return 2
+        for key in ("OPENAI_API_KEY", "OPENAI_MODEL"):
+            if not os.environ.get(key, "").strip():
+                print(f"error: {key} is empty; set it in AutoResearcher/.env before `ar run`", file=sys.stderr)
+                return 2
+        check_visible(resolve_gpus(cfg, os.environ))          # the live config is what the run will freeze
     ctx = attach_run(cfg, args.run_id, os.environ) if args.resume else bootstrap_run(cfg, args.run_id, os.environ)
     control = Control(ctx.run_dir)
-    if control.alive_pid() not in (None, os.getpid()):       # before touching any run file
-        print(f"error: a loop is already running (pid {control.alive_pid()})", file=sys.stderr)
+    try:
+        control.claim()        # before touching any run file: a second resume must not clean up a live loop
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
     if args.max_nodes is not None:
         control.save_args(max_nodes=args.max_nodes)
@@ -120,6 +130,7 @@ def _run(cfg, args) -> int:
         print("error: --max-nodes is required for a new run", file=sys.stderr)
         return 2
     run_cfg = KernelConfig.for_run(ctx.run_dir)
+    ctx.gpus = resolve_gpus(run_cfg, os.environ)              # one config per run: never the live one
     check_visible(ctx.gpus)
     repo = AgentsRepo(ctx.run_dir / "agents.git")
     killed = kill_recorded_groups(control)              # GPU jobs a killed kernel left running
