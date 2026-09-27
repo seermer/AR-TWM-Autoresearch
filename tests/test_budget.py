@@ -70,7 +70,30 @@ def test_load_twice_does_not_double_count(tmp_path):
 
 def test_error_rate_window():
     b = Budget()
-    for status in (200, 500, 502, 200):
+    for status in (200, 500, 502, 200, 400, 599):     # 400 is the agent's own request; 599 a connection error
         b.record(status, None)
     rate, n = b.error_rate(300)
-    assert (rate, n) == (0.5, 4)
+    assert (rate, n) == (0.5, 6)
+
+
+def test_string_prices_and_cap_are_numbers():     # YAML loads "2e-6" (no dot) as a string
+    b = Budget(max_usd="0.001", prices={"input": "2", "cached_input": "5e-1", "output": "8"})
+    assert b.record(200, {"prompt_tokens": 1000, "completion_tokens": 0}) == pytest.approx(0.002)
+    assert "budget" in b.exhausted()
+
+
+@pytest.mark.parametrize("max_usd, prices", [("five", PRICES), (-1, PRICES),
+                                             (None, {**PRICES, "output": "x"}), (None, {**PRICES, "input": -2})])
+def test_unparsable_or_negative_budget_values_are_rejected(max_usd, prices):
+    with pytest.raises(BudgetError):
+        Budget(max_usd=max_usd, prices=prices)
+
+
+def test_load_skips_a_torn_trailing_line(tmp_path):
+    events = tmp_path / "telemetry" / "events"
+    events.mkdir(parents=True)
+    good = json.dumps({"type": "llm.response", "mock": False, "usage": {"prompt_tokens": 10, "completion_tokens": 5}})
+    (events / "n1.jsonl").write_text(good + "\n" + good[:30])       # kill -9 / ENOSPC mid-write
+    b = Budget()
+    b.load(tmp_path)
+    assert b.snapshot()["calls"] == 1

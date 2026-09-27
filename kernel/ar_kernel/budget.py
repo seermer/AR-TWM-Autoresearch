@@ -29,12 +29,26 @@ def usage_tokens(usage) -> tuple[int, int, int]:
     return prompt - cached, cached, output
 
 
+def _usd(name: str, value) -> float | None:
+    """A price or cap as a float: YAML loads e.g. `2e-6` as a string, and a string would fail
+    only after a paid call had been made."""
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise BudgetError(f"{name} is not a number: {value!r}") from None
+    if number < 0:
+        raise BudgetError(f"{name} is negative: {value!r}")
+    return number
+
+
 class Budget:
     def __init__(self, *, max_usd: float | None = None, prices: dict | None = None) -> None:
-        self.prices = {k: (prices or {}).get(k) for k in PRICE_KEYS}
+        self.prices = {k: _usd(f"budget.usd_per_mtok.{k}", (prices or {}).get(k)) for k in PRICE_KEYS}
         if max_usd is not None and any(v is None for v in self.prices.values()):
             raise BudgetError("budget.max_usd needs budget.usd_per_mtok.{input,cached_input,output}")
-        self.max_usd = max_usd
+        self.max_usd = _usd("budget.max_usd", max_usd)
         self.usd, self.tokens, self.calls = 0.0, 0, 0
         self._statuses: collections.deque = collections.deque(maxlen=10000)
         self._lock = threading.Lock()
@@ -86,7 +100,10 @@ class Budget:
             for line in path.read_text(encoding="utf-8").splitlines():
                 if '"llm.response"' not in line:
                     continue
-                event = json.loads(line)
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:            # a line torn by kill -9 or a full disk
+                    continue
                 if event.get("type") != "llm.response" or event.get("mock"):
                     continue
                 cost = self.cost(event.get("usage"))

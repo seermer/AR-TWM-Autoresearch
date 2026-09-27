@@ -32,3 +32,15 @@ def test_status_is_plain_json(tmp_path):
     text = format_status(d)
     assert "n1" in text and "invalid_code" in text and "contract import failed" in text
     assert "nodes: 1 of 5" in text                              # interrupted n2 is not counted
+
+
+def test_status_skips_a_torn_trailing_event_line(tmp_path):
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "kernel.yaml").write_text("selection: {decay: 0.5, prior_weight: 1.0, subtree_share: 0.3,"
+                                                     " size_scale: 4, temperature: 2.0, noise_floor: 4.4e-4, epsilon: 0.2}\n")
+    open_db(tmp_path).close()
+    rec = Recorder(tmp_path)
+    alert(rec, "node_failed", "n1 ended invalid_code")
+    with open(tmp_path / "telemetry" / "events" / "run.jsonl", "a") as f:
+        f.write('{"type": "alert", "kind": "dis')                # kill -9 / ENOSPC mid-write
+    assert [a["kind"] for a in run_status(tmp_path)["alerts"]] == ["node_failed"]

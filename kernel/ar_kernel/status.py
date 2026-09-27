@@ -15,8 +15,13 @@ from .selection import candidates
 def _events(path: Path, kind: str) -> list[dict]:
     if not path.exists():
         return []
-    return [e for e in map(json.loads, path.read_text(encoding="utf-8").splitlines())
-            if e.get("type") == kind]
+    events = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:                    # a line torn by kill -9 or a full disk
+            continue
+    return [e for e in events if e.get("type") == kind]
 
 
 def run_status(run_dir: Path) -> dict:
