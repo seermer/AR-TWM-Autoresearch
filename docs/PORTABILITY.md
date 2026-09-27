@@ -31,6 +31,11 @@ Keep them relative. An absolute path here pins the tree to one machine, and
 - **`.env`.** `WorldModel/.env` and `WBench/.env` are *relative* symlinks to
   `../AutoResearcher/.env`. Keep them relative; `ar doctor` fails an absolute one.
 - **Generated run configs.** Written per run under `runs/`, regenerated each time.
+- **Node paths in the archive.** *(2026-09-27, Plan 4 as built.)* Every path the loop stores
+  in a node's or attempt's record (checkpoint, recipe, resolved config, rationale) is written
+  run-relative (`archive/nodes.py:run_rel`) and resolved against the run directory at read
+  time (`run_abs`), so a run directory moved to a new path — even on another machine — still
+  resolves without touching the database.
 
 ## Caches
 
@@ -246,7 +251,11 @@ distilled LoRA). Kernel launches set `PYTORCH_CUDA_ALLOC_CONF=expandable_segment
    `VLM_API_KEY` the six VLM metrics are excluded by design; the run records the
    exclusion and uses that fixed metric set for every node, so scores stay
    comparable. GPU-metric weights are different: if any is missing, a run
-   refuses to start rather than silently scoring on fewer metrics.
+   refuses to start rather than silently scoring on fewer metrics. *(2026-09-27, Plan 4 as
+   built)* `ar run` for a **new** run additionally requires `OPENAI_API_KEY` and
+   `OPENAI_MODEL` to be non-empty, checked before the run directory is created; `ar
+   init-run`, `ar run --resume` and `ar status` do not need them until an agent phase
+   actually runs.
 5. **Run `ar doctor`,** then the unit suites.
 
 ## The failure that motivated this

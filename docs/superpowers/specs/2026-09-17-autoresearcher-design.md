@@ -212,8 +212,8 @@ AutoResearcher/
 | `train` | Recipe gate (§8), view materialization (§5.6), prompt precache and training launch through the standard interface (§7.3). |
 | `eval` | Merge, proxy render, WBench phases, scoring, agent-facing aggregates (§11). |
 | `telemetry` | Event bus and stores (§13). |
-| `control` | CLI `ar run`, `ar run --resume`, `ar status`, `ar stop --graceful|--force`, `ar full-eval <node>`. |
-| `dashboard` | Read-only FastAPI app on localhost (§13.4). |
+| `control` | CLI `ar run`, `ar run --resume`, `ar status`, `ar stop [--force]`, `ar score-node`. *(2026-09-27, Plan 4 as built: no `--graceful` flag — plain `ar stop` is graceful, §14.4; no `ar full-eval`, §16.4's acceptance run used `ar run` directly.)* |
+| `dashboard` | Read-only FastAPI app on localhost (§13.4). *(2026-09-27, Plan 4 as built / user decision: not built, and none is planned — §13.4 amendment.)* |
 
 ---
 
@@ -444,9 +444,20 @@ One node at a time. GPU phases never overlap.
   not copied, because downloads can be tens of GiB.)*
 - **Exhaustion:** `invalid_code` after `N_edit` failed attempts; `invalid_recipe` after
   `N_recipe`.
-- **Recipe-caused training failures** (CUDA OOM, NaN/inf loss, training wall-time cap
-  exceeded) return to step 5 and consume one of the same `N_recipe` attempts; on
-  exhaustion the node is `train_failed`.
+- **Training and precache failures** *(amended 2026-09-27, Plan 4 as built / user decision:
+  broadens "recipe-caused" — every precache or training failure is the agent's to fix, not
+  only CUDA OOM/NaN-inf loss/wall-time cap; this includes a run that writes a checkpoint but
+  still fails, e.g. NaN/inf loss or a non-zero exit after an intermediate `checkpoint-*` — the
+  loop never scores that checkpoint)* return to step 5 with a log tail at `retry.json` and
+  consume one of the same `N_recipe` attempts; on exhaustion the node is `train_failed`.
+  Per-attempt training directories sit under `nodes/<n>/attempts/improve_recipe-<k>/train/`
+  (there is no separate `train-<k>` attempt directory). *(2026-09-27, Plan 4 as built)*
+  `nodes_remaining` in the agent's context counts the node currently being built, so the
+  agent sees `0` on the last node `max_nodes` allows.
+- **Merge, render and WBench (scoring) failures** *(2026-09-27, Plan 4 as built / user
+  decision)* end the node `eval_failed` instead of retrying (§14.2); there is no pause
+  anywhere in the loop. The loop records the failure, raises an alert, and starts a fresh
+  cycle at step 1.
 
 ### 7.3 Training execution (standard interface only)
 
@@ -776,10 +787,13 @@ Stored in `configs/proxy_cases.txt`; fixed for the run.
   before the first node — `VLM_API_KEY` present for the VLM metrics; the `wbench-vp` env
   and the `qwen3vl-a3b-visual-plausibility` weights present for `visual_plausibility`;
   each GPU metric's weights present. Metrics that fail preflight are excluded from the
-  metric set at run start and recorded, so the loop cannot pause on node 1 for a metric
-  that was never available.
-- If a metric in the set is missing for a node after one phase retry, the loop pauses and
-  alerts (it never scores a node on a different metric set).
+  metric set at run start and recorded, so a node cannot fail on a metric that was never
+  available.
+- *(Amended 2026-09-27, Plan 4 as built / user decision: no pause, §14.2.)* If a metric in
+  the set is still missing from a node's `report.json` (`score_from_report` raises
+  `KeyError`), that is an eval failure like any other: the node ends `eval_failed`, an
+  alert is raised, and the loop continues (it never scores a node on a different metric
+  set).
 
 ### 11.4 Best node and full evaluation
 
@@ -790,37 +804,60 @@ Stored in `configs/proxy_cases.txt`; fixed for the run.
 
 ## 12. Parent selection
 
-Eligible parents: the root and every node with status `scored`.
+*(Replaced 2026-09-27, Plan 4 as built / user decision: the percentile-rank method below, as
+designed 2026-09-17, is superseded by a continuous softmax over node value, and its golden
+tests are superseded too. There are no evaluation re-runs — proxy noise enters selection as
+a floor on the softmax temperature, `noise_floor`, not as repeated scoring of a node.)*
 
-1. **Floor:** `floor = min(score)` over all scored nodes (root included).
-2. **Subtree score:** over the **scored** descendants `d` at depth distance `k ≥ 1`,
-   weight `w_d = γ^k`: `subtree(n) = Σ w_d score(d) / Σ w_d`. Descendants that ended
-   `invalid_code`, `invalid_recipe`, `train_failed` or `crashed` are **left out** of this
-   mean: a child whose code failed to compile says nothing about the lineage's data. They
-   are still counted by the child-count penalty in step 5, so repeated failures do reduce
-   a node's selection weight. (Counting failures at the archive floor was rejected: a
-   single failed child would drop a 0.82 node to near the worst score in the archive.)
-3. **Value:** `value(n) = λ·score(n) + (1−λ)·subtree(n)` if `n` has **at least one scored
-   descendant**; otherwise `value(n) = score(n)`. A node whose descendants all failed has
-   an empty subtree mean (`Σ w = 0`), so it keeps its own score and is penalized only by
-   the child-count term in step 5.
-4. **Percentile rank:** sort eligible nodes by value; `x(n) = rank/(N−1)` with ties assigned
-   the average rank (tolerance 1e-12); `N = 1` ⇒ select the root.
-5. **Weight:** `mid = mean of the top `min(3, N)` x values` (explicitly `min(3, N)`, so
-   `N = 2` is well defined); `w(n) = sigmoid(slope·(x(n) − mid)) · exp(−(children(n)/8)³)`
-   with `slope = 6`, where `children(n)` counts direct children of any status.
-6. **Probability:** `P(n) = (1−ε)·w(n)/Σw + ε/N`, with `ε = 0.2`.
-7. **Draw:** seeded RNG; the seed and, for every candidate, `score`, `subtree`, `value`, `x`,
-   `children`, `w`, `P` are recorded in `selection_events`.
+Eligible parents: every node with status `scored` (the root included). `interrupted` nodes,
+and anything under them, count nowhere — not as a candidate, not in a mean, not in the size
+penalty (§14.1, §14.3).
 
-Defaults: `γ = 0.5`, `λ = 0.5`, `slope = 6`, midpoint over the top `min(3, N)`, child
-penalty scale 8, `ε = 0.2`. Simulated on a 6-node tree these give the top two candidates
-~70% of the mass (slope 10 / `ε` 0.1 gave ~85%), leaving the rest well above the
-exploration floor. The node's `subtree_value` field stores `value(n)`.
+1. **Subtree mean.** For a candidate `n`, walk its non-`interrupted` descendant tree
+   breadth-first. At generation `k` (`k = 1` for direct children), each non-`interrupted`
+   child adds `decay^(k-1)` to `n`'s **size**; each descendant that is itself `scored` also
+   adds `decay^k · score` to a running numerator and `decay^k` to a running denominator,
+   both seeded with `prior_weight · score(n)` / `prior_weight` — the node's own score counts
+   as one virtual child, pulling a thin subtree's mean toward the node itself.
+   `subtree_mean(n) = numerator / denominator`.
+2. **Value:** `value(n) = (1 − subtree_share)·score(n) + subtree_share·subtree_mean(n)`.
+3. **Size penalty:** `penalty(n) = 1 / (1 + size(n) / size_scale)`.
+4. **Softmax weight:** `tau = temperature · max(pstdev(values across candidates),
+   noise_floor, 1e-12)` (the `1e-12` floor only matters if `noise_floor` is misconfigured to
+   `0`); `w(n) = exp((value(n) − max(values)) / tau) · penalty(n)`.
+5. **Probability:** `P(n) = (1 − epsilon)·w(n) / Σw + epsilon / N`.
+6. **Draw:** an RNG seeded from `sha256("<run_id>:<child_id>")`, so selection is
+   deterministic per run and child id. The seed and, for every candidate, `score`,
+   `subtree_mean`, `value`, `size`, `penalty`, `w`, `P` are recorded in `selection_events`. A
+   single eligible node (the root alone) is chosen with `P = 1`.
 
-Verified behavior (toy trees, to become `tests/select/` golden tests): a node whose own score
-is higher but whose child scored poorly ranks below a sibling without children; a single
-root is chosen with P=1; tied values receive equal probability; all probabilities sum to 1.
+Defaults (`configs/kernel.yaml`, `selection.*`): `decay = 0.5`, `prior_weight = 1.0`,
+`subtree_share = 0.3`, `size_scale = 4`, `temperature = 2.0`, `noise_floor = 4.4e-4` (the
+proxy's measured noise floor, verification-log finding 5), `epsilon = 0.2`. **Requirement:**
+`noise_floor` must stay `> 0`; at `0` the softmax jumps at exact ties instead of treating
+near-equal values as indistinguishable from noise.
+
+**Worked example** (illustrative scores, not a run result): root scored `0.70` with two
+children `a` (`0.80`) and `b` (`0.72`); `a` has one scored child `a1` (`0.60`); no node is
+`interrupted`. With the default config above:
+
+| node | score | subtree_mean | value | size | penalty | w | P |
+|---|---|---|---|---|---|---|---|
+| root | 0.70 | 0.7156 | 0.7047 | 2.5 | 0.6154 | 0.3442 | 0.1861 |
+| a | 0.80 | 0.7333 | 0.7800 | 1.0 | 0.8000 | 0.8000 | 0.3663 |
+| b | 0.72 | 0.7200 | 0.7200 | 0.0 | 1.0000 | 0.6296 | 0.2989 |
+| a1 | 0.60 | 0.6000 | 0.6000 | 0.0 | 1.0000 | 0.2496 | 0.1487 |
+
+(`tau = temperature · pstdev([0.7047, 0.78, 0.72, 0.6]) = 2.0 · 0.0648 = 0.1298` here, above
+the `noise_floor`.) `a` draws the most mass despite `root` having the larger subtree,
+because `root`'s size penalty (2.5 non-interrupted descendants) outweighs its higher subtree
+mean, and `a1`'s poor score pulls `a`'s value down only a little (`subtree_share = 0.3`);
+`epsilon = 0.2` still gives every candidate at least `0.05` of the mass. The `P` column sums
+to 1 (up to floating-point error).
+
+**Requirements:** continuous in the scores (no step function, except at the `interrupted`
+boundary); a single eligible node is chosen with `P = 1`; tied values receive equal
+probability. The node's `subtree_value` field stores `value(n)`.
 
 ---
 
@@ -863,21 +900,28 @@ recorded.)*
 | Recipe | Agent recipe; resolved config; diffs vs. parent and base; each gate check result with full tool output. |
 | Training | `check_dataset.py`, precache and launcher logs; the full training log; parsed per-step metrics from `[Train]` lines (step, epoch, source, video, fs/fe, K, sigma, loss, grad, lr, time) and `[Mem]` lines; `nvidia-smi` samples every 5 s for all visible GPUs (util, memory, power, temperature) and an alert when a kernel process uses a GPU outside the list; host RAM and disk. |
 | Eval | Merge log; per-case render timing; WBench phase logs; per-case per-metric JSONs; `report.json`; metric set and score; exact agent-facing aggregates. |
-| Selection | §12.7. |
-| System | Config snapshot, versions, control commands, crashes with tracebacks, recoveries, discards (§14.3), deletions (path, bytes, reason), node counters. |
+| Selection | §12.6 *(2026-09-27: §12.7 as designed 2026-09-17; renumbered with the softmax replacement)*. |
+| System | Config snapshot, versions, control commands, crashes with tracebacks, recoveries, `interrupted` markings (§14.3), deletions (path, bytes, reason), node counters. |
 
 ### 13.4 Monitoring
 
-- `ar status`: current node/phase/attempt, progress and ETA, recent events.
-- Dashboard (read-only FastAPI, bound to 127.0.0.1): tree view (nodes colored by score,
-  selection probabilities); node page (phase/attempt timeline, code diff, recipe diff, data
-  commit summary per dataset, training curves, metric table); conversation viewer (threaded
-  LLM calls with full prompts, responses, tool calls); data browser (clips by provenance and
-  format with kernel-generated thumbnails); live panels (event tail via SSE, training loss,
-  GPUs, tokens and cost by node/phase/model).
-- Alerts (banner + `run.jsonl`): no events in the current phase for 30 min, GPU outside the
-  list used, disk below 50 GB, gateway error rate > 20% over 5 min, retries exhausted, loop
-  paused.
+*(Replaced 2026-09-27, Plan 4 as built / user decision: there is no dashboard, and none is
+planned. `ar status` — plain JSON — is the whole monitoring interface; a UI, if one is ever
+built, reads that JSON rather than a new store.)*
+
+- `ar status --run-id <id>` (`--json` for the raw snapshot; `ar_kernel.status.run_status` is
+  the same data as a plain function): loop pid and whether it is alive; the current
+  node/phase/attempt; every node with its status, score, subtree value and current selection
+  probability; the best scored node; LLM spend (`$` if `budget.usd_per_mtok` is configured,
+  else `tokens`/`calls` only, plus the cap); the last 20 alerts.
+- Alerts (`alert` events in `telemetry/events/run.jsonl`, surfaced by `ar status`): a stall
+  (no new telemetry event, growing `train.log`, or new eval output for `alerts.stall_min` —
+  default 30 — minutes); disk free under `disk.alert_below_gb` (default 50 GB); gateway
+  error rate over `alerts.gateway_error_rate` (default 20%) across
+  `alerts.gateway_error_window_min` (default 5) minutes, with at least 5 calls; a kernel
+  process on a GPU outside the configured list; `train_failed` per failed training attempt;
+  `node_failed` when a node ends anything but `scored`; `llm_outage` when the run stops for a
+  provider outage (§14.2). Alerts never stop anything by themselves.
 
 ---
 
@@ -890,8 +934,10 @@ recorded.)*
 | `scored` | Completed | yes | yes |
 | `invalid_code` | `edit_self`/contract retries exhausted | yes | no |
 | `invalid_recipe` | `improve_recipe`/gate retries exhausted | yes | no |
-| `train_failed` | Recipe-caused training failures exhausted retries | yes | no |
+| `train_failed` | Training/precache failures exhausted retries (§7.2, amended) | yes | no |
+| `eval_failed` | *(added 2026-09-27, Plan 4 as built / user decision)* merge, render or WBench (scoring) failed | yes | no |
 | `crashed` | Kernel-recoverable crash of the node (§14.2) | yes | no |
+| `interrupted` | *(added 2026-09-27, Plan 4 as built / user decision)* unfinished when the loop stopped (forced stop, kernel death, or a spent budget/outage stop); kept exactly as is, never resumed, never cleaned up (§14.3) | **no** | **no** |
 
 ### 14.2 Failure classes
 
@@ -902,30 +948,50 @@ recorded.)*
 | `improve_recipe` | crash, timeout, invalid result | failed attempt → retry loop 5↔6 |
 | kernel tools | download/rollout/annotation errors | returned to the agent as tool errors |
 | gate | any check fails | retry loop 5↔6 |
-| gateway | upstream 429/5xx | gateway retries with exponential backoff; upstream unavailable > 15 min ⇒ loop pauses and alerts (not charged to the node) |
-| precache/train | recipe-caused (CUDA OOM, NaN/inf loss, wall-time cap) | back to 5↔6, consuming one attempt; exhausted ⇒ `train_failed` |
-| precache/train, merge, render, eval | infrastructure (host OOM kill, disk full, NCCL/driver error, text-embed cache miss after a successful precache, WBench phase error) | retry the phase once; if it fails again ⇒ loop pauses and alerts |
+| gateway | upstream 429/5xx | gateway retries with exponential backoff |
+| precache/train | *(amended 2026-09-27, Plan 4 as built / user decision)* any failure — recipe-caused (CUDA OOM, NaN/inf loss, wall-time cap) or infrastructure (host OOM kill, disk full, NCCL/driver error, text-embed cache miss), including a run that writes a checkpoint but still fails | reported to the agent as a failed attempt (§7.2); back to 5↔6, consuming one attempt; exhausted ⇒ `train_failed` |
+| merge, render, WBench (scoring) | *(amended 2026-09-27, Plan 4 as built / user decision)* any failure | node `eval_failed`, alert, loop continues with a new cycle |
+| gateway (provider outage) | *(amended 2026-09-27, Plan 4 as built / user decision, option A)* upstream unavailable: an agent attempt fails while at least `gateway.outage_error_rate` (0.8) of the last `gateway.outage_window_min` (10) minutes' LLM calls, and at least `gateway.outage_min_calls` (3) of them, failed with 429/5xx or connection errors | the run **stops** (a stop, not a pause); `llm_outage` alert; the node in progress is marked `interrupted` on resume and not charged (§14.3); the operator resumes with `ar run --resume` |
+| budget | *(added 2026-09-27, Plan 4 as built / user decision)* the LLM spend ledger reaches `budget.max_usd` | the run **stops**; the node in progress is marked `interrupted` on resume and not charged (§14.3) |
 | any phase | unexpected kernel exception while the kernel process survives | node marked `crashed`, artifacts kept, loop continues with a new cycle |
+
+There is no pause anywhere in this table *(2026-09-27, Plan 4 as built / user decision)*: every row above either retries, ends the node, or stops the run outright.
 
 ### 14.3 Resume
 
-- **Graceful stop, or `crashed` node:** all finished nodes stay; `ar run --resume` starts a
-  new cycle at *select*.
-- **Unrecoverable crash (kernel process died) or forced stop:** on `ar run --resume` the
-  unfinished node is removed entirely: its containers and process groups (by run prefix),
-  attempt refs and branch, data commits, clips and blobs referenced only by it, view,
-  dataset cache, training outputs, merge slot contents, renders, eval dirs, and its
-  telemetry files. One discard record remains in `run.jsonl` (node id, parent, phase
-  reached, reason, time). The run then starts a new cycle at *select*.
-- Atomicity: blob writes are temp+rename; every DB state change is one transaction;
-  orphaned staging directories are removed on resume.
+*(Replaced 2026-09-27, Plan 4 as built / user decision: an unfinished node is never resumed
+and never cleaned up — a simpler rule than the discard-everything design of 2026-09-17, and
+one that never throws away partial training/eval artifacts a person might want to inspect.)*
+
+- **Every finished node** (any status of §14.1 other than a node still `running` when the
+  loop stopped) **stays exactly as is;** `ar run --resume` always starts a fresh cycle at
+  *select*, whatever stopped the previous run (graceful stop, forced stop, kernel death,
+  spent budget, provider outage).
+- **The one node in progress when the run stopped** is marked `interrupted` on resume and
+  kept as is: its code, data commits, clips, blobs, view, dataset cache, partial training
+  outputs, renders and telemetry are never touched. Only its leftover containers and process
+  groups (identified by the run's prefix) are removed. It is never resumed, never a parent,
+  does not count toward `max_nodes`, and counts nowhere in selection (§12) — not even as
+  another candidate's descendant. Node ids are never reused (`_next_id` reads the archive,
+  whose rows are never deleted).
+- `ar run --resume` also removes the run-level `merge_slot` *(2026-09-27, Plan 4 as built)*:
+  regenerable merged weights (~52 GB, spec 15), not node data, so "an `interrupted` node's
+  files are never deleted" still holds.
+- Atomicity: blob writes are temp+rename; every DB state change is one transaction.
 
 ### 14.4 Stop controls
 
-- `ar stop --graceful` (or first Ctrl-C): finish the current node through step 9, then exit.
-- `ar stop --force` (or second Ctrl-C): `docker kill` the node's containers, SIGTERM the
-  training/WBench/rollout process groups, SIGKILL after 30 s, flush telemetry, exit. The
-  unfinished node is discarded on resume (§14.3).
+*(Amended 2026-09-27, Plan 4 as built: `--graceful` is not a flag — plain `ar stop` is the
+graceful request. The first Ctrl-C to the loop's process group does not end an in-progress
+container wait, because `docker wait`/`docker stats` run in their own session.)*
+
+- `ar stop` (or a first Ctrl-C to the loop): writes a stop request; the loop finishes the
+  current node through step 9, then exits. `ar stop` with no loop running for the run still
+  writes the request and prints a note that no loop was running.
+- `ar stop --force` (or a second Ctrl-C, or SIGTERM to the loop): `docker kill` the node's
+  containers, SIGTERM the training/WBench/rollout process groups, SIGKILL after 30 s, flush
+  telemetry, exit. The node in progress becomes `interrupted` on resume (§14.3), not
+  discarded.
 
 ### 14.5 Timeouts with liveness checks
 
@@ -944,9 +1010,19 @@ the phase regardless. Stall alerts (§13.4) never terminate anything.
 
 ### 14.6 Guards before GPU phases
 
-- GPU list resolved per §2; the kernel refuses a list it cannot see.
-- No non-kernel processes on the listed GPUs; otherwise wait and alert.
-- Merge requires ≥ 30 GB free disk; otherwise pause and alert.
+*(Replaced 2026-09-27, Plan 4 as built / user decision: reduced to two start-time checks; no
+wait for idle GPUs — simpler. A foreign process on a listed GPU is no longer its own guard;
+it shows up as a failure of whatever phase collides with it, classified per §14.2, and
+`monitor.py` separately alerts `gpu_outside_list` when a *kernel* process strays outside the
+list.)*
+
+- **Start-time GPU visibility** (`guards.check_visible`): the run's GPU list (§2, frozen at
+  run start in the run's own config) must all be visible to `nvidia-smi`; checked before a
+  new run bootstraps and again before the loop attaches to an existing one. Missing GPUs
+  refuse the run before any run directory or config snapshot is created.
+- **Merge disk check** (inside `merge_lora`, not a separate guard): requires ≥
+  `disk.merge_min_free_gb` (default 30) GB free; below that the merge phase fails, which
+  ends the node `eval_failed` (§14.2) rather than pausing.
 
 ---
 
@@ -954,7 +1030,10 @@ the phase regardless. Stall alerts (§13.4) never terminate anything.
 
 - The kernel deletes only its own transient files without asking: merged `transformer.pt`
   after each eval, `da3_cache/`, `megasam/`, `masks/`, `trainer_state.pt`, staging after
-  ingest, and the artifacts of a discarded node (§14.3).
+  ingest, and the run-level `merge_slot` on resume (§14.3; an `interrupted` node's own files
+  are never deleted, §14.1). *(2026-09-27, Plan 4 as built: in this WorldModel,
+  `trainer_state.pt` holds only `{step, training_mode}`, so deleting it frees almost no
+  disk — it is kept for the spec's own consistency, not because it is large.)*
 - Nothing outside `AutoResearcher/runs/` is deleted by the kernel.
 - No per-node data quotas.
 
@@ -992,7 +1071,8 @@ the phase regardless. Stall alerts (§13.4) never terminate anything.
 - Contract: fixture agents (missing entry, wrong signature, import error, hanging smoke run,
   invalid result).
 - Scoring: metric-set resolution with/without `VLM_API_KEY`; mean from the existing 40-case
-  `report.json` fixture; missing metric ⇒ pause.
+  `report.json` fixture; missing metric ⇒ `eval_failed` *(amended 2026-09-27, Plan 4 as
+  built / user decision: no pause, §11.3, §14.2)*.
 - Failure classifier: log fixtures for CUDA OOM, NaN loss, exit -9 host OOM, NCCL error,
   disk full, text-embed cache miss.
 - Gateway: conversation linking (response id and prefix matching), fail-closed writes,
@@ -1003,9 +1083,10 @@ the phase regardless. Stall alerts (§13.4) never terminate anything.
 
 Mock gateway, mock tools, fake train/eval returning synthetic scores; multi-node run in
 minutes covering both retry loops and exhaustion, `crashed` node continuation, graceful
-stop, forced stop and `kill -9` of the kernel mid-phase (discard + fresh cycle), telemetry
-completeness (every phase has start/end events; every LLM call has a conversation id; every
-discard leaves one record).
+stop, forced stop and `kill -9` of the kernel mid-phase (*(amended 2026-09-27, Plan 4 as
+built)* the node in progress ends `interrupted` on resume, kept as is, §14.3 — not
+discarded), telemetry completeness (every phase has start/end events; every LLM call has a
+conversation id; every `node_failed`/`llm_outage` alert is raised as expected).
 
 ### 16.3 Real-component verification (GPU; manual, marked slow)
 
@@ -1059,13 +1140,14 @@ Three real nodes with small recipes before the first long run.
 |---|---|
 | `max_nodes` | required (no default) |
 | `retries.edit_self` / `retries.improve_recipe` | 3 / 3 |
-| `selection.gamma` / `lambda` / `slope` / `top_k_mid` / `child_penalty_scale` / `epsilon` | 0.5 / 0.5 / 6 / 3 (used as `min(3,N)`) / 8 / 0.2 |
-| `timeouts` | §14.5 |
-| `liveness.probe_window_min` / `extension_frac` | 10 / 0.25 |
+| `selection.decay` / `prior_weight` / `subtree_share` / `size_scale` / `temperature` / `noise_floor` / `epsilon` | 0.5 / 1.0 / 0.3 / 4 / 2.0 / 4.4e-4 / 0.2 *(replaced 2026-09-27, Plan 4 as built / user decision: the continuous softmax of §12, superseding the percentile-rank `gamma`/`lambda`/`slope`/`top_k_mid`/`child_penalty_scale` design)* |
+| `timeouts` | §14.5; explicitly `timeouts.train_s` / `timeouts.eval_s` = 172800 (48 h) / 43200 (12 h) soft, no hard cap for either — liveness also counts a growing `train.log` or new eval output (`monitor.py`, amended 2026-09-27) |
+| `liveness.probe_window_min` / `extension_frac` / `probe_every_s` | 10 / 0.25 / 30 |
 | `gpus.default` / `gpus.min_count` | `0,1,2,3` / 4 — used only when `CUDA_VISIBLE_DEVICES` is unset; both are config, no GPU count is hardcoded anywhere |
 | `sandbox.cpus` / `sandbox.memory_gb` | 16 / 64 |
 | `gateway.model_allowlist` | `[${OPENAI_MODEL}]` plus explicitly listed models |
-| `gateway.upstream_outage_pause_min` | 15 |
+| `gateway.outage_error_rate` / `outage_window_min` / `outage_min_calls` | 0.8 / 10 / 3 *(replaced 2026-09-27, Plan 4 as built / user decision, option A: supersedes `gateway.upstream_outage_pause_min`; §14.2, §14.3 — the run stops, it does not pause)* |
+| `budget.max_usd` / `usd_per_mtok.{input,cached_input,output}` | `null` / `null, null, null` — dollars only, no cap by default *(added 2026-09-27, Plan 4 as built / user decision)*. Covers only the agent's LLM calls through the gateway; WBench's separately paid VLM scoring (`VLM_API_KEY`) is not capped. The ledger is post-paid, so calls already in flight when the cap is reached can push spend past it — set `max_usd` with headroom. Prices and the cap are converted to `float` at `ar run` start; a non-numeric or negative value raises `BudgetError` (`kernel/ar_kernel/budget.py`). |
 | `ingest.aspect_tolerance` | 0.02 |
 | `leakage.phash_max_distance` / `leakage.min_ncc` / `leakage.min_entropy` | 4 / 0.95 / 4.0 bits |
 | `eval.free_ram_before_render_gb` / `eval.ram_wait_alert_min` | 120 / 10 |
@@ -1076,7 +1158,7 @@ Three real nodes with small recipes before the first long run.
 | `disk.merge_min_free_gb` / `disk.alert_below_gb` | 30 / 50 |
 | `telemetry.gpu_sample_sec` | 5 |
 | `agents.context_window_tokens` / `agents.compact_at` | 128000 (set to the agent model's window) / 0.85 |
-| `alerts.stall_min` / `gateway_error_rate` | 30 / 0.2 |
+| `alerts.stall_min` / `gateway_error_rate` / `gateway_error_window_min` | 30 / 0.2 / 5 |
 | `generators` | `alayaworld: {dmd4, ar30}`, `ltx25: {dev, distilled}`, `wan22: {ti2v-5b}`, each `enabled` per §16.3 item 5 *(amended 2026-09-26, Plan 3 as built: enabled = dmd4, ar30, ti2v-5b, distilled. Each block has `env` (a name or a repo-relative prefix env), `variants: {<v>: {enabled}}`, `max_items`, `timeout_s`, `license`; alayaworld `max_turns: 9`; wan22/ltx25 `repo` + pinned `commit` (the backend refuses other commits), `weights`, `frames: [default, max]` (wan22 `[121, 121]`, ltx25 `[121, 241]`), `workers`; wan22 `gpus_per_worker: 1`, `extra_args: {offload_model: true, t5_cpu: true}`; ltx25 `quantization: fp8-cast`, `offload: cpu`, per-variant `peak_rss_gib: 40`, `host_reserve_gib: 60`, `resolutions: [[576, 1024]]`)* |
 | `annotate` | *(Added 2026-09-26, Plan 3.)* `enabled: true`, `env: alayaworld`, `repo`/`checkpoint` (ViGeo under `WorldModel/third_party/ViGeo`), `max_frames: 1200`, `max_items: 64`, `timeout_s: 21600` |
 | `images` | *(Added 2026-09-26, Plan 3.)* `enabled: true`, `env: .envs/gen-zimage`, `weights: weights/z-image-turbo` + pinned `revision`, `steps: 9`, `offload: model`, `max_items: 64`, `timeout_s: 7200`, `license: Apache-2.0` |

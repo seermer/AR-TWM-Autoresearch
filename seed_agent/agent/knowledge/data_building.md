@@ -35,6 +35,13 @@
 - For timed prompts, caption each segment's trimmed clip and snap the boundaries with
   snap_timed_prompts.
 
+## Training failures
+
+- A precache or training failure of any kind comes back as the next `improve_recipe`
+  attempt's `retry.json` with `retry.kind == "train"`, plus a tail of the training log. This
+  includes a run that wrote a checkpoint but still failed (e.g. NaN/inf loss) — that
+  checkpoint is never scored. *(2026-09-27, Plan 4 as built.)*
+
 ## Generated clips
 
 - GPU tools: rollout_alayaworld (WBench-style cases), rollout_wan22 and rollout_ltx25 (text or

@@ -443,6 +443,10 @@ released base with `step reset to 0`.
    unattended run accumulates ~1 GB per killed case on a disk that is already
    the binding constraint. Pairs with finding 6: kill the process group, then
    reclaim both the GPU memory and the scratch space before the next node.
+   *(2026-09-27, Plan 4 as built: this finding is now moot. `WBench/tools/run_megasam.py`
+   puts its scratch under the node's own work directory instead of a shared
+   `WBench/_megasam_tmp`, so a killed phase's leftovers live inside the node and are removed
+   by the kernel's `REGENERABLE` cleanup for finished nodes — nothing to sweep separately.)*
 8. **Portability is a runtime property, not a source property** (§4.6,
    `docs/PORTABILITY.md`). Tracked source was already clean; what broke was
    untracked state — symlinks left pointing at the previous checkout. `ar doctor`
