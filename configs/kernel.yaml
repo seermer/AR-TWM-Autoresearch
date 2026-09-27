@@ -112,14 +112,23 @@ generators:                       # rollout_* GPU jobs; a variant is enabled onl
     timeout_s: 43200
     license: Apache-2.0
   ltx25:
-    env: gen-ltx25
-    repo: third_party/LTX-2
+    env: .envs/gen-ltx25           # a conda-prefix env inside the repo (disk budget; see docs/PORTABILITY.md)
+    repo: third_party/LTX-2       # relative to the AutoResearcher repo; gitignored, cloned per docs/PORTABILITY.md
+    commit: a95ab856bf29407b6b066ede0abe1846050db56c   # pinned; the backend refuses to run off this commit
     weights: weights/ltx-2.5
-    variants: {distilled: {enabled: false}, dev: {enabled: false}}
-    gpus_per_worker: 1
-    workers: null                 # Task 8 sets it from host-RAM measurements
+    # peak_rss_gib: one worker's private host RAM (Task 8 spike, 1024x576x121): peak RSS is ~72 GiB,
+    # but half of it is the mmapped weight files (page cache, shared by every worker); the private
+    # (RssAnon) peak is 35.4 GiB distilled / 36.8 GiB dev, and 4 concurrent distilled workers took
+    # 147 GiB of MemAvailable (36.7 each). distilled: 59 s/clip alone, 4 workers ~100 s/clip each
+    # (26 s/clip throughput); smoke on GPUs 0-3 passed. dev: 342 s/clip warm = 5.8x distilled
+    # (> 4x), so it stays disabled (brief rule); it fits (same 10 GiB GPU peak).
+    variants: {distilled: {enabled: true, peak_rss_gib: 40}, dev: {enabled: false, peak_rss_gib: 40}}
+    quantization: fp8-cast        # 24 GB cards: fp8-cast + CPU offload, one GPU per worker (Plan 3 fact 7)
+    offload: cpu
+    host_reserve_gib: 60          # workers = min(GPUs, floor((MemTotal - this) / peak_rss_gib))
+    workers: null                 # optional cap on that
     frames: [121, 241]            # [default, max]; 8k+1
-    resolutions: [[576, 1024]]    # [height, width], each divisible by 32, 16:9
+    resolutions: [[576, 1024]]    # [height, width], each divisible by 64 (two-stage), 16:9
     max_items: 16
     timeout_s: 43200
     license: LTX-2 Community License

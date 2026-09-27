@@ -1,7 +1,9 @@
 """rollout_alayaworld: case/config writers, submit checks, finish (CPU), the real produce with a
 fake worker, plus one real AlayaWorld gpu smoke per variant. Also rollout_wan22 (Wan2.2 TI2V-5B):
 submit checks, finish (crop/probe, CPU), the real produce with a fake worker, plus one real Wan
-gpu smoke."""
+gpu smoke. And rollout_ltx25 (LTX-2.5 distilled/dev): submit checks, the host-RAM worker rule,
+finish (audio strip/probe, CPU), the real produce with a fake worker, plus one real gpu smoke
+per enabled variant."""
 import copy
 import json
 import threading
@@ -19,7 +21,7 @@ from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools import rollouts
 from ar_kernel.tools.context import TokenRegistry
 from ar_kernel.tools.jobs import JobQueue
-from ar_kernel.tools.rollouts import AlayaWorldBackend, Wan22Backend, case_json, render_config
+from ar_kernel.tools.rollouts import AlayaWorldBackend, Ltx25Backend, Wan22Backend, case_json, render_config
 from ar_kernel.tools.server import ToolError
 from tests.conftest import make_mp4
 
@@ -912,3 +914,307 @@ def test_wan_bridge_fits_any_first_frame_to_1280x704(size):
     fitted = fit_first_frame(img)
     assert fitted.size == (1280, 704)
     assert fitted.getpixel((640, 352))[1] > 150       # centered: the center marker stays at the center
+
+
+# ---- Ltx25Backend (rollout_ltx25, Plan 3 Task 8) ----
+
+def _head():
+    import subprocess
+    return subprocess.run(["git", "-C", str(REAL.repo_root), "rev-parse", "HEAD"], capture_output=True,
+                          text=True, check=True).stdout.strip()
+
+
+def small_ltx_cfg(env="autoresearcher", enabled=("distilled", "dev"), **over):
+    """The real ltx25 block, both variants enabled (their measured peak_rss_gib kept), pinned to
+    repo_root's own HEAD (a real git repo, so the CPU tests need no LTX-2 clone)."""
+    raw = copy.deepcopy(REAL.raw)
+    b = raw["generators"]["ltx25"]
+    b.update(env=env, repo=".", commit=_head())
+    for v in ("distilled", "dev"):
+        b["variants"][v]["enabled"] = v in enabled
+    b.update(over)
+    return KernelConfig(raw=raw, repo_root=REAL.repo_root)
+
+
+GIB = {"MemTotal": 251.0, "MemAvailable": 240.0}
+
+
+@pytest.fixture
+def ltx_env(tmp_path, monkeypatch):
+    """The real Ltx25Backend.produce/run_workers, with ltx25_generate.py swapped for the fake
+    worker (ltx mode) and /proc/meminfo for a 251 GiB host with 240 GiB available."""
+    monkeypatch.setattr(rollouts, "LTX25_BRIDGE", FAKE)
+    monkeypatch.setattr(rollouts, "meminfo_gib", lambda: dict(GIB))
+    rec = Recorder(tmp_path / "run")
+    reg = TokenRegistry(rec)
+    q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
+    ws, staging = tmp_path / "ws", tmp_path / "staging"
+    ws.mkdir(); staging.mkdir()
+    Image.new("RGB", (640, 360), (10, 20, 30)).save(ws / "frame.png")
+
+    def make(gpus=(0, 1, 4, 5), **over):
+        q.register(Ltx25Backend(small_ltx_cfg(**over), tmp_path / "run", list(gpus), reg, rec,
+                                gpu_memory=lambda g: {i: 100 for i in g}))
+        return q
+    caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
+    yield make, caller, staging
+    q.shutdown()
+
+
+def run_ltx(q, caller, items, **params):
+    out = q.wait(caller, q.backends["rollout_ltx25"].submit(q, caller, {"items": items, **params})["job_id"], 120)
+    assert out["state"] == "done", out
+    return out["id"], {i["index"]: i for i in out["result"]["items"]}
+
+
+@pytest.mark.parametrize("params, match", [
+    ({"frames": 120}, r"8k\+1"), ({"frames": 1}, "1 < frames"), ({"frames": 125}, r"8k\+1"),
+    ({"frames": 100001}, "1 < frames"), ({"frames": "x"}, "1 < frames"),
+    ({"height": 720, "width": 1280}, "resolutions"), ({"width": 960}, "resolutions"),
+    ({"variant": "pro"}, "variant")])
+def test_ltx_bad_params_are_refused_at_submit(ltx_env, params, match):
+    make, caller, _ = ltx_env
+    q = make()
+    with pytest.raises(ToolError, match=match):
+        q.backends["rollout_ltx25"].submit(q, caller, {"items": [{"prompt": "p", "seed": 1}], **params})
+
+
+@pytest.mark.parametrize("item, match", [
+    ({"seed": 1}, "prompt"), ({"prompt": " ", "seed": 1}, "prompt"), ({"prompt": "p"}, "seed"),
+    ({"prompt": "p", "seed": True}, "seed"), ({"prompt": "p", "seed": 1, "image": 3}, "image")])
+def test_ltx_bad_items_are_refused_at_submit(ltx_env, item, match):
+    make, caller, _ = ltx_env
+    q = make()
+    with pytest.raises(ToolError, match=match):
+        q.backends["rollout_ltx25"].submit(q, caller, {"items": [item]})
+
+
+def test_ltx_a_disabled_variant_is_refused(ltx_env):
+    make, caller, _ = ltx_env
+    q = make(enabled=("distilled",))
+    with pytest.raises(ToolError, match="variant"):
+        q.backends["rollout_ltx25"].submit(q, caller, {"items": [{"prompt": "p", "seed": 1}], "variant": "dev"})
+
+
+def test_ltx_limits_come_from_the_generator_config_block(tmp_path):
+    rec = Recorder(tmp_path / "run")
+    b = Ltx25Backend(REAL, tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
+    blk = REAL.get("generators.ltx25")
+    assert (b.max_items, b.timeout_s) == (blk["max_items"], blk["timeout_s"])
+
+
+def test_ltx_produces_and_publishes_a_silent_24fps_candidate_with_no_pose_or_camera_motion(ltx_env):
+    make, caller, staging = ltx_env
+    q = make()
+    prompts = ["a walk in the woods", "a hiker on a ridge"]
+    job, by = run_ltx(q, caller, [{"prompt": prompts[0], "seed": 1},
+                                  {"prompt": prompts[1], "image": "frame.png", "seed": 2}])
+    (h, w), default = REAL.get("generators.ltx25.resolutions")[0], REAL.get("generators.ltx25.frames")[0]
+    for i, item in by.items():
+        c = item["candidate"]
+        assert c["video"] == f"/workspace/staging/rollouts/{job}/{i}.mp4"
+        assert c["caption"] == f"/workspace/staging/rollouts/{job}/{i}.json"
+        assert "pose" not in c and "camera_motion" not in c
+        assert c["provenance"]["generator"] == "ltx-2.5-distilled" and c["provenance"]["seed"] == i + 1
+        assert c["license"] == "LTX-2 Community License"
+        path = staging / "rollouts" / job / f"{i}.mp4"
+        info = probe_video(path)
+        assert (info.width, info.height, info.frames) == (w, h, default) and round(info.fps) == 24
+        import subprocess
+        streams = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0",
+                                  str(path)], capture_output=True, text=True, check=True).stdout.split()
+        assert streams == ["video"]                      # the fake's audio track is stripped
+        assert json.loads((staging / "rollouts" / job / f"{i}.json").read_text()) == {"caption": prompts[i]}
+        wk = item["worker"]
+        assert wk["weights"] == str(REAL.repo_root / REAL.get("generators.ltx25.weights"))
+        assert (wk["variant"], wk["quantization"], wk["offload"]) == ("distilled", "fp8-cast", "cpu")
+    assert by[1]["worker"]["image"].endswith("_image.png") and by[0]["worker"]["image"] is None
+
+
+def test_ltx_dev_job_is_named_after_its_variant(ltx_env):
+    make, caller, _ = ltx_env
+    q = make()
+    _, by = run_ltx(q, caller, [{"prompt": "p", "seed": 1}], variant="dev", frames=9)
+    assert by[0]["candidate"]["provenance"]["generator"] == "ltx-2.5-dev"
+    assert by[0]["worker"]["variant"] == "dev" and by[0]["worker"]["frames"] == 9
+
+
+@pytest.mark.parametrize("gpus, rss, cap, workers", [
+    ((0, 1, 4, 5), 60, None, 3),        # floor((251 - 60) / 60) = 3 < 4 GPUs
+    ((0, 1, 4, 5), 40, None, 4),        # RAM allows 4: one per GPU
+    ((0, 1, 4, 5), 40, 2, 2),           # the config's `workers` caps it
+    ((0, 1), 10, None, 2)])
+def test_ltx_worker_count_follows_host_ram(ltx_env, gpus, rss, cap, workers):
+    make, caller, _ = ltx_env
+    q = make(gpus=gpus, workers=cap, variants={"distilled": {"enabled": True, "peak_rss_gib": rss},
+                                               "dev": {"enabled": False}})
+    _, by = run_ltx(q, caller, [{"prompt": "p", "seed": i} for i in range(5)])
+    for i, item in by.items():
+        assert item["worker"]["rank"] == i % workers and item["worker"]["gpus"] == str(gpus[i % workers])
+
+
+def test_ltx_ram_shortfall_fails_the_job_before_any_worker(ltx_env, monkeypatch):
+    """Too little MemAvailable for workers x peak_rss_gib: the job fails with a clear message
+    instead of letting the host OOM killer pick a victim (verification-log finding)."""
+    make, caller, _ = ltx_env
+    monkeypatch.setattr(rollouts, "meminfo_gib", lambda: {"MemTotal": 251.0, "MemAvailable": 50.0})
+    q = make(variants={"distilled": {"enabled": True, "peak_rss_gib": 40}, "dev": {"enabled": False}})
+    job_id = q.backends["rollout_ltx25"].submit(q, caller, {"items": [{"prompt": "p", "seed": 1}]})["job_id"]
+    out = q.wait(caller, job_id, 60)
+    assert out["state"] == "failed"
+    assert "MemAvailable" in out["error"] and "50" in out["error"] and "160" in out["error"]
+
+
+def test_ltx_a_host_too_small_for_one_worker_fails_the_job(ltx_env, monkeypatch):
+    make, caller, _ = ltx_env
+    monkeypatch.setattr(rollouts, "meminfo_gib", lambda: {"MemTotal": 64.0, "MemAvailable": 60.0})
+    q = make(variants={"distilled": {"enabled": True, "peak_rss_gib": 40}, "dev": {"enabled": False}})
+    job_id = q.backends["rollout_ltx25"].submit(q, caller, {"items": [{"prompt": "p", "seed": 1}]})["job_id"]
+    out = q.wait(caller, job_id, 60)
+    assert out["state"] == "failed" and "host RAM" in out["error"]
+
+
+def test_ltx_meminfo_reads_proc():
+    m = rollouts.meminfo_gib()
+    assert 0 < m["MemAvailable"] <= m["MemTotal"]
+
+
+def test_ltx_missing_clone_fails_the_job_with_a_clear_message(ltx_env, tmp_path):
+    make, caller, _ = ltx_env
+    missing = tmp_path / "no_such_clone"
+    q = make(repo=str(missing))
+    out = q.wait(caller, q.backends["rollout_ltx25"].submit(
+        q, caller, {"items": [{"prompt": "p", "seed": 1}]})["job_id"], 60)
+    assert out["state"] == "failed"
+    assert str(missing) in out["error"] and "PORTABILITY.md" in out["error"]
+
+
+def test_ltx_refuses_to_run_off_the_pinned_commit(ltx_env):
+    make, caller, _ = ltx_env
+    q = make(commit="0" * 40)
+    out = q.wait(caller, q.backends["rollout_ltx25"].submit(
+        q, caller, {"items": [{"prompt": "p", "seed": 1}]})["job_id"], 60)
+    assert out["state"] == "failed" and "generators.ltx25.commit" in out["error"] and "0" * 40 in out["error"]
+
+
+def test_ltx_build_gpu_backends_includes_it_only_when_a_variant_is_enabled(tmp_path):
+    from ar_kernel.tools.gpu_jobs import build_gpu_backends
+    rec = Recorder(tmp_path / "run")
+    for enabled, present in ((("dev",), True), ((), False)):
+        names = [b.name for b in build_gpu_backends(small_ltx_cfg(enabled=enabled), tmp_path / "run",
+                                                     [0, 1, 2, 3], TokenRegistry(rec), rec)]
+        assert ("rollout_ltx25" in names) is present
+
+
+def _ltx_backend(tmp_path, **over):
+    rec = Recorder(tmp_path / "run")
+    return Ltx25Backend(small_ltx_cfg(**over), tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
+
+
+def _ltx_job(**args):
+    from types import SimpleNamespace
+    return SimpleNamespace(args={"variant": "distilled", "frames": 49, "height": 576, "width": 1024, **args})
+
+
+def test_ltx_finish_refuses_a_non_24fps_render(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    make_mp4(out / "0.mp4", seconds=2, fps=30, width=1024, height=576)
+    with pytest.raises(ValueError, match="fps"):
+        _ltx_backend(tmp_path).finish(_ltx_job(), {"index": 0, "prompt": "p"}, out)
+
+
+def test_ltx_finish_refuses_a_render_off_the_requested_size(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    make_mp4(out / "0.mp4", seconds=2, fps=24, width=960, height=544)
+    with pytest.raises(ValueError, match="1024x576"):
+        _ltx_backend(tmp_path).finish(_ltx_job(), {"index": 0, "prompt": "p"}, out)
+
+
+def test_ltx_finished_candidate_passes_the_real_ingestor_as_static(tmp_path):
+    from ar_kernel.archive.db import open_db
+    from ar_kernel.data.ingest import Candidate, Ingestor
+    run_dir = tmp_path / "run"
+    out = run_dir / "staging" / "rollouts"
+    out.mkdir(parents=True)
+    make_mp4(out / "0.mp4", seconds=121 / 24, fps=24, width=1024, height=576)
+    res = _ltx_backend(tmp_path).finish(_ltx_job(), {"index": 0, "prompt": "A quiet forest path at dawn."}, out)
+    ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
+    [r] = ing.ingest([Candidate(video=Path(res["video"]), caption=Path(res["caption"]), pose=None,
+                                camera_motion="static", provenance={"kind": "rollout", "generator": "ltx-2.5-distilled",
+                                "job_id": "j1", "inputs_hash": "x", "seed": 1})], node_id="n1")
+    assert r.accepted, r.reasons
+    assert "video_caption_static" in r.formats
+
+
+# ---- real LTX-2.5 gpu smoke (spec 16.3 item 5) ----
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("variant", ["distilled", "dev"])
+def test_real_ltx25_rollout(tmp_path, variant):
+    """AR_TEST_GPUS=0,1,2,3 pytest tests/test_rollouts.py -m gpu -k ltx25 -s --basetemp=.cache/pytest/gpu
+
+    Per enabled variant: 2 T2V + 2 I2V items (default frames and size; four, so four workers run
+    at once when the host-RAM rule allows), workers per that rule over AR_TEST_GPUS. The I2V item's image is a generate_images (Z-Image) frame -- the tools
+    chain. Each candidate must ingest as video_caption_static (camera_motion: static)."""
+    import os
+    import shutil
+    import time
+    from ar_kernel.archive.db import open_db
+    from ar_kernel.data.ingest import Candidate, Ingestor
+    from ar_kernel.tools.images import ImageBackend
+
+    if not REAL.get(f"generators.ltx25.variants.{variant}.enabled"):
+        pytest.skip(f"ltx25 {variant} is disabled in configs/kernel.yaml (see the Task 8 verification-log entry)")
+    gpus = [int(g) for g in os.environ.get("AR_TEST_GPUS", "0,1,2,3").split(",")]
+    run_dir, ws = tmp_path / "run", tmp_path / "ws"
+    staging = run_dir / "staging"
+    ws.mkdir(parents=True); staging.mkdir(parents=True)
+    rec = Recorder(run_dir)
+    reg = TokenRegistry(rec)
+    q = JobQueue(rec, threading.Lock(), wait_cap_s=3600)
+    for b in (ImageBackend, Ltx25Backend):
+        q.register(b(REAL, run_dir, gpus, reg, rec))
+    caller = reg.issue(node="gpu", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
+    host = lambda p: staging / Path(p).relative_to("/workspace/staging")
+    peak, stop = _peak_sampler(gpus)
+    try:
+        img = _wait(q, caller, q.backends["generate_images"].submit(
+            q, caller, {"items": [{"prompt": "a red barn in an open field, photorealistic", "seed": 9},
+                                  {"prompt": "a cup of coffee on a wooden table, photorealistic", "seed": 10}]})["job_id"])
+        assert img["state"] == "done", img.get("error")
+        frames = [i["image"] for i in img["result"]["items"]]
+        items = [{"prompt": "Ocean waves gently rolling onto a quiet beach at sunset, camera steady.", "seed": 2},
+                 {"prompt": "The red barn under slowly moving clouds, grass swaying, camera steady.",
+                  "image": frames[0], "seed": 3},
+                 {"prompt": "A slow walk through a sunlit forest path, camera steady.", "seed": 4},
+                 {"prompt": "A cup of coffee steaming on a wooden table, camera steady.", "image": frames[1], "seed": 5}]
+        t0 = time.monotonic()
+        out = _wait(q, caller, q.backends["rollout_ltx25"].submit(q, caller, {"items": items, "variant": variant})["job_id"])
+        wall = time.monotonic() - t0
+        assert out["state"] == "done", out.get("error")
+        by = {i["index"]: i for i in out["result"]["items"]}
+        assert all("candidate" in by[i] for i in range(4)), by
+        ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
+        rows, failures = [], []
+        for i in range(4):
+            c = by[i]["candidate"]
+            stage = staging / "ingest" / f"static{i}"
+            stage.mkdir(parents=True)
+            shutil.copy(host(c["video"]), stage / "v.mp4")
+            shutil.copy(host(c["caption"]), stage / "c.json")
+            [res] = ing.ingest([Candidate(video=stage / "v.mp4", caption=stage / "c.json", pose=None,
+                                          camera_motion="static", provenance=c["provenance"],
+                                          license=c["license"])], node_id="gpu")
+            rows.append({"item": i, "video": c["video"], "frames": c["frames"], "worker": by[i]["worker"],
+                         "accepted": res.accepted, "formats": res.formats, "reasons": res.reasons})
+            if not (res.accepted and "video_caption_static" in res.formats):
+                failures.append(f"{i}: {res.reasons}")
+        print(json.dumps({"variant": variant, "gpus": gpus, "wall_s": round(wall, 1), "peak_mib": peak,
+                          "gpu_memory_mib": out["result"]["gpu_memory_mib"], "rows": rows}, indent=1))
+    finally:
+        stop.set()
+        q.shutdown()
+    assert out["result"]["gpu_memory_released"] is True
+    assert not failures, failures

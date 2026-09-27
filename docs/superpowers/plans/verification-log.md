@@ -906,3 +906,44 @@ Two generate_images (Z-Image) frames (barn, coffee cup; 1280x720) feed the two I
 Content: forest path with a distant walker, slow forward drift (T2V); sunset beach with waves
 rolling in (T2V); the barn and the coffee cup (I2V) stay nearly frozen on their first frames
 (no visible cloud or steam) — good `static` material, little motion.
+
+## Plan 3 Task 8 — `rollout_ltx25` (LTX-2.5), 2026-09-26
+
+Env `.envs/gen-ltx25` (prefix env, python 3.12, ~5.9 GB; torch 2.13.0+cu132, natten
+0.21.7+torch2130cu132, transformers 5.14.1, cuDNN overridden to 9.24.0.43 as upstream does), LTX-2 @
+`a95ab856bf29407b6b066ede0abe1846050db56c` (2026-08-26). The PORTABILITY.md recreate commands were
+re-run verbatim into a scratch root and gave an identical `pip freeze`. `/` had 45 GB free
+throughout (floor 15 GB); everything new lives under `/mnt/biometrics`.
+
+### Fit spike (1024x576, 121 frames, fp8-cast + `--offload cpu`, `expandable_segments`, one GPU)
+
+| run | GPU | per clip | GPU peak (nvidia-smi / torch alloc) | host peak RSS (anon + file) |
+|---|---|---|---|---|
+| distilled, CLI `ltx_pipelines.distilled`, cold page cache | 4 | 5:50 wall (load + 1 clip) | 12.0 GiB / — | 71.4 GiB |
+| distilled, bridge, 2 items (T2V, I2V), warm | 4 | 59.6 s, 58.6 s | 11.9 GiB / 10.05 GiB | 71.8 GiB (35.4 + 35.2) |
+| dev (`ti2vid_two_stages` + distilled LoRA 1.0; 30 steps, CFG/STG), bridge, 2 items | 4 | 569.6 s (cold dev weights), **341.7 s** warm | 11.7 GiB / 10.05 GiB | 75.6 GiB (36.8 + ~41) |
+| distilled, 2 workers concurrently (GPUs 0,1), warm | 0,1 | 58.5 s each | — | MemAvailable -71 GiB |
+| distilled, 4 workers concurrently (GPUs 0-3), warm | 0-3 | 82-100 s each (105 s for 4) | — | MemAvailable -145 GiB |
+
+The pipelines rebuild their blocks for every call (upstream's per-call `ModelRegistry(cache_weights
+=False)` with CPU offload), so there is no separate load phase: every clip pays the weight
+streaming, and the page cache decides the speed. The file-backed half of the RSS is the mmapped
+safetensors, shared by all workers. **dev is 5.8x slower than distilled (> 4x): left disabled.**
+The GPU peak (~12 GiB) is far under 24 GB, so the conv VAE was not needed.
+
+Worker rule: `workers = min(GPUs, floor((MemTotal - 60 GiB) / peak_rss_gib))` with `peak_rss_gib: 40`
+(the private RssAnon peak, 36.8 GiB max, rounded up; the shared weight cache is not charged per
+worker) = 4 on this 251 GiB host; the job fails before launching when MemAvailable < workers x 40.
+
+### GPU smoke (`AR_TEST_GPUS=0,1,2,3`, 4 workers, 2 T2V + 2 I2V from generate_images frames)
+
+- Run 1: passed; 421 s wall, each clip ~404 s. The LTX weights were not in the page cache
+  (after the dev spike and the Z-Image job), so 4 workers read 67 GB each from the rotational
+  `/mnt/biometrics` disk at once.
+- Run 2: **passed**; 112 s wall, clips 104 / 89 / 104 / 104 s. All four: 1024x576, 24 fps, 121
+  frames, video-only, **ingest as `video_caption_static`**; GPU peaks 13.3/13.3/12.1/12.0 GiB;
+  `gpu_memory_released: true` (15/15/111/15 MiB before and 15/15/113/15 after; GPU 2 carries
+  Xorg). MemAvailable minimum 99 GiB in run 1.
+- Content: beach at sunset with rolling waves; the I2V barn keeps the Z-Image first frame exactly
+  and clouds roll in over it; the forest item moves the camera forward down the path despite
+  "camera steady" in the prompt; the coffee cup stays nearly static.

@@ -32,6 +32,7 @@ from .jobs import run_cancellable
 from .server import ToolError
 
 WAN22_BRIDGE = Path(__file__).resolve().parents[1] / "bridges" / "wan22_generate.py"
+LTX25_BRIDGE = Path(__file__).resolve().parents[1] / "bridges" / "ltx25_generate.py"
 
 # The launches, as argv after "python" (run in the generator env, cwd WorldModel). The tests
 # swap both for the fake worker.
@@ -98,6 +99,29 @@ def render_config(cfg, *, variant: str, rounds_per_turn: int, seed: int, indices
         for (section, key), value in AR30.items():
             c[section][key] = value
     return c
+
+
+def checked_repo(cfg, key: str, label: str) -> Path:
+    """The pinned third-party checkout of generator block `key`: refuses to run against a clone
+    that has moved off the commit configs/kernel.yaml pins (`<key>.commit`), so a silent `git pull`
+    there cannot change what a backend renders without a new review."""
+    block = cfg.get(key)
+    repo, pinned = cfg.repo_root / block["repo"], block.get("commit")
+    git = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True)
+    if git.returncode != 0:
+        raise RuntimeError(f"no {label} checkout at {repo} (git: {git.stderr.strip()}); clone it at "
+                           f"commit {pinned} as described in docs/PORTABILITY.md")
+    head = git.stdout.strip()
+    if head != pinned:
+        raise RuntimeError(f"{repo} is at commit {head}, but {key}.commit pins {pinned}; re-clone the "
+                           f"pinned commit or update the pin")
+    return repo
+
+
+def meminfo_gib() -> dict[str, float]:
+    """/proc/meminfo's MemTotal and MemAvailable, in GiB."""
+    fields = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
+    return {k: int(fields[k].split()[0]) / 2**20 for k in ("MemTotal", "MemAvailable")}
 
 
 def round_segments(schedule: list[dict], first: int, trim: int, frames: int) -> list[dict]:
@@ -352,24 +376,8 @@ class Wan22Backend(GpuJob):
             if not isinstance(item.get("seed"), int) or isinstance(item.get("seed"), bool):
                 raise ToolError(f"item {n}: seed must be an int")
 
-    def _checked_repo(self) -> Path:
-        """The pinned Wan2.2 checkout: refuses to run against a clone that has moved off the
-        commit configs/kernel.yaml pins (generators.wan22.commit), so a silent `git pull` there
-        cannot change what this backend renders without a new review."""
-        repo = self.cfg.repo_root / self.block["repo"]
-        pinned = self.block.get("commit")
-        git = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True)
-        if git.returncode != 0:
-            raise RuntimeError(f"no Wan2.2 checkout at {repo} (git: {git.stderr.strip()}); clone it at "
-                               f"commit {pinned} as described in docs/PORTABILITY.md")
-        head = git.stdout.strip()
-        if head != pinned:
-            raise RuntimeError(f"{repo} is at commit {head}, but generators.wan22.commit pins "
-                               f"{pinned}; re-clone the pinned commit or update the pin")
-        return repo
-
     def produce(self, job, items, work, out, cancel, report):
-        repo = self._checked_repo()
+        repo = checked_repo(self.cfg, "generators.wan22", "Wan2.2")
         ckpt = self.cfg.repo_root / self.block["weights"]
         extra = self.block.get("extra_args") or {}
         offload = "--offload-model" if extra.get("offload_model", True) else "--no-offload-model"
@@ -403,3 +411,111 @@ class Wan22Backend(GpuJob):
                              f"2% of 16:9 ({info.width}x{info.height})")
         caption = self.write_caption(out, item, {"caption": item["prompt"]})
         return {"video": cropped, "caption": caption, "frames": info.frames}
+
+
+class Ltx25Backend(GpuJob):
+    """rollout_ltx25 (spec 10, Plan 3 Task 8): training clips from LTX-2.5 (Lightricks'
+    ltx-pipelines in its own env, docs/PORTABILITY.md): `distilled` (DistilledPipeline) or `dev`
+    (TI2VidTwoStagesPipeline + the distilled LoRA). On 24 GB cards each worker runs one GPU with
+    fp8-cast weights and CPU offload, so each worker also holds the model in host RAM: the worker
+    count comes from host RAM (`workers`), and a job whose workers would not fit in MemAvailable
+    fails before any starts rather than meeting the host OOM killer. The clip carries no
+    pose/camera_motion, like Wan's."""
+    name = tool = "rollout_ltx25"
+    kind = "rollout"
+    config_key = "generators.ltx25"      # max_items / timeout_s
+    file_keys = ("image",)
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.block = self.cfg.get(self.config_key) or {}
+        self.license = self.block.get("license", "")
+        (h, w), (default, maximum) = self.block["resolutions"][0], self.block["frames"]
+        self.description = (
+            "Render training clips with LTX-2.5 (text-to-video, or image-to-video when an item carries a "
+            "first frame). A GPU job: returns {job_id} at once; collect with job_wait. Params (one value per "
+            f"job): `variant` (one of {self.enabled_variants()}; default the first), `frames` (8k+1, "
+            f"1 < frames <= {maximum}, default {default}), `height`/`width` (one of "
+            f"{self.block['resolutions']} as [height, width]; default {h}x{w}). Item: {{'prompt': str, "
+            "'image'?: first frame under /workspace (any size; center-cropped and resized to the clip size, "
+            "e.g. a generate_images frame), 'seed': int}. Each result item gives a `candidate` for "
+            "data_ingest (a 24 fps, 16:9, silent mp4, caption, provenance); it carries no "
+            "pose/camera_motion -- add one (annotate_camera then 'moving', or 'static') before ingesting. "
+            "Batch many prompts per call.")
+
+    def enabled_variants(self) -> list[str]:
+        return [v for v in ("distilled", "dev") if (self.block.get("variants", {}).get(v) or {}).get("enabled")]
+
+    def generator_name(self, job) -> str:
+        return f"ltx-2.5-{job.args['variant']}"
+
+    def check_args(self, args):
+        enabled = self.enabled_variants()
+        args.setdefault("variant", enabled[0] if enabled else None)
+        if args["variant"] not in enabled:
+            raise ToolError(f"variant must be one of the enabled variants {enabled}: got {args['variant']!r}")
+        default, maximum = self.block["frames"]
+        frames = args.setdefault("frames", default)
+        if not (isinstance(frames, int) and not isinstance(frames, bool) and 1 < frames <= maximum):
+            raise ToolError(f"frames must be 8k+1 with 1 < frames <= {maximum}: got {frames!r}")
+        if frames % 8 != 1:
+            raise ToolError(f"frames must be 8k+1: got {frames!r}")
+        h, w = self.block["resolutions"][0]
+        size = [args.setdefault("height", h), args.setdefault("width", w)]
+        if size not in [list(r) for r in self.block["resolutions"]]:
+            raise ToolError(f"[height, width] must be one of the resolutions {self.block['resolutions']}: got {size}")
+        for n, item in enumerate(args["items"]):
+            if not isinstance(item.get("prompt"), str) or not item["prompt"].strip():
+                raise ToolError(f"item {n}: prompt must be a non-empty string")
+            if item.get("image") is not None and not isinstance(item["image"], str):
+                raise ToolError(f"item {n}: image must be a file path")
+            if not isinstance(item.get("seed"), int) or isinstance(item.get("seed"), bool):
+                raise ToolError(f"item {n}: seed must be an int")
+
+    def worker_groups(self, variant: str) -> tuple[list[list[int]], float]:
+        """One GPU per worker; workers = min(GPUs, floor((MemTotal - host_reserve_gib) / peak_rss_gib)),
+        capped by the config's `workers`. Refuses when MemAvailable cannot hold them all."""
+        rss = float(self.block["variants"][variant]["peak_rss_gib"])
+        mem = meminfo_gib()
+        by_ram = int((mem["MemTotal"] - float(self.block.get("host_reserve_gib", 60))) // rss)
+        if by_ram < 1:
+            raise RuntimeError(f"host RAM too small for one ltx-2.5-{variant} worker: MemTotal "
+                               f"{mem['MemTotal']:.0f} GiB - reserve {self.block.get('host_reserve_gib', 60)} GiB "
+                               f"< peak_rss_gib {rss:g}")
+        groups = split_gpus(self.gpus, 1, min(by_ram, self.block.get("workers") or by_ram))
+        need = len(groups) * rss
+        if mem["MemAvailable"] < need:
+            raise RuntimeError(f"not enough free host RAM for {len(groups)} ltx-2.5-{variant} worker(s): "
+                               f"MemAvailable {mem['MemAvailable']:.0f} GiB < {need:.0f} GiB "
+                               f"({len(groups)} x peak_rss_gib {rss:g}); free host memory or lower "
+                               f"generators.ltx25.workers")
+        return groups, need
+
+    def produce(self, job, items, work, out, cancel, report):
+        repo = checked_repo(self.cfg, self.config_key, "LTX-2")
+        a = job.args
+        groups, _ = self.worker_groups(a["variant"])
+        return self.run_workers(self.block["env"], lambda r, w: [
+            "python", str(LTX25_BRIDGE), "--items", str(work / "items.json"), "--out", str(out),
+            "--rank", str(r), "--world", str(w), "--weights", str(self.cfg.repo_root / self.block["weights"]),
+            "--variant", a["variant"], "--frames", str(a["frames"]), "--height", str(a["height"]),
+            "--width", str(a["width"]), "--quantization", self.block.get("quantization", "fp8-cast"),
+            "--offload", self.block.get("offload", "cpu")], groups,
+            job=job, work=work, out=out, total=len(items), cancel=cancel, report=report, cwd=repo,
+            extra_env={"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
+
+    def finish(self, job, item, out):
+        a = job.args
+        silent = out / f"{item['index']}.silent.mp4"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(out / f"{item['index']}.mp4"), "-an",
+                        "-c:v", "copy", str(silent)], check=True)
+        info = probe_video(silent)
+        if (info.width, info.height) != (a["width"], a["height"]):
+            raise ValueError(f"rendered clip is {info.width}x{info.height}, not {a['width']}x{a['height']}")
+        if round(info.fps) != 24:
+            raise ValueError(f"published clip is {info.fps} fps, not 24")
+        if not aspect_ok(info, 0.02):
+            raise ValueError(f"published clip's aspect {info.display_aspect:.4f} is not within "
+                             f"2% of 16:9 ({info.width}x{info.height})")
+        caption = self.write_caption(out, item, {"caption": item["prompt"]})
+        return {"video": silent, "caption": caption, "frames": info.frames}

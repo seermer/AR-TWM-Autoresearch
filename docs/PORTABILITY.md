@@ -127,10 +127,113 @@ Versions (Task 7): Wan2.2 @ `1ea34ff48f87168174e12956e200b1d908b1c5ff` (2026-09-
 `Wan2.2_VAE.pth`). Kernel launches set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
 (without it the 24 GB card OOMs in the VAE decode; see verification-log, Task 7).
 
+**`gen-ltx25`** (LTX-2.5, `rollout_ltx25`): a prefix env at `AutoResearcher/.envs/gen-ltx25`,
+python 3.12. Lightricks' LTX-2 monorepo is a separate, gitignored clone at `third_party/LTX-2`;
+its `ltx-core` (with the `natten` extra: torch 2.13.0 cu132 + natten for the DiffVAE) and
+`ltx-pipelines` packages are installed editable from it, and it is pinned as
+`generators.ltx25.commit` (`Ltx25Backend` refuses to run when the clone's HEAD differs).
+`ltx-kernels` is not installed: it only serves multi-GPU sequence parallelism and NVFP4
+(Blackwell), neither of which helps on 24 GB Ada cards.
+
+```bash
+cd AutoResearcher
+export CONDA_PKGS_DIRS=$PWD/.cache/conda/pkgs PIP_CACHE_DIR=$PWD/.cache/pip UV_CACHE_DIR=$PWD/.cache/uv
+mkdir -p third_party
+git clone https://github.com/Lightricks/LTX-2.git third_party/LTX-2
+git -C third_party/LTX-2 checkout a95ab856bf29407b6b066ede0abe1846050db56c   # the pin
+conda create -y -p .envs/gen-ltx25 python=3.12
+conda run --no-capture-output -p .envs/gen-ltx25 pip install uv==0.9.30
+# LTX-2's own cuDNN override (its root pyproject: torch 2.13 pins nvidia-cudnn-cu13==9.20.0.48,
+# which lacks libcudnn_engines_tensor_ir), passed to uv as an *override*.
+echo 'nvidia-cudnn-cu13==9.24.0.43' > .cache/ltx25_override.txt
+# Every other resolved version, pinned (Task 8 `pip freeze`), passed as *constraints* (an override
+# would drop the cu132 index that ltx-core's [tool.uv.sources] maps torch to, and the extras torch
+# requests on cuda-toolkit). natten is pinned exactly (0.21.7+torch2130cu132) by the extra itself.
+cat > .cache/ltx25_pins.txt <<'EOF'
+accelerate==1.15.0
+annotated-doc==0.0.5
+anyio==4.15.1
+av==18.1.0
+certifi==2026.7.22
+click==8.5.0
+cloudpickle==3.1.2
+cuda-bindings==13.4.3
+cuda-pathfinder==1.8.2
+cuda-toolkit==13.2.1
+einops==0.8.2
+filelock==4.0.4
+fsspec==2026.9.0
+h11==0.16.0
+hf-xet==1.6.0
+httpcore==1.0.9
+httpx==0.28.1
+huggingface_hub==1.33.0
+idna==3.20
+Jinja2==3.1.6
+markdown-it-py==4.2.0
+MarkupSafe==3.0.3
+mdurl==0.1.2
+mpmath==1.3.0
+networkx==3.7
+numpy==2.5.3
+nvidia-cublas==13.4.0.1
+nvidia-cuda-cupti==13.2.75
+nvidia-cuda-nvrtc==13.2.78
+nvidia-cuda-runtime==13.2.75
+nvidia-cufft==12.2.0.46
+nvidia-cufile==1.17.1.22
+nvidia-curand==10.4.2.55
+nvidia-cusolver==12.2.0.1
+nvidia-cusparse==12.7.10.1
+nvidia-cusparselt-cu13==0.8.1
+nvidia-nccl-cu13==2.29.7
+nvidia-nvjitlink==13.4.92
+nvidia-nvshmem-cu13==3.4.5
+nvidia-nvtx==13.2.75
+OpenImageIO==3.1.17.0
+pillow==12.3.0
+psutil==7.2.2
+Pygments==2.21.0
+PyYAML==6.0.3
+regex==2026.9.10
+rich==15.0.0
+safetensors==0.8.0
+scipy==1.18.1
+shellingham==1.5.4
+sympy==1.14.0
+tokenizers==0.22.2
+tqdm==4.70.1
+transformers==5.14.1
+triton==3.7.1
+typer==0.27.2
+torch==2.13.0
+torchaudio==2.11.0
+torchvision==0.28.0
+typing_extensions==4.16.0
+EOF
+# ltx-core with its `natten` extra (torch 2.13.0 cu132 + natten; indexes from its pyproject's
+# [tool.uv.sources]) and ltx-pipelines, both editable from the clone. ltx-kernels is not needed.
+.envs/gen-ltx25/bin/uv pip install --python .envs/gen-ltx25/bin/python \
+  -e "third_party/LTX-2/packages/ltx-core[natten]" -e third_party/LTX-2/packages/ltx-pipelines \
+  --override .cache/ltx25_override.txt --constraint .cache/ltx25_pins.txt
+conda run --no-capture-output -p .envs/gen-ltx25 python -c "import ltx_pipelines.distilled, ltx_pipelines.ti2vid_two_stages"
+```
+
+These commands were re-run verbatim into a scratch root (fresh clone, fresh caches) on
+2026-09-26 and gave a `pip freeze` identical to the working env's. `pip check` reports exactly one
+conflict, by design: `torch 2.13.0+cu132 has requirement nvidia-cudnn-cu13==9.20.0.48, but you
+have nvidia-cudnn-cu13 9.24.0.43` (the upstream cuDNN override above). The torch family resolves
+from the cu132 indexes to `torch==2.13.0+cu132`, `torchvision==0.28.0+cu132`,
+`torchaudio==2.11.0+cu132` (upstream takes torchaudio from its `test/cu132` index);
+`natten==0.21.7+torch2130cu132`, `transformers==5.14.1` (ltx-core caps `<5.15`). Env size:
+~5.9 GB. Weights: `Lightricks/LTX-2.5` split pack at `weights/ltx-2.5` (the bf16
+transformers, `gemma4-12b-with-proj` text encoder, video/audio VAEs, x2 spatial upsampler, the
+distilled LoRA). Kernel launches set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
+
 ## What needs doing on a new machine
 
 1. **Create the conda environments** — `alayaworld`, `wbench-main`, `wbench-vp`,
-   `autoresearcher`, plus the prefix envs above (`.envs/gen-zimage`, ...). Never use `base` or
+   `autoresearcher`, plus the prefix envs above (`.envs/gen-zimage`, `.envs/gen-wan22`, `.envs/gen-ltx25`). Never use `base` or
    the system Python. `ar doctor` lists any named env that is missing.
 2. **System tools on PATH:** `ffmpeg`, `ffprobe`, `conda`, `git`.
 3. **Weights are not in git.** Re-download or copy:

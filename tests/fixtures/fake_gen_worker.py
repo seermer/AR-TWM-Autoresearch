@@ -27,6 +27,11 @@ With --frames set it stands in for wan22_generate.py instead (wan mode, see wan(
 item -- an image item has no "video"/"src" for the other modes' argparse-driven dispatch to key
 off, and only this bridge's argv carries --frames): it writes a 1280x704, 24 fps mp4 of --frames
 frames and echoes --repo/--ckpt-dir/--offload-model/--t5-cpu.
+
+With --variant set it stands in for ltx25_generate.py instead (ltx mode, see ltx(): checked
+before the image and wan modes, whose --weights/--frames that bridge's argv also carries): it
+writes a --width x --height, 24 fps mp4 of --frames frames WITH an audio track (as LTX-2.5's own
+output has one) and echoes --weights/--variant/--quantization/--offload.
 """
 import argparse
 import json
@@ -120,6 +125,8 @@ parser.add_argument("--offload-model", dest="offload_model", action="store_true"
 parser.add_argument("--no-offload-model", dest="offload_model", action="store_false")
 parser.add_argument("--t5-cpu", dest="t5_cpu", action="store_true", default=True)
 parser.add_argument("--no-t5-cpu", dest="t5_cpu", action="store_false")
+parser.add_argument("--variant")                     # set: ltx mode (stands in for ltx25_generate.py)
+parser.add_argument("--quantization")
 args, _ = parser.parse_known_args()
 
 
@@ -155,6 +162,23 @@ def wan(item, status_path):
                                        "image": item.get("image")}))
 
 
+def ltx(item, status_path):
+    """ltx25_generate.py's contract without a model: a synthetic --width x --height, 24 fps mp4 of
+    --frames frames with a sine audio track. item["fps"] overrides the rate (the finish() check)."""
+    fps = item.get("fps", 24)
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i",
+                    f"testsrc=size={args.width}x{args.height}:rate={fps}", "-f", "lavfi", "-i",
+                    "sine=frequency=440:sample_rate=48000", "-frames:v", str(args.frames), "-shortest",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(out / f"{item['index']}.mp4")],
+                   check=True)
+    status_path.write_text(json.dumps({"ok": True, "seconds": 0.01, "rank": args.rank,
+                                       "gpus": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
+                                       "weights": args.weights, "variant": args.variant, "frames": args.frames,
+                                       "height": args.height, "width": args.width,
+                                       "quantization": args.quantization, "offload": args.offload,
+                                       "image": item.get("image")}))
+
+
 def image(item, status_path):
     """zimage_generate.py's contract without a model: a solid PNG of the requested size."""
     from PIL import Image
@@ -187,6 +211,9 @@ for item in mine:
         continue
     if args.max_frames is not None:
         annotate(item, status_path)
+        continue
+    if args.variant is not None:
+        ltx(item, status_path)
         continue
     if args.weights is not None:
         image(item, status_path)
