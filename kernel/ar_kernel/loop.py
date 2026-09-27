@@ -259,7 +259,7 @@ class Loop:
             self._record_recipe(child, res, gate.resolved_path)
             self._state(child, "train", k)
             trained = self.phases.train(self, gate.resolved_path, child, adir)
-            if trained.checkpoint is None:
+            if trained.checkpoint is None or trained.failure != "none":   # e.g. nan loss after a checkpoint
                 retry = {"kind": "train", "failure": trained.failure, "detail": trained.detail,
                          "log_tail": _tail(trained.log_path)}
                 status = "train_failed"

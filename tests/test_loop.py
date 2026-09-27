@@ -12,6 +12,7 @@ from ar_kernel.config import KernelConfig
 from ar_kernel.loop import Loop
 from ar_kernel.run import RunContext
 from ar_kernel.telemetry.recorder import Recorder
+from ar_kernel.train.runner import TrainOutcome
 from ar_kernel.vcs.agents_repo import AgentsRepo
 from fixtures.fake_loop import Script
 
@@ -77,6 +78,25 @@ def test_training_failure_goes_back_to_the_agent_then_train_failed(make_loop):
     assert [r[3]["kind"] if r[3] else None for r in recipes] == [None, "train", "train"]
     assert "CUDA out of memory" in recipes[1][3]["log_tail"]
     assert NodeStore(loop.ctx.conn).get("n1")["status"] == "train_failed"
+
+
+def test_failed_training_that_left_a_checkpoint_is_not_scored(make_loop):
+    run, make = make_loop
+    script = Script(run, score=[0.7, 0.9])
+    real_train = script.train
+
+    def diverged_first(loop, resolved, node, attempt_dir):     # nan loss (exit 0) after checkpoint-2
+        out = real_train(loop, resolved, node, attempt_dir)
+        if attempt_dir.name.endswith("-1"):
+            return TrainOutcome(out.checkpoint, "recipe", out.log_path, detail="loss became nan")
+        return out
+    script.train = diverged_first
+    loop = make(script)
+    loop.run()
+    recipes = [r for r in script.retries if r[0] == "improve_recipe"]
+    assert recipes[1][3]["kind"] == "train" and recipes[1][3]["detail"] == "loss became nan"
+    n1 = NodeStore(loop.ctx.conn).get("n1")
+    assert n1["status"] == "scored" and "improve_recipe-2" in n1["checkpoint_path"]
 
 
 def test_gate_failure_then_success(make_loop):
