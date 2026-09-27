@@ -167,11 +167,17 @@ def run_container(*, image: str, name: str, mounts: Mounts, command: list[str], 
     def sample() -> None:
         while not stop.wait(stats_every_s):
             r = subprocess.run(["docker", "stats", "--no-stream", "--format", "{{json .}}", name],
-                               capture_output=True, text=True)
+                               capture_output=True, text=True, start_new_session=True)
             if r.returncode == 0 and r.stdout.strip():
                 stats.append({"t": time.monotonic() - started, **json.loads(r.stdout)})
 
-    exit_code, timed_out, stdout, stderr, reason = None, False, "", "", None
+    exit_code, timed_out, stdout, stderr, reason, waiter = None, False, "", "", None, None
+
+    def wait():
+        # Its own session: a Ctrl-C reaches the terminal's whole foreground process group, and the
+        # first one is graceful (spec 14.4) -- it must not end the wait and so the container.
+        return subprocess.Popen(["docker", "wait", name], stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, start_new_session=True)
     try:
         # `docker run -d` can fail *after* it has created the container (e.g. an
         # OCI runtime error or a bad bind source): a `Created` container named
@@ -186,29 +192,39 @@ def run_container(*, image: str, name: str, mounts: Mounts, command: list[str], 
         if liveness is not None:
             # Container CPU is a liveness signal (spec 14.5): count samples above 1%.
             liveness.add_signal(lambda: sum(1 for s in stats if _cpu(s) > 1.0))
-        waiter = subprocess.Popen(["docker", "wait", name], stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE, text=True)
+        waiter = wait()
         hard = time.monotonic() + timeout_s
         while True:
             try:
-                out, _ = waiter.communicate(timeout=poll_s)
-                exit_code = int(out.strip() or -1)
-                break
+                out, err = waiter.communicate(timeout=poll_s)
             except subprocess.TimeoutExpired:
-                if time.monotonic() >= hard:
-                    reason = f"hard cap of {timeout_s:.0f}s reached"
-                elif liveness is not None:
-                    reason = liveness.expired()
-                if reason:
-                    timed_out = True
-                    subprocess.run(["docker", "kill", name], capture_output=True)
-                    waiter.kill()
-                    waiter.communicate()
+                out = err = None
+            if out is not None:
+                if out.strip().lstrip("-").isdigit():
+                    exit_code = int(out.strip())
                     break
+                if "No such container" in err:          # gone: nothing left to wait for
+                    break
+            if time.monotonic() >= hard:
+                reason = f"hard cap of {timeout_s:.0f}s reached"
+            elif liveness is not None:
+                reason = liveness.expired()
+            if reason:
+                timed_out = True
+                subprocess.run(["docker", "kill", name], capture_output=True)
+                waiter.kill()
+                waiter.communicate()
+                break
+            if out is not None:                         # the waiter died without an exit code: wait again
+                time.sleep(poll_s)
+                waiter = wait()
         logs = subprocess.run(["docker", "logs", name], capture_output=True, text=True)
         stdout, stderr = logs.stdout, logs.stderr
     finally:
         stop.set()
+        if waiter is not None and waiter.poll() is None:
+            waiter.kill()
+            waiter.wait()
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
         for root in (mounts.agent, mounts.workspace, mounts.staging):   # everything the agent can write
             restore_owner_access(root)

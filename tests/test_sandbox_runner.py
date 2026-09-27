@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import threading
@@ -255,3 +256,89 @@ def test_container_runs_restore_owner_access_on_every_writable_mount(tmp_path, m
         assert (root / "locked.txt").read_text() == "x"
     shutil.copytree(mounts.workspace, tmp_path / "retry", symlinks=True)
     shutil.rmtree(mounts.workspace)
+
+
+class _FakeWaiter:
+    """`docker wait`: the first one dies of a Ctrl-C with no exit code, the second reports 0."""
+    made: list = []
+
+    def __init__(self, args, **kw):
+        self.kw, self.killed = kw, False
+        self.result = ("", "context canceled\n") if not _FakeWaiter.made else ("0\n", "")
+        _FakeWaiter.made.append(self)
+
+    def communicate(self, timeout=None):
+        return self.result
+
+    def poll(self):
+        return None if not self.killed else -9
+
+    def kill(self):
+        self.killed = True
+
+    def wait(self, timeout=None):
+        return -9
+
+
+def test_a_docker_wait_that_dies_without_an_exit_code_waits_again(tmp_path, mounts, monkeypatch):
+    from types import SimpleNamespace
+    import ar_kernel.sandbox.runner as runner
+    calls = []
+
+    def fake_run(args, **kw):
+        calls.append(list(args))
+        return subprocess.CompletedProcess(args, 0, "", "")
+    _FakeWaiter.made = []
+    monkeypatch.setattr(runner, "subprocess", SimpleNamespace(
+        run=fake_run, Popen=_FakeWaiter, PIPE=subprocess.PIPE, TimeoutExpired=subprocess.TimeoutExpired))
+    res = run_container(image="unused:tag", name="ar-t-n1-test-1-abc", mounts=mounts, command=["true"], env={},
+                        cpus=2, memory_gb=2, timeout_s=60, recorder=Recorder(tmp_path / "run"),
+                        node="n1", phase="test", attempt=1, stats_every_s=60, poll_s=0.01)
+    assert res.exit_code == 0 and not res.timed_out
+    assert len(_FakeWaiter.made) == 2 and all(w.kw.get("start_new_session") for w in _FakeWaiter.made)
+    assert ["docker", "kill", "ar-t-n1-test-1-abc"] not in calls
+
+
+_SIGINT_CHILD = r"""
+import json, signal, sys
+from pathlib import Path
+from ar_kernel.config import KernelConfig
+from ar_kernel.sandbox.image import ensure_image
+from ar_kernel.sandbox.runner import Mounts, run_container
+from ar_kernel.telemetry.recorder import Recorder
+signal.signal(signal.SIGINT, lambda *a: None)       # what drive() does on the first Ctrl-C: carry on
+cfg, d = KernelConfig.load(), json.loads(sys.argv[1])
+res = run_container(image=ensure_image(cfg, ""), name=d["name"], mounts=Mounts(**d["mounts"]),
+                    command=["python", "-c", "import time; print('started', flush=True); time.sleep(8); print('done')"],
+                    env={}, cpus=2, memory_gb=2, timeout_s=120, recorder=Recorder(Path(d["run"])),
+                    node="n1", phase="test", attempt=1, stats_every_s=1, poll_s=1.0)
+print(json.dumps({"exit_code": res.exit_code, "stdout": res.stdout}))
+"""
+
+
+@pytest.mark.docker
+def test_a_ctrl_c_to_the_process_group_does_not_end_the_container(tmp_path, mounts):
+    """Spec 14.4: the first Ctrl-C is graceful. The terminal sends SIGINT to the whole foreground
+    process group; `docker wait` and `docker stats` must not be in it."""
+    name = container_name("sigint", "n1", "test", 1)
+    arg = json.dumps({"name": name, "run": str(tmp_path / "run"),
+                      "mounts": {k: str(v) for k, v in vars(mounts).items() if k != "agent_readonly"}})
+    child = subprocess.Popen([os.sys.executable, "-c", _SIGINT_CHILD, arg], stdout=subprocess.PIPE, text=True,
+                             cwd=CFG.repo_root, start_new_session=True,
+                             env={**os.environ, "PYTHONPATH": str(CFG.repo_root / "kernel")})
+    try:
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            logs = subprocess.run(["docker", "logs", name], capture_output=True, text=True).stdout
+            if "started" in logs:
+                break
+            time.sleep(0.5)
+        time.sleep(1.0)                                     # docker wait is running by now
+        os.killpg(child.pid, signal.SIGINT)                 # as the terminal delivers a Ctrl-C
+        out, _ = child.communicate(timeout=120)
+    finally:
+        if child.poll() is None:
+            os.killpg(child.pid, signal.SIGKILL)
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+    result = json.loads(out.strip().splitlines()[-1])
+    assert result["exit_code"] == 0 and "done" in result["stdout"]
