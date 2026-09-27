@@ -187,6 +187,51 @@ def test_score_node_skips_cleanup_on_a_base_exception(tmp_path, monkeypatch):
     assert len(cleanups) == 0
 
 
+def test_score_node_starts_from_a_clean_rollout_and_work_dir(tmp_path, monkeypatch):
+    """Fix: a re-render must start from scratch. A root killed mid-render (or
+    mid-WBench) leaves stale bucket dirs under rollout/ and stale caches under
+    work_dir/<model>/ that WorldModel/WBench treat as already done and skip on
+    resume, producing a silently incomplete render (real run loopcheck_20260927,
+    Task 13 Step 3 GPU check). score_node must clear both before scoring starts,
+    but must leave the render_config logs dir alone."""
+    import ar_kernel.run as run_mod
+    _runs(tmp_path, monkeypatch)
+    ctx = bootstrap_run(CFG, run_id="r-fresh", env=ENV4)
+    ctx.metric_set = ["aesthetic_quality"]
+    ctx.expected_n = {}
+    node_dir = ctx.run_dir / "nodes" / "1"
+    work_dir = node_dir / "eval" / "work_dirs"
+    model = f"ar_{ctx.run_dir.name}_n1"
+
+    rollout = node_dir / "eval" / "rollout" / "validation" / "step-000000" / "wbench_t02"
+    rollout.mkdir(parents=True)
+    (rollout / "stale.mp4").write_text("stale")
+    videos = work_dir / model / "videos"
+    videos.mkdir(parents=True)
+    (videos / "case_0001_combined.mp4").write_text("stale")
+    evaluation = work_dir / model / "evaluation"
+    evaluation.mkdir(parents=True)
+    (evaluation / "megasam_cache.json").write_text("stale")
+    logs = node_dir / "eval" / "logs"
+    logs.mkdir(parents=True)
+    (logs / "old.log").write_text("keep me")
+
+    seen = {}
+    def fake_build_render_config(*a, **k):
+        seen["rollout_gone"] = not rollout.exists()
+        seen["work_dir_model_gone"] = not (work_dir / model).exists()
+        return object()
+    monkeypatch.setattr(run_mod, "build_render_config", fake_build_render_config)
+    monkeypatch.setattr(run_mod, "render_proxy", lambda *a, **k: None)
+    monkeypatch.setattr(run_mod, "run_wbench_phases",
+                        lambda *a, **k: {"full": {"aesthetic_quality": {"mean": 0.5, "n": 1}}})
+
+    run_mod.score_node(CFG, ctx, "1", checkpoint=None, rank=8, alpha=16)
+
+    assert seen == {"rollout_gone": True, "work_dir_model_gone": True}
+    assert logs.exists() and (logs / "old.log").exists()
+
+
 def test_bootstrap_records_expected_case_counts_from_the_reference(tmp_path, monkeypatch):
     _runs(tmp_path, monkeypatch)
     ctx = bootstrap_run(CFG, run_id="r_n", env=ENV4)
