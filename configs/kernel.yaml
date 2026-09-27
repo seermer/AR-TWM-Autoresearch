@@ -125,10 +125,11 @@ generators:                       # rollout_* GPU jobs; a variant is enabled onl
     variants: {distilled: {enabled: true, peak_rss_gib: 40}, dev: {enabled: false, peak_rss_gib: 40}}
     quantization: fp8-cast        # 24 GB cards: fp8-cast + CPU offload, one GPU per worker (Plan 3 fact 7)
     offload: cpu
-    host_reserve_gib: 60          # workers = min(GPUs, floor((MemTotal - this) / peak_rss_gib))
-    workers: null                 # optional cap on that
+    host_reserve_gib: 60          # workers = min(GPUs, items, floor((MemAvailable - this) / peak_rss_gib)),
+    workers: null                 # checked at job start; fails only below 1. Optional cap on the GPU count.
     frames: [121, 241]            # [default, max]; 8k+1
     resolutions: [[576, 1024]]    # [height, width], each divisible by 64 (two-stage), 16:9
     max_items: 16
-    timeout_s: 43200
+    timeout_s: 10800              # 3 h, ~3x the worst case measured: 16 cold 241-frame clips on 4 workers =
+                                  # 4 per worker x ~900 s (2x the ~400 s cold 121-frame clip, Task 8) ~ 1 h
     license: LTX-2 Community License

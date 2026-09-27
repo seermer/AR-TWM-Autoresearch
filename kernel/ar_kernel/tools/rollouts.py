@@ -354,7 +354,7 @@ class Wan22Backend(GpuJob):
         "int}. Each result item gives a `candidate` for data_ingest "
         "(a 1248x704 (~16:9), 24 fps mp4 center-cropped from Wan's 1280x704, caption, provenance); it "
         "carries no pose/camera_motion -- add one (annotate_camera then 'moving', or 'static') "
-        "before ingesting. Batch many prompts per call.")
+        "before ingesting. Wan often ignores camera instructions like 'camera steady'; never label a clip 'static' from its prompt; run annotate_camera, or check the frames, first. Batch many prompts per call.")
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -418,8 +418,8 @@ class Ltx25Backend(GpuJob):
     ltx-pipelines in its own env, docs/PORTABILITY.md): `distilled` (DistilledPipeline) or `dev`
     (TI2VidTwoStagesPipeline + the distilled LoRA). On 24 GB cards each worker runs one GPU with
     fp8-cast weights and CPU offload, so each worker also holds the model in host RAM: the worker
-    count comes from host RAM (`workers`), and a job whose workers would not fit in MemAvailable
-    fails before any starts rather than meeting the host OOM killer. The clip carries no
+    count shrinks to what MemAvailable holds (`worker_groups`), and a job that cannot fit one
+    worker fails before any starts rather than meeting the host OOM killer. The clip carries no
     pose/camera_motion, like Wan's."""
     name = tool = "rollout_ltx25"
     kind = "rollout"
@@ -441,7 +441,7 @@ class Ltx25Backend(GpuJob):
             "e.g. a generate_images frame), 'seed': int}. Each result item gives a `candidate` for "
             "data_ingest (a 24 fps, 16:9, silent mp4, caption, provenance); it carries no "
             "pose/camera_motion -- add one (annotate_camera then 'moving', or 'static') before ingesting. "
-            "Batch many prompts per call.")
+            "LTX often ignores camera instructions like 'camera steady'; never label a clip 'static' from its prompt; run annotate_camera, or check the frames, first. Batch many prompts per call.")
 
     def enabled_variants(self) -> list[str]:
         return [v for v in ("distilled", "dev") if (self.block.get("variants", {}).get(v) or {}).get("enabled")]
@@ -462,6 +462,8 @@ class Ltx25Backend(GpuJob):
             raise ToolError(f"frames must be 8k+1: got {frames!r}")
         h, w = self.block["resolutions"][0]
         size = [args.setdefault("height", h), args.setdefault("width", w)]
+        if not all(isinstance(v, int) and not isinstance(v, bool) for v in size):
+            raise ToolError(f"height and width must be ints: got {size}")
         if size not in [list(r) for r in self.block["resolutions"]]:
             raise ToolError(f"[height, width] must be one of the resolutions {self.block['resolutions']}: got {size}")
         for n, item in enumerate(args["items"]):
@@ -472,29 +474,26 @@ class Ltx25Backend(GpuJob):
             if not isinstance(item.get("seed"), int) or isinstance(item.get("seed"), bool):
                 raise ToolError(f"item {n}: seed must be an int")
 
-    def worker_groups(self, variant: str) -> tuple[list[list[int]], float]:
-        """One GPU per worker; workers = min(GPUs, floor((MemTotal - host_reserve_gib) / peak_rss_gib)),
-        capped by the config's `workers`. Refuses when MemAvailable cannot hold them all."""
+    def worker_groups(self, variant: str, n_items: int) -> list[list[int]]:
+        """One GPU per worker; workers = min(GPUs (capped by the config's `workers`), items,
+        floor((MemAvailable - host_reserve_gib) / peak_rss_gib)): the job shrinks to what free
+        host RAM holds (with the reserve kept for the kernel and OS) and refuses only below one."""
         rss = float(self.block["variants"][variant]["peak_rss_gib"])
-        mem = meminfo_gib()
-        by_ram = int((mem["MemTotal"] - float(self.block.get("host_reserve_gib", 60))) // rss)
-        if by_ram < 1:
-            raise RuntimeError(f"host RAM too small for one ltx-2.5-{variant} worker: MemTotal "
-                               f"{mem['MemTotal']:.0f} GiB - reserve {self.block.get('host_reserve_gib', 60)} GiB "
-                               f"< peak_rss_gib {rss:g}")
-        groups = split_gpus(self.gpus, 1, min(by_ram, self.block.get("workers") or by_ram))
-        need = len(groups) * rss
-        if mem["MemAvailable"] < need:
-            raise RuntimeError(f"not enough free host RAM for {len(groups)} ltx-2.5-{variant} worker(s): "
-                               f"MemAvailable {mem['MemAvailable']:.0f} GiB < {need:.0f} GiB "
-                               f"({len(groups)} x peak_rss_gib {rss:g}); free host memory or lower "
-                               f"generators.ltx25.workers")
-        return groups, need
+        reserve = float(self.block.get("host_reserve_gib", 60))
+        avail = meminfo_gib()["MemAvailable"]
+        by_ram = int((avail - reserve) // rss)
+        groups = split_gpus(self.gpus, 1, self.block.get("workers"))
+        n = min(len(groups), n_items, by_ram)
+        if n < 1:
+            raise RuntimeError(f"not enough free host RAM for one ltx-2.5-{variant} worker: MemAvailable "
+                               f"{avail:.0f} GiB - host_reserve_gib {reserve:g} < peak_rss_gib {rss:g}; "
+                               f"free host memory and retry")
+        return groups[:n]
 
     def produce(self, job, items, work, out, cancel, report):
         repo = checked_repo(self.cfg, self.config_key, "LTX-2")
         a = job.args
-        groups, _ = self.worker_groups(a["variant"])
+        groups = self.worker_groups(a["variant"], len(items))
         return self.run_workers(self.block["env"], lambda r, w: [
             "python", str(LTX25_BRIDGE), "--items", str(work / "items.json"), "--out", str(out),
             "--rank", str(r), "--world", str(w), "--weights", str(self.cfg.repo_root / self.block["weights"]),
@@ -517,5 +516,7 @@ class Ltx25Backend(GpuJob):
         if not aspect_ok(info, 0.02):
             raise ValueError(f"published clip's aspect {info.display_aspect:.4f} is not within "
                              f"2% of 16:9 ({info.width}x{info.height})")
+        if info.frames != a["frames"]:
+            raise ValueError(f"rendered clip has {info.frames} frames, not {a['frames']}")
         caption = self.write_caption(out, item, {"caption": item["prompt"]})
         return {"video": silent, "caption": caption, "frames": info.frames}

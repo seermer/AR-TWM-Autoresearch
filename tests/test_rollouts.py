@@ -971,7 +971,7 @@ def run_ltx(q, caller, items, **params):
     ({"frames": 120}, r"8k\+1"), ({"frames": 1}, "1 < frames"), ({"frames": 125}, r"8k\+1"),
     ({"frames": 100001}, "1 < frames"), ({"frames": "x"}, "1 < frames"),
     ({"height": 720, "width": 1280}, "resolutions"), ({"width": 960}, "resolutions"),
-    ({"variant": "pro"}, "variant")])
+    ({"height": 576.0}, "ints"), ({"width": True}, "ints"), ({"variant": "pro"}, "variant")])
 def test_ltx_bad_params_are_refused_at_submit(ltx_env, params, match):
     make, caller, _ = ltx_env
     q = make()
@@ -1054,24 +1054,34 @@ def test_ltx_worker_count_follows_host_ram(ltx_env, gpus, rss, cap, workers):
 
 
 def test_ltx_ram_shortfall_fails_the_job_before_any_worker(ltx_env, monkeypatch):
-    """Too little MemAvailable for workers x peak_rss_gib: the job fails with a clear message
-    instead of letting the host OOM killer pick a victim (verification-log finding)."""
+    """Not even one worker fits in MemAvailable - host_reserve_gib: the job fails with a clear
+    message instead of letting the host OOM killer pick a victim (verification-log finding)."""
     make, caller, _ = ltx_env
-    monkeypatch.setattr(rollouts, "meminfo_gib", lambda: {"MemTotal": 251.0, "MemAvailable": 50.0})
+    monkeypatch.setattr(rollouts, "meminfo_gib", lambda: {"MemTotal": 251.0, "MemAvailable": 90.0})
     q = make(variants={"distilled": {"enabled": True, "peak_rss_gib": 40}, "dev": {"enabled": False}})
     job_id = q.backends["rollout_ltx25"].submit(q, caller, {"items": [{"prompt": "p", "seed": 1}]})["job_id"]
     out = q.wait(caller, job_id, 60)
     assert out["state"] == "failed"
-    assert "MemAvailable" in out["error"] and "50" in out["error"] and "160" in out["error"]
+    assert "MemAvailable 90 GiB" in out["error"] and "peak_rss_gib 40" in out["error"]
 
 
-def test_ltx_a_host_too_small_for_one_worker_fails_the_job(ltx_env, monkeypatch):
+def test_ltx_workers_shrink_to_what_mem_available_holds(ltx_env, monkeypatch):
+    """4 GPUs, but MemAvailable - reserve fits 3 workers: the job runs on 3, not refused."""
     make, caller, _ = ltx_env
-    monkeypatch.setattr(rollouts, "meminfo_gib", lambda: {"MemTotal": 64.0, "MemAvailable": 60.0})
+    monkeypatch.setattr(rollouts, "meminfo_gib", lambda: {"MemTotal": 251.0, "MemAvailable": 185.0})
     q = make(variants={"distilled": {"enabled": True, "peak_rss_gib": 40}, "dev": {"enabled": False}})
-    job_id = q.backends["rollout_ltx25"].submit(q, caller, {"items": [{"prompt": "p", "seed": 1}]})["job_id"]
-    out = q.wait(caller, job_id, 60)
-    assert out["state"] == "failed" and "host RAM" in out["error"]
+    _, by = run_ltx(q, caller, [{"prompt": "p", "seed": i} for i in range(6)])
+    assert {item["worker"]["gpus"] for item in by.values()} == {"0", "1", "4"}
+    assert all(item["worker"]["rank"] == i % 3 for i, item in by.items())
+
+
+def test_ltx_a_one_item_job_charges_one_worker(ltx_env, monkeypatch):
+    """RAM is charged only for workers that get an item: 1 item runs with room for just 1 worker."""
+    make, caller, _ = ltx_env
+    monkeypatch.setattr(rollouts, "meminfo_gib", lambda: {"MemTotal": 251.0, "MemAvailable": 105.0})
+    q = make(variants={"distilled": {"enabled": True, "peak_rss_gib": 40}, "dev": {"enabled": False}})
+    _, by = run_ltx(q, caller, [{"prompt": "p", "seed": 1}])
+    assert by[0]["worker"]["gpus"] == "0" and by[0]["worker"]["rank"] == 0
 
 
 def test_ltx_meminfo_reads_proc():
@@ -1124,6 +1134,14 @@ def test_ltx_finish_refuses_a_non_24fps_render(tmp_path):
         _ltx_backend(tmp_path).finish(_ltx_job(), {"index": 0, "prompt": "p"}, out)
 
 
+def test_ltx_finish_refuses_a_render_of_the_wrong_frame_count(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    make_mp4(out / "0.mp4", seconds=2, fps=24, width=1024, height=576)      # 48 frames, job asks 49
+    with pytest.raises(ValueError, match="48 frames, not 49"):
+        _ltx_backend(tmp_path).finish(_ltx_job(), {"index": 0, "prompt": "p"}, out)
+
+
 def test_ltx_finish_refuses_a_render_off_the_requested_size(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
@@ -1139,7 +1157,8 @@ def test_ltx_finished_candidate_passes_the_real_ingestor_as_static(tmp_path):
     out = run_dir / "staging" / "rollouts"
     out.mkdir(parents=True)
     make_mp4(out / "0.mp4", seconds=121 / 24, fps=24, width=1024, height=576)
-    res = _ltx_backend(tmp_path).finish(_ltx_job(), {"index": 0, "prompt": "A quiet forest path at dawn."}, out)
+    frames = probe_video(out / "0.mp4").frames
+    res = _ltx_backend(tmp_path).finish(_ltx_job(frames=frames), {"index": 0, "prompt": "A quiet forest path at dawn."}, out)
     ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
     [r] = ing.ingest([Candidate(video=Path(res["video"]), caption=Path(res["caption"]), pose=None,
                                 camera_motion="static", provenance={"kind": "rollout", "generator": "ltx-2.5-distilled",

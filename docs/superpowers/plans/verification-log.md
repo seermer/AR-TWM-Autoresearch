@@ -947,3 +947,11 @@ worker) = 4 on this 251 GiB host; the job fails before launching when MemAvailab
 - Content: beach at sunset with rolling waves; the I2V barn keeps the Z-Image first frame exactly
   and clouds roll in over it; the forest item moves the camera forward down the path despite
   "camera steady" in the prompt; the coffee cup stays nearly static.
+
+### Fix round 1 (review)
+
+The worker rule is now computed at job start from free memory, not MemTotal:
+`workers = min(GPUs, items, floor((MemAvailable - 60 GiB) / peak_rss_gib))`. The job shrinks to
+that and fails only below 1 (a 1-item job charges 1 worker). `timeout_s` is 10800. `finish` also
+checks the frame count. Both tool descriptions (LTX, Wan) now warn that camera instructions are
+often ignored, so a clip must not be labelled static from its prompt.
