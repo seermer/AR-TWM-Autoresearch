@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .eval.merge import free_disk_gb
 from .guards import alert, smi
+from .liveness import tree_mark
 
 
 def gpu_usage_detailed(gpus: list[int] | None = None) -> dict[int, dict] | None:
@@ -55,6 +56,8 @@ class Monitor:
         self._raised: set = set()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._last_check = 0.0
+        self._errors: set[str] = set()
 
     def _once(self, key, kind: str, message: str, **payload) -> None:
         if key not in self._raised:
@@ -75,7 +78,12 @@ class Monitor:
             node = state.get("node")
             if node and state.get("phase") not in (None, "idle"):
                 events = self.recorder.events_path(node)
-                last = max(state.get("since", 0), events.stat().st_mtime if events.exists() else 0)
+                # Progress is new events, a growing training log or new eval output: a normal
+                # multi-hour training writes no events but does write its log.
+                node_dir = self.run_dir / "nodes" / node
+                train_log = node_dir / "attempts" / f"improve_recipe-{state.get('attempt')}" / "train" / "train.log"
+                last = max(state.get("since", 0), events.stat().st_mtime if events.exists() else 0,
+                           tree_mark(train_log, node_dir / "eval")[2] / 1e9)
                 if now - last > 60 * float(self.cfg.get("alerts.stall_min")):
                     self._once(("stall", node, state.get("phase"), state.get("attempt")), "stall",
                                f"no events from {node} {state.get('phase')} for "
@@ -97,19 +105,27 @@ class Monitor:
                 self._once(("outside", gpu, tuple(ours)), "gpu_outside_list",
                            f"kernel process(es) {ours} run on GPU {gpu}, outside the list {self.gpus}")
 
+    def _guarded(self, step) -> None:
+        try:
+            step()
+        except Exception as exc:                               # noqa: BLE001 -- never kill the run
+            if repr(exc) not in self._errors:                  # the same failure every 5 s is logged once
+                self._errors.add(repr(exc))
+                self.recorder.event("monitor.error", payload={"error": repr(exc)})
+
+    def poll(self) -> None:
+        """One monitor step. A failing GPU sample never suppresses the checks (e.g. disk_low)."""
+        self._guarded(self.tick)
+        if time.monotonic() - self._last_check >= 60:
+            self._last_check = time.monotonic()
+            self._guarded(self.check)
+
     def start(self) -> None:
         sample_s = float(self.cfg.get("telemetry.gpu_sample_sec"))
 
         def loop():
-            last_check = 0.0
             while not self._stop.wait(sample_s):
-                try:
-                    self.tick()
-                    if time.monotonic() - last_check >= 60:
-                        last_check = time.monotonic()
-                        self.check()
-                except Exception as exc:                       # noqa: BLE001 -- never kill the run
-                    self.recorder.event("monitor.error", payload={"error": repr(exc)})
+                self.poll()
 
         self._thread = threading.Thread(target=loop, daemon=True, name="ar-monitor")
         self._thread.start()

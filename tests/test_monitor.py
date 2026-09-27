@@ -1,4 +1,6 @@
+import copy
 import os
+import time
 
 from ar_kernel.budget import Budget
 from ar_kernel.config import KernelConfig
@@ -47,3 +49,48 @@ def test_gpu_outside_the_list_alert(tmp_path):
                                         "pids": [os.getpid()]}})
     m.check()
     assert "gpu_outside_list" in kinds(rec)
+
+
+def _state(run, phase="train", attempt=1):
+    (run / "control").mkdir(exist_ok=True)
+    (run / "control" / "state.json").write_text(
+        f'{{"node": "n1", "phase": "{phase}", "attempt": {attempt}, "since": 0}}')
+
+
+def test_a_growing_train_log_is_progress_not_a_stall(tmp_path):
+    rec = Recorder(tmp_path)
+    _state(tmp_path)
+    log = tmp_path / "nodes" / "n1" / "attempts" / "improve_recipe-1" / "train" / "train.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("step 100\n")
+    now = time.time() + 3600                           # no event for an hour, but the log grew a minute ago
+    os.utime(log, (now - 60, now - 60))
+    Monitor(CFG, tmp_path, rec, [0], Budget(), usage=lambda gpus: {}, clock=lambda: now).check()
+    assert "stall" not in kinds(rec)
+
+
+def test_eval_work_is_progress_not_a_stall(tmp_path):
+    rec = Recorder(tmp_path)
+    _state(tmp_path, phase="eval", attempt=0)
+    out = tmp_path / "nodes" / "n1" / "eval" / "renders" / "case1.mp4"
+    out.parent.mkdir(parents=True)
+    out.write_bytes(b"x")
+    now = time.time() + 3600
+    os.utime(out, (now - 60, now - 60))
+    Monitor(CFG, tmp_path, rec, [0], Budget(), usage=lambda gpus: {}, clock=lambda: now).check()
+    assert "stall" not in kinds(rec)
+
+
+def test_a_failing_gpu_sample_does_not_stop_the_checks_and_is_logged_once(tmp_path):
+    raw = copy.deepcopy(CFG.raw)
+    raw["disk"]["alert_below_gb"] = 10 ** 9
+    cfg = type(CFG)(raw=raw, repo_root=CFG.repo_root)
+    rec = Recorder(tmp_path)
+
+    def broken(gpus):
+        raise RuntimeError("nvidia-smi hung")
+    m = Monitor(cfg, tmp_path, rec, [0], Budget(), usage=broken)
+    m.poll()
+    m.poll()
+    assert "disk_low" in kinds(rec)
+    assert len([e for e in rec.read_events() if e["type"] == "monitor.error"]) == 1
