@@ -117,6 +117,15 @@ def _run(cfg, args) -> int:
                 return 2
         check_visible(resolve_gpus(cfg, os.environ))          # the live config is what the run will freeze
     ctx = attach_run(cfg, args.run_id, os.environ) if args.resume else bootstrap_run(cfg, args.run_id, os.environ)
+    if args.resume:
+        try:
+            status = NodeStore(ctx.conn).get("root")["status"]
+        except KeyError:
+            status = "missing"
+        if status != "scored":                              # the run holds no information; files are kept
+            print(f"error: run {args.run_id!r} cannot be resumed: its root was never scored (root: {status}). "
+                  "Start a new run; this one is kept as is.", file=sys.stderr)
+            return 2
     control = Control(ctx.run_dir)
     try:
         control.claim()        # before touching any run file: a second resume must not clean up a live loop

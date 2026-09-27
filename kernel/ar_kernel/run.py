@@ -144,12 +144,6 @@ def score_node(cfg: KernelConfig, ctx: RunContext, node_id: str, checkpoint: Pat
     videos_dir = work_dir / model / "videos"
     merged = None
 
-    # WorldModel/WBench skip existing outputs, so a re-score after a kill (e.g. a
-    # re-render on `ar run --resume`) must start from empty rollout/work dirs, not
-    # reuse a previous attempt's partial ones.
-    shutil.rmtree(node_dir / "eval" / "rollout", ignore_errors=True)
-    shutil.rmtree(work_dir / model, ignore_errors=True)
-
     def cleanup() -> None:
         removed = cleanup_eval(work_dir, model)
         slot = ctx.run_dir / "merge_slot"

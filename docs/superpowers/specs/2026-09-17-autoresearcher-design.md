@@ -979,6 +979,11 @@ one that never throws away partial training/eval artifacts a person might want t
 - `ar run --resume` also removes the run-level `merge_slot` *(2026-09-27, Plan 4 as built)*:
   regenerable merged weights (~52 GB, spec 15), not node data, so "an `interrupted` node's
   files are never deleted" still holds.
+- **A run whose root was never scored cannot be resumed** *(2026-09-27, user decision)*: a
+  root scoring failure marks the root `eval_failed`, writes a `root_failed` alert and ends the
+  run; a run stopped or killed before its root was scored leaves the root `running`. Either
+  way `ar run --resume` refuses the run before touching it (such a run holds no information)
+  and every file is kept for debugging. Start a new run instead.
 - Atomicity: blob writes are temp+rename; every DB state change is one transaction.
 
 ### 14.4 Stop controls

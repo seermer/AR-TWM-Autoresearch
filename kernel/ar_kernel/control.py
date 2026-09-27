@@ -100,8 +100,8 @@ def mark_interrupted(ctx, reason: str) -> list[str]:
     """On resume: every non-root node still `running` was cut off (forced stop, kernel death or a
     spent budget). It is never resumed and never cleaned up (user decision 2026-09-27): its status
     becomes `interrupted`, its files and archive rows stay, and only containers a killed kernel left
-    running are removed. A fresh cycle then starts. A root left `running` is not marked:
-    ensure_root scores it again."""
+    running are removed. A fresh cycle then starts. The root is never marked: a run whose root
+    was never scored is refused before this (cli)."""
     nodes = NodeStore(ctx.conn)
     state_file = Path(ctx.run_dir) / "control" / "state.json"
     state = json.loads(state_file.read_text()) if state_file.exists() else {}

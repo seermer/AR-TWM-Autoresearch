@@ -137,22 +137,25 @@ class Loop:
                 return str(exc)
 
     def ensure_root(self) -> None:
+        """Create and score the root of a new run. A run whose root never got a score is not
+        resumable (cli refuses it), so a resumed run always finds a scored root here."""
         try:
-            root = self.nodes.get("root")
+            if self.nodes.get("root")["status"] == "scored":
+                return
         except KeyError:
-            self.nodes.create("root", None, 0)
-            root = self.nodes.get("root")
-        if not root["agent_commit"]:            # also after a kill between create and set_fields
-            commit = self.repo.resolve(self.repo.branch_ref("root")) or \
-                self.repo.init(self.cfg.repo_root / "seed_agent")
-            self.nodes.set_fields("root", agent_commit=commit)
-        if root["status"] == "scored":
-            return
+            pass
+        self.nodes.create("root", None, 0)
+        commit = self.repo.resolve(self.repo.branch_ref("root")) or \
+            self.repo.init(self.cfg.repo_root / "seed_agent")
+        self.nodes.set_fields("root", agent_commit=commit)
         self._state("root", "eval")
         try:
             score, detail = self.phases.score(self, "root", None, None)
-        except Exception as exc:                # ends the run; root stays running
-            alert(self.ctx.recorder, "root_failed", f"{type(exc).__name__}: {exc}", node_id="root")
+        except Exception as exc:                # ends the run; the run cannot be resumed
+            error = f"{type(exc).__name__}: {exc}"
+            self.nodes.set_status("root", "eval_failed")
+            self.nodes.set_fields("root", error=error)
+            alert(self.ctx.recorder, "root_failed", error, node_id="root")
             raise
         self._record_score("root", score, detail)
 

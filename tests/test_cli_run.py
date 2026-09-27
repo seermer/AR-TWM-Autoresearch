@@ -5,6 +5,8 @@ import pytest
 import yaml
 
 from ar_kernel import cli
+from ar_kernel.archive.db import open_db
+from ar_kernel.archive.nodes import NodeStore
 from ar_kernel.config import GpuPolicyError
 from ar_kernel.control import Control
 
@@ -33,7 +35,7 @@ def test_a_new_run_without_max_nodes_creates_nothing(tmp_path, monkeypatch, caps
     assert "--max-nodes" in capsys.readouterr().err and not (tmp_path / "r2").exists()
 
 
-def _existing_run(tmp_path, monkeypatch, gpus_default="0,1,2,3"):
+def _existing_run(tmp_path, monkeypatch, gpus_default="0,1,2,3", root="scored"):
     monkeypatch.setattr(cli.KernelConfig, "runs_dir", property(lambda self: tmp_path))
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     run = tmp_path / "r1"
@@ -43,6 +45,13 @@ def _existing_run(tmp_path, monkeypatch, gpus_default="0,1,2,3"):
     raw["gpus"]["default"] = gpus_default
     (run / "config" / "kernel.yaml").write_text(yaml.safe_dump(raw))
     Control(run).save_args(max_nodes=1)
+    if root is not None:
+        nodes = NodeStore(open_db(run))
+        nodes.create("root", None, 0)
+        if root == "scored":
+            nodes.record_score("root", 0.78, ["m"], {"m": 0.78})
+        elif root != "running":
+            nodes.set_status("root", root)
     return run
 
 
@@ -106,3 +115,14 @@ def test_stop_without_a_running_loop_says_so(tmp_path, monkeypatch, capsys):
     (tmp_path / "r1" / "config" / "run.json").write_text("{}")
     assert cli.main(["stop", "--run-id", "r1"]) == 0
     assert "no loop is running" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("root", ["running", "eval_failed", None])
+def test_resume_refuses_a_run_whose_root_was_never_scored(tmp_path, monkeypatch, capsys, root):
+    run = _existing_run(tmp_path, monkeypatch, root=root)
+    (run / "nodes" / "root").mkdir(parents=True)
+    (run / "nodes" / "root" / "debug.txt").write_text("kept")
+    assert cli.main(["run", "--run-id", "r1", "--resume"]) == 2
+    assert "cannot be resumed" in capsys.readouterr().err
+    assert Control(run).alive_pid() is None                        # refused before claiming the run
+    assert (run / "nodes" / "root" / "debug.txt").read_text() == "kept"   # nothing cleaned up
