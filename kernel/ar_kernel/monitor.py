@@ -1,0 +1,120 @@
+"""Run monitoring (spec 13.3 GPU samples, 13.4 alerts). Alerts never stop anything."""
+from __future__ import annotations
+
+import json
+import os
+import threading
+import time
+from pathlib import Path
+
+from .eval.merge import free_disk_gb
+from .guards import alert, smi
+
+
+def gpu_usage_detailed(gpus: list[int] | None = None) -> dict[int, dict] | None:
+    table = smi(["--query-gpu=index,uuid,utilization.gpu,memory.used,power.draw,temperature.gpu",
+                  "--format=csv,noheader,nounits"])
+    apps = smi(["--query-compute-apps=pid,gpu_uuid", "--format=csv,noheader"])
+    if table is None or apps is None:
+        return None
+    out, by_uuid = {}, {}
+    for line in table.splitlines():
+        if not line.strip():
+            continue
+        index, uuid, util, mem, power, temp = (s.strip() for s in line.split(","))
+        by_uuid[uuid] = int(index)
+        num = lambda v: float(v) if v.replace(".", "", 1).isdigit() else None   # "[N/A]" -> None
+        out[int(index)] = {"util": num(util), "memory_mib": num(mem), "power_w": num(power),
+                           "temp_c": num(temp), "pids": []}
+    for line in apps.splitlines():
+        if line.strip():
+            pid, uuid = (s.strip() for s in line.split(","))
+            if uuid in by_uuid:
+                out[by_uuid[uuid]]["pids"].append(int(pid))
+    return out if gpus is None else {g: v for g, v in out.items() if g in gpus}
+
+
+def _descends_from(pid: int, ancestor: int) -> bool:
+    for _ in range(64):
+        if pid == ancestor:
+            return True
+        if pid <= 1:
+            return False
+        try:
+            pid = int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            return False
+    return False
+
+
+class Monitor:
+    def __init__(self, cfg, run_dir: Path, recorder, gpus: list[int], budget, *,
+                 usage=gpu_usage_detailed, clock=time.time) -> None:
+        self.cfg, self.run_dir, self.recorder, self.gpus, self.budget = cfg, Path(run_dir), recorder, list(gpus), budget
+        self.usage, self.clock = usage, clock
+        self._raised: set = set()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _once(self, key, kind: str, message: str, **payload) -> None:
+        if key not in self._raised:
+            self._raised.add(key)
+            alert(self.recorder, kind, message, **payload)
+
+    def tick(self) -> None:
+        usage = self.usage(None)
+        if usage is not None:
+            self.recorder.event("gpu.sample", node="gpu",
+                                gpus={str(g): {k: v for k, v in u.items() if k != "pids"} for g, u in usage.items()})
+
+    def check(self) -> None:
+        now = self.clock()
+        state_file = self.run_dir / "control" / "state.json"
+        if state_file.exists():
+            state = json.loads(state_file.read_text())
+            node = state.get("node")
+            if node and state.get("phase") not in (None, "idle"):
+                events = self.recorder.events_path(node)
+                last = max(state.get("since", 0), events.stat().st_mtime if events.exists() else 0)
+                if now - last > 60 * float(self.cfg.get("alerts.stall_min")):
+                    self._once(("stall", node, state.get("phase"), state.get("attempt")), "stall",
+                               f"no events from {node} {state.get('phase')} for "
+                               f"{(now - last) / 60:.0f} min", level="warning")
+        free = free_disk_gb(self.run_dir)
+        if free < float(self.cfg.get("disk.alert_below_gb")):
+            self._once(("disk", int(now // 3600)), "disk_low", f"{free:.0f} GB free under {self.run_dir}")
+        rate, calls = self.budget.error_rate(60 * float(self.cfg.get("alerts.gateway_error_window_min")))
+        if calls >= 5 and rate > float(self.cfg.get("alerts.gateway_error_rate")):
+            self._once(("gateway", int(now // 300)), "gateway_errors",
+                       f"{rate:.0%} of the last {calls} LLM calls failed")
+        usage = self.usage(None) or {}
+        me = os.getpid()
+        for gpu, u in usage.items():
+            if gpu in self.gpus:
+                continue
+            ours = [p for p in u["pids"] if _descends_from(p, me)]
+            if ours:
+                self._once(("outside", gpu, tuple(ours)), "gpu_outside_list",
+                           f"kernel process(es) {ours} run on GPU {gpu}, outside the list {self.gpus}")
+
+    def start(self) -> None:
+        sample_s = float(self.cfg.get("telemetry.gpu_sample_sec"))
+
+        def loop():
+            last_check = 0.0
+            while not self._stop.wait(sample_s):
+                try:
+                    self.tick()
+                    if time.monotonic() - last_check >= 60:
+                        last_check = time.monotonic()
+                        self.check()
+                except Exception as exc:                       # noqa: BLE001 -- never kill the run
+                    self.recorder.event("monitor.error", payload={"error": repr(exc)})
+
+        self._thread = threading.Thread(target=loop, daemon=True, name="ar-monitor")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=30)

@@ -8,8 +8,10 @@ from .control import Control, drive, kill_recorded_groups, mark_interrupted
 from .doctor import report, run_checks
 from .guards import check_visible
 from .loop import Loop
+from .monitor import Monitor
 from .run import RunNotFound, attach_run, bootstrap_run, score_node
 from .run_kit import build_run_kit
+from .status import format_status, run_status
 from .subproc import cache_env
 from .vcs.agents_repo import AgentsRepo
 
@@ -21,6 +23,7 @@ def main(argv: list[str] | None = None) -> int:
     init.add_argument("--run-id", default=None)
     status = sub.add_parser("status", help="show nodes of a run")
     status.add_argument("--run-id", required=True)
+    status.add_argument("--json", action="store_true", help="print the raw JSON snapshot")
     score = sub.add_parser("score-node", help="render and score one node on the proxy")
     score.add_argument("--run-id", required=True)
     score.add_argument("--node", required=True)
@@ -77,8 +80,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     nodes = NodeStore(ctx.conn)
     if args.command == "status":
-        for node in nodes.all():
-            print(f"{node['node_id']:<12} {node['status']:<14} score={node['score']}")
+        d = run_status(ctx.run_dir)
+        print(json.dumps(d, indent=1) if args.json else format_status(d))
         return 0
 
     if args.command == "score-node":
@@ -129,7 +132,8 @@ def _run(cfg, args) -> int:
     mark_interrupted(ctx, "unfinished when the loop stopped (forced stop, kernel death or spent budget)")
     kit = build_run_kit(run_cfg, ctx.run_dir, ctx.gpus, ctx.recorder, os.environ)
     loop = Loop(run_cfg, ctx, kit, repo, max_nodes=max_nodes)
-    reason = drive(loop, kit, control, ctx.recorder)
+    monitor = Monitor(run_cfg, ctx.run_dir, ctx.recorder, ctx.gpus, kit.budget)
+    reason = drive(loop, kit, control, ctx.recorder, monitor)
     print(f"loop stopped: {reason}")
     return 0
 

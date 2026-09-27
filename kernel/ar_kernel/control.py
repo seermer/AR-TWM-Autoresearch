@@ -122,7 +122,7 @@ def mark_interrupted(ctx, reason: str) -> list[str]:
     return marked
 
 
-def drive(loop, kit, control: Control, recorder) -> str:
+def drive(loop, kit, control: Control, recorder, monitor=None) -> str:
     """Run `loop` with stop handling. Returns the exit reason."""
     control.claim()
     os.environ["AR_PGID_DIR"] = str(control.dir / "pgids")     # run_in_env records every group here
@@ -159,6 +159,8 @@ def drive(loop, kit, control: Control, recorder) -> str:
     reason = "unknown"
     try:
         kit.start()
+        if monitor is not None:
+            monitor.start()
         reason = loop.run()
     except ForceStop as exc:
         reason = f"force stop ({exc})"
@@ -170,11 +172,15 @@ def drive(loop, kit, control: Control, recorder) -> str:
         state["forced"] = True                  # a signal from here on only logs
         done.set()
         try:
-            kit.stop()
+            if monitor is not None:
+                monitor.stop()
         finally:
-            kill_recorded_groups(control)       # e.g. a job whose kill outlived JobQueue.shutdown's join
-            for s, h in old.items():
-                signal.signal(s, h)
-            control.release()
-            recorder.event("run.stopped", payload={"reason": reason})
+            try:
+                kit.stop()
+            finally:
+                kill_recorded_groups(control)   # e.g. a job whose kill outlived JobQueue.shutdown's join
+                for s, h in old.items():
+                    signal.signal(s, h)
+                control.release()
+                recorder.event("run.stopped", payload={"reason": reason})
     return reason
