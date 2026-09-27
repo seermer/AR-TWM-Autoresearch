@@ -219,6 +219,30 @@ def test_job_waiting_for_the_gpu_lock_stays_queued_and_its_gpu_seconds_exclude_t
     assert done["finished"] - done["started"] < 0.3      # what job.finished records as gpu_seconds
 
 
+def test_active_for_token_counts_queued_and_running_jobs(env):
+    q, a, b, _ = env
+    gate = threading.Event()
+
+    class BlockingBackend:
+        name, tool = "blocking", "rollout_blocking"
+
+        def run(self, job, cancel, report):
+            gate.wait(30)
+            return {}
+
+    q.register(BlockingBackend())
+    assert q.active_for_token(a.token) == 0
+    job_id = q.submit(a, "blocking", {})
+    deadline = time.monotonic() + 5
+    while q.status(a, job_id)["state"] != "running" and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert q.active_for_token(a.token) == 1
+    assert q.active_for_token(b.token) == 0
+    gate.set()
+    assert q.wait(a, job_id, 30)["state"] == "done"
+    assert q.active_for_token(a.token) == 0
+
+
 def test_job_cancelled_while_waiting_for_the_gpu_lock_never_reaches_the_backend(env):
     q, a, _, _ = env
     calls = []

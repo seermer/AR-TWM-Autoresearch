@@ -12,6 +12,7 @@ import time
 import pytest
 
 from ar_kernel.config import REPO_ROOT
+from ar_kernel.liveness import Liveness, tree_mark
 from ar_kernel.subproc import SubprocTimeout, conda_command, run_in_env
 from ar_kernel.telemetry.recorder import Recorder
 
@@ -85,3 +86,23 @@ def test_log_path_streams_output_to_disk(tmp_path):
     text = log.read_text()
     assert "to-out" in text and "to-err" in text
     assert "to-out" in proc.stdout
+
+
+def test_a_stalled_job_is_killed_by_liveness(tmp_path):
+    rec = Recorder(tmp_path)
+    lv = Liveness(1, probe_window_s=1, extension_frac=0.25, signals=[lambda: 0])
+    started = time.monotonic()
+    with pytest.raises(SubprocTimeout):
+        run_in_env(ENV, ["python", "-c", "import time; time.sleep(120)"], cwd=tmp_path,
+                   recorder=rec, liveness=lv, poll_s=0.2)
+    assert time.monotonic() - started < 30
+    err = [e for e in rec.read_events() if e["type"] == "subproc.error"][-1]
+    assert "no sign of progress" in rec.load_payload(err["payload"])["message"]
+
+
+def test_a_job_that_keeps_writing_is_extended(tmp_path):
+    log = tmp_path / "log.txt"
+    lv = Liveness(1, probe_window_s=1.5, extension_frac=0.5, signals=[lambda: tree_mark(log)])
+    code = "import time\nfor i in range(8):\n    print(i, flush=True); time.sleep(0.5)\n"
+    proc = run_in_env(ENV, ["python", "-c", code], cwd=tmp_path, liveness=lv, poll_s=0.2, log_path=log)
+    assert proc.returncode == 0 and lv.extensions >= 1

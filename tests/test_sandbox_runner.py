@@ -4,10 +4,12 @@ import shutil
 import socket
 import subprocess
 import threading
+import time
 
 import pytest
 
 from ar_kernel.config import KernelConfig
+from ar_kernel.liveness import Liveness
 from ar_kernel.sandbox.image import ensure_image
 from ar_kernel.sandbox.runner import Mounts, container_name, diff, run_container, snapshot
 from ar_kernel.telemetry.recorder import Recorder
@@ -45,11 +47,11 @@ def mounts(tmp_path):
                   contract=CFG.repo_root / "contract", sockets=dirs["sockets"])
 
 
-def _run(tmp_path, mounts, script, timeout_s=120, env=None):
+def _run(tmp_path, mounts, script, timeout_s=120, env=None, liveness=None, poll_s=5.0):
     return run_container(image=ensure_image(CFG, ""), name=container_name("t", "n1", "test", 1),
                          mounts=mounts, command=["python", "-c", script], env=env or {},
                          cpus=2, memory_gb=2, timeout_s=timeout_s, recorder=Recorder(tmp_path / "run"),
-                         node="n1", phase="test", attempt=1, stats_every_s=1)
+                         node="n1", phase="test", attempt=1, stats_every_s=1, liveness=liveness, poll_s=poll_s)
 
 
 def test_failed_launch_is_still_removed_and_only_the_recorded_argv_is_redacted(tmp_path, mounts, monkeypatch):
@@ -161,6 +163,21 @@ print(json.dumps(out))
 def test_timeout_kills_and_removes_the_container(tmp_path, mounts):
     res = _run(tmp_path, mounts, "import time; print('started', flush=True); time.sleep(600)", timeout_s=8)
     assert res.timed_out and "started" in res.stdout
+    listed = subprocess.run(["docker", "ps", "-a", "--filter", f"name={res.container}", "-q"],
+                            capture_output=True, text=True).stdout.strip()
+    assert listed == ""
+
+
+@pytest.mark.docker
+def test_liveness_ends_a_stalled_container_well_before_the_hard_cap(tmp_path, mounts):
+    """`sleep` uses no CPU, so the liveness signal (container CPU%, added inside
+    run_container) never changes; the probe window must end the container long
+    before the 600s hard cap."""
+    started = time.monotonic()
+    lv = Liveness(3, probe_window_s=3, extension_frac=0.25, signals=[lambda: 0])
+    res = _run(tmp_path, mounts, "print('go', flush=True); import time; time.sleep(600)",
+               timeout_s=600, liveness=lv, poll_s=1.0)
+    assert res.timed_out and time.monotonic() - started < 60
     listed = subprocess.run(["docker", "ps", "-a", "--filter", f"name={res.container}", "-q"],
                             capture_output=True, text=True).stdout.strip()
     assert listed == ""

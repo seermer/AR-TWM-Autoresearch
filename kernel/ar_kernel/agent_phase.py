@@ -15,6 +15,7 @@ from .archive.blobs import BlobStore
 from .archive.clips import ClipStore
 from .archive.commits import CommitStore
 from .context_bundle import build_edit_context, build_recipe_context, write_bundle
+from .liveness import Liveness, tree_mark
 from .sandbox.image import ImageBuildError, ensure_image
 from .sandbox.runner import Mounts, RunResult, container_name, diff, run_container, snapshot
 from .vcs.agents_repo import CheckoutError
@@ -129,6 +130,10 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
     try:
         env.recorder.add_redaction(caller.token)   # idempotent, regardless of who redacted it first
         soft = float(env.cfg.get(f"timeouts.{phase}_s"))
+        liveness = Liveness.from_config(env.cfg, soft, signals=[
+            lambda: tree_mark(dirs["workspace"], dirs["staging"]),          # workspace changes
+            lambda: tree_mark(env.recorder.events_path(node)),               # gateway + tool calls
+            lambda: env.queue.active_for_token(caller.token) and time.monotonic()])  # own GPU jobs
         # /workspace/staging is mounted from its own host directory, so it is snapshotted separately.
         before = {"agent": snapshot(dirs["agent"], True), "workspace": snapshot(dirs["workspace"], False),
                   "staging": snapshot(dirs["staging"], False)}
@@ -146,7 +151,8 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
                  "AR_CONTEXT_WINDOW": str(env.cfg.get("agents.context_window_tokens")),
                  "AR_COMPACT_AT": str(env.cfg.get("agents.compact_at"))},
             cpus=env.cfg.get("sandbox.cpus"), memory_gb=env.cfg.get("sandbox.memory_gb"),
-            timeout_s=4 * soft,                 # hard cap (spec 14.5); liveness is Plan 4
+            timeout_s=4 * soft,                 # hard cap (spec 14.5)
+            liveness=liveness,
             recorder=env.recorder, node=node, phase=phase, attempt=attempt)
     finally:
         try:

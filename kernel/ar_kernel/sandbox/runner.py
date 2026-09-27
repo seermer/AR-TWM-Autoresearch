@@ -127,9 +127,17 @@ def _redact_argv(args: list[str]) -> list[str]:
     return redacted
 
 
+def _cpu(sample: dict) -> float:
+    try:
+        return float(str(sample.get("CPUPerc", "0")).rstrip("%") or 0)
+    except ValueError:
+        return 0.0
+
+
 def run_container(*, image: str, name: str, mounts: Mounts, command: list[str], env: dict,
                   cpus: float, memory_gb: float, timeout_s: float, recorder, node: str, phase: str,
-                  attempt: int, stats_every_s: float = 30.0) -> RunResult:
+                  attempt: int, stats_every_s: float = 30.0, liveness=None,
+                  poll_s: float = 5.0) -> RunResult:
     (Path(mounts.workspace) / ".home").mkdir(parents=True, exist_ok=True)
     args = _docker_args(image, name, mounts, command, env, cpus, memory_gb)
     recorded_args = _redact_argv(args)
@@ -146,7 +154,7 @@ def run_container(*, image: str, name: str, mounts: Mounts, command: list[str], 
             if r.returncode == 0 and r.stdout.strip():
                 stats.append({"t": time.monotonic() - started, **json.loads(r.stdout)})
 
-    exit_code, timed_out, stdout, stderr = None, False, "", ""
+    exit_code, timed_out, stdout, stderr, reason = None, False, "", "", None
     try:
         # `docker run -d` can fail *after* it has created the container (e.g. an
         # OCI runtime error or a bad bind source): a `Created` container named
@@ -158,13 +166,28 @@ def run_container(*, image: str, name: str, mounts: Mounts, command: list[str], 
             return RunResult(None, False, "", stderr, time.monotonic() - started, [], name)
         sampler = threading.Thread(target=sample, daemon=True)
         sampler.start()
-        try:
-            waited = subprocess.run(["docker", "wait", name], capture_output=True, text=True,
-                                    timeout=timeout_s)
-            exit_code = int(waited.stdout.strip() or -1)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            subprocess.run(["docker", "kill", name], capture_output=True)
+        if liveness is not None:
+            # Container CPU is a liveness signal (spec 14.5): count samples above 1%.
+            liveness.add_signal(lambda: sum(1 for s in stats if _cpu(s) > 1.0))
+        waiter = subprocess.Popen(["docker", "wait", name], stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True)
+        hard = time.monotonic() + timeout_s
+        while True:
+            try:
+                out, _ = waiter.communicate(timeout=poll_s)
+                exit_code = int(out.strip() or -1)
+                break
+            except subprocess.TimeoutExpired:
+                if time.monotonic() >= hard:
+                    reason = f"hard cap of {timeout_s:.0f}s reached"
+                elif liveness is not None:
+                    reason = liveness.expired()
+                if reason:
+                    timed_out = True
+                    subprocess.run(["docker", "kill", name], capture_output=True)
+                    waiter.kill()
+                    waiter.communicate()
+                    break
         logs = subprocess.run(["docker", "logs", name], capture_output=True, text=True)
         stdout, stderr = logs.stdout, logs.stderr
     finally:
@@ -175,5 +198,5 @@ def run_container(*, image: str, name: str, mounts: Mounts, command: list[str], 
     result = RunResult(exit_code, timed_out, stdout, stderr, time.monotonic() - started, stats, name)
     recorder.event("sandbox.end", container=name, exit_code=exit_code, timed_out=timed_out,
                    duration_s=result.duration_s,
-                   payload={"stdout": stdout, "stderr": stderr, "stats": stats}, **base)
+                   payload={"stdout": stdout, "stderr": stderr, "stats": stats, "reason": reason}, **base)
     return result

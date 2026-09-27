@@ -53,7 +53,8 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
                timeout: int | None = None, recorder=None, node: str = "run",
                phase: str = "-", log_path: Path | None = None,
                cancel: "threading.Event | None" = None,
-               poll_s: float = 1.0) -> subprocess.CompletedProcess:
+               poll_s: float = 1.0,
+               liveness: "object | None" = None) -> subprocess.CompletedProcess:
     """Run `args` inside conda env `env`.
 
     The job runs in its own session, so a timeout kills the WHOLE process group:
@@ -106,14 +107,15 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
 
     cancelled = False
     try:
-        stdout, stderr, cancelled = _wait(proc, timeout, cancel, poll_s)
+        stdout, stderr, cancelled = _wait(proc, timeout, cancel, poll_s, liveness)
     except subprocess.TimeoutExpired:
         _kill_group(proc)
         stdout, stderr = proc.communicate()
         if sink is not None:
             sink.close()
             stdout, stderr = Path(log_path).read_text(encoding="utf-8", errors="replace"), ""
-        _error(recorder, node, phase, f"timed out after {timeout}s; process group killed",
+        message = liveness.reason if (liveness is not None and liveness.reason) else f"timed out after {timeout}s"
+        _error(recorder, node, phase, f"{message}; process group killed",
                stdout or "", stderr or "", log_path)
         raise SubprocTimeout(command, timeout, output=stdout, stderr=stderr) from None
     except BaseException:
@@ -136,15 +138,17 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
 
 
 def _wait(proc: subprocess.Popen, timeout: int | None, cancel: "threading.Event | None",
-         poll_s: float) -> tuple[str, str, bool]:
-    """Wait for `proc`, polling `cancel` when given; returns (stdout, stderr, cancelled).
+         poll_s: float, liveness=None) -> tuple[str, str, bool]:
+    """Wait for `proc`, polling `cancel` and `liveness` when given; returns
+    (stdout, stderr, cancelled).
 
-    With no `cancel`, this is exactly the prior single blocking `communicate(timeout=)`
-    call. With one, `communicate(timeout=poll_s)` is safe to retry on TimeoutExpired
-    (it does not kill the child); each retry checks `cancel` and, when a `timeout`
-    was also given, the deadline.
+    The fast path (a single blocking `communicate(timeout=)`) applies only when
+    neither `cancel` nor `liveness` is given. Otherwise `communicate(timeout=poll_s)`
+    is safe to retry on TimeoutExpired (it does not kill the child); each retry
+    checks `cancel`, then `liveness.expired()`, and, when a `timeout` was also
+    given, the hard deadline.
     """
-    if cancel is None:
+    if cancel is None and liveness is None:
         stdout, stderr = proc.communicate(timeout=timeout)
         return stdout, stderr, False
     deadline = time.monotonic() + timeout if timeout is not None else None
@@ -153,10 +157,12 @@ def _wait(proc: subprocess.Popen, timeout: int | None, cancel: "threading.Event 
             stdout, stderr = proc.communicate(timeout=poll_s)
             return stdout, stderr, False
         except subprocess.TimeoutExpired:
-            if cancel.is_set():
+            if cancel is not None and cancel.is_set():
                 _kill_group(proc)
                 stdout, stderr = proc.communicate()
                 return stdout, stderr, True
+            if liveness is not None and liveness.expired():
+                raise subprocess.TimeoutExpired(proc.args, timeout or 0)
             if deadline is not None and time.monotonic() >= deadline:
                 raise
 

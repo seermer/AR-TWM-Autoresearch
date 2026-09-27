@@ -123,6 +123,15 @@ def test_timeout_is_a_failed_attempt(env):
     assert not out.ok and out.timed_out and "timed out" in out.error
 
 
+def test_runner_gets_a_liveness_with_the_phase_soft_timeout(env):
+    make, conn, root, rec, _ = env
+    runner = FakeRunner({"ok": True, "result": {"summary": "s"}})
+    run_edit_self(make(runner), conn=conn, node="n1", parent_id="root", base_commit=root, attempt=1,
+                  max_attempts=3, retry=None, nodes_remaining=5)
+    lv = runner.calls[0]["liveness"]
+    assert lv.soft_s == float(CFG.get("timeouts.edit_self_s")) and runner.calls[0]["timeout_s"] == 4 * lv.soft_s
+
+
 def test_improve_recipe_mounts_code_read_only_and_rejects_unknown_commits(env):
     make, conn, root, _, _ = env
     runner = FakeRunner({"ok": True, "result": {"data_commit": "f" * 64, "recipe": {}, "rationale": "r"}})

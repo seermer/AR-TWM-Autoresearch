@@ -14,6 +14,7 @@ from ..agent_phase import _read_result
 from ..gateway.app import create_gateway_app
 from ..gateway.mock import MockBook
 from ..gateway.store import CallStore
+from ..liveness import Liveness, tree_mark
 from ..sandbox.image import ImageBuildError, ensure_image
 from ..sandbox.runner import Mounts, container_name, run_container
 from ..services import RunServices, socket_dir_for
@@ -189,7 +190,8 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
     if not step.ok:
         return finish(False)
 
-    def run(label: str, command: list[str], timeout_s: float, context: dict | None) -> tuple:
+    def run(label: str, command: list[str], timeout_s: float, context: dict | None,
+           with_liveness: bool = False) -> tuple:
         run_dir_l = work / label.replace(":", "_")
         ws, ctx_dir = run_dir_l / "workspace", run_dir_l / "context"
         staging = Path(run_dir) / "staging" / node / f"contract-{attempt}-{label.replace(':', '_')}"
@@ -205,6 +207,11 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
         # finish()'s contract.report event below) needs the redaction added here
         # too, or a token an agent prints to stdout/stderr would leak into it.
         recorder.add_redaction(caller.token)
+        # The two smoke runs get a liveness (spec 14.5); the import probe does not.
+        liveness = Liveness.from_config(cfg, float(cfg.get("timeouts.contract_smoke_s")),
+                                        signals=[lambda: tree_mark(ws),
+                                                 lambda: tree_mark(recorder.events_path(node))]) \
+            if with_liveness else None
         try:
             result = runner(image=report.image, name=container_name(run_id, node, "contract", attempt),
                             mounts=Mounts(agent=code, workspace=ws, staging=staging, context=ctx_dir,
@@ -213,7 +220,7 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
                             command=command, env={"AR_TOKEN": caller.token, "AR_DEFAULT_MODEL": MOCK_MODEL,
                                                   "AR_CONTEXT_WINDOW": str(cfg.get("agents.context_window_tokens")),
                                                   "AR_COMPACT_AT": str(cfg.get("agents.compact_at"))},
-                            cpus=4, memory_gb=8, timeout_s=timeout_s, recorder=recorder,
+                            cpus=4, memory_gb=8, timeout_s=timeout_s, liveness=liveness, recorder=recorder,
                             node=node, phase="contract", attempt=attempt)
         finally:
             harness.registry.revoke(caller.token)
@@ -232,7 +239,7 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
 
     for kind in ENTRY_POINTS:
         result, ws = run(f"smoke:{kind}", ["python", "-m", "ar_contract.run", kind], smoke_timeout_s,
-                         _smoke_context(kind))
+                         _smoke_context(kind), with_liveness=True)
         name = f"smoke:{kind}"
         if result.timed_out:
             report.steps.append(ContractStep(name, False, f"timed out after {smoke_timeout_s:.0f}s"))
