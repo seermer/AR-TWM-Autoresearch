@@ -42,6 +42,15 @@ def conda_command(env: str, args: list[str]) -> list[str]:
     return ["conda", "run", "--no-capture-output", "-n", env, *args]
 
 
+def proc_start_time(pid: int) -> str | None:
+    """Field 22 of /proc/<pid>/stat: with the pid it names one process, so a recycled pid
+    (after kill -9 or a reboot) is never mistaken for the process that was recorded."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return None
+
+
 class SubprocTimeout(subprocess.TimeoutExpired):
     """A phase exceeded its timeout; its whole process group has been killed.
 
@@ -77,6 +86,10 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
     SIGKILL). Callers that never pass `cancel` see exactly the prior behaviour,
     with `.cancelled` always `False`.
 
+    With `AR_PGID_DIR` set, the job's process group is recorded there as `<pgid>` (holding its
+    start time) until the wait ends, so a kernel that dies mid-job leaves a record that
+    `control.kill_recorded_groups` uses to kill the orphaned group on resume.
+
     Every exit path records an event: subproc.end (or subproc.cancelled), or
     subproc.error on timeout or launch failure, including the output captured
     so far.
@@ -104,6 +117,12 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
             sink.close()
         _error(recorder, node, phase, f"launch failed: {exc}", "", "", log_path)
         raise
+    registry = os.environ.get("AR_PGID_DIR")
+    marker = None
+    if registry:
+        marker = Path(registry) / str(proc.pid)          # start_new_session: pgid == pid
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(proc_start_time(proc.pid) or "")
 
     cancelled = False
     try:
@@ -124,6 +143,8 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
     finally:
         if sink is not None and not sink.closed:
             sink.close()
+        if marker is not None:
+            marker.unlink(missing_ok=True)
 
     if log_path is not None:
         stdout, stderr = Path(log_path).read_text(encoding="utf-8", errors="replace"), ""

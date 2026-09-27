@@ -7,6 +7,7 @@ workers held ~19 GB for 35 minutes and made the next job OOM. A timeout also
 wrote no event and dropped the output captured so far.
 """
 import os
+import threading
 import time
 
 import pytest
@@ -106,3 +107,16 @@ def test_a_job_that_keeps_writing_is_extended(tmp_path):
     code = "import time\nfor i in range(8):\n    print(i, flush=True); time.sleep(0.5)\n"
     proc = run_in_env(ENV, ["python", "-c", code], cwd=tmp_path, liveness=lv, poll_s=0.2, log_path=log)
     assert proc.returncode == 0 and lv.extensions >= 1
+
+
+def test_process_groups_are_recorded_while_running(tmp_path, monkeypatch):
+    monkeypatch.setenv("AR_PGID_DIR", str(tmp_path / "pgids"))
+    seen = []
+
+    def check():
+        seen.extend(p.name for p in (tmp_path / "pgids").iterdir())
+    t = threading.Timer(3.0, check)
+    t.start()
+    run_in_env(ENV, ["python", "-c", "import time; time.sleep(6)"], cwd=tmp_path)
+    t.join()
+    assert len(seen) == 1 and not any((tmp_path / "pgids").iterdir())
