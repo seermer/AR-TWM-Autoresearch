@@ -58,6 +58,7 @@ AR30 = {("paths", "dmd_resume"): None, ("validation", "sampling_steps"): 30,
 ROUND_FRAMES = 32           # one rollout round: 4 latents x temporal stride 8
 GRID = 25                   # per_chunk round boundaries sit at 25 + 32k frames (spec 6.2)
 FPS = 24
+FFMPEG_TIMEOUT_S = 600      # a wedged/oversize ffmpeg must fail its item, not hang the job
 
 
 def valid_action(action) -> bool:
@@ -242,7 +243,9 @@ class AlayaWorldBackend(GpuJob):
                     mask = f"masks/case_{i}_mask.png"
                     with Image.open(item["subject_mask"]) as im:
                         im.convert("L").save(data / mask)
-            except OSError as exc:
+            except Exception as exc:            # noqa: BLE001 -- a bad image/mask (e.g. PIL raising
+                # DecompressionBombError, SyntaxError or ValueError on a broken file) must be this
+                # item's error, not a job failure that orphans the others.
                 (out / f"{i}.json").write_text(json.dumps({"ok": False, "error": f"input: {exc}"}))
                 continue
             (data / "cases" / f"case_{i}.json").write_text(
@@ -320,7 +323,8 @@ class AlayaWorldBackend(GpuJob):
         if trim:
             subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(video), "-vf",
                             f"select='gte(n\\,{trim})',setpts=N/{FPS}/TB", "-r", str(FPS), "-c:v", "libx264",
-                            "-crf", "18", "-pix_fmt", "yuv420p", "-an", str(trimmed)], check=True)
+                            "-crf", "18", "-pix_fmt", "yuv420p", "-an", str(trimmed)],
+                           check=True, timeout=FFMPEG_TIMEOUT_S)
         n = probe_video(trimmed).frames
         poses = saved[trim:]
         if n != len(poses):
@@ -348,21 +352,22 @@ class Wan22Backend(GpuJob):
     generator = "wan2.2-ti2v-5b"
     config_key = "generators.wan22"      # max_items / timeout_s
     file_keys = ("image",)
-    description = (
-        "Render training clips with Wan 2.2 TI2V-5B (text-to-video, or image-to-video when an "
-        "item carries a first frame). A GPU job: returns {job_id} at once; collect with job_wait. "
-        "`frames`: 4k+1, at most the configured max (default: the configured default; one value "
-        "for the whole job). Item: {'prompt': str, 'image'?: first frame under /workspace (any "
-        "size; center-cropped and resized to 1280x704, e.g. a generate_images frame), 'seed': "
-        "int}. Each result item gives a `candidate` for data_ingest "
-        "(a 1248x704 (~16:9), 24 fps mp4 center-cropped from Wan's 1280x704, caption, provenance); it "
-        "carries no pose/camera_motion -- add one (annotate_camera then 'moving', or 'static') "
-        "before ingesting. Wan often ignores camera instructions like 'camera steady'; never label a clip 'static' from its prompt; run annotate_camera, or check the frames, first. Batch many prompts per call.")
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.block = self.cfg.get(self.config_key) or {}
         self.license = self.block.get("license", "")
+        default, maximum = self.block["frames"]
+        self.description = (
+            "Render training clips with Wan 2.2 TI2V-5B (text-to-video, or image-to-video when an "
+            "item carries a first frame). A GPU job: returns {job_id} at once; collect with job_wait. "
+            f"`frames`: 4k+1, 1 < frames <= {maximum}, default {default} (one value "
+            "for the whole job). Item: {'prompt': str, 'image'?: first frame under /workspace (any "
+            "size; center-cropped and resized to 1280x704, e.g. a generate_images frame), 'seed': "
+            "int}. Each result item gives a `candidate` for data_ingest "
+            "(a 1248x704 (~16:9), 24 fps mp4 center-cropped from Wan's 1280x704, caption, provenance); it "
+            "carries no pose/camera_motion -- add one (annotate_camera then 'moving', or 'static') "
+            "before ingesting. Wan often ignores camera instructions like 'camera steady'; never label a clip 'static' from its prompt; run annotate_camera, or check the frames, first. Batch many prompts per call.")
 
     def check_args(self, args):
         default, maximum = self.block["frames"]
@@ -405,7 +410,7 @@ class Wan22Backend(GpuJob):
         cropped = out / f"{item['index']}.cropped.mp4"
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(rendered), "-vf",
                         "crop=1248:704:16:0", "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p",
-                        "-an", str(cropped)], check=True)
+                        "-an", str(cropped)], check=True, timeout=FFMPEG_TIMEOUT_S)
         info = probe_video(cropped)
         if round(info.fps) != 24:
             raise ValueError(f"published clip is {info.fps} fps, not 24")
@@ -510,7 +515,7 @@ class Ltx25Backend(GpuJob):
         a = job.args
         silent = out / f"{item['index']}.silent.mp4"
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(out / f"{item['index']}.mp4"), "-an",
-                        "-c:v", "copy", str(silent)], check=True)
+                        "-c:v", "copy", str(silent)], check=True, timeout=FFMPEG_TIMEOUT_S)
         info = probe_video(silent)
         if (info.width, info.height) != (a["width"], a["height"]):
             raise ValueError(f"rendered clip is {info.width}x{info.height}, not {a['width']}x{a['height']}")

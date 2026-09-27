@@ -46,7 +46,7 @@ Also read:
   - Every launch goes through `run_cancellable` (process group, `subproc.*` telemetry).
   - `torchrun` jobs get a free `MASTER_PORT`.
   - After a job, GPU memory must return to its pre-job level (the captioner's release check).
-- **Python envs.** Never use system or `base` Python. Every command uses `conda run --no-capture-output -n <env>`.
+- **Python envs.** Never use system or `base` Python. Every command uses `conda run --no-capture-output -n <env>` (the generator envs below are prefix envs that don't fit `~/miniforge3`, so they run `-p .envs/<name>` instead, as built).
   - Kernel and tests: `autoresearcher`.
   - WorldModel and ViGeo: `alayaworld`.
   - Wan: `gen-wan22` (new).

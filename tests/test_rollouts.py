@@ -427,6 +427,18 @@ def test_a_case_without_video_and_a_bad_image_fail_alone(env):
     assert "candidate" in by[2]
 
 
+def test_a_non_oserror_from_pil_fails_only_its_own_item(env, monkeypatch):
+    """PIL's decompression-bomb guard raises DecompressionBombError -- a plain Exception, not an
+    OSError -- on an oversize image. produce() must catch that too and fail only that item,
+    rather than letting it escape and fail the whole job (the other items still render)."""
+    q, caller, staging, _ = env
+    Image.new("RGB", (100, 100), (1, 2, 3)).save(staging.parent / "ws" / "tiny.png")
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 20000)   # tiny.png (10k px) stays under 2x this;
+    _, by = run_job(q, caller, [first_person(image="tiny.png"), first_person(), first_person(image="tiny.png")])
+    assert "candidate" in by[0] and "candidate" in by[2]
+    assert by[1]["error"].startswith("input:") and "decompression bomb" in by[1]["error"].lower()
+
+
 def test_ar30_job_is_named_after_its_variant(env):
     q, caller, _, run_dir = env
     job, by = run_job(q, caller, [first_person(turns=[{"action": "W"}])], variant="ar30")
