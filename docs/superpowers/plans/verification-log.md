@@ -1003,3 +1003,33 @@ Branch `feat/loop`. GPUs 0-3 (another user's vLLM was on GPU 5). Run `loopcheck_
 - Ended `eval_failed`: `hpsv3_quality` 34 of 40 cases (transient CUDA OOM on two WBench workers; another ~20 GB process was on the same GPU). Reproduced 1 of 3 standalone runs; the source of the extra process was not identified. WBench's GPU phase re-runs only failed cases (verified: 6 recomputed in 40 s), so the kernel now runs the GPU phase twice (`8acdc9f`).
 
 `ar status` alert lines now carry local timestamps (`e5ccde8`).
+
+## Run panel — real check on `loopcheck_20260927` (2026-09-28)
+
+Plan `2026-09-27-run-panel.md`, Task 8. Gradio 6.28.0 in `.envs/panel`, launched with
+`.envs/panel/bin/python -m panel --run-id loopcheck_20260927` behind the `.env` login on a public
+share link.
+
+- Through the public link: `/config` and a run video are 401 without login; a wrong password is
+  refused; with login, `/config` is 200, a video byte range returns 206 with exactly the bytes asked
+  for (seeking works), and a file outside the run (`AutoResearcher/.env`) is 403.
+- The owner checked every tab in a browser. Seven findings from the first look were fixed and
+  re-checked:
+  - GPU plot empty for a stopped run (it used the clock's last 6 h);
+  - Trace "Node" and attempt filters unclear (attempt 0 is a kernel step);
+  - Files empty on load;
+  - a clip stayed open after a node switch;
+  - empty tables showed Gradio's placeholder headers `1 2 3`;
+  - the agent commit was a free-text box.
+- Added on the owner's request: the Problems view (every failure in one list, counts on the
+  Overview, tool errors marked red and open in chats). On this run it lists 42 problems:
+  - 22 kernel tool errors;
+  - 13 gate failures;
+  - 3 captioner item errors: vLLM HTTP 400, video tokens 12,600-12,720 over its encoder cache of
+    12,288; the agent re-captioned them in a second job;
+  - 2 alerts, 1 error event, 1 inferred failed `run_command`.
+- Read-only guarantee on real data: all 2,485 files under the run folder (paths, sizes, mtimes)
+  were identical before the first launch and after three browsing sessions. One earlier write
+  happened before the fix: the Task 7 local smoke launch touched `archive.db-shm` (00:06:57),
+  because a plain `mode=ro` open met the stopped run's leftover 0-byte `archive.db-wal`. The fix
+  opens such runs with `immutable=1`.
