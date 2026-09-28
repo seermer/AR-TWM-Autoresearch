@@ -321,3 +321,77 @@ def test_views_on_an_empty_run(tmp_path):
     assert views.node_detail(r, "root") is None and views.selection(r) == []
     assert views.cost(r) == {"by_phase": [], "by_role": [], "errors": []}
     assert views.code_edits(r, "root")["attempts"] == []
+
+from panel import media
+
+
+def test_training_data_and_clips(run):
+    d = media.training_data(run, "n1")
+    assert d["datasets"] == [{"dataset": "ds1", "clips": 1}] and d["commit"]["message"] == "ds1: one clip"
+    got = media.clips(run, "n1", "ds1")
+    [clip] = got["rows"]
+    assert clip["video"] == "store/blobs/video/vd1.mp4" and clip["caption"]["caption"] == "a hallway"
+    assert clip["leakage"] == {"matches": [], "near": [{"case_id": "7"}], "inferred": False}
+    assert media.training_data(run, "root")["datasets"] == []
+    assert media.clip_detail(run, "nope") is None
+
+
+def test_leakage_pairs_by_order_for_old_runs(run_dir):
+    from ar_kernel.telemetry.recorder import Recorder
+    rec = Recorder(run_dir)
+    rec.event("ingest.leakage", node="n3", phase="ingest", payload={"matches": [], "near": []})
+    rec.event("ingest.accepted", node="n3", phase="ingest", payload={"clip_id": "old1", "formats": [], "warnings": []})
+    assert media.leakage_index(views.Run(run_dir))["old1"]["inferred"] is True
+
+
+def test_ingest_calls_and_staging(run):
+    rows = media.ingest_calls(run, "n1")
+    assert [(r["outcome"], r["clip_id"]) for r in rows] == [("accepted", "clip1"), ("rejected", None)]
+    assert rows[1]["reasons"] == "aspect 4:3" and rows[1]["video"] == "/workspace/staging/work/v2.mp4"
+    assert rows[1]["host_video"] == "staging/n1/improve_recipe-1/work/v2.mp4"
+    assert media.staging_files(run, "n1") == [{"path": "staging/n1/improve_recipe-1/work/v2.mp4", "bytes": 9}]
+
+
+def test_camera_path(run):
+    path = media.camera_path(run, "store/blobs/pose/pd1.npz")
+    assert path["x"] == [0, 1, 2, 3, 4] and path["z"] == [0, 2, 4, 6, 8]
+
+
+def test_eval_view(run):
+    ev = media.eval_view(run, "n1")
+    [case] = ev["cases"]
+    assert case["case"] == "7" and case["scores"] == {"m1": 0.7, "m2": 0.8}
+    assert case["video"].endswith("videos/case_7_combined.mp4") and case["prompt_schedule"][0]["prompt"] == "a corridor"
+    assert ev["aggregates"]["metrics"]["m1"] == 0.7
+
+
+def test_eval_view_without_eval(run):
+    assert media.eval_view(run, "n2") == {"cases": [], "aggregates": None}
+
+
+def test_files_list_and_preview(run, run_dir):
+    names = [e["name"] for e in media.list_dir(run, "")]
+    assert names[:3] == ["agents.git", "config", "control"] and "archive.db" in names
+    assert media.preview(run, "config/run.json")["kind"] == "text"
+    assert media.preview(run, "store/blobs/video/vd1.mp4")["kind"] == "video"
+    npz = media.preview(run, "store/blobs/pose/pd1.npz")
+    assert npz["kind"] == "npz" and npz["arrays"] == [{"name": "cam_c2w", "shape": [5, 4, 4], "dtype": "float64"}]
+    assert media.preview(run, "archive.db")["kind"] == "binary"
+    assert media.preview(run, "nodes")["kind"] == "dir"
+    (run_dir / "big.txt").write_bytes(b"x" * 3_000_000)
+    assert "not shown" in media.preview(run, "big.txt")["text"]
+
+
+def test_preview_non_utf8_text(run, run_dir):
+    (run_dir / "latin.log").write_bytes(b"caf\xe9 ok\n")
+    got = media.preview(run, "latin.log")
+    assert got["kind"] == "text" and "caf" in got["text"]
+
+
+def test_preview_refuses_symlink_out(run, run_dir, tmp_path):
+    (tmp_path / "secret.txt").write_text("s")
+    (run_dir / "link.txt").symlink_to(tmp_path / "secret.txt")
+    with pytest.raises(ValueError):
+        media.preview(run, "link.txt")
+    with pytest.raises(ValueError):
+        media.list_dir(run, "..")
