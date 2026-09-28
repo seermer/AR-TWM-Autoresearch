@@ -15,6 +15,9 @@ import plotly.graph_objects as go
 from . import media, problems, views
 
 FOLDED = {"system", "tools", "reasoning", "tool_call", "tool_output", "context"}
+TOOL_ERROR_MARK = "⚠ Tool error"
+# Passed to launch(css=...): the tool-error mark stays red even if the chat's sanitizer drops `style`.
+CSS = ".panel-tool-error { color: #cf222e; font-weight: 600; }"
 
 
 def guarded(n: int):
@@ -90,7 +93,9 @@ def to_messages(items: list[dict]) -> list[dict]:
         elif kind == "compaction_summary":
             out.append({"role": "assistant", "content": f"**{title}**\n\n{text}"})
         elif kind == "tool_error":             # no status: Gradio 6 shows the section open
-            out.append({"role": "assistant", "content": fence(text), "metadata": {"title": title}})
+            rest = (title or "").removeprefix(TOOL_ERROR_MARK)
+            red = f'<span class="panel-tool-error" style="color:#cf222e">{TOOL_ERROR_MARK}</span>{html.escape(rest)}'
+            out.append({"role": "assistant", "content": fence(text), "metadata": {"title": red}})
         else:
             body = text if kind in ("system", "context") else fence(text)
             # status "done": Gradio 6 starts the section closed (open when status is absent)

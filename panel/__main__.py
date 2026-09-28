@@ -39,11 +39,11 @@ def main(argv: list[str] | None = None) -> int:
     # Gradio's file cache stays out of runs/ (the panel never writes there).
     os.environ.setdefault("GRADIO_TEMP_DIR", str(REPO / ".cache" / "panel"))
     os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
-    from .ui import build_app
+    from .ui import CSS, build_app
     app = build_app(run_dir)
     app.queue(default_concurrency_limit=4)
     app.launch(share=not args.no_share, server_name="127.0.0.1", server_port=args.port,
-               auth=(user, password), allowed_paths=[str(run_dir)], footer_links=["gradio", "settings"],
+               auth=(user, password), allowed_paths=[str(run_dir)], footer_links=["gradio", "settings"], css=CSS,
                inbrowser=False)
     return 0
 

@@ -218,4 +218,7 @@ def test_problems_tab_and_overview_counts(tmp_path):
 
 def test_tool_errors_stay_open_in_chats():
     msgs = ui.to_messages([{"kind": "tool_error", "title": "⚠ Tool error: x", "text": "Error: boom"}])
-    assert msgs[0]["metadata"] == {"title": "⚠ Tool error: x"}               # no status: shown open
+    title = msgs[0]["metadata"]["title"]
+    assert "status" not in msgs[0]["metadata"]                                   # no status: shown open
+    assert title.startswith('<span class="panel-tool-error" style="color:#cf222e">⚠ Tool error</span>')
+    assert title.endswith(": x") and ".panel-tool-error" in ui.CSS
