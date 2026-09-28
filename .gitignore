@@ -11,3 +11,4 @@ runs/
 third_party/
 *.swp
 .*.swp
+.gradio/
