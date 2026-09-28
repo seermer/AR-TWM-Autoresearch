@@ -48,7 +48,6 @@ def test_root_then_one_scored_child(make_loop):
     assert (run / "nodes" / "n1" / "recipe.yaml").exists() and (run / "nodes" / "n1" / "rationale.md").exists()
     assert json.loads((run / "nodes" / "n1" / "eval" / "aggregates.json").read_text())["metrics"]["m"] == 0.9
     assert nodes["root"]["subtree_value"] == pytest.approx(0.7 * 0.7 + 0.3 * (0.7 + 0.5 * 0.9) / 1.5)
-    assert not (run / "staging" / "n1").exists()
     passed = NodeStore(loop.ctx.conn).attempts("n1", "improve_recipe")[-1]["detail"]
     assert passed["checkpoint"].startswith("nodes/n1/")          # run-relative, never absolute
 
@@ -230,3 +229,15 @@ def test_root_score_failure_ends_the_run_with_the_root_eval_failed(make_loop):
     assert root["status"] == "eval_failed" and "wbench down" in root["error"]
     alerts = [e for e in loop.ctx.recorder.read_events() if e["type"] == "alert"]
     assert alerts[-1]["kind"] == "root_failed" and "wbench down" in alerts[-1]["message"]
+
+
+def test_node_end_deletes_only_raw_downloads_from_staging(make_loop):
+    run, make = make_loop
+    attempt = run / "staging" / "n1" / "improve_recipe-1"
+    for rel in ("hf/org/ds/clip.mp4", "rollouts/job1/r.mp4", "work/rejected.mp4", "annotations/job2/p.npz"):
+        (attempt / rel).parent.mkdir(parents=True, exist_ok=True)
+        (attempt / rel).write_bytes(b"x")
+    make(Script(run, score=[0.7, 0.9]), max_nodes=1).run()
+    assert not (attempt / "hf").exists()                                   # raw downloads: recorded, deleted
+    for rel in ("rollouts/job1/r.mp4", "work/rejected.mp4", "annotations/job2/p.npz"):
+        assert (attempt / rel).exists()                                    # prepared candidates are kept

@@ -304,7 +304,10 @@ class Loop:
         counts = {p: len(self.nodes.attempts(node, p)) for p in ("edit_self", "improve_recipe")}
         self.nodes.set_fields(node, error=error, attempt_counts=json.dumps(counts),
                               phase_timings=json.dumps({"total_s": time.time() - started}))
-        shutil.rmtree(Path(self.ctx.run_dir) / "staging" / node, ignore_errors=True)   # spec 15
+        # Only raw downloads go (their source and files are in the hf_download events); every
+        # candidate the agent or a GPU job prepared stays, ingested or not (spec 15).
+        for raw in (Path(self.ctx.run_dir) / "staging" / node).glob("*/hf"):
+            shutil.rmtree(raw, ignore_errors=True)
         self.ctx.recorder.event("node.end", payload={"node": node, "status": status, "error": error},
                                 child=node, status=status)
         self._state(None, "idle")

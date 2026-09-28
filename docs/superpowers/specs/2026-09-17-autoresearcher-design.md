@@ -1048,6 +1048,10 @@ list.)*
   are never deleted, §14.1). *(2026-09-27, Plan 4 as built: in this WorldModel,
   `trainer_state.pt` holds only `{step, training_mode}`, so deleting it frees almost no
   disk — it is kept for the spec's own consistency, not because it is large.)*
+  *(Amended 2026-09-27, user decision: at node end only each attempt's raw downloads,
+  `staging/<node>/<phase>-<k>/hf/`, are deleted; their repo, revision and files stay in the
+  `hf_download` events. Every other staged file — converted or rejected candidates, generated
+  rollouts and images, camera annotations — is kept as part of the run's record.)*
 - Nothing outside `AutoResearcher/runs/` is deleted by the kernel.
 - No per-node data quotas.
 
