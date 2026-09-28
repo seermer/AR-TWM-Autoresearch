@@ -61,6 +61,12 @@ class Ingestor:
         """
         return not Path(path).resolve().is_relative_to((self.run_dir / "staging").resolve())
 
+    def _event(self, candidate: Candidate, kind: str, node_id: str, payload: dict) -> None:
+        """Every ingest event names its candidate by the paths the agent staged."""
+        staged = {k: str(v) if v is not None else None
+                  for k, v in (("video", candidate.video), ("caption", candidate.caption), ("pose", candidate.pose))}
+        self.recorder.event(kind, node=node_id, phase="ingest", payload={"candidate": staged, **payload})
+
     def _one(self, candidate: Candidate, node_id: str) -> IngestResult:
         reasons: list[str] = []
         if not candidate.provenance:
@@ -82,8 +88,7 @@ class Ingestor:
                     f"{label} path {path} is outside the staging directory "
                     f"{self.run_dir / 'staging'}; ingest only accepts files staged there")
         if reasons:
-            self.recorder.event("ingest.rejected", node=node_id, phase="ingest",
-                                payload={"reasons": reasons})
+            self._event(candidate, "ingest.rejected", node_id, {"reasons": reasons})
             return IngestResult(accepted=False, reasons=reasons)
 
         # Quarantine before ANY check: every check and the store then act on the
@@ -101,8 +106,7 @@ class Ingestor:
                 # A file ffprobe/decoding cannot read is the candidate's fault: record
                 # a rejection and carry on with the batch instead of crashing the node.
                 reasons = [f"could not read the candidate video: {type(exc).__name__}: {exc}"[:500]]
-                self.recorder.event("ingest.rejected", node=node_id, phase="ingest",
-                                    payload={"reasons": reasons})
+                self._event(candidate, "ingest.rejected", node_id, {"reasons": reasons})
                 result = IngestResult(accepted=False, reasons=reasons)
         finally:
             # Anything not consumed by the store goes back where the agent staged it.
@@ -121,14 +125,12 @@ class Ingestor:
                        f"frames in stored orientation, so they would train rotated. re-encode with "
                        f"the rotation applied (ffmpeg applies it when transcoding: "
                        f"ffmpeg -i in.mp4 -c:v libx264 -pix_fmt yuv420p out.mp4)"]
-            self.recorder.event("ingest.rejected", node=node_id, phase="ingest",
-                                payload={"reasons": reasons})
+            self._event(candidate, "ingest.rejected", node_id, {"reasons": reasons})
             return IngestResult(accepted=False, reasons=reasons)
         if not aspect_ok(info, self.tolerance):
             reasons = [f"display aspect ratio {info.display_aspect:.4f} (coded {info.width}x{info.height}, "
                        f"sar {info.sar:.4f}) is not within {self.tolerance:.0%} of 16:9"]
-            self.recorder.event("ingest.rejected", node=node_id, phase="ingest",
-                                payload={"reasons": reasons})
+            self._event(candidate, "ingest.rejected", node_id, {"reasons": reasons})
             return IngestResult(accepted=False, reasons=reasons)
 
         probe_root = self.run_dir / "tmp" / f"probe_{_digest(video)[:12]}"
@@ -150,18 +152,15 @@ class Ingestor:
         warnings = sorted({w for report in reports.values() for w in report["warnings"]})
         if not formats:
             reasons = sorted({e for report in reports.values() for e in report["errors"]})
-            self.recorder.event("ingest.rejected", node=node_id, phase="ingest",
-                                payload={"reasons": reasons, "reports": reports})
+            self._event(candidate, "ingest.rejected", node_id, {"reasons": reasons, "reports": reports})
             return IngestResult(accepted=False, reasons=reasons)
 
         verdict = self.leakage.check(video)
-        self.recorder.event("ingest.leakage", node=node_id, phase="ingest",
-                            payload={"matches": verdict.matches, "near": verdict.near_matches})
+        self._event(candidate, "ingest.leakage", node_id, {"matches": verdict.matches, "near": verdict.near_matches})
         if verdict.rejected:
             reasons = [f"matches WBench case {m['case_id']} "
                        f"(phash {m['phash_distance']}, ncc {m['ncc']:.3f})" for m in verdict.matches]
-            self.recorder.event("ingest.rejected", node=node_id, phase="ingest",
-                                payload={"reasons": reasons})
+            self._event(candidate, "ingest.rejected", node_id, {"reasons": reasons})
             return IngestResult(accepted=False, reasons=reasons)
 
         has_segments = bool(json.loads(caption.read_text(encoding="utf-8")).get("segments"))
@@ -185,8 +184,7 @@ class Ingestor:
             "license": candidate.license, "derived_from": candidate.derived_from,
             "ingested_by": node_id,
         })
-        self.recorder.event("ingest.accepted", node=node_id, phase="ingest",
-                            payload={"clip_id": clip_id, "formats": formats, "warnings": warnings})
+        self._event(candidate, "ingest.accepted", node_id, {"clip_id": clip_id, "formats": formats, "warnings": warnings})
         return IngestResult(accepted=True, clip_id=clip_id, formats=formats, warnings=warnings)
 
 

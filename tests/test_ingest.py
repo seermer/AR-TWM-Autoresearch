@@ -170,3 +170,17 @@ def test_clip_metadata_records_segments_and_intrinsics(tmp_path):
     meta = [ing.clips.get(r.clip_id)["metadata"] for r in results]
     assert [(m["has_segments"], m["has_intrinsics"]) for m in meta] == [
         (False, True), (True, False), (False, False)]
+
+def test_every_ingest_event_names_its_candidate(tmp_path):
+    ing = _ingestor(tmp_path)
+    good, wide = _candidate(tmp_path, "good"), _candidate(tmp_path, "wide", width=640, height=480)
+    bare = _candidate(tmp_path, "bare")
+    bare.provenance = {}
+    ing.ingest([good, wide, bare], node_id="n1")
+    events = [e for e in ing.recorder.read_events("n1") if e["type"].startswith("ingest.")]
+    named = [(e["type"], ing.recorder.load_payload(e["payload"])["candidate"]["video"]) for e in events]
+    assert ("ingest.leakage", str(good.video)) in named and ("ingest.accepted", str(good.video)) in named
+    assert ("ingest.rejected", str(wide.video)) in named and ("ingest.rejected", str(bare.video)) in named
+    assert len(named) == 4
+    first = ing.recorder.load_payload(events[0]["payload"])["candidate"]
+    assert first == {"video": str(good.video), "caption": str(good.caption), "pose": str(good.pose)}
