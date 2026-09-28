@@ -38,7 +38,7 @@ down to the raw record.
   `.envs/*`), created by `scripts/make_panel_env.sh` from a pinned `panel/requirements.txt`
   (gradio, plotly, pandas, numpy, zstandard, pyyaml). The kernel's `autoresearcher` env is not
   touched, so Gradio's dependencies cannot disturb the gateway or MCP stack.
-- Launch: `.envs/panel/bin/python -m panel --run-id <run> [--port N] [--no-share]`. Prints
+- Launch: `.envs/panel/bin/python -m panel --run-id <run> [--port N] [--no-share] [--host ADDR]` (default 127.0.0.1). Prints
   the share link. All paths resolve relative to the repo (portable across machines).
 - The panel does not import the kernel package. It reads the file formats directly (JSONL
   events, zstd JSON payloads, SQLite, git); the formats are pinned by tests (section 9).

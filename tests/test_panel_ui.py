@@ -81,6 +81,25 @@ def test_launcher_refuses_without_login(tmp_path, monkeypatch, capsys):
     assert launcher.main(["--run-id", "nope"]) == 2 and "no run" in capsys.readouterr().err
 
 
+
+def test_launcher_host_option(tmp_path, monkeypatch):
+    from panel import __main__ as launcher
+    from panel import ui as panel_ui
+    monkeypatch.setattr(launcher, "REPO", tmp_path)
+    make_run(tmp_path)
+    (tmp_path / ".env").write_text("PANEL_USER=u\nPANEL_PASSWORD=p\n")
+    launched = []
+
+    class App:
+        def queue(self, **kw): pass
+        def launch(self, **kw): launched.append(kw)
+
+    monkeypatch.setattr(panel_ui, "build_app", lambda run_dir: App())
+    assert launcher.main(["--run-id", "r1", "--no-share", "--host", "0.0.0.0"]) == 0
+    assert launched[-1]["server_name"] == "0.0.0.0" and launched[-1]["share"] is False
+    assert launcher.main(["--run-id", "r1"]) == 0
+    assert launched[-1]["server_name"] == "127.0.0.1"
+
 # ---- final review fixes ----
 
 def _by_label(app, label):

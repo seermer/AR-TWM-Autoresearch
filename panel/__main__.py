@@ -25,6 +25,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--no-share", action="store_true", help="serve locally only, no public link")
+    parser.add_argument("--host", default="127.0.0.1", help="address to bind (0.0.0.0: every interface)")
     args = parser.parse_args(argv)
     env = {**read_dotenv(REPO / ".env"), **{k: v for k, v in os.environ.items() if k.startswith("PANEL_")}}
     user, password = env.get("PANEL_USER", ""), env.get("PANEL_PASSWORD", "")
@@ -42,7 +43,7 @@ def main(argv: list[str] | None = None) -> int:
     from .ui import CSS, build_app
     app = build_app(run_dir)
     app.queue(default_concurrency_limit=4)
-    app.launch(share=not args.no_share, server_name="127.0.0.1", server_port=args.port,
+    app.launch(share=not args.no_share, server_name=args.host, server_port=args.port,
                auth=(user, password), allowed_paths=[str(run_dir)], footer_links=["gradio", "settings"], css=CSS,
                inbrowser=False)
     return 0
