@@ -1,10 +1,10 @@
 from __future__ import annotations
-import argparse, json, os, shutil, signal, sys
+import argparse, json, os, shutil, signal, sys, time, traceback
 from pathlib import Path
 
 from .archive.nodes import NodeStore
 from .config import KernelConfig, load_dotenv, resolve_gpus
-from .control import Control, drive, kill_recorded_groups, mark_interrupted
+from .control import Control, drive, exit_process, kill_recorded_groups, mark_interrupted
 from .doctor import report, run_checks
 from .guards import alert, check_visible
 from .loop import Loop
@@ -12,8 +12,11 @@ from .monitor import Monitor
 from .run import RunNotFound, attach_run, bootstrap_run, score_node
 from .run_kit import build_run_kit
 from .status import format_status, run_status
-from .subproc import cache_env
+from .subproc import cache_env, proc_running, proc_start_time
 from .vcs.agents_repo import AgentsRepo
+
+FORCE_STOP_WAIT_S = 300.0     # the kernel's force-stop cleanup kills containers and GPU job groups
+
 
 def main(argv: list[str] | None = None) -> int:
     os.environ.update(cache_env())
@@ -70,7 +73,16 @@ def main(argv: list[str] | None = None) -> int:
             if pid is None:
                 print("no loop is running for this run", file=sys.stderr)
                 return 1
+            started = proc_start_time(pid)
             os.kill(pid, signal.SIGTERM)
+            deadline = time.monotonic() + FORCE_STOP_WAIT_S   # its own cleanup: containers, GPU jobs
+            while proc_running(pid, started) and time.monotonic() < deadline:
+                time.sleep(0.5)
+            if proc_running(pid, started):
+                print(f"the loop is still running (pid {pid}) {FORCE_STOP_WAIT_S:.0f} s after SIGTERM; "
+                      f"`kill -9 {pid}` ends it now (a resume then cleans up after it)", file=sys.stderr)
+                return 1
+            print("stopped")
         else:
             control.request_stop()
             if control.alive_pid() is None:
@@ -162,15 +174,26 @@ def _run(cfg, args) -> int:
     removed_slot = slot.exists()
     if removed_slot:
         shutil.rmtree(slot)
-    if killed or removed_slot:
-        ctx.recorder.event("run.resume_cleanup", payload={"killed_groups": killed, "merge_slot": removed_slot})
+    hf_tmp = ctx.run_dir / "hf_tmp"                     # kernel-private partial downloads of a stopped kernel
+    partial = sorted(p.name for p in hf_tmp.iterdir()) if hf_tmp.is_dir() else []
+    for name in partial:
+        shutil.rmtree(hf_tmp / name, ignore_errors=True)
+    if killed or removed_slot or partial:
+        ctx.recorder.event("run.resume_cleanup", payload={"killed_groups": killed, "merge_slot": removed_slot,
+                                                          "hf_tmp": partial})
     mark_interrupted(ctx, "unfinished when the loop stopped (forced stop, kernel death or spent budget)")
     kit = build_run_kit(run_cfg, ctx.run_dir, ctx.gpus, ctx.recorder, os.environ)
     loop = Loop(run_cfg, ctx, kit, repo, max_nodes=max_nodes)
     monitor = Monitor(run_cfg, ctx.run_dir, ctx.recorder, ctx.gpus, kit.budget)
-    reason = drive(loop, kit, control, ctx.recorder, monitor)
-    print(f"loop stopped: {reason}")
-    return 0
+    try:
+        reason = drive(loop, kit, control, ctx.recorder, monitor)
+    except BaseException:                               # noqa: BLE001 -- reported, then the process ends
+        traceback.print_exc()
+        code = 1
+    else:
+        print(f"loop stopped: {reason}")
+        code = 0
+    return exit_process(code, ctx.recorder)             # never returns: stuck worker threads must not keep it alive
 
 if __name__ == "__main__":
     sys.exit(main())

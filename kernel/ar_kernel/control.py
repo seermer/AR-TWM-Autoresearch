@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import sys
 import threading
 import time
 from pathlib import Path
@@ -66,6 +67,21 @@ class Control:
     def save_args(self, **kw) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
         (self.dir / "run_args.json").write_text(json.dumps({**self.args(), **kw}))
+
+
+def exit_process(code: int, recorder) -> None:
+    """End the kernel process now. A tool call still running in a worker thread (an hf_download
+    waiting out HF rate limits, say) would otherwise keep it alive after the stop: Python's exit
+    joins those threads, and the pid file is already gone (acceptance_20260928). Every record is
+    already on disk: events are fsync'd as written and archive transactions are committed."""
+    stuck = [t.name for t in threading.enumerate()
+             if t is not threading.main_thread() and t.is_alive() and not t.daemon]
+    if stuck:
+        alert(recorder, "shutdown", f"exiting with {len(stuck)} thread(s) still running: {', '.join(stuck)}",
+              level="warning", threads=stuck)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
 
 
 def kill_recorded_groups(control: Control) -> list[int]:

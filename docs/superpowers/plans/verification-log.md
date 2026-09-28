@@ -1132,3 +1132,17 @@ The run was reset to "root scored" before this: n1/n2 records moved (not deleted
 `runs/acceptance_20260928.discarded_n1_n2/` (event files, payloads only they referenced, node and
 staging dirs, GPU job dirs, dropped run.jsonl lines, archive.db and state.json as they were, and the
 agents.git ref SHAs); their archive rows and agents.git refs were removed locally and on the run remote.
+
+## Force stop that did not end the kernel (2026-09-28)
+
+After `ar stop --force` on `acceptance_20260928`, `ar status` said "loop not running" but the kernel
+(pid 3690884) was alive 15 min later, still in an `hf_download` of 4998 files under HF rate limits
+(`Rate limited. Waiting 267.0s`), writing into `hf_tmp`. Cause: the tool ran in an
+`asyncio.to_thread` worker; `services.stop()` could not join the tool server thread and raised, so
+"loop stopped" was never printed, and Python's exit then joined the executor worker. `drive()` had
+already removed the pid file. It was killed with `kill -9` before the run was reset.
+
+Fix: `exit_process` ends the process with `os._exit` after `drive()` returns or raises, recording
+leftover threads as a `shutdown` alert (checked in a subprocess with a worker stuck in a 60 s sleep:
+exit in well under 15 s, alert names the thread); `ar stop --force` waits for the recorded (pid,
+start time) to exit, treating a zombie as exited; a resume clears `hf_tmp`.

@@ -1007,6 +1007,12 @@ container wait, because `docker wait`/`docker stats` run in their own session.)*
   containers, SIGTERM the training/WBench/rollout process groups, SIGKILL after 30 s, flush
   telemetry, exit. The node in progress becomes `interrupted` on resume (§14.3), not
   discarded.
+  *(Amended 2026-09-28, from acceptance_20260928: a tool call still running in a worker thread —
+  an `hf_download` waiting out HF rate limits — kept the kernel alive after its pid file was
+  removed. Now the kernel always ends its process with `os._exit` after cleanup, recording any
+  threads still running as a `shutdown` alert; `ar stop --force` waits (up to 300 s) until the
+  process has actually exited and otherwise says it is still running and how to kill it; a resume
+  removes partial downloads left in the kernel's `hf_tmp`.)*
 
 ### 14.5 Timeouts with liveness checks
 

@@ -4,6 +4,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -163,3 +164,27 @@ def test_a_crash_is_recorded_and_reraised(tmp_path):
     with pytest.raises(ValueError):
         drive(_FakeLoop(tmp_path, run), _Kit(), c, rec)
     assert _stopped(rec) == ["crashed: ValueError: boom"] and c.alive_pid() is None
+
+
+# ---- the process really exits (acceptance_20260928: a force stop left the kernel alive) ----
+
+def test_exit_process_ends_the_process_despite_a_stuck_worker_thread(tmp_path):
+    """A tool call ran in an asyncio.to_thread worker (hf_download under HF rate limiting). Python's
+    exit joins those workers, so after the stop the kernel lived on with its pid file gone."""
+    code = (
+        "import asyncio, sys, threading, time\n"
+        "from ar_kernel.control import exit_process\n"
+        "from ar_kernel.telemetry.recorder import Recorder\n"
+        f"rec = Recorder({str(tmp_path)!r})\n"
+        "threading.Thread(target=lambda: asyncio.run(asyncio.to_thread(time.sleep, 60)), name='tools').start()\n"
+        "time.sleep(0.5)\n"
+        "print('exiting', flush=True)\n"
+        "exit_process(3, rec)\n")
+    started = time.monotonic()
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30,
+                          cwd=str(Path(__file__).resolve().parents[1]),
+                          env={**os.environ, "PYTHONPATH": "kernel:contract:."})
+    assert proc.returncode == 3 and "exiting" in proc.stdout, proc.stderr
+    assert time.monotonic() - started < 15
+    alerts = [e for e in Recorder(tmp_path).read_events() if e["type"] == "alert"]
+    assert alerts and alerts[-1]["kind"] == "shutdown" and "tools" in alerts[-1]["message"]

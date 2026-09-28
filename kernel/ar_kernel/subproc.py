@@ -51,6 +51,16 @@ def proc_start_time(pid: int) -> str | None:
         return None
 
 
+def proc_running(pid: int, started: str | None) -> bool:
+    """The process recorded as (pid, start time) still runs: same start time, and not a zombie
+    (exited but not yet reaped by its parent)."""
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+    except (OSError, IndexError):
+        return False
+    return started is not None and fields[19] == started and fields[0] != "Z"
+
+
 class SubprocTimeout(subprocess.TimeoutExpired):
     """A phase exceeded its timeout; its whole process group has been killed.
 

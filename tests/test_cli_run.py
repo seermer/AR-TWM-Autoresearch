@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -170,3 +171,88 @@ def test_resume_refuses_when_the_runs_git_remote_is_unreachable(tmp_path, monkey
     assert cli.main(["run", "--run-id", "r1", "--resume"]) == 2
     assert "cannot reach the run's git remote" in capsys.readouterr().err
     assert Control(run).alive_pid() is None
+
+
+# ---- stop and resume around a kernel that will not exit (acceptance_20260928) ----
+
+def _patch_until_drive(monkeypatch, drive):
+    monkeypatch.setattr(cli, "check_visible", lambda gpus: None)
+    monkeypatch.setattr(cli, "build_run_kit", lambda *a, **k: SimpleNamespace(budget=None))
+    monkeypatch.setattr(cli, "Loop", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "Monitor", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "drive", drive)
+    exits = []
+
+    def exit_process(code, recorder):
+        exits.append(code)
+        raise Reached
+    monkeypatch.setattr(cli, "exit_process", exit_process)
+    return exits
+
+
+@pytest.mark.parametrize("outcome,code", [("return", 0), ("raise", 1)])
+def test_run_always_ends_the_process_after_drive(tmp_path, monkeypatch, outcome, code):
+    _existing_run(tmp_path, monkeypatch)
+
+    def drive(*a, **k):
+        if outcome == "raise":
+            raise RuntimeError("service thread(s) did not stop within the join timeout: ar-tools")
+        return "force stop (SIGTERM)"
+    exits = _patch_until_drive(monkeypatch, drive)
+    with pytest.raises(Reached):
+        cli.main(["run", "--run-id", "r1", "--resume"])
+    assert exits == [code]
+
+
+def test_resume_clears_partial_downloads_left_in_hf_tmp(tmp_path, monkeypatch):
+    from ar_kernel.telemetry.recorder import Recorder
+    run = _existing_run(tmp_path, monkeypatch)
+    (run / "hf_tmp" / "6963b829").mkdir(parents=True)
+    (run / "hf_tmp" / "6963b829" / "part.mp4").write_bytes(b"x")
+    exits = _patch_until_drive(monkeypatch, lambda *a, **k: "max_nodes reached")
+    with pytest.raises(Reached):
+        cli.main(["run", "--run-id", "r1", "--resume"])
+    assert exits == [0] and list((run / "hf_tmp").iterdir()) == []
+    cleanup = [Recorder(run).load_payload(e["payload"]) for e in Recorder(run).read_events()
+               if e["type"] == "run.resume_cleanup"]
+    assert cleanup and cleanup[-1]["hf_tmp"] == ["6963b829"]
+
+
+def _fake_loop(run, on_term):
+    """A process holding the run's pid file; on SIGTERM it `exit`s after 1 s, or `ignore`s it."""
+    import subprocess
+    import sys
+    from ar_kernel.subproc import proc_start_time
+    handler = {"exit": "lambda *a: (time.sleep(1), sys.exit(0))", "ignore": "signal.SIG_IGN"}[on_term]
+    proc = subprocess.Popen([sys.executable, "-c", "import signal, sys, time\n"
+                             f"signal.signal(signal.SIGTERM, {handler})\nprint('up', flush=True)\n"
+                             "time.sleep(60)\n"], stdout=subprocess.PIPE, text=True)
+    assert proc.stdout.readline().strip() == "up"
+    (run / "control").mkdir(parents=True, exist_ok=True)
+    (run / "control" / "loop.pid").write_text(f"{proc.pid} {proc_start_time(proc.pid)}")
+    return proc
+
+
+def test_force_stop_waits_until_the_process_has_exited(tmp_path, monkeypatch, capsys):
+    run = _existing_run(tmp_path, monkeypatch)
+    proc = _fake_loop(run, "exit")
+    try:
+        assert cli.main(["stop", "--run-id", "r1", "--force"]) == 0
+        assert proc.poll() is not None                     # gone before stop returned
+        assert "stopped" in capsys.readouterr().out
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_force_stop_says_when_the_process_outlives_the_wait(tmp_path, monkeypatch, capsys):
+    run = _existing_run(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli, "FORCE_STOP_WAIT_S", 1.0)
+    proc = _fake_loop(run, "ignore")
+    try:
+        assert cli.main(["stop", "--run-id", "r1", "--force"]) == 1
+        err = capsys.readouterr().err
+        assert f"still running (pid {proc.pid})" in err and "kill -9" in err
+    finally:
+        proc.kill()
+        proc.wait()
