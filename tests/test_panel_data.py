@@ -213,3 +213,111 @@ def test_roles_are_inferred_from_the_prompt_files():
     assert infer_role("A new role I invented.\nMore.", files) == "A new role I invented."
     assert infer_role(None, files) == "(no system prompt)"
     assert infer_role("x", {}) == "x"
+
+from panel import views
+
+
+@pytest.fixture
+def run(run_dir):
+    return views.Run(run_dir)
+
+
+def test_overview(run):
+    ov = views.overview(run)
+    assert ov["loop"]["alive"] is False and ov["loop"]["state_label"] == "last recorded"
+    assert ov["loop"]["max_nodes"] == 3
+    rows = {r["node"]: r for r in ov["nodes"]}
+    assert rows["n1"]["vs parent"] == pytest.approx(0.05) and rows["n1"]["duration_min"] == 10.0
+    assert rows["root"]["parent"] == "" and rows["n2"]["status"] == "running"
+    assert ov["spend"]["calls"] == 6 and ov["spend"]["usd"] == pytest.approx(0.006)
+    assert ov["alerts"][0]["kind"] == "stall" and [s["node"] for s in ov["scores"]] == ["root", "n1"]
+    assert len(ov["recent"]) <= 50 and ov["disk_free_gb"] > 0
+
+
+def test_gpu_series(run):
+    series = views.gpu_series(run, hours=1e6)
+    assert {s["gpu"] for s in series} == {"0", "1"} and series[0]["memory_gib"] == 2.0
+
+
+def test_trace_filters_pages_and_detail(run):
+    choices = views.trace_choices(run)
+    assert "llm.request" in choices["type"] and "n1" in choices["node"]
+    got = views.trace(run, node="n1", phase=None, attempt=None, types=["llm.request"], component=None,
+                      text=None, include_gpu=False, page=0, page_size=2)
+    assert got["total"] == 7 and got["pages"] == 4 and len(got["rows"]) == 2
+    detail = views.trace_detail(run, got["rows"][0]["seq"])
+    assert detail["event"]["type"] == "llm.request" and detail["chat"][0]["kind"] == "system"
+    resp = next(e for e in run.log.events() if e["type"] == "llm.response")
+    assert views.trace_detail(run, resp["_seq"])["chat"]
+    assert views.trace_detail(run, 10 ** 9) is None
+    all_gpu = views.trace(run, node=None, phase=None, attempt=None, types=None, component=None,
+                          text=None, include_gpu=True, page=0)
+    assert any(r["type"] == "gpu.sample" for r in all_gpu["rows"])
+
+
+def test_node_detail(run):
+    d = views.node_detail(run, "n1")
+    assert d["lineage"] == "root → n1" and d["edit"]["component"] == "prompts"
+    assert "+optimizer.lr" in d["recipe_diff"] and d["data_commit"]["datasets"] == {"ds1": 1}
+    m1 = next(r for r in d["metrics"] if r["metric"] == "m1")
+    assert (m1["node"], m1["parent"], m1["root"]) == (0.7, 0.6, 0.6)
+    assert [(a["phase"], a["attempt"], a["outcome"]) for a in d["attempts"]][0] == ("edit_self", 1, "contract_failed")
+    assert views.node_detail(run, "nope") is None
+
+
+def test_root_is_a_baseline_everywhere(run):
+    assert views.node_detail(run, "root")["baseline"] is True
+    assert views.code_edits(run, "root")["baseline"] is True
+    assert views.training_attempts(run, "root") == []
+    assert views.training(run, "root", 1)["reached_training"] is False
+
+
+def test_conversations_and_logs(run):
+    assert ("improve_recipe", 1) in views.agent_attempts(run, "n1")
+    convs = views.conversations(run, "n1", "improve_recipe", 1)
+    assert [(c["role"], c["calls"], c["compactions"]) for c in convs] == [("planner", 2, 0), ("data_builder", 5, 1)]
+    chat = views.conversation_chat(run, "n1", "improve_recipe", 1, 1)
+    assert any(i["kind"] == "compaction_request" for i in chat)
+    assert views.tool_logs(run, "n1", "improve_recipe", 1) == [
+        "nodes/n1/attempts/improve_recipe-1/workspace/tool_output/run_command-20260927-120000-0001.log"]
+
+
+def test_code_edits(run):
+    d = views.code_edits(run, "n1")
+    assert "-X = 1" in d["node_diff"] and "+X = 3" in d["node_diff"]
+    a1, a2 = d["attempts"]
+    assert a1["outcome"] == "contract_failed" and "+X = 2" in a1["diff"] and a1["contract"]["ok"] is False
+    assert a2["outcome"] == "passed" and "-X = 2" in a2["diff"] and "+X = 3" in a2["diff"]
+    [n2] = views.code_edits(run, "n2")["attempts"]
+    assert n2["commit"] is None and n2["diff"] is None and n2["contract"] is None and "check out" in n2["detail"]
+    assert "agent/entry.py" in views.agent_tree(run, d["agent_commit"])
+    assert views.agent_file(run, d["agent_commit"], "agent/entry.py") == "X = 3\n"
+
+
+def test_training(run):
+    assert views.training_attempts(run, "n1") == [1]
+    t = views.training(run, "n1", 1)
+    assert [p["step"] for p in t["loss"]] == [1, 2] and t["loss"][0]["loss"] == pytest.approx(0.347656)
+    assert [g["result"] for g in t["gates"]] == ["failed", "passed"]
+    assert t["reached_training"] and t["config"].startswith("optimizer")
+    assert {g["gpu"] for g in t["gpu"]} == {"0", "1"}
+
+
+def test_selection_and_cost(run):
+    [sel] = views.selection(run)
+    assert sel["child"] == "n1" and sel["chosen"] == "root" and sel["candidates"][0]["P"] == 1.0
+    c = views.cost(run)
+    assert {r["role (inferred)"] for r in c["by_role"]} == {"planner", "data_builder"}
+    assert sum(r["calls"] for r in c["by_phase"]) == 6 and c["errors"] == []
+
+
+def test_views_on_an_empty_run(tmp_path):
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "run.json").write_text("{}")
+    r = views.Run(tmp_path)
+    assert views.overview(r)["nodes"] == [] and views.gpu_series(r) == []
+    assert views.trace(r, node=None, phase=None, attempt=None, types=None, component=None, text=None,
+                       include_gpu=False, page=0)["rows"] == []
+    assert views.node_detail(r, "root") is None and views.selection(r) == []
+    assert views.cost(r) == {"by_phase": [], "by_role": [], "errors": []}
+    assert views.code_edits(r, "root")["attempts"] == []
