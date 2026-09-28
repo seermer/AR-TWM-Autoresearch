@@ -52,10 +52,22 @@ captioner:                       # caption_videos GPU job: a local vLLM server, 
   env: zhantaoy-vllm             # conda env with vLLM (0.29.0)
   model: Qwen/Qwen3.8-27B-FP8    # resolved by id through the HF cache (HF_HUB_OFFLINE=1: never downloads)
   tensor_parallel: null          # null = the largest power of two <= the number of node GPUs
-  max_model_len: 32768
-  gpu_memory_utilization: 0.85
-  max_tokens: 512                # per caption
-  media_io_kwargs: {video: {num_frames: 64, fps: 2}}   # at most this many frames decoded per clip
+  # The owner's launch on 4 x 24 GB, checked on 57 clips (verification log, 2026-09-28). vLLM test-runs the
+  # vision encoder at startup on min(max_num_batched_tokens / 12288, max_num_seqs) max-size videos, so
+  # 262144 / 32 ran out of memory at startup; at 0.95 the engine ran out of memory while serving.
+  max_model_len: 81920
+  gpu_memory_utilization: 0.90
+  max_num_seqs: 20               # clips are sent concurrently, up to this many at a time
+  # vLLM sizes the encoder cache as max(max_num_batched_tokens, its estimate of one video's tokens); the
+  # estimate (12288) is exceeded by clips with an odd sampled frame count (1080p, 13 frames: 14280 tokens),
+  # which vLLM rejects with HTTP 400 (verification log, 2026-09-28).
+  max_num_batched_tokens: 32768
+  reasoning_parser: qwen3        # the model reasons; its reasoning is recorded per clip, not returned
+  reasoning_effort: medium       # sent with each request (the chat template takes low / medium / xhigh)
+  mm_encoder_tp_mode: data       # each GPU runs the vision encoder on its share of the videos
+  speculative_config: null       # e.g. {method: mtp, num_speculative_tokens: 3}; off in the verified launch
+  media_io_kwargs: {video: {num_frames: 64, fps: 2}}   # vLLM's Qwen3-VL loader ignores num_frames: it samples
+                                 # 2 frames/s (4..768) and resizes frames to the model's video pixel budget
   startup_timeout_s: 1200        # model load + warm-up
   clip_timeout_s: 300
   memory_release_timeout_s: 120  # after the server stops, wait up to this long for GPU memory to free

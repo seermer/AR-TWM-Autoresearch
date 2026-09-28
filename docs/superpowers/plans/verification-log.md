@@ -1033,3 +1033,66 @@ share link.
   happened before the fix: the Task 7 local smoke launch touched `archive.db-shm` (00:06:57),
   because a plain `mode=ro` open met the stopped run's leftover 0-byte `archive.db-wal`. The fix
   opens such runs with `immutable=1`.
+
+## Captioner: clips rejected by vLLM's encoder cache, and the new launch (2026-09-28)
+
+**What happened.** In `loopcheck_20260927` n1, 3 of 50 clips failed captioning with vLLM HTTP
+400: "video item with 12720 (12600) embedding tokens exceeds the pre-allocated encoder cache size
+12288". The job still succeeded; the three were per-clip errors. The agent worked around it by
+cutting those clips to 144 frames (6 s) with ffmpeg and re-captioning them. So the ingested data
+was shaped by this limit, not by the agent's plan.
+
+**Cause**, from the vLLM 0.29.0 source in `zhantaoy-vllm`:
+- **Frame sampling:** the Qwen3-VL video loader ignores `media_io_kwargs.num_frames`. It samples
+  `duration x fps` frames (fps 2, clamped to 4..768), so our "at most 64 frames" was never in
+  effect.
+- **Token count:** the model resizes frames so frames x H x W fits its video budget of
+  25,165,824 pixels, which is 12,288 tokens. But it sizes frames with the raw frame count and pads
+  an odd count up to an even one. An odd count therefore overshoots: 1080p at 13, 15 or 17 frames
+  gives 14,280, 12,720 or 12,600 tokens; 720p at 31 frames gives 12,432. The worst case over every
+  frame count at 720p and 1080p is 14,280.
+- **Encoder cache:** vLLM sets it to max(`max_num_batched_tokens`, its estimate of 12,288), and
+  `max_num_batched_tokens` was left at vLLM's small default, so those clips were refused.
+
+GPU reproduction (GPUs 0-3, the real `CaptionBackend`, clips built to sample 13, 15, 17 and 31
+frames): with the old config the four fail with exactly the predicted counts (14,280, 12,720,
+12,600, 12,432).
+
+**New launch** (owner's settings; FP8 model, the only one cached). The captioner now runs vLLM
+with:
+- `max_model_len 81920`, `max_num_batched_tokens 32768`, `max_num_seqs 20`;
+- `--reasoning-parser qwen3`, with `reasoning_effort: medium` sent per request and no
+  `max_tokens`;
+- `--mm-encoder-tp-mode data`;
+- `gpu_memory_utilization 0.90`.
+
+Clips are sent concurrently, up to `max_num_seqs`. Each clip's reasoning is recorded in its
+`caption.clip` event; the agent gets only the caption.
+
+Checked on 57 clips: n1's 50 clips, the four overshooting clips, a 12-frame control, and 45 s
+clips at 1920x1088 and 1280x720.
+
+| Settings | Result |
+|---|---|
+| owner's first proposal (`max_model_len` / `max_num_batched_tokens` 262144, `max_num_seqs` 32 or 20, `gpu_memory_utilization` 0.94, MTP) | out of memory at startup |
+| the same with `max_model_len` 196,608 | out of memory at startup |
+| owner's launch at `gpu_memory_utilization` 0.95 | starts; the engine runs out of memory while serving |
+| owner's launch at `gpu_memory_utilization` 0.90 | works |
+
+- **Why the first proposal failed at startup:** vLLM test-runs the vision encoder at startup on
+  min(`max_num_batched_tokens` / 12,288, `max_num_seqs`) max-size videos, 20-21 here, and in
+  0.29.0 the encoder budget is always `max_num_batched_tokens`.
+- **Why 0.95 failed while serving:** allocations of 262-398 MiB failed in the language model's
+  prefill and in the data-parallel vision encoder, even with one request at a time.
+- **0.90, all 57 captioned, 0 errors:**
+  - concurrent (20): caption phase 137 s;
+  - one at a time: 333 s;
+  - load 70-72 s;
+  - peak 23.8-24.1 GB per GPU; KV cache 626k tokens;
+  - memory released afterwards.
+
+**Tests.** `test_the_encoder_cache_fits_every_clip_the_video_budget_allows`,
+`test_clips_are_captioned_concurrently_up_to_max_num_seqs`,
+`test_each_clips_reasoning_is_recorded_but_not_returned_to_the_agent` and
+`test_the_server_runs_with_reasoning_and_a_data_parallel_encoder`. A run keeps the config it was
+started with, so only new runs get this.

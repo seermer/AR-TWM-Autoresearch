@@ -1,7 +1,7 @@
 """A stand-in for `vllm serve` in the caption_videos tests (no GPU, no model).
 
 Called with the real command line minus `vllm serve`. `--fake-mode`: ok (default), exit (dies
-during startup), hang (never becomes ready), slow (every caption takes 60 s). A clip whose bytes
+during startup), hang (never becomes ready), slow (every caption takes 60 s), second (1 s each). A clip whose bytes
 start with BAD gets a 400, like a video the server cannot decode. Writes its pid to fake_vllm.pid
 and its argv to fake_vllm.argv.json in its working directory; refuses to start without
 HF_HUB_OFFLINE=1; captions name the CUDA_VISIBLE_DEVICES it was given.
@@ -54,7 +54,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         video, text = body["messages"][0]["content"]
-        assert body["chat_template_kwargs"] == {"enable_thinking": False}
+        assert body["reasoning_effort"] == "medium" and "max_tokens" not in body and "chat_template_kwargs" not in body
         path = Path(unquote(urlparse(video["video_url"]["url"]).path)).resolve()
         if allowed not in path.parents:
             return self.reply(400, {"error": {"message": f"{path} is outside the allowed media path"}})
@@ -63,9 +63,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(400, {"error": {"message": "failed to decode the video"}})
         if args.fake_mode == "slow":
             time.sleep(60)
+        if args.fake_mode == "second":        # every caption takes 1 s, requests are served in parallel
+            time.sleep(1)
         caption = (f"{text['text']} [{len(data)} bytes, tp={args.tensor_parallel_size}, "
                    f"gpus={os.environ['CUDA_VISIBLE_DEVICES']}]")
-        self.reply(200, {"choices": [{"message": {"role": "assistant", "content": caption}}]})
+        self.reply(200, {"choices": [{"message": {"role": "assistant", "content": caption,
+                                                  "reasoning_content": f"thinking about {len(data)} bytes"}}]})
 
 
 ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()

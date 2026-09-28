@@ -153,6 +153,60 @@ def test_default_tensor_parallel_is_the_largest_power_of_two_within_the_gpus(tmp
         assert cmd[cmd.index("--tensor-parallel-size") + 1] == tp
 
 
+def test_the_encoder_cache_fits_every_clip_the_video_budget_allows(tmp_path):
+    """vLLM's encoder cache is max(--max-num-batched-tokens, its own estimate of one video's tokens),
+    and its estimate (12288 for Qwen3.8's 25165824-pixel video budget) is exceeded by clips whose
+    sampled frame count is odd: a 1080p clip of 13 frames (~6.5 s at 2 fps) takes 14280 tokens.
+    Such a clip was rejected with HTTP 400 in loopcheck_20260927 n1 (verification log, 2026-09-28)."""
+    cmd = CaptionBackend(REAL, tmp_path, [0, 1, 2, 3], None, None).server_command(8000, tmp_path)
+    assert int(cmd[cmd.index("--max-num-batched-tokens") + 1]) >= 14280
+
+
+def test_the_server_takes_the_configured_batch_limits(tmp_path):
+    cmd = CaptionBackend(fake_cfg(max_num_seqs=7, max_num_batched_tokens=65536), tmp_path, [0, 1, 2, 3],
+                         None, None).server_command(8000, tmp_path)
+    assert cmd[cmd.index("--max-num-seqs") + 1] == "7"
+    assert cmd[cmd.index("--max-num-batched-tokens") + 1] == "65536"
+
+
+def test_the_server_runs_with_reasoning_and_a_data_parallel_encoder(tmp_path):
+    cmd = CaptionBackend(REAL, tmp_path, [0, 1, 2, 3], None, None).server_command(8000, tmp_path)
+    assert cmd[cmd.index("--reasoning-parser") + 1] == "qwen3"
+    assert cmd[cmd.index("--mm-encoder-tp-mode") + 1] == "data"
+    assert "--speculative-config" not in cmd                      # off in the owner's verified launch
+    assert "max_tokens" not in REAL.get("captioner")
+    mtp = {"method": "mtp", "num_speculative_tokens": 3}
+    cmd = CaptionBackend(fake_cfg(speculative_config=mtp), tmp_path, [0, 1, 2, 3], None, None).server_command(8000, tmp_path)
+    assert json.loads(cmd[cmd.index("--speculative-config") + 1]) == mtp
+
+
+def test_each_clips_reasoning_is_recorded_but_not_returned_to_the_agent(make):
+    q, caller, rec, ws, _ = make()
+    (ws / "a.mp4").write_bytes(b"x" * 10)
+    out = q.wait(caller, submit(q, caller, ["a.mp4"], "Caption.")["job_id"], 120)
+    assert out["state"] == "done" and set(out["result"]["clips"]["/workspace/a.mp4"]) == {"caption"}
+    [clip] = [e for e in rec.read_events("n1") if e["type"] == "caption.clip"]
+    assert rec.load_payload(clip["payload"])["reasoning"] == "thinking about 10 bytes"
+
+
+def test_clips_are_captioned_concurrently_up_to_max_num_seqs(make):
+    """Sequential requests left the server's batching unused (n1: 53 clips x 3.5 s)."""
+    q, caller, rec, ws, _ = make(fake_cfg(max_num_seqs=6, extra_args=["--fake-mode", "second"]))
+    names = [f"c{i}.mp4" for i in range(6)]
+    for i, n in enumerate(names):
+        (ws / n).write_bytes(b"v" * (i + 1))
+    job = submit(q, caller, names, "Caption.")["job_id"]
+    out = q.wait(caller, job, 120)
+    assert out["state"] == "done", out
+    assert list(out["result"]["clips"]) == [f"/workspace/{n}" for n in names]          # submitted order
+    assert all("caption" in v for v in out["result"]["clips"].values())
+    events = rec.read_events("n1")
+    ready = next(e["ts_wall"] for e in events if e["type"] == "caption.server_ready")
+    last = max(e["ts_wall"] for e in events if e["type"] == "caption.clip")
+    assert last - ready < 3.5                                   # 6 one-second captions, not 6 s in a row
+    assert out["progress"] == {"captioned": 6, "total": 6}
+
+
 def test_unreadable_gpu_memory_is_none_not_a_crash(monkeypatch):
     import subprocess
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(

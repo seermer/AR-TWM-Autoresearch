@@ -13,6 +13,7 @@ import stat
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -123,6 +124,11 @@ class CaptionBackend:
                 "--tensor-parallel-size", str(c.get("tensor_parallel") or 1 << (len(self.gpus).bit_length() - 1)),
                 "--max-model-len", str(c["max_model_len"]),
                 "--gpu-memory-utilization", str(c["gpu_memory_utilization"]),
+                "--max-num-seqs", str(c["max_num_seqs"]),
+                "--max-num-batched-tokens", str(c["max_num_batched_tokens"]),
+                "--reasoning-parser", c["reasoning_parser"],
+                "--mm-encoder-tp-mode", c["mm_encoder_tp_mode"],
+                *(["--speculative-config", json.dumps(c["speculative_config"])] if c.get("speculative_config") else []),
                 "--limit-mm-per-prompt", json.dumps({"image": 0, "video": 1}),
                 "--media-io-kwargs", json.dumps(c["media_io_kwargs"]),
                 "--allowed-local-media-path", str(media_dir), *c.get("extra_args", [])]
@@ -196,17 +202,29 @@ class CaptionBackend:
                     self.recorder.event("caption.server_ready", node=job.node, component="tools",
                                         job_id=job.id, load_s=load_s,
                                         payload={"gpus": self.gpus, "model": c["model"]})
-                for n, (path, file) in enumerate(clips.items()):
+                # Up to max_num_seqs requests at once, so the server batches them; each clip
+                # still gets its own event, and results keep the submitted order.
+                done_lock, captioned = threading.Lock(), [0]
+
+                def one(path: str, file: Path) -> None:
                     if cancel.is_set():
-                        break
+                        return
                     t0 = time.monotonic()
-                    results[path] = self._caption(http, base, file, job.args["prompt"], c)
+                    recorded = self._caption(http, base, file, job.args["prompt"], c)
+                    result = {k: v for k, v in recorded.items() if k != "reasoning"}   # the agent gets the caption
                     latency = time.monotonic() - t0
-                    sample()
-                    self.recorder.event("caption.clip", node=job.node, component="tools", job_id=job.id,
-                                        latency_s=latency, ok="caption" in results[path],
-                                        payload={"path": path, **results[path]})
-                    report({"captioned": n + 1, "total": len(clips)})
+                    with done_lock:
+                        results[path] = result
+                        sample()
+                        captioned[0] += 1
+                        self.recorder.event("caption.clip", node=job.node, component="tools", job_id=job.id,
+                                            latency_s=latency, ok="caption" in result,
+                                            payload={"path": path, **recorded})
+                        report({"captioned": captioned[0], "total": len(clips)})
+
+                with ThreadPoolExecutor(max_workers=max(1, min(int(c["max_num_seqs"]), len(clips)))) as pool:
+                    for f in [pool.submit(one, path, file) for path, file in clips.items()]:
+                        f.result()
             outcome = "done"
         finally:
             stop.set()
@@ -224,13 +242,14 @@ class CaptionBackend:
         if released is False:
             self.recorder.event("caption.gpu_not_released", node=job.node, component="tools",
                                 job_id=job.id, payload={"before": before, "after": after})
+        results = {p: results[p] for p in job.args["paths"] if p in results}     # the submitted order
         return {"clips": results, "load_s": load_s,
                 "gpu_memory_mib": {"before": before, "peak": peak or None, "after": after},
                 "gpu_memory_released": released}
 
     def _caption(self, http: httpx.Client, base: str, file: Path, prompt: str, c: dict) -> dict:
-        body = {"model": "captioner", "max_tokens": c["max_tokens"], "temperature": 0.0,
-                "chat_template_kwargs": {"enable_thinking": False},
+        # No max_tokens: the model reasons first, and a cap could cut the caption off.
+        body = {"model": "captioner", "temperature": 0.0, "reasoning_effort": c["reasoning_effort"],
                 "messages": [{"role": "user", "content": [
                     {"type": "video_url", "video_url": {"url": file.as_uri()}},
                     {"type": "text", "text": prompt}]}]}
@@ -241,10 +260,12 @@ class CaptionBackend:
         if r.status_code != 200:
             return {"error": f"HTTP {r.status_code}: {r.text[-2000:]}"}
         try:
-            text = r.json()["choices"][0]["message"]["content"]
+            message = r.json()["choices"][0]["message"]
+            text, reasoning = message["content"], message.get("reasoning_content") or message.get("reasoning")
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             return {"error": f"unexpected response ({type(exc).__name__}): {r.text[-2000:]}"}
-        return {"caption": text.strip()} if text and text.strip() else {"error": "empty caption"}
+        out = {"caption": text.strip()} if text and text.strip() else {"error": "empty caption"}
+        return {**out, "reasoning": reasoning} if reasoning else out
 
     def _released(self, before: dict | None, timeout_s: float) -> tuple[dict | None, bool | None]:
         return wait_gpu_release(self.gpu_memory, self.gpus, before, timeout_s)
