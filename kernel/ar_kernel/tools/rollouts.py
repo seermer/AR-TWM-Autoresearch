@@ -27,7 +27,7 @@ from PIL import Image
 
 from ..data.probe import aspect_ok, probe_video
 from ..subproc import free_port
-from .gpu_jobs import GpuJob, split_gpus
+from .gpu_jobs import GpuJob, check_item_seed, split_gpus
 from .jobs import run_cancellable
 from .server import ToolError
 
@@ -382,8 +382,7 @@ class Wan22Backend(GpuJob):
                 raise ToolError(f"item {n}: prompt must be a non-empty string")
             if item.get("image") is not None and not isinstance(item["image"], str):
                 raise ToolError(f"item {n}: image must be a file path")
-            if not isinstance(item.get("seed"), int) or isinstance(item.get("seed"), bool):
-                raise ToolError(f"item {n}: seed must be an int")
+            check_item_seed(n, item)
 
     def produce(self, job, items, work, out, cancel, report):
         repo = checked_repo(self.cfg, "generators.wan22", "Wan2.2")
@@ -480,8 +479,7 @@ class Ltx25Backend(GpuJob):
                 raise ToolError(f"item {n}: prompt must be a non-empty string")
             if item.get("image") is not None and not isinstance(item["image"], str):
                 raise ToolError(f"item {n}: image must be a file path")
-            if not isinstance(item.get("seed"), int) or isinstance(item.get("seed"), bool):
-                raise ToolError(f"item {n}: seed must be an int")
+            check_item_seed(n, item)
 
     def worker_groups(self, variant: str, n_items: int) -> list[list[int]]:
         """One GPU per worker; workers = min(GPUs (capped by the config's `workers`), items,

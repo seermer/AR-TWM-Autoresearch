@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from .gpu_jobs import GpuJob, split_gpus
+from .gpu_jobs import GpuJob, check_item_seed, split_gpus
 from .server import ToolError
 
 BRIDGE = Path(__file__).resolve().parents[1] / "bridges" / "zimage_generate.py"
@@ -40,8 +40,7 @@ class ImageBackend(GpuJob):
         for n, item in enumerate(args["items"]):
             if not item.get("prompt") or not isinstance(item["prompt"], str):
                 raise ToolError(f"item {n}: prompt must be a non-empty string")
-            if not isinstance(item.get("seed"), int) or isinstance(item.get("seed"), bool):
-                raise ToolError(f"item {n}: seed must be an int")
+            check_item_seed(n, item)
 
     def produce(self, job, items, work, out, cancel, report):
         i = self.cfg.get("images")

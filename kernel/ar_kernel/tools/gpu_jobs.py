@@ -16,15 +16,49 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Annotated, Any, Callable
 
 from mcp.server.mcpserver import Context
+from pydantic import WithJsonSchema
 
 from .captioner import clip_host_path, container_path, gpu_memory_mib, stage_clip, wait_gpu_release
 from .context import STAGING, PathError
 from .hf_tools import _move_into
 from .jobs import run_cancellable
 from .server import ToolError
+
+
+def _items(properties: dict, required: list[str]) -> WithJsonSchema:
+    """The listed JSON schema of an `items` list. Only the schema: the values still reach the tool
+    as plain dicts and each backend's check_args validates them, so a bad value is a recorded
+    tool.error rather than a failure inside the MCP layer."""
+    return WithJsonSchema({"type": "array", "items": {"type": "object", "properties": properties,
+                                                      "required": required, "additionalProperties": False}})
+
+
+_STR, _INT = {"type": "string"}, {"type": "integer"}
+ImageItems = Annotated[list[dict[str, Any]], _items({"prompt": _STR, "seed": _INT}, ["prompt", "seed"])]
+ClipItems = Annotated[list[dict[str, Any]], _items({"prompt": _STR, "image": _STR, "seed": _INT},
+                                                   ["prompt", "seed"])]
+_TURN = {"type": "object", "properties": {"action": _STR, "subject_action": _STR, "event_edit": _STR,
+                                          "perspective_switch": _STR},
+         "required": ["action"], "additionalProperties": False}
+CaseItems = Annotated[list[dict[str, Any]], _items(
+    {"image": _STR, "perspective": {"type": "string", "enum": ["first_person", "third_person"]},  # rollouts.PERSPECTIVES
+     "environment_prompt": _STR, "character_prompt": _STR, "perspective_prompt": _STR, "subject_mask": _STR,
+     "turns": {"type": "array", "items": _TURN}},
+    ["image", "perspective", "environment_prompt", "turns"])]
+
+
+def check_item_seed(n: int, item: dict) -> None:
+    """An item's `seed` must be an int; integer text ("7") is taken as that int, in place."""
+    if "seed" not in item:
+        raise ToolError(f"item {n}: seed is missing; give an int")
+    seed = item["seed"]
+    if isinstance(seed, str) and seed.strip().lstrip("+-").isdigit():
+        item["seed"] = seed = int(seed)
+    if not isinstance(seed, int) or isinstance(seed, bool):
+        raise ToolError(f"item {n}: seed must be an int: got {seed!r}")
 
 
 def canonical_hash(obj) -> str:
@@ -269,7 +303,7 @@ def register_gpu_tools(mcp, kit, q) -> None:
 
     if "rollout_alayaworld" in b:
         @mcp.tool(name="rollout_alayaworld", description=b["rollout_alayaworld"].description)
-        async def rollout_alayaworld(items: list[dict[str, Any]], ctx: Context, variant: str | None = None,
+        async def rollout_alayaworld(items: CaseItems, ctx: Context, variant: str | None = None,
                                      rounds_per_turn: int | None = None, seed: int | None = None) -> dict[str, Any]:
             params = {k: v for k, v in {"variant": variant, "rounds_per_turn": rounds_per_turn,
                                         "seed": seed}.items() if v is not None}
@@ -278,7 +312,7 @@ def register_gpu_tools(mcp, kit, q) -> None:
 
     if "generate_images" in b:
         @mcp.tool(name="generate_images", description=b["generate_images"].description)
-        async def generate_images(items: list[dict[str, Any]], ctx: Context, width: int | None = None,
+        async def generate_images(items: ImageItems, ctx: Context, width: int | None = None,
                                   height: int | None = None) -> dict[str, Any]:
             params = {k: v for k, v in {"width": width, "height": height}.items() if v is not None}
             return await kit.call(ctx, "generate_images", {"items": items, **params},
@@ -286,7 +320,7 @@ def register_gpu_tools(mcp, kit, q) -> None:
 
     if "rollout_wan22" in b:
         @mcp.tool(name="rollout_wan22", description=b["rollout_wan22"].description)
-        async def rollout_wan22(items: list[dict[str, Any]], ctx: Context,
+        async def rollout_wan22(items: ClipItems, ctx: Context,
                                 frames: int | None = None) -> dict[str, Any]:
             params = {k: v for k, v in {"frames": frames}.items() if v is not None}
             return await kit.call(ctx, "rollout_wan22", {"items": items, **params},
@@ -294,7 +328,7 @@ def register_gpu_tools(mcp, kit, q) -> None:
 
     if "rollout_ltx25" in b:
         @mcp.tool(name="rollout_ltx25", description=b["rollout_ltx25"].description)
-        async def rollout_ltx25(items: list[dict[str, Any]], ctx: Context, variant: str | None = None,
+        async def rollout_ltx25(items: ClipItems, ctx: Context, variant: str | None = None,
                                 frames: int | None = None, height: int | None = None,
                                 width: int | None = None) -> dict[str, Any]:
             params = {k: v for k, v in {"variant": variant, "frames": frames, "height": height,

@@ -261,7 +261,7 @@ class CaptionBackend:
             return {"error": f"HTTP {r.status_code}: {r.text[-2000:]}"}
         try:
             message = r.json()["choices"][0]["message"]
-            text, reasoning = message["content"], message.get("reasoning_content") or message.get("reasoning")
+            text, reasoning = message["content"], message.get("reasoning") or message.get("reasoning_content")
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             return {"error": f"unexpected response ({type(exc).__name__}): {r.text[-2000:]}"}
         out = {"caption": text.strip()} if text and text.strip() else {"error": "empty caption"}

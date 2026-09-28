@@ -161,8 +161,9 @@ def message_items(m: dict, names: dict[str, str]) -> list[dict]:
             return [item("tool_error", f"⚠ Tool error: {name}", text)]
         return [item("tool_output", f"Tool output: {name}", text)]
     out = []
-    if m.get("reasoning_content"):
-        out.append(item("reasoning", "Reasoning", text_of(m["reasoning_content"])))
+    reasoning = m.get("reasoning") or m.get("reasoning_content")     # reasoning_content: fallback only
+    if reasoning:
+        out.append(item("reasoning", "Reasoning", text_of(reasoning)))
     if text_of(m.get("content")).strip():
         out.append(item("assistant", None, text_of(m.get("content"))))
     for call in m.get("tool_calls") or []:

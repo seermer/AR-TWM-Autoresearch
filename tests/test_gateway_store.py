@@ -163,7 +163,9 @@ def test_on_revoke_wired_to_forget_via_registry(tmp_path):
     assert m1["call_id"] not in store._calls
 
 
-def test_chat_model_resent_history_links_to_a_real_style_chat_response(env):
+@pytest.mark.parametrize("reasoning", [{"reasoning": "plan", "reasoning_details": [{"type": "reasoning.text", "text": "plan"}]},
+                                       {"reasoning_content": "plan"}, {"reasoning": "", "reasoning_content": "plan"}])
+def test_chat_model_resent_history_links_to_a_real_style_chat_response(env, reasoning):
     """Task 19: the agent's ChatOpenAI (Chat Completions) resends the prior request plus the
     assistant message. Upstream messages carry fields the client never sends back (OpenAI's
     `refusal`/`annotations`, a tool-call `index`, empty content next to tool calls)
@@ -176,7 +178,7 @@ def test_chat_model_resent_history_links_to_a_real_style_chat_response(env):
     reply = {"id": "cc1", "object": "chat.completion", "created": 1, "model": "m",
              "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
                  "role": "assistant", "content": "", "refusal": None, "annotations": [],
-                 "reasoning_content": "plan", "tool_calls": [
+                 **reasoning, "tool_calls": [
                      {"index": 0, "id": "c1", "type": "function",
                       "function": {"name": "data_query", "arguments": '{"q":1,"a":"b"}'}}]}}],
              "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}}

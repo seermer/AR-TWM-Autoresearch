@@ -29,7 +29,7 @@ def chat_request(messages, tools=None):
 def chat_response(content="", reasoning=None, tool_calls=None):
     message = {"role": "assistant", "content": content}
     if reasoning:
-        message["reasoning_content"] = reasoning
+        message["reasoning"] = reasoning
     if tool_calls:
         message["tool_calls"] = tool_calls
     return {"body": {"choices": [{"index": 0, "finish_reason": "stop", "message": message}]}}
@@ -167,8 +167,8 @@ def make_run(base: Path, name: str = "r1") -> Path:
     first = {"content": "", "reasoning": "look first", "tool_calls": [tool_call("c1", "list_dir", {"path": "."})]}
     tools = [{"type": "function", "function": {"name": "list_dir", "description": "List a directory"}}]
     llm.call("p1", 0, [plan_sys, plan_user], first, tools=tools)
-    # the harness round-trips reasoning_content with the assistant message it resends
-    llm.call("p1", 1, [plan_sys, plan_user, {"role": "assistant", "content": "", "reasoning_content": "look first",
+    # the harness round-trips reasoning with the assistant message it resends
+    llm.call("p1", 1, [plan_sys, plan_user, {"role": "assistant", "content": "", "reasoning": "look first",
                                              "tool_calls": first["tool_calls"]},
                        {"role": "tool", "tool_call_id": "c1", "content": "a\nb"}], {"content": "plan done"},
              tools=tools)

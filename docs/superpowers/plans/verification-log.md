@@ -1096,3 +1096,23 @@ clips at 1920x1088 and 1280x720.
 `test_each_clips_reasoning_is_recorded_but_not_returned_to_the_agent` and
 `test_the_server_runs_with_reasoning_and_a_data_parallel_encoder`. A run keeps the config it was
 started with, so only new runs get this.
+
+## Tool item types and reasoning round-trip — from `acceptance_20260928` n1 (2026-09-28)
+
+Agent model `stealth/space-bunny-alpha` on OpenRouter. n1's improve_recipe repeated
+`item 0: seed must be an int` on generate_images, rollout_wan22 and rollout_ltx25.
+
+- Cause (ours): the tools listed `items` as untyped objects; `seed: int` was only in the description.
+  In n1's raw tool calls every value the schema typed (frames, width, height, limit, max_bytes,
+  timeout_s, AlayaWorld's top-level seed) came as an int, and every value inside an untyped item (9
+  keys, seed included) came as a string: `"1"`, then `"1.0"`, then omitted.
+- Fix: the listed schemas now type every item field (`pydantic.WithJsonSchema`; validation is still
+  each backend's `check_args`, so a bad value stays a recorded `tool.error`: checked that FastMCP
+  passes a string seed and an unknown key through untouched). Integer text (`"7"`) is taken as the
+  int; a missing seed says "seed is missing".
+- Reasoning: 32 of n1's first 95 replies carried `reasoning` (+ `reasoning_details`); nothing read it,
+  since the client, the gateway's linking and the panel looked only at `reasoning_content`. So the
+  model lost its earlier reasoning on every turn and the panel showed none. Now one rule for every
+  provider: `reasoning`, or `reasoning_content` only when `reasoning` is empty; the client resends it
+  as `reasoning`. OpenRouter reports `reasoning_tokens: 0` for this model and effort none/max/high/
+  xhigh gave similar 500-900-character reasoning, so it looks like a summary.

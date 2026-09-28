@@ -165,35 +165,51 @@ def _chat_reply(message):
             "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}}
 
 
-def test_reasoning_content_round_trips_through_the_chat_model():
-    """Some OpenAI-compatible providers return reasoning_content and require it back on every
-    earlier assistant message (Task 19); stock ChatOpenAI drops it both ways. Messages that never
-    had it are sent unchanged."""
+def test_reasoning_round_trips_through_the_chat_model():
+    """A reply's `reasoning` (OpenAI's field) is kept on the AIMessage and sent back with that
+    assistant message; stock ChatOpenAI drops it both ways. Messages that never had it are sent
+    unchanged."""
     from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
     seen = []
     model = _stub_model([
-        _chat_reply({"role": "assistant", "content": "", "reasoning_content": "think first",
+        _chat_reply({"role": "assistant", "content": "", "reasoning": "think first",
                      "tool_calls": [{"index": 0, "id": "c1", "type": "function",
                                      "function": {"name": "echo", "arguments": '{"x": 1}'}}]}),
-        _chat_reply({"role": "assistant", "content": "done", "reasoning_content": ""})], seen)
+        _chat_reply({"role": "assistant", "content": "done", "reasoning": ""})], seen)
     first = model.invoke([HumanMessage("go")])
-    assert first.additional_kwargs["reasoning_content"] == "think first"
+    assert first.additional_kwargs["reasoning"] == "think first"
     assert first.tool_calls[0]["name"] == "echo"
     plain = AIMessage("earlier reply without reasoning")
     second = model.invoke([HumanMessage("go"), plain, HumanMessage("again"), first,
                            ToolMessage("1", tool_call_id="c1")])
-    assert second.text == "done" and second.additional_kwargs["reasoning_content"] == ""
+    assert second.text == "done" and second.additional_kwargs["reasoning"] == ""
     assistants = [m for m in seen[1]["messages"] if m["role"] == "assistant"]
-    assert "reasoning_content" not in assistants[0]
-    assert assistants[1]["reasoning_content"] == "think first"
+    assert "reasoning" not in assistants[0]
+    assert assistants[1]["reasoning"] == "think first" and "reasoning_content" not in assistants[1]
     assert assistants[1]["tool_calls"][0]["id"] == "c1"
 
 
-def test_reasoning_content_is_never_invented():
+@pytest.mark.parametrize("message,expected", [
+    ({"reasoning_content": "backup"}, "backup"),                        # only the other name
+    ({"reasoning": "", "reasoning_content": "backup"}, "backup"),       # reasoning empty
+    ({"reasoning": None, "reasoning_content": "backup"}, "backup"),
+    ({"reasoning": "main", "reasoning_content": "other"}, "main"),      # reasoning wins
+])
+def test_reasoning_content_is_only_the_fallback(message, expected):
+    from langchain_core.messages import HumanMessage
+    seen = []
+    model = _stub_model([_chat_reply({"role": "assistant", "content": "hi", **message})] * 2, seen)
+    first = model.invoke([HumanMessage("go")])
+    assert first.additional_kwargs["reasoning"] == expected and "reasoning_content" not in first.additional_kwargs
+    model.invoke([HumanMessage("go"), first, HumanMessage("more")])
+    assert seen[1]["messages"][1] == {"role": "assistant", "content": "hi", "reasoning": expected}
+
+
+def test_reasoning_is_never_invented():
     from langchain_core.messages import HumanMessage
     seen = []
     model = _stub_model([_chat_reply({"role": "assistant", "content": "hi"})] * 2, seen)
     first = model.invoke([HumanMessage("go")])
-    assert "reasoning_content" not in first.additional_kwargs
+    assert "reasoning" not in first.additional_kwargs and "reasoning_content" not in first.additional_kwargs
     model.invoke([HumanMessage("go"), first, HumanMessage("more")])
     assert seen[1]["messages"][1] == {"role": "assistant", "content": "hi"}

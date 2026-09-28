@@ -189,6 +189,17 @@ def test_chat_items_cover_reasoning_tools_and_usage(run_dir):
     assert items[-1]["kind"] == "usage" and "100 in / 10 out" in items[-1]["text"]
 
 
+@pytest.mark.parametrize("message,expected", [
+    ({"reasoning": "main"}, "main"), ({"reasoning_content": "backup"}, "backup"),
+    ({"reasoning": "", "reasoning_content": "backup"}, "backup"),
+    ({"reasoning": "main", "reasoning_content": "other"}, "main"), ({}, None)])
+def test_reasoning_is_shown_from_reasoning_then_reasoning_content(message, expected):
+    from panel.chat import message_items
+    items = message_items({"role": "assistant", "content": "hi", **message}, {})
+    shown = [i["text"] for i in items if i["kind"] == "reasoning"]
+    assert shown == ([expected] if expected else [])
+
+
 def test_stitching_ignores_whitespace_and_unrelated_conversations():
     from panel.chat import Call, Segment
     payloads = {

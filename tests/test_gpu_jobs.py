@@ -266,3 +266,58 @@ def test_listed_tools_show_only_enabled_tools_and_enabled_variants(tmp_path):
     alaya, ltx = tools["rollout_alayaworld"].description, tools["rollout_ltx25"].description
     assert "'dmd4'" in alaya and "'ar30'" not in alaya
     assert "'distilled'" in ltx and "'dev'" not in ltx
+
+
+# ---- item schemas: the listed tools say each item field's type (acceptance_20260928 n1) ----
+
+def _listed_tools(tmp_path):
+    from ar_kernel.tools.gpu_jobs import build_gpu_backends
+    rec = Recorder(tmp_path / "run")
+    reg = TokenRegistry(rec)
+    q = JobQueue(rec, threading.Lock(), wait_cap_s=60)
+    try:
+        backends = build_gpu_backends(toggled_cfg(), tmp_path / "run", [0, 1, 2, 3], reg, rec)
+        for b in backends:
+            q.register(b)
+        kit, mcp = ToolKit(reg, rec), new_mcp()
+        register_gpu_tools(mcp, kit, q)
+        return {t.name: t for t in asyncio.run(mcp.list_tools())}, {b.name: b for b in backends}
+    finally:
+        q.shutdown()
+
+
+def test_listed_item_schemas_type_every_field(tmp_path):
+    """n1 of acceptance_20260928 sent every value inside an untyped item as a string ("seed": "1")
+    while every schema-typed value came as an int: the schema must type the item fields."""
+    tools, _ = _listed_tools(tmp_path)
+    for name in ("generate_images", "rollout_wan22", "rollout_ltx25"):
+        item = tools[name].input_schema["properties"]["items"]["items"]
+        assert item["properties"]["seed"]["type"] == "integer", name
+        assert item["properties"]["prompt"]["type"] == "string", name
+        assert set(item["required"]) == {"prompt", "seed"}, name
+    for name in ("rollout_wan22", "rollout_ltx25"):
+        assert tools[name].input_schema["properties"]["items"]["items"]["properties"]["image"]["type"] == "string"
+    alaya = tools["rollout_alayaworld"].input_schema["properties"]["items"]["items"]
+    from ar_kernel.tools.rollouts import PERSPECTIVES
+    assert alaya["properties"]["perspective"]["enum"] == list(PERSPECTIVES)
+    assert set(alaya["required"]) == {"image", "perspective", "environment_prompt", "turns"}
+    turn = alaya["properties"]["turns"]["items"]
+    assert turn["properties"]["action"]["type"] == "string" and turn["required"] == ["action"]
+
+
+@pytest.mark.parametrize("name", ["generate_images", "rollout_wan22", "rollout_ltx25"])
+def test_integer_text_seed_is_taken_as_an_int(tmp_path, name):
+    _, backends = _listed_tools(tmp_path)
+    args = {"items": [{"prompt": "p", "seed": "7"}, {"prompt": "q", "seed": 8}]}
+    backends[name].check_args(args)
+    assert [i["seed"] for i in args["items"]] == [7, 8]
+
+
+@pytest.mark.parametrize("name", ["generate_images", "rollout_wan22", "rollout_ltx25"])
+@pytest.mark.parametrize("seed,match", [("abc", "seed must be an int: got 'abc'"), (1.5, "seed must be an int"),
+                                        (True, "seed must be an int"), (None, "seed is missing")])
+def test_bad_or_missing_seed_is_refused_clearly(tmp_path, name, seed, match):
+    _, backends = _listed_tools(tmp_path)
+    item = {"prompt": "p"} if seed is None else {"prompt": "p", "seed": seed}
+    with pytest.raises(ToolError, match=match):
+        backends[name].check_args({"items": [item]})

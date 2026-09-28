@@ -4,7 +4,7 @@ Linking, in order: an explicit previous_response_id; a Responses API conversatio
 id; otherwise the request's history begins with a prior call's request + response
 (how ChatOpenAI continues a run, fact 6). Prefix matching only looks at calls from the
 same container token. A Chat Completions assistant message is compared by what a client
-sends back (content, tool call ids/names/parsed arguments, reasoning_content), because
+sends back (content, tool call ids/names/parsed arguments, reasoning), because
 upstream replies carry extra fields (`refusal`, `annotations`, tool-call `index`) and may
 format the arguments JSON differently.
 
@@ -34,7 +34,8 @@ def _assistant(message: dict) -> dict:
               "arguments": args((c.get("function") or {}).get("arguments"))}
              for c in message.get("tool_calls") or []]
     return {"role": "assistant", "content": message.get("content") or None,
-            "tool_calls": calls or None, "reasoning_content": message.get("reasoning_content") or None}
+            "tool_calls": calls or None,     # reasoning: the ar_contract.client.reasoning_of rule
+            "reasoning": message.get("reasoning") or message.get("reasoning_content") or None}
 
 
 def _chat(messages: list[Any]) -> list[Any]:
