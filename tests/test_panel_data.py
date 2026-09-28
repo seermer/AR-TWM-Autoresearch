@@ -395,3 +395,40 @@ def test_preview_refuses_symlink_out(run, run_dir, tmp_path):
         media.preview(run, "link.txt")
     with pytest.raises(ValueError):
         media.list_dir(run, "..")
+
+import hashlib
+
+
+def _snapshot(root):
+    out = {}
+    for p in sorted(root.rglob("*")):
+        if p.is_file() and not p.is_symlink():
+            st = p.stat()
+            out[str(p.relative_to(root))] = (st.st_size, st.st_mtime_ns, hashlib.sha256(p.read_bytes()).hexdigest())
+    return out
+
+
+def test_every_view_leaves_the_run_untouched(run_dir):
+    before = _snapshot(run_dir)
+    r = views.Run(run_dir)
+    views.overview(r), views.gpu_series(r, hours=1e6), views.trace_choices(r)
+    got = views.trace(r, node=None, phase=None, attempt=None, types=None, component=None, text="n1",
+                      include_gpu=True, page=0)
+    for row in got["rows"]:
+        views.trace_detail(r, row["seq"])
+    for node in ("root", "n1", "n2"):
+        views.node_detail(r, node), views.code_edits(r, node), media.training_data(r, node), media.eval_view(r, node)
+        for phase, attempt in views.agent_attempts(r, node):
+            for c in views.conversations(r, node, phase, attempt):
+                views.conversation_chat(r, node, phase, attempt, c["index"])
+            views.tool_logs(r, node, phase, attempt)
+        for attempt in views.training_attempts(r, node):
+            views.training(r, node, attempt)
+    media.clips(r, "n1", "ds1"), media.camera_path(r, "store/blobs/pose/pd1.npz")
+    views.selection(r), views.cost(r)
+    commit = views.code_edits(r, "n1")["agent_commit"]
+    for path in views.agent_tree(r, commit):
+        views.agent_file(r, commit, path)
+    for entry in media.list_dir(r, ""):
+        media.preview(r, entry["name"])
+    assert _snapshot(run_dir) == before
