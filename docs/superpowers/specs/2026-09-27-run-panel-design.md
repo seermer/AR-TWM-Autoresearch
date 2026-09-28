@@ -98,7 +98,10 @@ and only its eval, lineage and events are shown.
    from the pose, provenance, license, leakage-check result, warnings; every ingest call
    with each candidate's paths and its outcome (accepted clip id, or rejection reasons),
    taken from the `data_ingest` tool call (candidate list) and tool result (one result per
-   candidate, in order); the kept staging files per attempt (rejected candidates,
+   candidate, in order). Each clip's leakage-check result comes from the `ingest.leakage`
+   event whose `candidate.video` matches that candidate (every `ingest.*` event names its
+   candidate since 2026-09-27; for older runs the panel pairs by order within the ingest
+   call and labels the pairing "inferred"); the kept staging files per attempt (rejected candidates,
    generated rollouts and images, annotations) — often none, since accepted candidates
    move into the clip store and runs before 2026-09-27 deleted staging.
 7. **Training** (per `improve_recipe` attempt): the loss curve parsed from that attempt's
