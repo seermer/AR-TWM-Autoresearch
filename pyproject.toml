@@ -25,6 +25,7 @@ where = ["kernel", "contract"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = [".", "kernel"]
 markers = [
     "manual: GPU verification, run explicitly",
     "gpu: launches a real GPU job (the gate's describe step); run with -m gpu",
