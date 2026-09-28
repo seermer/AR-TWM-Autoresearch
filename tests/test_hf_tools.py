@@ -196,3 +196,66 @@ def test_links_planted_inside_an_earlier_download_are_not_written_through(env, t
         tools.download(caller, "org/walks", "main", ["videos/*.mp4"])
     assert list(outside.iterdir()) == []
     assert list((tmp_path / "hf_tmp").iterdir()) == []          # the private dir is cleaned on failure
+
+
+# ---- hf_list_files, and refusals that say what the repo holds (acceptance_20260928 n1/n2) ----
+
+class ManyFilesApi(FakeApi):
+    """A repo like the ones n1/n2 probed: thousands of files across folders."""
+    def dataset_info(self, repo_id, revision=None, files_metadata=False):
+        sib = [SimpleNamespace(rfilename=f"clips/part_{i:04d}.tar", size=1000 + i) for i in range(300)]
+        sib += [SimpleNamespace(rfilename=f"meta/labels_{i}.json", size=10) for i in range(3)]
+        sib += [SimpleNamespace(rfilename="README.md", size=5), SimpleNamespace(rfilename="big.zip", size=10**9)]
+        return SimpleNamespace(id=repo_id, sha=SHA, card_data={"license": "cc-by-4.0"}, siblings=sib)
+
+
+@pytest.fixture
+def many(tmp_path):
+    reg = TokenRegistry(Recorder(tmp_path))
+    caller = reg.issue(node="n1", phase="improve_recipe", attempt=1,
+                       workspace_host=tmp_path / "ws", staging_host=tmp_path / "staging")
+    (tmp_path / "staging").mkdir()
+    return HfTools(CFG, tmp_path / "hf_tmp", api=ManyFilesApi(), snapshot=fake_snapshot), caller
+
+
+def test_list_files_pages_through_matching_paths_with_sizes(many):
+    tools, caller = many
+    out = tools.list_files(caller, "org/big", "main", "clips/*", limit=100, offset=100)
+    assert out["revision"] == SHA and out["license"] == "cc-by-4.0"
+    assert out["matching_files"] == 300 and out["matching_bytes"] == sum(1000 + i for i in range(300))
+    assert out["offset"] == 100 and len(out["files"]) == 100
+    assert out["files"][0] == {"path": "clips/part_0100.tar", "size": 1100}
+    assert out["repo_files"] == 305
+
+
+def test_list_files_defaults_to_everything_and_caps_the_page(many):
+    tools, caller = many
+    out = tools.list_files(caller, "org/big", "main")
+    assert out["matching_files"] == 305 and len(out["files"]) == 200      # default page
+    assert len(tools.list_files(caller, "org/big", "main", limit=10**6)["files"]) == 305   # capped at 1000
+    assert tools.list_files(caller, "org/big", "main", "*.parquet")["files"] == []
+
+
+def test_list_files_refuses_a_bad_repo_id(many):
+    tools, caller = many
+    with pytest.raises(ToolError, match="invalid dataset repo id"):
+        tools.list_files(caller, "../x", "main")
+
+
+def test_over_the_cap_names_the_largest_matching_files(many):
+    tools, caller = many
+    with pytest.raises(ToolError) as exc:
+        tools.download(caller, "org/big", "main", ["*"], max_bytes=1000)
+    msg = str(exc.value)
+    assert "over the 1000-byte cap" in msg and "big.zip (1000000000 bytes)" in msg
+    assert "clips/part_0299.tar" in msg and "hf_list_files" in msg
+
+
+def test_no_match_says_what_the_repo_holds(many):
+    tools, caller = many
+    with pytest.raises(ToolError) as exc:
+        tools.download(caller, "org/big", "main", ["*.mp4"])
+    msg = str(exc.value)
+    assert "no files match" in msg and "hf_list_files" in msg
+    assert "clips/ (300 files)" in msg and "meta/ (3 files)" in msg
+    assert ".tar: 300" in msg and ".json: 3" in msg

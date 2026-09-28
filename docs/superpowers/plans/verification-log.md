@@ -1116,3 +1116,19 @@ Agent model `stealth/space-bunny-alpha` on OpenRouter. n1's improve_recipe repea
   provider: `reasoning`, or `reasoning_content` only when `reasoning` is empty; the client resends it
   as `reasoning`. OpenRouter reports `reasoning_tokens: 0` for this model and effort none/max/high/
   xhigh gave similar 500-900-character reasoning, so it looks like a summary.
+
+## hf_list_files and informative hf_download refusals (2026-09-28)
+
+In n1/n2 of `acceptance_20260928`, 45 of 54 `hf_download` calls failed: 28 "no files match", 14
+"over the cap", 3 other. 24 calls used `max_bytes` <= 1 MB as a probe, because no tool listed a
+repo's files and the refusals named none. HF itself lists every file with its size (the
+`dataset_info(files_metadata=True)` call hf_download already makes) and downloads exact paths.
+Added `hf_list_files` (paged; the same metadata call) and refusals that name the repo's folders/
+extensions or its largest matches. Checked against the real Hub on HoyerChou/EgocentricVideos (12
+files, apache-2.0): listing, an over-cap refusal naming the three mp4s, a no-match refusal listing
+`.zip: 6, .mp4: 3, ...`.
+
+The run was reset to "root scored" before this: n1/n2 records moved (not deleted) to
+`runs/acceptance_20260928.discarded_n1_n2/` (event files, payloads only they referenced, node and
+staging dirs, GPU job dirs, dropped run.jsonl lines, archive.db and state.json as they were, and the
+agents.git ref SHAs); their archive rows and agents.git refs were removed locally and on the run remote.

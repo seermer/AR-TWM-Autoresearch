@@ -1,4 +1,4 @@
-"""hf_search / hf_download (spec 10). The kernel downloads; the container has no network."""
+"""hf_search / hf_list_files / hf_download (spec 10). The kernel downloads; the container has no network."""
 from __future__ import annotations
 
 import fnmatch
@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import uuid
+from collections import Counter
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -16,6 +17,15 @@ from .context import STAGING
 from .server import ToolError
 
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
+LIST_PAGE, LIST_MAX = 200, 1000
+
+
+def _layout(names: list[str]) -> str:
+    """What a repo holds, for a refusal: its top-level folders and file extensions."""
+    tops = Counter(n.split("/", 1)[0] + "/" if "/" in n else "(top level)" for n in names)
+    exts = Counter(PurePosixPath(n).suffix or "(none)" for n in names)
+    return ("folders: " + ", ".join(f"{k} ({v} files)" for k, v in tops.most_common(12)) +
+            "; extensions: " + ", ".join(f"{k}: {v}" for k, v in exts.most_common(12)))
 
 
 def _move_into(src: Path, base: Path, rel: str) -> None:
@@ -68,18 +78,35 @@ class HfTools:
                  "last_modified": str(getattr(d, "last_modified", None))}
                 for d in self.api.list_datasets(search=query, limit=min(int(limit), 100), full=True)]
 
-    def download(self, caller, repo: str, revision: str, patterns: list[str],
-                 max_bytes: int | None = None) -> dict:
+    def _info(self, repo: str, revision: str):
         if not REPO_RE.match(repo or ""):
             raise ToolError(f"invalid dataset repo id {repo!r}")
         try:
-            info = self.api.dataset_info(repo, revision=revision, files_metadata=True)
+            return self.api.dataset_info(repo, revision=revision, files_metadata=True)
         except HfHubHTTPError as exc:
             raise ToolError(str(exc)) from None
+
+    def list_files(self, caller, repo: str, revision: str, pattern: str = "*",
+                   limit: int = LIST_PAGE, offset: int = 0) -> dict:
+        """One page of the repo's files matching `pattern` (fnmatch; `*` crosses folders), with sizes."""
+        info = self._info(repo, revision)
+        files = sorted((s.rfilename, int(s.size or 0)) for s in info.siblings
+                       if fnmatch.fnmatch(s.rfilename, pattern))
+        offset, limit = max(0, int(offset)), max(1, min(int(limit), LIST_MAX))
+        return {"repo": repo, "revision": info.sha, "license": _license(info),
+                "repo_files": len(info.siblings), "matching_files": len(files),
+                "matching_bytes": sum(size for _, size in files), "offset": offset,
+                "files": [{"path": f, "size": size} for f, size in files[offset:offset + limit]]}
+
+    def download(self, caller, repo: str, revision: str, patterns: list[str],
+                 max_bytes: int | None = None) -> dict:
+        info = self._info(repo, revision)
         files = sorted(s.rfilename for s in info.siblings
                        if any(fnmatch.fnmatch(s.rfilename, p) for p in patterns))
         if not files:
-            raise ToolError(f"no files match {patterns} in {repo}@{revision}")
+            raise ToolError(f"no files match {patterns} in {repo}@{revision}. The repo has "
+                            f"{len(info.siblings)} files; {_layout([s.rfilename for s in info.siblings])}. "
+                            f"hf_list_files lists paths and sizes")
         for f in files:                     # repo-reported names must stay inside dest (join below)
             p = PurePosixPath(f)
             if p.is_absolute() or ".." in p.parts or "\\" in f:
@@ -88,8 +115,10 @@ class HfTools:
         total = sum(sizes[f] for f in files)
         cap = min(self.cap, int(max_bytes)) if max_bytes else self.cap
         if total > cap:
-            raise ToolError(f"{len(files)} files total {total} bytes, over the {cap}-byte cap; "
-                            f"narrow the patterns")
+            largest = ", ".join(f"{f} ({sizes[f]} bytes)" for f in sorted(files, key=lambda f: -sizes[f])[:5])
+            raise ToolError(f"{len(files)} files total {total} bytes, over the {cap}-byte cap; narrow the "
+                            f"patterns (exact paths work). Largest matches: {largest}. hf_list_files lists "
+                            f"paths and sizes")
         # The agent owns staging. Refuse early (before a large transfer) if a planted link already
         # sends the destination outside it; _move_into below is the guard that cannot be raced.
         rel, staging = f"hf/{repo.replace('/', '__')}/{info.sha}", caller.staging_host.resolve()
@@ -122,6 +151,17 @@ def register_hf_tools(mcp, kit, tools: HfTools) -> None:
     async def hf_search(query: str, ctx: Context, kind: str = "dataset", limit: int = 20) -> list[dict]:
         return await kit.call(ctx, "hf_search", {"query": query, "kind": kind, "limit": limit},
                               lambda c: tools.search(c, query, kind, limit))
+
+    @mcp.tool(name="hf_list_files", description="List a dataset repo's files with their sizes (bytes), "
+              "without downloading: paths matching `pattern` (fnmatch; `*` also crosses folders, e.g. "
+              "'videos/*.mp4'), sorted, one page of `limit` (default 200, at most 1000) from `offset`. "
+              "Also returns the pinned revision, license and the matching count and bytes.")
+    async def hf_list_files(repo: str, revision: str, ctx: Context, pattern: str = "*",
+                            limit: int = LIST_PAGE, offset: int = 0) -> dict[str, Any]:
+        return await kit.call(ctx, "hf_list_files",
+                              {"repo": repo, "revision": revision, "pattern": pattern, "limit": limit,
+                               "offset": offset},
+                              lambda c: tools.list_files(c, repo, revision, pattern, limit, offset))
 
     @mcp.tool(name="hf_download", description="Download files matching glob patterns from a dataset "
               "repo into /workspace/staging/hf/. The revision is pinned to a commit SHA; the result "
