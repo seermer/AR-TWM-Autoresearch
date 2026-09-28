@@ -1,6 +1,11 @@
 """Runs in the panel env: .envs/panel/bin/python -m pytest tests/test_panel_ui.py"""
+import os
+from pathlib import Path
+
 import pytest
 
+# Gradio's file cache stays inside the project (.cache/ is git-ignored), never in /tmp.
+os.environ.setdefault("GRADIO_TEMP_DIR", str(Path(__file__).resolve().parents[1] / ".cache" / "panel-tests"))
 gr = pytest.importorskip("gradio")
 
 from fixtures.panel_run import make_run  # noqa: E402
@@ -74,3 +79,66 @@ def test_launcher_refuses_without_login(tmp_path, monkeypatch, capsys):
     assert launcher.main(["--run-id", "r1"]) == 2 and "PANEL_USER" in capsys.readouterr().err
     (tmp_path / ".env").write_text("PANEL_USER=u\nPANEL_PASSWORD=p\n")
     assert launcher.main(["--run-id", "nope"]) == 2 and "no run" in capsys.readouterr().err
+
+
+# ---- final review fixes ----
+
+def _by_label(app, label):
+    return next(b for b in app.blocks.values() if getattr(b, "label", None) == label)
+
+
+def _chains(app, component, event):
+    """Function names run, in order, for each listener of `event` on `component` (following .then)."""
+    deps = app.config["dependencies"]
+    out = []
+    for start in [d for d in deps if (component._id, event) in [tuple(t) for t in d["targets"]]]:
+        names, cur = [app.fns[start["id"]].name], start
+        while nxt := [d for d in deps if d.get("trigger_after") == cur["id"]]:
+            cur = nxt[0]
+            names.append(app.fns[cur["id"]].name)
+        out.append(names)
+    return out
+
+
+def test_node_level_tabs_follow_the_node_even_when_a_default_repeats(run):
+    """Gradio 6 fires .change only when a value differs, so a cascade may not rely on it: a new
+    node whose default attempt key equals the old one would keep the old node's data."""
+    app = ui.build_app(run.files.root)
+    node = _by_label(app, "Node (shared by node tabs)")
+    chains = _chains(app, node, "change")
+    assert ["h_attempts", "h_conversations", "h_chat"] in chains
+    assert ["h_training_attempts", "h_training"] in chains
+    button = lambda text: next(b for b in app.blocks.values() if getattr(b, "value", None) == text)
+    assert _chains(app, button("Load code edits"), "click") == [["h_code", "h_code_attempt"]]
+    assert _chains(app, button("Load eval"), "click") == [["h_eval", "h_eval_case"]]
+    assert _chains(app, button("Load training data"), "click") == [["h_training_data", "h_clips"]]
+    assert _chains(app, _by_label(app, "Compare with"), "input") == [["h_eval_case"]]
+    for label in ("Phase-attempt", "Conversation (role labels are inferred)", "improve_recipe attempt",
+                  "edit_self attempt", "Case", "Dataset", "Full run_command outputs (tool_output/)", "File",
+                  "Compare with"):
+        assert _chains(app, _by_label(app, label), "change") == [], label        # user changes use .input
+        assert _chains(app, _by_label(app, label), "input"), label
+
+
+def test_row_selection_uses_the_selected_row_values(run):
+    """A sorted table's evt.index need not be the frame's row: select by the row's own values."""
+    from types import SimpleNamespace
+    seq = next(e for e in run.log.events() if e["type"] == "llm.response")["_seq"]
+    out = ui.select_trace(run, SimpleNamespace(index=[0, 0], row_value=[seq, "t", "n1"]))
+    assert out[0]["type"] == "llm.response" and out[-1] == ""
+    out = ui.select_clip(run, SimpleNamespace(index=[7, 0], row_value=["clip1", "moving"]))
+    assert out[0].endswith("store/blobs/video/vd1.mp4") and out[-1] == ""
+    rows = views.selection(run)
+    out = ui.select_selection(run, rows, SimpleNamespace(index=[9, 0], row_value=[rows[0]["time"], "n1", "root"]))
+    assert list(out[0]["node_id"]) == ["root"]
+    out = ui.select_file(run, "config", SimpleNamespace(index=[5, 0], row_value=["run.json", "file", 10, "t"]))
+    assert out[1] == "config" and out[2]["kind"] == "text" and '"run_id"' in out[3]
+
+
+def test_run_files_are_served_in_place_not_copied(run):
+    ui.build_app(run.files.root)
+    video = str(run.files.path("nodes/n1/eval/work_dirs/ar_r1_nn1/videos/case_7_combined.mp4"))
+    from gradio import processing_utils
+    block = gr.Video()
+    served = processing_utils.move_files_to_cache(block.postprocess(video), block, postprocess=True)
+    assert (served if isinstance(served, dict) else served.model_dump())["path"] == video

@@ -45,8 +45,15 @@ down to the raw record.
 
 ## 4. Read-only guarantees
 
-- `archive.db` is opened per query as `file:...?mode=ro` (SQLite URI), with a short retry if
-  the kernel holds a write lock.
+- `archive.db` is opened per query, with a short retry if the kernel holds a write lock
+  *(refined 2026-09-28 after the final review; a plain `mode=ro` open creates `-wal`/`-shm`
+  side files)*: while the loop is alive, `mode=ro` (SQLite then shares the writer's `-shm`,
+  its shared-memory index — unavoidable for a live reader and not data); with no writer and
+  an empty or absent `-wal`, `mode=ro&immutable=1`, which creates nothing; with no writer but
+  a non-empty `-wal` (a killed writer's committed rows), a private copy of the db and wal
+  outside the run folder.
+- Files are served from the run folder in place (`gr.set_static_paths`), never copied into
+  Gradio's cache; `/file=` routes stay behind the login.
 - `agents.git` is read only through `git show`, `git diff`, `git ls-tree`, `git log`.
 - Nothing is created, changed or deleted under `runs/`. No cache files are written there.
 - Gradio serves files only from the run folder (`allowed_paths` = the run dir); nothing else

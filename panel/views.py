@@ -273,11 +273,19 @@ def code_edits(run: Run, node_id: str) -> dict:
             "agent_commit": n["agent_commit"] if n else None, "attempts": attempts}
 
 
+COMMIT = re.compile(r"[0-9a-f]{4,64}")
+
+
 def agent_tree(run: Run, commit: str) -> list[str]:
+    """`commit` comes from a textbox: only a hex id reaches git, never an option like --output."""
+    if not COMMIT.fullmatch(commit or ""):
+        return []
     return (run.files.git("ls-tree", "-r", "--name-only", commit) or "").splitlines()
 
 
 def agent_file(run: Run, commit: str, path: str) -> str | None:
+    if not COMMIT.fullmatch(commit or ""):
+        return None
     return run.files.git("show", f"{commit}:{path}")
 
 

@@ -183,6 +183,8 @@ def chat_items(chain: list[Segment], load: Load, awaiting: bool) -> list[dict]:
         normal = seg.calls[:len(seg.calls) - len(comp)]
         base = comp[0] if comp else seg.calls[-1]
         messages = request_messages(load(base.request))
+        if not messages:                       # the payload file is missing or unreadable
+            items.append(item("note", None, "request payload missing: this segment's history cannot be shown"))
         if comp:
             messages = messages[:-1]               # the compaction instruction: shown in its own turn
         if k == 0:
@@ -218,7 +220,8 @@ def chat_items(chain: list[Segment], load: Load, awaiting: bool) -> list[dict]:
             else:
                 items.append(item("note", None, "awaiting response" if awaiting else "no response recorded"))
             continue
-        instruction = text_of(request_messages(load(comp[-1].request))[-1].get("content"))
+        last_request = request_messages(load(comp[-1].request))
+        instruction = text_of(last_request[-1].get("content")) if last_request else "(request payload missing)"
         before = comp[-1].usage.get("prompt_tokens", "?")
         after = chain[k + 1].calls[0].usage.get("prompt_tokens", "?")
         items.append(item("compaction_request", f"Compaction #{k + 1}: ~{before} → ~{after} tokens", instruction))
@@ -233,7 +236,7 @@ def chat_items(chain: list[Segment], load: Load, awaiting: bool) -> list[dict]:
 def infer_role(system_text: str | None, prompt_files: dict[str, str]) -> str:
     """The prompt file (in the agent code that ran) the system prompt starts with; else the
     system prompt's first line. Only a label: roles are the agent's own convention."""
-    if not system_text:
+    if not (system_text or "").strip():
         return "(no system prompt)"
     matches = [name for name, text in prompt_files.items() if text and system_text.startswith(text)]
     if matches:

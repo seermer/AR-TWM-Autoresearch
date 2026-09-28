@@ -4,7 +4,10 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import shutil
 import subprocess
+import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -31,6 +34,9 @@ class RunFiles:
         self.root = Path(run_dir).resolve()
         if not (self.root / "config" / "run.json").is_file():
             raise FileNotFoundError(f"{self.root} is not a run folder (no config/run.json)")
+        self._copy_lock = threading.Lock()
+        self._copy_dir: tempfile.TemporaryDirectory | None = None
+        self._copy_key: tuple | None = None
 
     def path(self, rel: str | Path) -> Path:
         """A path inside the run folder; anything that resolves outside it is refused."""
@@ -39,14 +45,33 @@ class RunFiles:
             raise ValueError(f"{rel} is outside the run folder")
         return target
 
+    def _db_uri(self, db: Path) -> str:
+        """How to open archive.db without writing to the run folder:
+        - loop alive: plain `mode=ro` (SQLite then shares the writer's -shm; unavoidable);
+        - no writer and no WAL content: `immutable=1`, which creates no side files;
+        - no writer but a non-empty -wal (a killed writer's committed rows): a private copy of
+          db + wal outside the run, refreshed when either file changes."""
+        if self.loop_pid() is not None:
+            return f"{db.as_uri()}?mode=ro"
+        wal = db.with_name("archive.db-wal")
+        if not wal.exists() or wal.stat().st_size == 0:
+            return f"{db.as_uri()}?mode=ro&immutable=1"
+        key = tuple((p.stat().st_size, p.stat().st_mtime_ns) for p in (db, wal))
+        with self._copy_lock:
+            if self._copy_key != key:
+                self._copy_dir = self._copy_dir or tempfile.TemporaryDirectory(prefix="panel-db-")
+                for p in (db, wal):
+                    shutil.copyfile(p, Path(self._copy_dir.name) / p.name)
+                (Path(self._copy_dir.name) / "archive.db-shm").unlink(missing_ok=True)
+                self._copy_key = key
+            return (Path(self._copy_dir.name) / "archive.db").as_uri()
+
     def query(self, sql: str, args: tuple = ()) -> list[dict]:
-        """Read-only SQL. With no -wal file (no writer), `immutable=1` keeps SQLite from
-        creating -wal/-shm side files; with a live writer, plain `mode=ro`."""
+        """Read-only SQL (see `_db_uri` for how the run folder is never written)."""
         db = self.root / "archive.db"
         if not db.is_file():
             return []
-        live = (self.root / "archive.db-wal").exists()
-        uri = f"{db.as_uri()}?mode=ro" + ("" if live else "&immutable=1")
+        uri = self._db_uri(db)
         for tries in range(5):
             try:
                 conn = sqlite3.connect(uri, uri=True, timeout=5.0)

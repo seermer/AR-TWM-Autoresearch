@@ -432,3 +432,61 @@ def test_every_view_leaves_the_run_untouched(run_dir):
     for entry in media.list_dir(r, ""):
         media.preview(r, entry["name"])
     assert _snapshot(run_dir) == before
+
+
+# ---- final review fixes ----
+
+def test_git_arguments_cannot_become_options(run, tmp_path):
+    target = tmp_path / "pwned"
+    assert views.agent_file(run, f"--output={target}", "x") is None
+    assert views.agent_tree(run, f"--output={target}") == []
+    assert not list(tmp_path.glob("pwned*"))
+
+
+def test_an_empty_wal_left_by_a_stopped_run_is_not_touched(run_dir):
+    (run_dir / "archive.db-wal").write_bytes(b"")
+    before = _snapshot(run_dir)
+    assert [r["node_id"] for r in RunFiles(run_dir).query("SELECT node_id FROM nodes ORDER BY created_at")] == ["root", "n1", "n2"]
+    assert _snapshot(run_dir) == before and not (run_dir / "archive.db-shm").exists()
+
+
+def test_rows_committed_in_a_leftover_wal_are_read_without_touching_the_run(run_dir):
+    import sqlite3
+    conn = sqlite3.connect(run_dir / "archive.db")
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA wal_autocheckpoint=0")
+    conn.execute("UPDATE nodes SET status='eval_failed' WHERE node_id='n2'")
+    conn.commit()
+    crashed = {p.name: p.read_bytes() for p in run_dir.glob("archive.db*")}   # as a killed writer leaves them
+    conn.close()
+    for name, data in crashed.items():
+        (run_dir / name).write_bytes(data)
+    assert (run_dir / "archive.db-wal").stat().st_size > 0
+    before = _snapshot(run_dir)
+    rows = RunFiles(run_dir).query("SELECT status FROM nodes WHERE node_id = 'n2'")
+    assert rows == [{"status": "eval_failed"}] and _snapshot(run_dir) == before
+
+
+def test_a_live_writer_is_read_with_plain_read_only(run_dir, monkeypatch):
+    import sqlite3
+    started = open(f"/proc/{os.getpid()}/stat").read().rsplit(")", 1)[1].split()[19]
+    (run_dir / "control" / "loop.pid").write_text(f"{os.getpid()} {started}")
+    (run_dir / "archive.db-wal").write_bytes(b"")
+    uris, real = [], sqlite3.connect
+    monkeypatch.setattr(sqlite3, "connect", lambda target, **kw: uris.append(target) or real(target, **kw))
+    assert RunFiles(run_dir).query("SELECT count(*) AS n FROM nodes") == [{"n": 3}]
+    assert uris[0].endswith("?mode=ro")
+
+
+def test_a_missing_request_payload_does_not_break_the_chat(run_dir):
+    log, segs, chs = _chat(run_dir)
+    digest = next(c for c in chs[1][0].calls[::-1]).request
+    (run_dir / "telemetry" / "payloads" / f"{digest}.json.zst").unlink()
+    log = EventLog(RunFiles(run_dir))
+    chs = chains(segments(log.events(), "n1", "improve_recipe", 1), log.payload)
+    items = [i for ch in chs for i in chat_items(ch, log.payload, awaiting=False)]
+    assert any(i["kind"] == "note" and "payload missing" in i["text"] for i in items)
+
+
+def test_a_blank_system_prompt_has_no_role():
+    assert infer_role("  \n ", {"planner": PLANNER}) == "(no system prompt)"

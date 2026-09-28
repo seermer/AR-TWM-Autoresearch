@@ -326,13 +326,46 @@ def h_preview(run, rel):
     return meta, text, video, image, p["kind"]
 
 
+# ---- row selection: by the selected row's own values (a sorted table's index is not the frame's) ----
+
+def select_trace(run, evt):
+    return h_trace_detail(run, int(evt.row_value[0]))
+
+
+def select_clip(run, evt):
+    return h_clip(run, evt.row_value[0])
+
+
+def select_selection(run, rows, evt):
+    time_, child = evt.row_value[0], evt.row_value[1]
+    index = next((i for i, r in enumerate(rows or []) if (r["time"], r["child"]) == (time_, child)), -1)
+    return h_selection_row(run, rows, index)
+
+
+def select_file(run, folder, evt):
+    name, kind = evt.row_value[0], evt.row_value[1]
+    rel = f"{folder}/{name}" if folder else name
+    if kind == "dir":
+        listed = h_files(run, rel)
+        return listed[0], rel, None, "", None, None, "dir", listed[-1]
+    meta, text, video, image, kind, err = h_preview(run, rel)
+    return gr.update(), folder, meta, text, video, image, kind, err
+
+
 # ---- layout ----
 
 def build_app(run_dir) -> gr.Blocks:
     run = views.Run(run_dir)
-    bind = lambda fn: functools.partial(fn, run)
+    # Run files are served where they are, never copied into Gradio's cache (disk is the binding
+    # constraint); they stay behind the login like every other file route.
+    gr.set_static_paths([str(run.files.root)])
+
+    def bind(fn):
+        bound = functools.partial(fn, run)
+        bound.__name__ = fn.__name__           # for Gradio's function names; the signature stays the partial's
+        return bound
     nodes = [n["node_id"] for n in run.nodes()]
-    with gr.Blocks(title=f"Run {run.name}", fill_width=True) as app:
+    with gr.Blocks(title=f"Run {run.name}", fill_width=True, delete_cache=(3600, 3600)) as app:
         gr.Markdown(f"## Run `{run.name}` — read-only panel")
         node = gr.Dropdown(choices=nodes, value=nodes[0] if nodes else None, label="Node (shared by node tabs)",
                            allow_custom_value=True)
@@ -472,41 +505,54 @@ def build_app(run_dir) -> gr.Blocks:
         tr_in = [tr_node, tr_phase, tr_attempt, tr_types, tr_comp, tr_text, tr_gpu, tr_page]
         tr_go.click(bind(h_trace), tr_in, [tr_rows, tr_count, tr_page, tr_err])
 
-        def trace_select(rows: pd.DataFrame, evt: gr.SelectData):
-            return h_trace_detail(run, int(rows.iloc[evt.index[0]]["seq"]))
-        tr_rows.select(trace_select, tr_rows, [tr_event, tr_payload, tr_chat, tr_err])
+        def on_trace_select(evt: gr.SelectData):
+            return select_trace(run, evt)
+        tr_rows.select(on_trace_select, None, [tr_event, tr_payload, tr_chat, tr_err])
 
-        app.load(bind(h_attempts), node, [cv_attempt, cv_err])
-        app.load(bind(h_training_attempts), node, [tn_attempt, tn_err])
-        node.change(bind(h_attempts), node, [cv_attempt, cv_err])
-        cv_attempt.change(bind(h_conversations), [node, cv_attempt], [cv_conv, cv_log, cv_err])
-        cv_conv.change(bind(h_chat), [node, cv_attempt, cv_conv], [cv_chat, cv_err])
-        cv_log.change(bind(h_tool_log), cv_log, [cv_log_text, cv_err])
+        # Gradio 6 fires .change only when a value differs, so a step that sets a dropdown to the
+        # same value as before would stop a .change cascade and leave the previous node's data up.
+        # Programmatic steps are chained with .then; user picks listen on .input.
+        conv_out, chat_out = [cv_conv, cv_log, cv_err], [cv_chat, cv_err]
+        tn_out = [tn_head, tn_loss, tn_config, tn_gates, tn_gpu, tn_err]
+        for trigger in (app.load, node.change):
+            trigger(bind(h_attempts), node, [cv_attempt, cv_err]) \
+                .then(bind(h_conversations), [node, cv_attempt], conv_out) \
+                .then(bind(h_chat), [node, cv_attempt, cv_conv], chat_out)
+            trigger(bind(h_training_attempts), node, [tn_attempt, tn_err]) \
+                .then(bind(h_training), [node, tn_attempt], tn_out)
+        cv_attempt.input(bind(h_conversations), [node, cv_attempt], conv_out) \
+            .then(bind(h_chat), [node, cv_attempt, cv_conv], chat_out)
+        cv_conv.input(bind(h_chat), [node, cv_attempt, cv_conv], chat_out)
+        cv_log.input(bind(h_tool_log), cv_log, [cv_log_text, cv_err])
+        tn_attempt.input(bind(h_training), [node, tn_attempt], tn_out)
 
-        ce_load.click(bind(h_code), node, [ce_head, ce_diff, ce_attempt, ce_commit, ce_path, ce_err])
-        ce_attempt.change(bind(h_code_attempt), [node, ce_attempt], [ce_att_head, ce_att_diff, ce_contract, ce_err])
-        ce_path.change(bind(h_agent_file), [ce_commit, ce_path], [ce_file, ce_err])
+        ce_att_out = [ce_att_head, ce_att_diff, ce_contract, ce_err]
+        ce_load.click(bind(h_code), node, [ce_head, ce_diff, ce_attempt, ce_commit, ce_path, ce_err]) \
+            .then(bind(h_code_attempt), [node, ce_attempt], ce_att_out)
+        ce_attempt.input(bind(h_code_attempt), [node, ce_attempt], ce_att_out)
+        ce_path.input(bind(h_agent_file), [ce_commit, ce_path], [ce_file, ce_err])
 
-        td_load.click(bind(h_training_data), node, [td_head, td_sets, td_dataset, td_ingest, td_staging, td_err])
-        td_dataset.change(bind(h_clips), [node, td_dataset, td_page], [td_clips, td_count, td_page, td_err])
-        td_page.submit(bind(h_clips), [node, td_dataset, td_page], [td_clips, td_count, td_page, td_err])
+        clips_out = [td_clips, td_count, td_page, td_err]
+        td_load.click(bind(h_training_data), node, [td_head, td_sets, td_dataset, td_ingest, td_staging, td_err]) \
+            .then(bind(h_clips), [node, td_dataset, td_page], clips_out)
+        td_dataset.input(bind(h_clips), [node, td_dataset, td_page], clips_out)
+        td_page.submit(bind(h_clips), [node, td_dataset, td_page], clips_out)
 
-        def clip_select(rows: pd.DataFrame, evt: gr.SelectData):
-            return h_clip(run, rows.iloc[evt.index[0]]["clip_id"])
-        td_clips.select(clip_select, td_clips, [td_video, td_caption, td_plot, td_info, td_err])
+        def on_clip_select(evt: gr.SelectData):
+            return select_clip(run, evt)
+        td_clips.select(on_clip_select, None, [td_video, td_caption, td_plot, td_info, td_err])
 
-        node.change(bind(h_training_attempts), node, [tn_attempt, tn_err])
-        tn_attempt.change(bind(h_training), [node, tn_attempt], [tn_head, tn_loss, tn_config, tn_gates, tn_gpu, tn_err])
-
-        ev_load.click(bind(h_eval), [node, ev_other], [ev_cases, ev_case, ev_agg, ev_err])
-        ev_case.change(bind(h_eval_case), [node, ev_other, ev_case],
-                       [ev_video, ev_video2, ev_table, ev_meta, ev_prompt, ev_err])
+        ev_case_out = [ev_video, ev_video2, ev_table, ev_meta, ev_prompt, ev_err]
+        ev_load.click(bind(h_eval), [node, ev_other], [ev_cases, ev_case, ev_agg, ev_err]) \
+            .then(bind(h_eval_case), [node, ev_other, ev_case], ev_case_out)
+        ev_case.input(bind(h_eval_case), [node, ev_other, ev_case], ev_case_out)
+        ev_other.input(bind(h_eval_case), [node, ev_other, ev_case], ev_case_out)
 
         se_load.click(bind(h_selection), None, [se_rows, se_state, se_err])
 
-        def selection_select(rows: list, evt: gr.SelectData):
-            return h_selection_row(run, rows, evt.index[0])
-        se_rows.select(selection_select, se_state, [se_cands, se_err])
+        def on_selection_select(rows: list, evt: gr.SelectData):
+            return select_selection(run, rows, evt)
+        se_rows.select(on_selection_select, se_state, [se_cands, se_err])
 
         co_load.click(bind(h_cost), None, [co_phase, co_role, co_errs, co_err])
 
@@ -514,14 +560,8 @@ def build_app(run_dir) -> gr.Blocks:
         fi_up.click(lambda p: h_files(run, str(Path(p or ".").parent) if p else ""), fi_path,
                     [fi_list, fi_path, fi_err])
 
-        def file_select(rows: pd.DataFrame, folder: str, evt: gr.SelectData):
-            entry = rows.iloc[evt.index[0]]
-            rel = f"{folder}/{entry['name']}" if folder else entry["name"]
-            if entry["type"] == "dir":
-                listed = h_files(run, rel)
-                return (listed[0], rel, None, "", None, None, "dir", listed[-1])
-            meta, text, video, image, kind, err = h_preview(run, rel)
-            return gr.update(), folder, meta, text, video, image, kind, err
-        fi_list.select(file_select, [fi_list, fi_path],
+        def on_file_select(folder: str, evt: gr.SelectData):
+            return select_file(run, folder, evt)
+        fi_list.select(on_file_select, fi_path,
                        [fi_list, fi_path, fi_meta, fi_text, fi_video, fi_image, fi_kind, fi_err])
     return app
