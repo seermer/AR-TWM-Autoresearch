@@ -94,10 +94,15 @@ def overview(run: Run) -> dict:
 
 
 def gpu_series(run: Run, hours: float = 6.0) -> list[dict]:
-    since = time.time() - hours * 3600
+    """The last `hours` of GPU samples, ending at the run's latest sample (a stopped run's
+    samples are all older than the clock's last hours)."""
+    samples = [e for e in run.log.events(files=["gpu"]) if e.get("type") == "gpu.sample"]
+    if not samples:
+        return []
+    since = max(e.get("ts_wall", 0) for e in samples) - hours * 3600
     out = []
-    for e in run.log.events(files=["gpu"]):
-        if e.get("type") != "gpu.sample" or e.get("ts_wall", 0) < since:
+    for e in samples:
+        if e.get("ts_wall", 0) < since:
             continue
         for gpu, s in (e.get("gpus") or {}).items():
             out.append({"time": fmt_ts(e["ts_wall"]), "gpu": str(gpu), "util": s.get("util"),
@@ -124,7 +129,8 @@ def _gpu_summary(run: Run, lo: float, hi: float) -> list[dict]:
 def trace_choices(run: Run) -> dict:
     events = run.log.events(include_gpu=True)
     pick = lambda key: sorted({str(e.get(key)) for e in events if e.get(key) is not None})
-    return {"node": pick("node"), "phase": pick("phase"), "type": pick("type"), "component": pick("component")}
+    return {"node": pick("node"), "phase": pick("phase"), "type": pick("type"), "component": pick("component"),
+            "attempt": sorted({str(e["attempt"]) for e in events if e.get("attempt") is not None}, key=int)}
 
 
 def trace(run: Run, *, node, phase, attempt, types, component, text, include_gpu, page, page_size=100) -> dict:

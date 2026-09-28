@@ -490,3 +490,18 @@ def test_a_missing_request_payload_does_not_break_the_chat(run_dir):
 
 def test_a_blank_system_prompt_has_no_role():
     assert infer_role("  \n ", {"planner": PLANNER}) == "(no system prompt)"
+
+
+# ---- owner's first look (2026-09-28) ----
+
+def test_gpu_series_covers_the_runs_last_hours_not_the_clock(run_dir):
+    path = run_dir / "telemetry" / "events" / "gpu.jsonl"
+    events = [json.loads(line) for line in path.read_text().splitlines()]
+    for e in events:
+        e["ts_wall"] -= 2 * 86400                             # a run that stopped two days ago
+    path.write_text("".join(json.dumps(e) + "\n" for e in events))
+    assert views.gpu_series(views.Run(run_dir), hours=6)
+
+
+def test_trace_offers_attempts_and_any(run):
+    assert {"0", "1"} <= set(views.trace_choices(run)["attempt"])

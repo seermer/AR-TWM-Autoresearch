@@ -30,7 +30,34 @@ def guarded(n: int):
     return wrap
 
 
-def df(rows: list[dict] | None, columns: list[str] | None = None) -> pd.DataFrame:
+# Every table has named columns, also when empty (Gradio 6 shows "1 2 3" for a table without any).
+COLUMNS = {
+    "nodes": ["node", "parent", "status", "score", "vs parent", "component", "attempts", "duration_min", "error"],
+    "alerts": ["time", "level", "kind", "message"],
+    "events": ["seq", "time", "node", "phase", "attempt", "type", "component", "summary"],
+    "metrics": ["metric", "node", "parent", "root"],
+    "attempts": ["phase", "attempt", "outcome", "time", "detail"],
+    "datasets": ["dataset", "clips"],
+    "clips": ["clip_id", "camera_motion", "formats", "frames", "license", "leakage"],
+    "ingests": ["time", "phase", "attempt", "video", "caption", "pose", "camera_motion", "outcome", "clip_id",
+                "reasons", "host_video"],
+    "staging": ["path", "bytes"],
+    "gates": ["time", "result", "failures"],
+    "gpu": ["gpu", "mean_util", "peak_memory_gib"],
+    "cases": ["case", "perspective"],
+    "case_scores": ["metric", "this node", "compared node"],
+    "selection": ["time", "child", "chosen", "seed", "candidates"],
+    "candidates": ["node_id", "score", "subtree_mean", "value", "size", "penalty", "w", "P"],
+    "by_phase": ["node", "phase", "calls", "tokens", "usd", "latency_s", "errors"],
+    "by_role": ["role (inferred)", "conversations", "calls", "tokens", "usd"],
+    "errors": ["time", "node", "phase", "status"],
+    "files": ["name", "type", "bytes", "modified"],
+}
+DYNAMIC = {"cases", "candidates"}          # their columns come from the data (metrics, selection fields)
+
+
+def df(rows: list[dict] | None, key: str) -> pd.DataFrame:
+    columns = None if rows and key in DYNAMIC else COLUMNS[key]
     frame = pd.DataFrame(rows or [], columns=columns)
     for col in frame.columns:
         if frame[col].map(lambda v: isinstance(v, (dict, list))).any():
@@ -102,19 +129,19 @@ def h_overview(run):
     for g in sorted({s["gpu"] for s in series}):
         pts = [s for s in series if s["gpu"] == g]
         gpu.add_trace(go.Scatter(x=[p["time"] for p in pts], y=[p["memory_gib"] for p in pts], name=f"GPU {g}"))
-    gpu.update_layout(title="GPU memory (GiB), last 6 h", height=300, margin=dict(t=40, b=30))
+    gpu.update_layout(title="GPU memory (GiB), the run's last 6 h of samples", height=300, margin=dict(t=40, b=30))
     nodes = [n["node"] for n in ov["nodes"]]
-    return (head, df(ov["nodes"]), scores, gpu, df(ov["alerts"]), df(ov["recent"]),
+    return (head, df(ov["nodes"], "nodes"), scores, gpu, df(ov["alerts"], "alerts"), df(ov["recent"], "events"),
             gr.update(choices=nodes), gr.update(choices=nodes))
 
 
 @guarded(3)
 def h_trace(run, node, phase, attempt, types, component, text, include_gpu, page):
     got = views.trace(run, node=node or None, phase=phase or None,
-                      attempt=None if attempt in (None, "") else int(attempt), types=types or None,
+                      attempt=None if attempt in (None, "", "any") else int(attempt), types=types or None,
                       component=component or None, text=text, include_gpu=bool(include_gpu),
                       page=max(0, int(page or 1) - 1))
-    return df(got["rows"], ["seq", "time", "node", "phase", "attempt", "type", "component", "summary"]), \
+    return df(got["rows"], "events"), \
         f"{got['total']} events · page {min(int(page or 1), got['pages'])} of {got['pages']}", \
         gr.update(maximum=got["pages"])
 
@@ -131,13 +158,13 @@ def h_trace_detail(run, seq):
 def h_node(run, node):
     d = views.node_detail(run, node)
     if d is None:
-        return (f"No node {node!r}.", None, "", "", None, pd.DataFrame(), pd.DataFrame(), None, None)
+        return (f"No node {node!r}.", None, "", "", None, df([], "metrics"), df([], "attempts"), None, None)
     n = d["node"]
     head = (f"### {node} · {n['status']} · score {n['score']}\n\n**Lineage:** {d['lineage']}"
             + ("\n\n*Baseline: no parent, edit, recipe, rationale or training.*" if d["baseline"] else "")
             + (f"\n\n**Error:** {n['error']}" if n["error"] else ""))
     return (head, d["edit"], d["rationale"] or "", diff_html(d["recipe_diff"]) if d["recipe_diff"] else "",
-            d["data_commit"], df(d["metrics"]), df(d["attempts"]), d["timings"], dict(n))
+            d["data_commit"], df(d["metrics"], "metrics"), df(d["attempts"], "attempts"), d["timings"], dict(n))
 
 
 @guarded(1)
@@ -177,18 +204,36 @@ def h_tool_log(run, rel):
     return run.files.read_text(rel) if rel else ""
 
 
+def _commit_choices(run, node, d) -> list[tuple[str, str]]:
+    """Every agent version worth browsing for this node: its own, its parent's, each edit attempt's."""
+    n = run.node(node)
+    parent = run.node(n["parent_id"]) if n and n["parent_id"] else None
+    out = []
+    if d["agent_commit"]:
+        out.append((f"{node} · this node" if parent else f"{node} · seed agent", d["agent_commit"]))
+    if parent and parent["agent_commit"]:
+        out.append((f"{parent['node_id']} · parent", parent["agent_commit"]))
+    out += [(f"edit_self attempt {a['attempt']} · {a['outcome']} · {a['commit'][:8]}", a["commit"])
+            for a in d["attempts"] if a["commit"]]
+    return out
+
+
 @guarded(5)
 def h_code(run, node):
     d = views.code_edits(run, node)
+    commits = gr.update(choices=_commit_choices(run, node, d), value=d["agent_commit"])
+    tree = gr.update(choices=views.agent_tree(run, d["agent_commit"]) if d["agent_commit"] else [], value=None)
     if d["baseline"]:
-        note = "*Baseline: the root runs the seed agent unedited.*"
-        return note, "", gr.update(choices=[], value=None), d["agent_commit"] or "", \
-            gr.update(choices=views.agent_tree(run, d["agent_commit"]) if d["agent_commit"] else [], value=None)
+        return "*Baseline: the root runs the seed agent unedited.*", "", gr.update(choices=[], value=None), \
+            commits, tree
     choices = [a["attempt"] for a in d["attempts"]]
-    tree = views.agent_tree(run, d["agent_commit"]) if d["agent_commit"] else []
     return ("**Node diff** (parent's agent code → this node's)", diff_html(d["node_diff"]),
-            gr.update(choices=choices, value=choices[-1] if choices else None), d["agent_commit"] or "",
-            gr.update(choices=tree, value=None))
+            gr.update(choices=choices, value=choices[-1] if choices else None), commits, tree)
+
+
+@guarded(2)
+def h_commit_tree(run, commit):
+    return gr.update(choices=views.agent_tree(run, commit) if commit else [], value=None), ""
 
 
 @guarded(3)
@@ -210,27 +255,28 @@ def h_agent_file(run, commit, path):
     return (views.agent_file(run, commit, path) or "") if commit and path else ""
 
 
-@guarded(5)
+@guarded(9)
 def h_training_data(run, node):
     d = media.training_data(run, node)
     names = [x["dataset"] for x in d["datasets"]]
     head = (f"**Data commit** `{d['commit']['commit_id'][:16]}`: {d['commit']['message']}" if d["commit"]
             else "*No data commit (baseline, or not built yet).*")
-    return (head, df(d["datasets"]), gr.update(choices=names, value=names[0] if names else None),
-            df(d["ingests"]), df(d["staging"]))
+    return (head, df(d["datasets"], "datasets"), gr.update(choices=names, value=names[0] if names else None),
+            df(d["ingests"], "ingests"), df(d["staging"], "staging"),
+            None, None, None, None)                  # the previously opened clip: video, caption, plot, record
 
 
 @guarded(3)
 def h_clips(run, node, dataset, page):
     if not dataset:
-        return pd.DataFrame(), "", gr.update()
+        return df([], "clips"), "", gr.update()
     got = media.clips(run, node, dataset, page=max(0, int(page or 1) - 1))
     rows = [{"clip_id": r["clip_id"], "camera_motion": r["camera_motion"], "formats": r["formats"],
              "frames": r["metadata"].get("frames"), "license": r["license"],
              "leakage": "none" if not r["leakage"] else ("inferred " if r["leakage"]["inferred"] else "") +
              f"{len(r['leakage']['matches'] or [])} matches / {len(r['leakage']['near'] or [])} near"}
             for r in got["rows"]]
-    return df(rows), f"{got['total']} clips · page {min(int(page or 1), got['pages'])} of {got['pages']}", \
+    return df(rows, "clips"), f"{got['total']} clips · page {min(int(page or 1), got['pages'])} of {got['pages']}", \
         gr.update(maximum=got["pages"])
 
 
@@ -258,7 +304,7 @@ def h_training_attempts(run, node):
 @guarded(5)
 def h_training(run, node, attempt):
     if attempt is None:
-        return "*No improve_recipe attempt (baseline, or not started).*", None, "", pd.DataFrame(), pd.DataFrame()
+        return "*No improve_recipe attempt (baseline, or not started).*", None, "", df([], "gates"), df([], "gpu")
     t = views.training(run, node, int(attempt))
     head = (f"Training started {t['started']}" + (f", {t['duration_min']} min" if t["duration_min"] else "")
             if t["reached_training"] else "*This attempt never reached training.*")
@@ -269,7 +315,7 @@ def h_training(run, node, attempt):
         fig = go.Figure(go.Scatter(x=[p["step"] for p in t["loss"]], y=[p["loss"] for p in t["loss"]],
                                    mode="lines", name="loss"))
         fig.update_layout(title="Training loss", height=350)
-    return head, fig, t["config"] or "", df(t["gates"]), df(t["gpu"])
+    return head, fig, t["config"] or "", df(t["gates"], "gates"), df(t["gpu"], "gpu")
 
 
 @guarded(3)
@@ -277,7 +323,7 @@ def h_eval(run, node, other):
     ev = media.eval_view(run, node)
     rows = [{"case": c["case"], "perspective": c["perspective"], **c["scores"]} for c in ev["cases"]]
     cases = [c["case"] for c in ev["cases"]]
-    return df(rows), gr.update(choices=cases, value=cases[0] if cases else None), ev["aggregates"]
+    return df(rows, "cases"), gr.update(choices=cases, value=cases[0] if cases else None), ev["aggregates"]
 
 
 @guarded(5)
@@ -285,11 +331,11 @@ def h_eval_case(run, node, other, case):
     mine = next((c for c in media.eval_view(run, node)["cases"] if c["case"] == case), None)
     theirs = next((c for c in media.eval_view(run, other)["cases"] if c["case"] == case), None) if other else None
     if mine is None:
-        return None, None, pd.DataFrame(), None, None
+        return None, None, df([], "case_scores"), None, None
     metrics = sorted(set(mine["scores"]) | set((theirs or {}).get("scores", {})))
-    table = [{"metric": m, node: mine["scores"].get(m), (other or "other"): (theirs or {}).get("scores", {}).get(m)}
-             for m in metrics]
-    return (_abs(run, mine["video"]), _abs(run, theirs["video"]) if theirs else None, df(table),
+    table = [{"metric": m, "this node": mine["scores"].get(m),
+              "compared node": (theirs or {}).get("scores", {}).get(m)} for m in metrics]
+    return (_abs(run, mine["video"]), _abs(run, theirs["video"]) if theirs else None, df(table, "case_scores"),
             {"perspective": mine["perspective"], "actions": mine["actions"]}, mine["prompt_schedule"])
 
 
@@ -297,23 +343,23 @@ def h_eval_case(run, node, other, case):
 def h_selection(run):
     rows = views.selection(run)
     return df([{k: v for k, v in r.items() if k != "candidates"} | {"candidates": len(r["candidates"])}
-               for r in rows]), rows
+               for r in rows], "selection"), rows
 
 
 @guarded(1)
 def h_selection_row(run, rows, index):
-    return df(rows[index]["candidates"]) if rows and 0 <= index < len(rows) else pd.DataFrame()
+    return df(rows[index]["candidates"] if rows and 0 <= index < len(rows) else [], "candidates")
 
 
 @guarded(3)
 def h_cost(run):
     c = views.cost(run)
-    return df(c["by_phase"]), df(c["by_role"]), df(c["errors"])
+    return df(c["by_phase"], "by_phase"), df(c["by_role"], "by_role"), df(c["errors"], "errors")
 
 
 @guarded(2)
 def h_files(run, rel):
-    return df(media.list_dir(run, rel or "")), rel or ""
+    return df(media.list_dir(run, rel or ""), "files"), rel or ""
 
 
 @guarded(5)
@@ -372,11 +418,11 @@ def build_app(run_dir) -> gr.Blocks:
         with gr.Tabs():
             with gr.Tab("Overview"):
                 ov_head = gr.Markdown()
-                ov_nodes = gr.Dataframe(label="Nodes", wrap=True, interactive=False)
+                ov_nodes = gr.Dataframe(headers=COLUMNS["nodes"], label="Nodes", wrap=True, interactive=False)
                 with gr.Row():
                     ov_scores, ov_gpu = gr.Plot(), gr.Plot()
-                ov_alerts = gr.Dataframe(label="Alerts (newest first)", wrap=True, interactive=False)
-                ov_recent = gr.Dataframe(label="Last 50 events (newest first)", wrap=True, interactive=False)
+                ov_alerts = gr.Dataframe(headers=COLUMNS["alerts"], label="Alerts (newest first)", wrap=True, interactive=False)
+                ov_recent = gr.Dataframe(headers=COLUMNS["events"], label="Last 50 events (newest first)", wrap=True, interactive=False)
                 ov_err = gr.Markdown()
             with gr.Tab("Node"):
                 nd_load = gr.Button("Load node")
@@ -385,17 +431,19 @@ def build_app(run_dir) -> gr.Blocks:
                     nd_edit, nd_commit = gr.JSON(label="edit.json"), gr.JSON(label="Data commit")
                 nd_rationale = gr.Markdown(label="rationale.md")
                 nd_recipe = gr.HTML(label="Recipe vs parent")
-                nd_metrics = gr.Dataframe(label="Metrics: node, parent, root", interactive=False)
-                nd_attempts = gr.Dataframe(label="Attempts", wrap=True, interactive=False)
+                nd_metrics = gr.Dataframe(headers=COLUMNS["metrics"], label="Metrics: node, parent, root", interactive=False)
+                nd_attempts = gr.Dataframe(headers=COLUMNS["attempts"], label="Attempts", wrap=True, interactive=False)
                 with gr.Row():
                     nd_timings, nd_row = gr.JSON(label="Phase timings"), gr.JSON(label="Archive row")
                 nd_err = gr.Markdown()
             with gr.Tab("Trace"):
                 choices = views.trace_choices(run)
                 with gr.Row():
-                    tr_node = gr.Dropdown([""] + choices["node"], value="", label="Node", allow_custom_value=True)
+                    tr_node = gr.Dropdown([""] + choices["node"], value="", label="Event source (a node, run or gpu)",
+                                          allow_custom_value=True)
                     tr_phase = gr.Dropdown([""] + choices["phase"], value="", label="Phase", allow_custom_value=True)
-                    tr_attempt = gr.Number(value=None, precision=0, label="Attempt")
+                    tr_attempt = gr.Dropdown(["any"] + choices["attempt"], value="any",
+                                             label="Attempt (0 = a kernel step, not an agent attempt)")
                     tr_types = gr.Dropdown(choices["type"], multiselect=True, label="Event types",
                                            allow_custom_value=True)
                     tr_comp = gr.Dropdown([""] + choices["component"], value="", label="Component",
@@ -406,7 +454,7 @@ def build_app(run_dir) -> gr.Blocks:
                     tr_page = gr.Number(value=1, precision=0, minimum=1, label="Page")
                     tr_go = gr.Button("Search")
                 tr_count = gr.Markdown()
-                tr_rows = gr.Dataframe(interactive=False, wrap=True)
+                tr_rows = gr.Dataframe(headers=COLUMNS["events"], interactive=False, wrap=True)
                 with gr.Row():
                     tr_event, tr_payload = gr.JSON(label="Event"), gr.JSON(label="Payload")
                 tr_chat = gr.Chatbot(label="As a chat", height=600)
@@ -426,66 +474,66 @@ def build_app(run_dir) -> gr.Blocks:
                 ce_att_head, ce_att_diff = gr.Markdown(), gr.HTML()
                 ce_contract = gr.JSON(label="Contract report")
                 with gr.Row():
-                    ce_commit = gr.Textbox(label="Agent commit")
+                    ce_commit = gr.Dropdown(label="Agent commit")
                     ce_path = gr.Dropdown(label="File", allow_custom_value=True)
                 ce_file = gr.Code(label="File content", lines=25)
                 ce_err = gr.Markdown()
             with gr.Tab("Training data"):
                 td_load = gr.Button("Load training data")
                 td_head = gr.Markdown()
-                td_sets = gr.Dataframe(label="Datasets", interactive=False)
+                td_sets = gr.Dataframe(headers=COLUMNS["datasets"], label="Datasets", interactive=False)
                 with gr.Row():
                     td_dataset = gr.Dropdown(label="Dataset")
                     td_page = gr.Number(value=1, precision=0, minimum=1, label="Page")
                 td_count = gr.Markdown()
-                td_clips = gr.Dataframe(label="Clips (select one)", interactive=False, wrap=True)
+                td_clips = gr.Dataframe(headers=COLUMNS["clips"], label="Clips (select one)", interactive=False, wrap=True)
                 with gr.Row():
                     td_video = gr.Video(label="Clip")
                     td_plot = gr.Plot()
                 with gr.Row():
                     td_caption, td_info = gr.JSON(label="Caption"), gr.JSON(label="Clip record")
-                td_ingest = gr.Dataframe(label="Every ingest candidate", wrap=True, interactive=False)
-                td_staging = gr.Dataframe(label="Kept staging files", interactive=False)
+                td_ingest = gr.Dataframe(headers=COLUMNS["ingests"], label="Every ingest candidate", wrap=True, interactive=False)
+                td_staging = gr.Dataframe(headers=COLUMNS["staging"], label="Kept staging files", interactive=False)
                 td_err = gr.Markdown()
             with gr.Tab("Training"):
                 tn_attempt = gr.Dropdown(label="improve_recipe attempt")
                 tn_head = gr.Markdown()
                 tn_loss = gr.Plot()
                 tn_config = gr.Code(label="Resolved train config", language="yaml", lines=20)
-                tn_gates = gr.Dataframe(label="Gate checks", wrap=True, interactive=False)
-                tn_gpu = gr.Dataframe(label="GPU during training", interactive=False)
+                tn_gates = gr.Dataframe(headers=COLUMNS["gates"], label="Gate checks", wrap=True, interactive=False)
+                tn_gpu = gr.Dataframe(headers=COLUMNS["gpu"], label="GPU during training", interactive=False)
                 tn_err = gr.Markdown()
             with gr.Tab("Eval"):
                 with gr.Row():
                     ev_load = gr.Button("Load eval")
                     ev_other = gr.Dropdown(choices=nodes, value="root" if "root" in nodes else None,
                                            label="Compare with", allow_custom_value=True)
-                ev_cases = gr.Dataframe(label="Per-case scores", interactive=False)
+                ev_cases = gr.Dataframe(headers=COLUMNS["cases"], label="Per-case scores", interactive=False)
                 ev_case = gr.Dropdown(label="Case")
                 with gr.Row():
                     ev_video, ev_video2 = gr.Video(label="This node"), gr.Video(label="Compared node")
-                ev_table = gr.Dataframe(label="Case scores", interactive=False)
+                ev_table = gr.Dataframe(headers=COLUMNS["case_scores"], label="Case scores", interactive=False)
                 with gr.Row():
                     ev_meta, ev_prompt = gr.JSON(label="Case"), gr.JSON(label="Prompt schedule")
                 ev_agg = gr.JSON(label="aggregates.json")
                 ev_err = gr.Markdown()
             with gr.Tab("Selection"):
                 se_load = gr.Button("Load selection history")
-                se_rows = gr.Dataframe(label="Parent picks (select one)", interactive=False)
+                se_rows = gr.Dataframe(headers=COLUMNS["selection"], label="Parent picks (select one)", interactive=False)
                 se_state = gr.State([])
-                se_cands = gr.Dataframe(label="Candidates at that pick", interactive=False)
+                se_cands = gr.Dataframe(headers=COLUMNS["candidates"], label="Candidates at that pick", interactive=False)
                 se_err = gr.Markdown()
             with gr.Tab("Cost"):
                 co_load = gr.Button("Compute")
-                co_phase = gr.Dataframe(label="By node and phase", interactive=False)
-                co_role = gr.Dataframe(label="By role (inferred)", interactive=False)
-                co_errs = gr.Dataframe(label="Non-200 responses", interactive=False)
+                co_phase = gr.Dataframe(headers=COLUMNS["by_phase"], label="By node and phase", interactive=False)
+                co_role = gr.Dataframe(headers=COLUMNS["by_role"], label="By role (inferred)", interactive=False)
+                co_errs = gr.Dataframe(headers=COLUMNS["errors"], label="Non-200 responses", interactive=False)
                 co_err = gr.Markdown()
             with gr.Tab("Files"):
                 with gr.Row():
                     fi_path = gr.Textbox(value="", label="Folder (run-relative)")
                     fi_open, fi_up = gr.Button("Open"), gr.Button("Up")
-                fi_list = gr.Dataframe(label="Entries (select one)", interactive=False)
+                fi_list = gr.Dataframe(headers=COLUMNS["files"], label="Entries (select one)", interactive=False)
                 fi_meta = gr.JSON(label="File")
                 fi_text = gr.Code(label="Text", lines=30)
                 with gr.Row():
@@ -501,6 +549,7 @@ def build_app(run_dir) -> gr.Blocks:
         nd_out = [nd_head, nd_edit, nd_rationale, nd_recipe, nd_commit, nd_metrics, nd_attempts, nd_timings,
                   nd_row, nd_err]
         nd_load.click(bind(h_node), node, nd_out)
+        app.load(bind(h_files), fi_path, [fi_list, fi_path, fi_err])
 
         tr_in = [tr_node, tr_phase, tr_attempt, tr_types, tr_comp, tr_text, tr_gpu, tr_page]
         tr_go.click(bind(h_trace), tr_in, [tr_rows, tr_count, tr_page, tr_err])
@@ -513,6 +562,12 @@ def build_app(run_dir) -> gr.Blocks:
         # same value as before would stop a .change cascade and leave the previous node's data up.
         # Programmatic steps are chained with .then; user picks listen on .input.
         conv_out, chat_out = [cv_conv, cv_log, cv_err], [cv_chat, cv_err]
+        ce_out = [ce_head, ce_diff, ce_attempt, ce_commit, ce_path, ce_err]
+        ce_att_out = [ce_att_head, ce_att_diff, ce_contract, ce_err]
+        td_out = [td_head, td_sets, td_dataset, td_ingest, td_staging, td_video, td_caption, td_plot, td_info, td_err]
+        clips_out = [td_clips, td_count, td_page, td_err]
+        node_eval_in, ev_out = [node, ev_other], [ev_cases, ev_case, ev_agg, ev_err]
+        ev_case_out = [ev_video, ev_video2, ev_table, ev_meta, ev_prompt, ev_err]
         tn_out = [tn_head, tn_loss, tn_config, tn_gates, tn_gpu, tn_err]
         for trigger in (app.load, node.change):
             trigger(bind(h_attempts), node, [cv_attempt, cv_err]) \
@@ -520,21 +575,22 @@ def build_app(run_dir) -> gr.Blocks:
                 .then(bind(h_chat), [node, cv_attempt, cv_conv], chat_out)
             trigger(bind(h_training_attempts), node, [tn_attempt, tn_err]) \
                 .then(bind(h_training), [node, tn_attempt], tn_out)
+            trigger(bind(h_node), node, nd_out)
+            trigger(bind(h_code), node, ce_out).then(bind(h_code_attempt), [node, ce_attempt], ce_att_out)
+            trigger(bind(h_training_data), node, td_out).then(bind(h_clips), [node, td_dataset, td_page], clips_out)
+            trigger(bind(h_eval), node_eval_in, ev_out).then(bind(h_eval_case), [node, ev_other, ev_case], ev_case_out)
         cv_attempt.input(bind(h_conversations), [node, cv_attempt], conv_out) \
             .then(bind(h_chat), [node, cv_attempt, cv_conv], chat_out)
         cv_conv.input(bind(h_chat), [node, cv_attempt, cv_conv], chat_out)
         cv_log.input(bind(h_tool_log), cv_log, [cv_log_text, cv_err])
         tn_attempt.input(bind(h_training), [node, tn_attempt], tn_out)
 
-        ce_att_out = [ce_att_head, ce_att_diff, ce_contract, ce_err]
-        ce_load.click(bind(h_code), node, [ce_head, ce_diff, ce_attempt, ce_commit, ce_path, ce_err]) \
-            .then(bind(h_code_attempt), [node, ce_attempt], ce_att_out)
+        ce_load.click(bind(h_code), node, ce_out).then(bind(h_code_attempt), [node, ce_attempt], ce_att_out)
         ce_attempt.input(bind(h_code_attempt), [node, ce_attempt], ce_att_out)
         ce_path.input(bind(h_agent_file), [ce_commit, ce_path], [ce_file, ce_err])
+        ce_commit.input(bind(h_commit_tree), ce_commit, [ce_path, ce_file, ce_err])
 
-        clips_out = [td_clips, td_count, td_page, td_err]
-        td_load.click(bind(h_training_data), node, [td_head, td_sets, td_dataset, td_ingest, td_staging, td_err]) \
-            .then(bind(h_clips), [node, td_dataset, td_page], clips_out)
+        td_load.click(bind(h_training_data), node, td_out).then(bind(h_clips), [node, td_dataset, td_page], clips_out)
         td_dataset.input(bind(h_clips), [node, td_dataset, td_page], clips_out)
         td_page.submit(bind(h_clips), [node, td_dataset, td_page], clips_out)
 
@@ -542,9 +598,7 @@ def build_app(run_dir) -> gr.Blocks:
             return select_clip(run, evt)
         td_clips.select(on_clip_select, None, [td_video, td_caption, td_plot, td_info, td_err])
 
-        ev_case_out = [ev_video, ev_video2, ev_table, ev_meta, ev_prompt, ev_err]
-        ev_load.click(bind(h_eval), [node, ev_other], [ev_cases, ev_case, ev_agg, ev_err]) \
-            .then(bind(h_eval_case), [node, ev_other, ev_case], ev_case_out)
+        ev_load.click(bind(h_eval), node_eval_in, ev_out).then(bind(h_eval_case), [node, ev_other, ev_case], ev_case_out)
         ev_case.input(bind(h_eval_case), [node, ev_other, ev_case], ev_case_out)
         ev_other.input(bind(h_eval_case), [node, ev_other, ev_case], ev_case_out)
 

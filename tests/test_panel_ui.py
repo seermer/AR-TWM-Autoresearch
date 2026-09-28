@@ -142,3 +142,48 @@ def test_run_files_are_served_in_place_not_copied(run):
     block = gr.Video()
     served = processing_utils.move_files_to_cache(block.postprocess(video), block, postprocess=True)
     assert (served if isinstance(served, dict) else served.model_dump())["path"] == video
+
+
+# ---- owner's first look (2026-09-28) ----
+
+def test_trace_attempt_defaults_to_any(run):
+    app = ui.build_app(run.files.root)
+    attempt = _by_label(app, "Attempt (0 = a kernel step, not an agent attempt)")
+    assert isinstance(attempt, gr.Dropdown) and attempt.value == "any"
+    rows = ui.h_trace(run, "n1", "", "any", ["llm.request"], "", "", False, 1)
+    assert "7 events" in rows[1]
+
+
+def test_every_table_has_named_columns_even_when_empty(run):
+    app = ui.build_app(run.files.root)
+    for block in app.blocks.values():
+        if isinstance(block, gr.Dataframe):
+            assert block.value["headers"] != ["1", "2", "3"], block.label
+    assert list(ui.h_node(run, "root")[6].columns) == ["phase", "attempt", "outcome", "time", "detail"]
+    assert list(ui.h_selection_row(run, [], -1)[0].columns)[:1] == ["node_id"]
+
+
+def test_switching_node_reloads_every_node_tab_and_clears_the_open_clip(run):
+    app = ui.build_app(run.files.root)
+    chains = _chains(app, _by_label(app, "Node (shared by node tabs)"), "change")
+    for chain in (["h_node"], ["h_code", "h_code_attempt"], ["h_training_data", "h_clips"], ["h_eval", "h_eval_case"]):
+        assert chain in chains, chain
+    out = ui.h_training_data(run, "root")
+    assert out[-5:-1] == (None, None, None, None)              # clip video, caption, plot, record cleared
+
+
+def test_files_tab_lists_the_run_folder_on_load(run):
+    app = ui.build_app(run.files.root)
+    loads = [app.fns[d["id"]].name for d in app.config["dependencies"]
+             if any(t[1] == "load" for t in d["targets"])]
+    assert "h_files" in loads
+
+
+def test_agent_commit_is_a_labelled_choice(run):
+    out = ui.h_code(run, "n1")
+    labels = [c[0] for c in out[3]["choices"]]
+    assert labels[0] == "n1 · this node" and "root · parent" in labels
+    assert any(label.startswith("edit_self attempt 1 · contract_failed") for label in labels)
+    app = ui.build_app(run.files.root)
+    assert isinstance(_by_label(app, "Agent commit"), gr.Dropdown)
+    assert _chains(app, _by_label(app, "Agent commit"), "input") == [["h_commit_tree"]]
