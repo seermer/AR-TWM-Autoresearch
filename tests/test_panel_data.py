@@ -89,6 +89,37 @@ def test_helpers():
 from panel.events import EventLog, event_row, filter_events
 
 
+def _ev(ts, kind, node="n1"):
+    return json.dumps({"ts_wall": ts, "type": kind, "node": node}) + "\n"
+
+
+@pytest.mark.parametrize("how", ["replace", "truncate", "rewrite_longer", "delete"])
+def test_event_log_rereads_a_file_that_was_rewritten_under_it(run_dir, how):
+    """reset_run_to_root.py deletes a node's file and rewrites run.jsonl while the panel runs; the
+    panel kept the old events and read the new file from the old byte offset (two edit_planner
+    conversations for one n1)."""
+    ev = run_dir / "telemetry" / "events"
+    log = EventLog(RunFiles(run_dir))
+    (ev / "zz.jsonl").write_text(_ev(1e9, "old.a", "zz") + _ev(1e9 + 1, "old.b", "zz"))
+    assert [e["type"] for e in log.events(files=["zz"])] == ["old.a", "old.b"]
+    if how == "replace":                                  # a new file (new inode) under the same name
+        (ev / "zz.tmp").write_text(_ev(2e9, "new.a", "zz"))
+        (ev / "zz.tmp").replace(ev / "zz.jsonl")
+        expected = ["new.a"]
+    elif how == "truncate":                               # same inode, shorter
+        (ev / "zz.jsonl").write_text(_ev(2e9, "new.a", "zz"))
+        expected = ["new.a"]
+    elif how == "rewrite_longer":                         # same inode, grown past the old offset
+        (ev / "zz.jsonl").write_text(_ev(2e9, "new.first", "zz") + _ev(2e9 + 1, "new.second", "zz")
+                                     + _ev(2e9 + 2, "new.third", "zz"))
+        expected = ["new.first", "new.second", "new.third"]
+    else:
+        (ev / "zz.jsonl").unlink()
+        expected = []
+    assert [e["type"] for e in log.events(files=["zz"])] == expected
+    assert all(log.by_seq(e["_seq"]) is e for e in log.events(files=["zz"]))
+
+
 def test_event_log_reads_incrementally_and_waits_for_torn_lines(run_dir):
     log = EventLog(RunFiles(run_dir))
     before = len(log.events())
