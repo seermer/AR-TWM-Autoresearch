@@ -138,11 +138,16 @@ What the records contain (gateway linking is by resent-history prefix):
 3. That next request no longer shares the old prefix, so the gateway starts a new
    `conversation_id` at turn 0. The records carry no explicit link.
 
-Roles: the gateway records no role. A conversation's role is taken from its first
-request's system prompt: the name of the prompt file in that attempt's agent commit
-(`agent/prompts/*.md`) whose text the system prompt starts with (e.g. `data_builder`),
-else the system prompt's first line. This reads one payload per conversation, once, and
-the result is cached in memory.
+Roles (user decision 2026-09-27: panel inference only, no record change): the gateway
+records no role, and "role" is only the seed agent's convention, which self-edits may
+change. A conversation's role label is inferred from its first request's system prompt:
+the name of the prompt file, in the agent code that ran (the `code_commit` on the
+attempt's `phase.start` event), whose text the system prompt starts with (e.g.
+`data_builder`; appended knowledge documents do not prevent the match). If no file
+matches, the label is the system prompt's first line; with no system prompt it is
+"(no system prompt)". Every label is shown as inferred, and the Cost tab's per-role
+figures group by these labels. This reads one payload per conversation, once, and the
+result is cached in memory.
 
 Stitching (panel data layer only; records untouched): conversation B continues
 conversation A when both belong to the same node, phase and attempt, B's first call
