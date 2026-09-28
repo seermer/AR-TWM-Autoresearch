@@ -56,16 +56,35 @@ or downloaded fresh into `AutoResearcher/.cache/huggingface/hub/` before the cap
 start; the first captioner start after that also rebuilds the vLLM compile cache under
 `.cache/vllm` and is slower than subsequent ones.
 
-## Prefix envs (envs that don't fit `~/miniforge3`)
+## Environments (all in `AutoResearcher/.envs/`)
 
-Named envs live in `~/miniforge3/envs` (disk budget: `/home` has limited free space, each
-named env is ~8-12 GB). A generator env that would tip that over instead lives inside the
-project as a **conda-prefix** env, `AutoResearcher/.envs/<name>` (gitignored). `ar_kernel.subproc`
-tells the two apart by the env value: a plain name (`"autoresearcher"`) runs `conda run -n
-<name>`; a value containing "/" (`".envs/gen-zimage"`) is a prefix env instead — repo-relative
-unless absolute — and runs `conda run -p <path>` (`conda_command()` in `subproc.py`, tested in
-`tests/test_subproc.py` without needing conda). `configs/kernel.yaml`'s `<block>.env` is just
-this string, so a backend's `produce()` never needs to know which kind it got.
+*(Amended 2026-09-28: every environment lives in the project; user rule: environments, data,
+models and code all stay under the project folder.)* Each conda env is a **prefix** env,
+`AutoResearcher/.envs/<name>` (gitignored): `autoresearcher`, `alayaworld`, `wbench-main`,
+`wbench-vp`, `zhantaoy-vllm`, `gen-zimage`, `gen-wan22`, `gen-ltx25`, `panel`. Only the `conda`
+executable itself stays outside (a conda/miniforge install is a prerequisite, like `git`).
+
+`ar_kernel.subproc.conda_command()` picks how an env value is run: a value containing "/"
+(`".envs/gen-zimage"`) is a prefix path, repo-relative unless absolute (`conda run -p`); a plain
+name (`"alayaworld"`) runs `conda run -p .envs/alayaworld` when that folder is a conda env
+(`project_env()`), and otherwise falls back to `conda run -n <name>`, a named env of the conda
+installation, so a tree that has not been moved yet keeps working. `configs/kernel.yaml`'s
+`<block>.env` is just this string, so a backend's `produce()` never needs to know which kind it
+got. `ar doctor` reports `ok` for an env in `.envs/`, `warn` for a named env outside the
+project, `fail` for a missing one.
+
+**How the older named envs were moved (2026-09-28):**
+`conda create -y -p .envs/<name> --clone <name>` for `autoresearcher`, `alayaworld`,
+`wbench-main`, `wbench-vp` and `zhantaoy-vllm` (with `CONDA_PKGS_DIRS=$PWD/.cache/conda/pkgs`).
+A clone rewrites the prefix in scripts and editable installs, so `ar`, `pip` and friends point
+at the new location. Inside `AutoResearcher`, run the CLI as `.envs/autoresearcher/bin/ar`
+(or `conda activate $PWD/.envs/autoresearcher`).
+
+**Rebuilding on another machine:** `envs/<name>.yml` (tracked, all nine envs; from `conda env export -p --no-builds`)
+records the conda and pip packages of each env. `conda env create -p .envs/<name> -f
+envs/<name>.yml` recreates it; the `autoresearcher` env additionally needs `.envs/autoresearcher/bin/pip install -e ".[dev]"`
+run in `AutoResearcher` (the kernel itself is the only editable install, so it is not in the yml), and
+the CUDA build of torch must match the new machine's driver.
 
 **`gen-zimage`** (Z-Image-Turbo, `generate_images`): created at
 `AutoResearcher/.envs/gen-zimage`, python 3.11.
@@ -237,9 +256,10 @@ distilled LoRA). Kernel launches set `PYTORCH_CUDA_ALLOC_CONF=expandable_segment
 
 ## What needs doing on a new machine
 
-1. **Create the conda environments** — `alayaworld`, `wbench-main`, `wbench-vp`,
-   `autoresearcher`, plus the prefix envs above (`.envs/gen-zimage`, `.envs/gen-wan22`, `.envs/gen-ltx25`). Never use `base` or
-   the system Python. `ar doctor` lists any named env that is missing.
+1. **Create the conda environments in `.envs/`** — `autoresearcher`, `alayaworld`,
+   `wbench-main`, `wbench-vp`, `zhantaoy-vllm`, `gen-zimage`, `gen-wan22`, `gen-ltx25` (see
+   "Environments" above; `envs/<name>.yml`). Never use `base` or the
+   system Python. `ar doctor` lists any env that is missing or lives outside `.envs/`.
 2. **System tools on PATH:** `ffmpeg`, `ffprobe`, `conda`, `git`.
 3. **Weights are not in git.** Re-download or copy:
    `WorldModel/weights/` (LTX-2.3 transformer, `alaya-world-ar`, VAE, Gemma),

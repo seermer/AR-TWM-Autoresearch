@@ -1,3 +1,17 @@
+## Environments
+
+Everything the project runs lives inside the project: code, weights, caches (`.cache/`) and
+every conda environment, as a prefix env under `AutoResearcher/.envs/<name>`:
+`autoresearcher` (kernel, `ar`), `alayaworld`, `wbench-main`, `wbench-vp`, `zhantaoy-vllm`,
+`gen-zimage`, `gen-wan22`, `gen-ltx25`, `panel`.
+
+    .envs/autoresearcher/bin/ar run --run-id <run> ...        # or: conda activate $PWD/.envs/autoresearcher
+    .envs/autoresearcher/bin/python -m pytest tests -q
+
+Config still says `env: alayaworld`; `subproc.conda_command` runs `.envs/alayaworld` when it
+exists (else a named conda env). `ar doctor` reports any env that is not in `.envs/`.
+Rebuilding on another machine: `docs/PORTABILITY.md`.
+
 
 ## Run panel
 

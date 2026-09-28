@@ -31,14 +31,26 @@ def cache_env() -> dict[str, str]:
     return {var: str(root / sub) if sub else str(root) for var, sub in CACHE_VARS.items()}
 
 
+def project_env(name: str, root: Path | None = None) -> Path | None:
+    """`<repo>/.envs/<name>` when it is a conda env, else None. Every env the project runs lives
+    there (user rule, 2026-09-28: environments, data, models and code all stay in the project)."""
+    path = (root or REPO_ROOT) / ".envs" / name
+    return path if (path / "conda-meta").is_dir() else None
+
+
 def conda_command(env: str, args: list[str]) -> list[str]:
-    """`conda run` argv for `env`: a plain name runs `-n <env>` as before; a value containing
-    "/" is a conda-prefix env instead and runs `-p <path>` (repo-relative unless absolute) --
-    how the generator envs that don't fit `~/miniforge3` (disk budget) are named in config."""
+    """`conda run` argv for `env`. A value containing "/" is a conda-prefix path (`-p`,
+    repo-relative unless absolute). A plain name runs the project env `.envs/<name>` when there is
+    one -- so config keeps saying `alayaworld` and the env still lives inside the project -- and
+    otherwise a named env of the conda installation (`-n`), as on a machine that has not been
+    moved into `.envs` yet."""
     if "/" in env:
         path = Path(env)
         path = path if path.is_absolute() else REPO_ROOT / path
         return ["conda", "run", "--no-capture-output", "-p", str(path), *args]
+    local = project_env(env)
+    if local:
+        return ["conda", "run", "--no-capture-output", "-p", str(local), *args]
     return ["conda", "run", "--no-capture-output", "-n", env, *args]
 
 

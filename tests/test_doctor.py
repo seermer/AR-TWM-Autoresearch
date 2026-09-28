@@ -148,3 +148,26 @@ def test_missing_prefix_env_of_an_enabled_tool_is_a_failure(tmp_path):
     assert found == {"env.images": "fail"}                # disabled wan22 is not checked
     (tmp_path / ".envs" / "gen-zimage" / "conda-meta").mkdir(parents=True)
     assert {f.check: f.level for f in _prefix_envs(cfg)} == {"env.images": "ok"}
+
+
+def test_env_in_the_project_is_ok_a_named_one_warns_and_a_missing_one_fails(tmp_path, monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+    from ar_kernel.doctor import _envs
+    cfg = KernelConfig(raw={"captioner": {"env": "vllm-env"}}, repo_root=tmp_path)
+    (tmp_path / ".envs" / "alayaworld" / "conda-meta").mkdir(parents=True)
+    listing = "# conda environments:\nbase  /x\nwbench-main  /y\n"
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=listing))
+    found = {f.check: f.level for f in _envs(cfg)}
+    assert found["env.alayaworld"] == "ok"                 # lives in <repo>/.envs
+    assert found["env.wbench-main"] == "warn"              # only a named env of the conda install
+    assert found["env.wbench-vp"] == "fail" and found["env.vllm-env"] == "fail"
+
+
+def test_dangling_links_in_the_package_cache_are_not_reported(tmp_path):
+    root = _tree(tmp_path)
+    pkgs = root / ".cache" / "conda" / "pkgs" / "python-3.12" / "compiler_compat"
+    pkgs.mkdir(parents=True)
+    os.symlink("../bin/ld", str(pkgs / "ld"))                       # dangling by design
+    cfg = KernelConfig.load(root / "configs" / "kernel.yaml")
+    assert _levels(run_checks(cfg), "symlink") == {"ok"}

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import KernelConfig
+from .subproc import project_env
 
 ENVS = ("alayaworld", "wbench-main", "wbench-vp", "autoresearcher")
 
@@ -107,10 +108,15 @@ def _siblings(cfg: KernelConfig) -> list[Finding]:
 
 
 def _symlinks(cfg: KernelConfig) -> list[Finding]:
-    """Broken links are the concrete way a move has broken this tree before."""
+    """Broken links are the concrete way a move has broken this tree before. The package cache
+    under `.cache/` is skipped: conda's extracted packages hold relative links whose targets exist
+    only once a package is linked into an env."""
     out = []
+    skip = Path(cfg.repo_root) / ".cache"
     for root in (cfg.wbench, cfg.worldmodel, cfg.repo_root):
         for link in sorted(Path(root).rglob("*")):
+            if skip in link.parents:
+                continue
             try:
                 if not link.is_symlink():
                     continue
@@ -125,16 +131,33 @@ def _symlinks(cfg: KernelConfig) -> list[Finding]:
     return out or [Finding("ok", "symlink", "no broken symlinks")]
 
 
-def _envs() -> list[Finding]:
+def _envs(cfg: KernelConfig) -> list[Finding]:
+    """Every env the project runs in must live in `<repo>/.envs/<name>` (user rule, 2026-09-28).
+    A named env of the conda installation still works but is reported, so the tree is not
+    quietly depending on something outside it."""
     try:
         raw = subprocess.run(["conda", "env", "list"], capture_output=True, text=True, timeout=60).stdout
     except (OSError, subprocess.SubprocessError) as exc:
-        return [Finding("warn", "conda", f"could not list environments: {exc}")]
+        raw, listing_error = "", str(exc)
+    else:
+        listing_error = None
     names = {line.split()[0] for line in raw.splitlines()
              if line.strip() and not line.startswith("#")}
-    return [Finding("ok", f"env.{e}", "present") if e in names
-            else Finding("fail", f"env.{e}", "missing; create it before running")
-            for e in ENVS]
+    out = []
+    for e in dict.fromkeys((*ENVS, str(cfg.get("captioner.env") or ""))):
+        if not e or "/" in e:
+            continue
+        local = project_env(e, cfg.repo_root)
+        if local:
+            out.append(Finding("ok", f"env.{e}", str(local)))
+        elif e in names:
+            out.append(Finding("warn", f"env.{e}", "a named conda env outside the project; "
+                                                   "move it to .envs/ (docs/PORTABILITY.md)"))
+        elif listing_error:
+            out.append(Finding("warn", f"env.{e}", f"not in .envs/ and conda could not list environments: {listing_error}"))
+        else:
+            out.append(Finding("fail", f"env.{e}", "missing; create it in .envs/ before running"))
+    return out
 
 
 def _tools() -> list[Finding]:
@@ -185,7 +208,7 @@ def run_checks(cfg: KernelConfig | None = None) -> list[Finding]:
     findings += _rel_paths(cfg)
     findings += _siblings(cfg)
     findings += _tools()
-    findings += _envs()
+    findings += _envs(cfg)
     findings += _prefix_envs(cfg)
     findings += _dotenv(cfg)
     findings += _symlinks(cfg)

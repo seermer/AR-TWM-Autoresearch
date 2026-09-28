@@ -49,7 +49,7 @@ tools:
   job_wait_max_s: 300
   hf_download_max_bytes: 21474836480   # 20 GiB per hf.download call
 captioner:                       # caption_videos GPU job: a local vLLM server, never the paid agent model
-  env: zhantaoy-vllm             # conda env with vLLM (0.29.0)
+  env: zhantaoy-vllm             # conda env with vLLM (0.29.0), lives in .envs/zhantaoy-vllm
   model: Qwen/Qwen3.8-27B-FP8    # resolved by id through the HF cache (HF_HUB_OFFLINE=1: never downloads)
   tensor_parallel: null          # null = the largest power of two <= the number of node GPUs
   # The owner's launch on 4 x 24 GB, checked on 57 clips (verification log, 2026-09-28). vLLM test-runs the
