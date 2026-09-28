@@ -187,3 +187,35 @@ def test_agent_commit_is_a_labelled_choice(run):
     app = ui.build_app(run.files.root)
     assert isinstance(_by_label(app, "Agent commit"), gr.Dropdown)
     assert _chains(app, _by_label(app, "Agent commit"), "input") == [["h_commit_tree"]]
+
+
+# ---- problems view (2026-09-28) ----
+
+def test_problems_tab_and_overview_counts(tmp_path):
+    from test_panel_data import _add_problems
+    run_dir = make_run(tmp_path)
+    _add_problems(run_dir)
+    run = views.Run(run_dir)
+    frame, rows, count, err = ui.h_problems(run, [], "any")
+    assert err == "" and len(frame) == len(rows) == 15 and "15 problems" in count
+    assert list(frame.columns) == ui.COLUMNS["problems"]
+    only = ui.h_problems(run, ["agent_tool"], "any")[1]
+    assert {r["kind"] for r in only} == {"agent_tool"} and len(only) == 2
+    assert len(ui.h_problems(run, [], "inferred")[1]) == 2
+    from types import SimpleNamespace
+    recorded = next(i for i, r in enumerate(rows) if r["kind"] == "tool_error")
+    event, payload, text, err = ui.select_problem(run, rows, SimpleNamespace(index=[0, 0], row_value=[recorded]))
+    assert event["type"] == "tool.error" and payload["error"] == "bad filter" and err == ""
+    guessed = next(i for i, r in enumerate(rows) if r["kind"] == "agent_tool")
+    event, payload, text, err = ui.select_problem(run, rows, SimpleNamespace(index=[0, 0], row_value=[guessed]))
+    assert event is None and text.startswith(("exit 2", "Error: nope"))
+    counts = ui.h_overview(run)[6]
+    assert list(counts.columns) == ui.COLUMNS["problem_counts"] and counts["total"].sum() == 15
+    app = ui.build_app(run_dir)
+    assert _chains(app, next(b for b in app.blocks.values() if getattr(b, "value", None) == "Load problems"),
+                   "click") == [["h_problems"]]
+
+
+def test_tool_errors_stay_open_in_chats():
+    msgs = ui.to_messages([{"kind": "tool_error", "title": "⚠ Tool error: x", "text": "Error: boom"}])
+    assert msgs[0]["metadata"] == {"title": "⚠ Tool error: x"}               # no status: shown open

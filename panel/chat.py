@@ -7,10 +7,19 @@ A chat is a list of items {"kind", "title", "text"} that the UI turns into chat 
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Callable
 
 Load = Callable[[str | None], dict | None]
+
+# How the seed harness and run_command report a failure to the model (agent code, so a self-edit
+# may change it: anything found this way is labelled inferred).
+ERROR_TEXT = re.compile(r"(Error\b|exit [1-9]\d*\b|timed out after\b)")
+
+
+def is_tool_error(text: str | None) -> bool:
+    return bool(ERROR_TEXT.match((text or "").lstrip()))
 
 
 @dataclass
@@ -147,8 +156,10 @@ def message_items(m: dict, names: dict[str, str]) -> list[dict]:
     if role == "user":
         return [item("user", None, text_of(m.get("content")))]
     if role == "tool":
-        name = names.get(m.get("tool_call_id"), "tool")
-        return [item("tool_output", f"Tool output: {name}", text_of(m.get("content")))]
+        name, text = names.get(m.get("tool_call_id"), "tool"), text_of(m.get("content"))
+        if is_tool_error(text):
+            return [item("tool_error", f"⚠ Tool error: {name}", text)]
+        return [item("tool_output", f"Tool output: {name}", text)]
     out = []
     if m.get("reasoning_content"):
         out.append(item("reasoning", "Reasoning", text_of(m["reasoning_content"])))

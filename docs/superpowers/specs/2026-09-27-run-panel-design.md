@@ -120,6 +120,17 @@ and only its eval, lineage and events are shown.
 9. **Selection**: every `selection_events` row — the chosen parent and each candidate's
    value, penalty and probability.
 10. **Cost and LLM stats**: tokens, cost, latency and errors per node, phase and role.
+12. **Problems** *(added 2026-09-28, user decision)*: every failure in one list, newest first,
+    filterable by kind and source; selecting one shows its event and payload. *Recorded*:
+    non-200 or unanswered LLM calls (unanswered only once the attempt ended or the loop
+    stopped), kernel tool errors, per-item errors inside GPU job results (e.g. a clip the
+    captioner rejected) and failed jobs, gate, ingest and contract failures, failed
+    subprocesses and containers, `*.error` spans, warnings and alerts. *Inferred*: the agent's
+    own in-container tool failures, read from the chats' tool outputs by the seed harness's
+    error text and `run_command`'s non-zero exit (kernel tools excluded: they are recorded).
+    The Overview shows counts per kind for the run's last hour and in total; in chats an error
+    tool output is marked "⚠ Tool error" and shown open. Individual failures are not kernel
+    alerts: alerts stay for run-level trouble.
 11. **Files**: a read-only browser of the whole run folder, for anything the other tabs do
     not cover (vLLM logs, render logs, WBench output, config snapshots). Every file shows
     its size and mtime. Text and JSON under 2 MB are shown in full; larger text shows its

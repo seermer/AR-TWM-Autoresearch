@@ -22,6 +22,7 @@ class Run:
         self.files = RunFiles(run_dir)
         self.log = EventLog(self.files)
         self._prompts: dict[str, dict[str, str]] = {}
+        self.cache: dict = {}                  # derived results keyed by what they were derived from
         self._lock = threading.Lock()
 
     @property

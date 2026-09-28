@@ -426,6 +426,8 @@ def test_every_view_leaves_the_run_untouched(run_dir):
             views.training(r, node, attempt)
     media.clips(r, "n1", "ds1"), media.camera_path(r, "store/blobs/pose/pd1.npz")
     views.selection(r), views.cost(r)
+    from panel import problems as problem_view
+    problem_view.problems(r), problem_view.problem_counts(r)
     commit = views.code_edits(r, "n1")["agent_commit"]
     for path in views.agent_tree(r, commit):
         views.agent_file(r, commit, path)
@@ -505,3 +507,96 @@ def test_gpu_series_covers_the_runs_last_hours_not_the_clock(run_dir):
 
 def test_trace_offers_attempts_and_any(run):
     assert {"0", "1"} <= set(views.trace_choices(run)["attempt"])
+
+
+# ---- problems view (2026-09-28) ----
+
+from collections import Counter  # noqa: E402
+
+from panel import problems  # noqa: E402
+
+
+def _add_problems(run_dir):
+    """One of every problem kind on n2 (n1 already has a contract failure, a gate failure, an
+    ingest rejection and an unanswered LLM call; the run has a stall alert)."""
+    from ar_kernel.telemetry.recorder import Recorder
+    from fixtures.panel_run import Llm, tool_call
+    rec = Recorder(run_dir)
+    base = dict(node="n2", phase="edit_self", attempt=1)
+    rec.event("phase.start", payload={"code_commit": None}, **base)
+    calls = [tool_call("t1", "run_command", {"command": "false"}), tool_call("t2", "nope", {}),
+             tool_call("t3", "data_query", {"filter": {}}), tool_call("t4", "read_file", {"path": "a"})]
+    history = [{"role": "system", "content": "You code."}, {"role": "user", "content": "go"}]
+    llm = Llm(rec, **base)
+    llm.call("c1", 0, history, {"content": "", "tool_calls": calls})
+    rec.event("tool.call", tool="data_query", component="tools", payload={"tool": "data_query", "args": {}}, **base)
+    rec.event("tool.error", tool="data_query", component="tools",
+              payload={"tool": "data_query", "error": "bad filter"}, **base)
+    llm.call("c1", 1, history + [
+        {"role": "assistant", "content": "", "tool_calls": calls},
+        {"role": "tool", "tool_call_id": "t1", "content": "exit 2\nboom"},
+        {"role": "tool", "tool_call_id": "t2", "content": "Error: nope is not a valid tool, try one of [a]."},
+        {"role": "tool", "tool_call_id": "t3", "content": "Error: ToolException('bad filter')\n Please fix your mistakes."},
+        {"role": "tool", "tool_call_id": "t4", "content": "fine"}], {"content": "done"})
+    rec.event("llm.request", payload={"body": {"messages": [{"role": "user", "content": "x"}]}}, call_id="r1",
+              conversation_id="c9", turn_index=0, model="m", component="gateway", **base)
+    rec.event("llm.response", payload={"body": {"error": {"message": "rate limited"}}}, call_id="r1",
+              conversation_id="c9", status=429, usage={}, cost_usd=None, latency_s=0.1, component="gateway", **base)
+    rec.event("job.finished", node="n2", job_id="j1", component="tools", payload={"error": None, "result": {
+        "clips": {"/workspace/a.mp4": {"error": "HTTP 400: too many tokens"}, "/workspace/b.mp4": {"caption": "ok"}}}})
+    rec.event("job.finished", node="n2", job_id="j2", component="tools", payload={"error": "worker died", "result": None})
+    rec.event("subproc.end", node="n2", phase="render", returncode=1, payload={"stdout": "", "stderr": "Traceback: x"})
+    rec.event("subproc.end", node="n2", phase="render", returncode=0, payload={"stdout": "", "stderr": ""})
+    rec.event("subproc.cancelled", node="n2", phase="caption_videos", returncode=-15, payload={})
+    rec.event("sandbox.end", exit_code=1, timed_out=False, component="sandbox",
+              payload={"stdout": "", "stderr": "crash", "reason": None}, **base)
+    rec.event("render.error", node="n2", phase="render", payload={"error": "RuntimeError('x')", "traceback": "tb"})
+    rec.event("run.warning", payload={"message": "disk low"}, message="disk low")
+    rec.event("phase.end", **base)
+
+
+def test_problems_lists_every_failure_once(run_dir):
+    _add_problems(run_dir)
+    got = problems.problems(views.Run(run_dir))
+    assert Counter((p["source"], p["kind"]) for p in got) == Counter({
+        ("recorded", "alert"): 1, ("recorded", "contract_failed"): 1, ("recorded", "gate_failed"): 1,
+        ("recorded", "ingest_rejected"): 1, ("recorded", "llm_call"): 2, ("recorded", "tool_error"): 1,
+        ("recorded", "job_item"): 1, ("recorded", "job_failed"): 1, ("recorded", "subprocess"): 1,
+        ("recorded", "sandbox"): 1, ("recorded", "error_event"): 1, ("recorded", "warning"): 1,
+        ("inferred", "agent_tool"): 2})
+    assert [p["ts"] for p in got] == sorted((p["ts"] for p in got), reverse=True)        # newest first
+    by = {(p["kind"], p["node"]): p for p in got}
+    assert "429" in by[("llm_call", "n2")]["summary"] and "rate limited" in by[("llm_call", "n2")]["summary"]
+    assert "no response" in by[("llm_call", "n1")]["summary"]
+    assert "a.mp4" in by[("job_item", "n2")]["summary"] and "too many tokens" in by[("job_item", "n2")]["summary"]
+    assert by[("tool_error", "n2")]["seq"] is not None and "data_query" in by[("tool_error", "n2")]["summary"]
+    inferred = sorted(p["summary"] for p in got if p["source"] == "inferred")
+    assert inferred[0].startswith("nope:") and inferred[1].startswith("run_command: exit 2")
+    assert all(p["where"] == "edit_self-1 · conversation 0" and p["seq"] is None for p in got
+               if p["source"] == "inferred")
+
+
+def test_an_unanswered_call_in_a_live_attempt_is_not_a_problem(run_dir):
+    started = open(f"/proc/{os.getpid()}/stat").read().rsplit(")", 1)[1].split()[19]
+    (run_dir / "control" / "loop.pid").write_text(f"{os.getpid()} {started}")
+    path = run_dir / "telemetry" / "events" / "n1.jsonl"
+    path.write_text("".join(line + "\n" for line in path.read_text().splitlines()
+                            if '"phase.end"' not in line))                  # the attempt is still running
+    assert not [p for p in problems.problems(views.Run(run_dir)) if p["kind"] == "llm_call"]
+
+
+def test_problem_counts_by_kind(run_dir):
+    _add_problems(run_dir)
+    r = views.Run(run_dir)
+    counts = problems.problem_counts(r, hours=1)
+    assert sum(c["total"] for c in counts) == len(problems.problems(r))
+    assert all(c["last hour"] == c["total"] for c in counts)          # everything happened in the last hour
+
+
+def test_error_tool_outputs_are_marked_in_chats(run_dir):
+    _add_problems(run_dir)
+    r = views.Run(run_dir)
+    items = views.conversation_chat(r, "n2", "edit_self", 1, 0)
+    marked = [i["title"] for i in items if i["kind"] == "tool_error"]
+    assert marked == ["⚠ Tool error: run_command", "⚠ Tool error: nope", "⚠ Tool error: data_query"]
+    assert any(i["kind"] == "tool_output" and i["text"] == "fine" for i in items)

@@ -12,7 +12,7 @@ import gradio as gr
 import pandas as pd
 import plotly.graph_objects as go
 
-from . import media, views
+from . import media, problems, views
 
 FOLDED = {"system", "tools", "reasoning", "tool_call", "tool_output", "context"}
 
@@ -52,7 +52,11 @@ COLUMNS = {
     "by_role": ["role (inferred)", "conversations", "calls", "tokens", "usd"],
     "errors": ["time", "node", "phase", "status"],
     "files": ["name", "type", "bytes", "modified"],
+    "problems": ["id", "time", "source", "kind", "node", "phase", "attempt", "where", "summary"],
+    "problem_counts": ["kind", "source", "last hour", "total"],
 }
+PROBLEM_KINDS = ["llm_call", "tool_error", "agent_tool", "job_item", "job_failed", "gate_failed", "ingest_rejected",
+                 "contract_failed", "subprocess", "sandbox", "error_event", "warning", "alert"]
 DYNAMIC = {"cases", "candidates"}          # their columns come from the data (metrics, selection fields)
 
 
@@ -85,6 +89,8 @@ def to_messages(items: list[dict]) -> list[dict]:
             out.append({"role": "user", "content": f"**{title}**\n\n{text}"})
         elif kind == "compaction_summary":
             out.append({"role": "assistant", "content": f"**{title}**\n\n{text}"})
+        elif kind == "tool_error":             # no status: Gradio 6 shows the section open
+            out.append({"role": "assistant", "content": fence(text), "metadata": {"title": title}})
         else:
             body = text if kind in ("system", "context") else fence(text)
             # status "done": Gradio 6 starts the section closed (open when status is absent)
@@ -111,7 +117,7 @@ def _abs(run: views.Run, rel: str | None) -> str | None:
 
 # ---- handlers ----
 
-@guarded(8)
+@guarded(9)
 def h_overview(run):
     ov = views.overview(run)
     loop, spend = ov["loop"], ov["spend"]
@@ -132,6 +138,7 @@ def h_overview(run):
     gpu.update_layout(title="GPU memory (GiB), the run's last 6 h of samples", height=300, margin=dict(t=40, b=30))
     nodes = [n["node"] for n in ov["nodes"]]
     return (head, df(ov["nodes"], "nodes"), scores, gpu, df(ov["alerts"], "alerts"), df(ov["recent"], "events"),
+            df(problems.problem_counts(run), "problem_counts"),
             gr.update(choices=nodes), gr.update(choices=nodes))
 
 
@@ -372,10 +379,33 @@ def h_preview(run, rel):
     return meta, text, video, image, p["kind"]
 
 
+@guarded(3)
+def h_problems(run, kinds, source):
+    rows = [p for p in problems.problems(run)
+            if (not kinds or p["kind"] in kinds) and source in (None, "", "any", p["source"])]
+    rows = [dict(p, id=i) for i, p in enumerate(rows)]
+    return df(rows, "problems"), rows, f"{len(rows)} problems · newest first · inferred = read from a chat's tool output"
+
+
+@guarded(3)
+def h_problem_detail(run, rows, index):
+    if not rows or not 0 <= index < len(rows):
+        return None, None, ""
+    p = rows[index]
+    if p["seq"] is None:
+        return None, None, p.get("detail") or p["summary"]
+    d = views.trace_detail(run, p["seq"])
+    return (d["event"], d["payload"], p.get("detail") or "") if d else (None, None, p["summary"])
+
+
 # ---- row selection: by the selected row's own values (a sorted table's index is not the frame's) ----
 
 def select_trace(run, evt):
     return h_trace_detail(run, int(evt.row_value[0]))
+
+
+def select_problem(run, rows, evt):
+    return h_problem_detail(run, rows, int(evt.row_value[0]))
 
 
 def select_clip(run, evt):
@@ -422,8 +452,23 @@ def build_app(run_dir) -> gr.Blocks:
                 with gr.Row():
                     ov_scores, ov_gpu = gr.Plot(), gr.Plot()
                 ov_alerts = gr.Dataframe(headers=COLUMNS["alerts"], label="Alerts (newest first)", wrap=True, interactive=False)
+                ov_problems = gr.Dataframe(headers=COLUMNS["problem_counts"], interactive=False,
+                                           label="Problems: the run's last hour / total (details in the Problems tab)")
                 ov_recent = gr.Dataframe(headers=COLUMNS["events"], label="Last 50 events (newest first)", wrap=True, interactive=False)
                 ov_err = gr.Markdown()
+            with gr.Tab("Problems"):
+                with gr.Row():
+                    pr_kind = gr.Dropdown(PROBLEM_KINDS, multiselect=True, label="Kinds (none = all)")
+                    pr_source = gr.Dropdown(["any", "recorded", "inferred"], value="any", label="Source")
+                    pr_load = gr.Button("Load problems")
+                pr_count = gr.Markdown()
+                pr_rows = gr.Dataframe(headers=COLUMNS["problems"], interactive=False, wrap=True,
+                                       label="Every failure (select one)")
+                pr_state = gr.State([])
+                with gr.Row():
+                    pr_event, pr_payload = gr.JSON(label="Event"), gr.JSON(label="Payload")
+                pr_text = gr.Code(label="Tool output (inferred problems)", lines=15)
+                pr_err = gr.Markdown()
             with gr.Tab("Node"):
                 nd_load = gr.Button("Load node")
                 nd_head = gr.Markdown()
@@ -542,13 +587,20 @@ def build_app(run_dir) -> gr.Blocks:
                 fi_err = gr.Markdown()
 
         # overview: on load and every 15 s
-        ov_out = [ov_head, ov_nodes, ov_scores, ov_gpu, ov_alerts, ov_recent, node, ev_other, ov_err]
+        ov_out = [ov_head, ov_nodes, ov_scores, ov_gpu, ov_alerts, ov_recent, ov_problems, node, ev_other, ov_err]
         app.load(bind(h_overview), None, ov_out)
         gr.Timer(15).tick(bind(h_overview), None, ov_out)
 
         nd_out = [nd_head, nd_edit, nd_rationale, nd_recipe, nd_commit, nd_metrics, nd_attempts, nd_timings,
                   nd_row, nd_err]
         nd_load.click(bind(h_node), node, nd_out)
+        pr_out = [pr_rows, pr_state, pr_count, pr_err]
+        app.load(bind(h_problems), [pr_kind, pr_source], pr_out)
+        pr_load.click(bind(h_problems), [pr_kind, pr_source], pr_out)
+
+        def on_problem_select(rows: list, evt: gr.SelectData):
+            return select_problem(run, rows, evt)
+        pr_rows.select(on_problem_select, pr_state, [pr_event, pr_payload, pr_text, pr_err])
         app.load(bind(h_files), fi_path, [fi_list, fi_path, fi_err])
 
         tr_in = [tr_node, tr_phase, tr_attempt, tr_types, tr_comp, tr_text, tr_gpu, tr_page]
