@@ -69,6 +69,23 @@ def test_edit_file_refuses_non_utf8_files_and_leaves_them_untouched(tmp_path):
     assert (tmp_path / "c.txt").read_bytes() == raw
 
 
+def test_run_command_keeps_the_full_output_in_the_workspace(tmp_path, monkeypatch):
+    from agent.tools import MAX_OUTPUT, make_file_tools
+    agent, workspace = tmp_path / "agent", tmp_path / "ws"
+    agent.mkdir(), workspace.mkdir()
+    monkeypatch.setenv("AR_WORKSPACE", str(workspace))
+    run = {t.name: t for t in make_file_tools(str(agent))}["run_command"]      # an edit_self tool root
+    out = run.invoke({"command": "echo first; seq 1 20000"})
+    logs = list((workspace / "tool_output").glob("*.log"))
+    assert len(logs) == 1 and not list(agent.rglob("*.log"))                   # never inside /agent
+    full = logs[0].read_text()
+    assert full.startswith("$ echo first; seq 1 20000\nexit 0\n") and "first\n1\n2\n" in full
+    assert full.endswith("20000\n")
+    assert out.endswith("20000\n") and str(logs[0]) in out and len(out) < MAX_OUTPUT + 500
+    short = run.invoke({"command": "echo hi"})
+    assert short == "exit 0\nhi\n" and len(list((workspace / "tool_output").glob("*.log"))) == 2
+
+
 def test_read_only_file_tools_cannot_write(tmp_path):
     from agent.tools import make_file_tools
     assert {t.name for t in make_file_tools(str(tmp_path), writable=False)} == {"read_file", "list_dir"}

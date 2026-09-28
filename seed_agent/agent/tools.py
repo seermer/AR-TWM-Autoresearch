@@ -3,8 +3,11 @@ tools (the MCP tool server) as LangChain tools, and submit_<x> result tools. Cap
 kernel's caption_videos GPU job."""
 from __future__ import annotations
 
+import itertools
 import json
+import os
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -33,6 +36,19 @@ def replace_once(text: str, old: str, new: str) -> str:
     if count != 1:
         raise ValueError(f"old text must appear exactly once, found {count} matches")
     return text.replace(old, new, 1)
+
+
+_command_ids = itertools.count(1)
+
+
+def _keep_output(command: str, status: str, output: str) -> Path:
+    """Save a command's full output under /workspace/tool_output (never under /agent, whose
+    files are committed as agent code), so the run keeps what the model only saw the tail of."""
+    folder = Path(os.environ.get("AR_WORKSPACE", "/workspace")) / "tool_output"
+    folder.mkdir(parents=True, exist_ok=True)
+    log = folder / f"run_command-{time.strftime('%Y%m%d-%H%M%S')}-{next(_command_ids):04d}.log"
+    log.write_text(f"$ {command}\n{status}\n{output}", encoding="utf-8")
+    return log
 
 
 def make_file_tools(root: str, *, writable: bool = True) -> list:
@@ -72,9 +88,16 @@ def make_file_tools(root: str, *, writable: bool = True) -> list:
         try:
             r = subprocess.run(["bash", "-lc", command], cwd=root, capture_output=True, text=True,
                                timeout=min(int(timeout_s), 3600))
-        except subprocess.TimeoutExpired:
-            return f"timed out after {timeout_s}s"
-        return f"exit {r.returncode}\n{(r.stdout + r.stderr)[-MAX_OUTPUT:]}"
+            status, output = f"exit {r.returncode}", r.stdout + r.stderr
+        except subprocess.TimeoutExpired as exc:
+            status = f"timed out after {timeout_s}s"
+            output = "".join(p.decode(errors="replace") if isinstance(p, bytes) else p or ""
+                             for p in (exc.stdout, exc.stderr))
+        log = _keep_output(command, status, output)
+        if len(output) <= MAX_OUTPUT:
+            return f"{status}\n{output}"
+        return f"{status}\n[output cut to its last {MAX_OUTPUT} of {len(output)} chars; full output: {log}]\n" \
+               f"{output[-MAX_OUTPUT:]}"
 
     if not writable:
         return [read_file, list_dir]
