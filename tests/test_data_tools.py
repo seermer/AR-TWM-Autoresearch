@@ -165,6 +165,7 @@ def test_leakage_checker_is_built_once_across_concurrent_ingests(tmp_path, monke
     ws.mkdir(), st.mkdir(parents=True)
     caller = TokenRegistry(rec).issue(node="n1", phase="improve_recipe", attempt=1,
                                       workspace_host=ws, staging_host=st)
+    (st / "v.mp4").write_bytes(b"x"), (st / "c.json").write_text("{}")
     # An invalid camera_motion is rejected before any file is touched: this exercises only setup.
     # Distinct values keep the two rejection payloads distinct (the recorder writes identical
     # payloads through one shared tmp name, a separate race).
@@ -180,3 +181,11 @@ def test_leakage_checker_is_built_once_across_concurrent_ingests(tmp_path, monke
         t.join()
     assert [r["accepted"] for r in results] == [False, False]
     assert len(built) == 1
+
+
+def test_ingesting_an_already_ingested_file_names_the_container_path(env):
+    tools, caller, _, run = env
+    with pytest.raises(ToolError, match=r"/workspace/staging/c0/v.mp4 does not exist") as exc:
+        tools.ingest(caller, [{"video": "/workspace/staging/c0/v.mp4", "caption": "/workspace/staging/c0/c.json",
+                               "camera_motion": "moving", "provenance": PROV}])
+    assert str(run) not in str(exc.value)

@@ -1,5 +1,7 @@
 import subprocess
 
+from pathlib import Path
+
 import pytest
 
 from ar_kernel.config import KernelConfig
@@ -46,3 +48,9 @@ def test_built_image_has_the_runtime_stack_and_no_network_needed():
     ff = subprocess.run(["docker", "run", "--rm", "--network", "none", tag, "ffprobe", "-version"],
                         capture_output=True, text=True, timeout=120)
     assert ff.returncode == 0
+
+
+def test_dockerfile_installs_the_tools_the_agents_reach_for():
+    text = (Path(__file__).resolve().parents[1] / "docker" / "agent.Dockerfile").read_text()
+    for package in ("ffmpeg", "unzip", "curl", "wget", "git", "p7zip-full"):
+        assert package in text

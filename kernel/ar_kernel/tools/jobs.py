@@ -121,10 +121,16 @@ class JobQueue:
         return dict(self._backends)
 
     def _own(self, caller, job_id: str) -> Job:
-        job = self._jobs.get(job_id)
-        if job is None or job.token != caller.token:
-            raise ToolError(f"no job {job_id!r} for this caller")
-        return job
+        """The caller's job with this id, or with this unique id prefix (8+ characters)."""
+        mine = {i: j for i, j in self._jobs.items() if j.token == caller.token}
+        if job_id in mine:
+            return mine[job_id]
+        matches = [i for i in mine if len(job_id) >= 8 and i.startswith(job_id)]
+        if len(matches) == 1:
+            return mine[matches[0]]
+        if matches:
+            raise ToolError(f"job id prefix {job_id!r} matches {len(matches)} jobs: {', '.join(matches)}")
+        raise ToolError(f"no job {job_id!r} for this caller; yours: {', '.join(mine) or 'none'}")
 
     def _view(self, job: Job) -> dict:
         view = asdict(job)

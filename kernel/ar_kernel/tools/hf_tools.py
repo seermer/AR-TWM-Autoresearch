@@ -10,7 +10,7 @@ from collections import Counter
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from huggingface_hub.errors import HfHubHTTPError
+from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
 from mcp.server.mcpserver import Context
 
 from .context import STAGING
@@ -73,10 +73,17 @@ class HfTools:
     def search(self, caller, query: str, kind: str = "dataset", limit: int = 20) -> list[dict]:
         if kind != "dataset":
             raise ToolError("only kind='dataset' is supported: models are not training data")
-        return [{"id": d.id, "license": _license(d), "tags": list(d.tags or [])[:40],
+        words = (query or "").lower().split()
+        if not words:
+            raise ToolError("query is empty")
+        # The Hub matches one substring, so ask for the longest word and keep the hits holding every word.
+        hits = self.api.list_datasets(search=max(words, key=len), limit=min(int(limit), 100) * 5, full=True)
+        rows = [{"id": d.id, "license": _license(d), "tags": list(d.tags or [])[:40],
+                 "gated": getattr(d, "gated", False),
                  "downloads": getattr(d, "downloads", None),
                  "last_modified": str(getattr(d, "last_modified", None))}
-                for d in self.api.list_datasets(search=query, limit=min(int(limit), 100), full=True)]
+                for d in hits if all(w in " ".join([d.id, *(d.tags or [])]).lower() for w in words)]
+        return rows[:min(int(limit), 100)]
 
     def _info(self, repo: str, revision: str):
         if not REPO_RE.match(repo or ""):
@@ -93,7 +100,13 @@ class HfTools:
         files = sorted((s.rfilename, int(s.size or 0)) for s in info.siblings
                        if fnmatch.fnmatch(s.rfilename, pattern))
         offset, limit = max(0, int(offset)), max(1, min(int(limit), LIST_MAX))
+        try:
+            self.api.auth_check(repo, repo_type="dataset")
+            accessible = True
+        except (GatedRepoError, RepositoryNotFoundError):     # gated without access, or private
+            accessible = False
         return {"repo": repo, "revision": info.sha, "license": _license(info),
+                "gated": getattr(info, "gated", False), "accessible": accessible,
                 "repo_files": len(info.siblings), "matching_files": len(files),
                 "matching_bytes": sum(size for _, size in files), "offset": offset,
                 "files": [{"path": f, "size": size} for f, size in files[offset:offset + limit]]}
@@ -147,7 +160,8 @@ class HfTools:
 
 
 def register_hf_tools(mcp, kit, tools: HfTools) -> None:
-    @mcp.tool(name="hf_search", description="Search Hugging Face datasets. Returns ids, license and tags.")
+    @mcp.tool(name="hf_search", description="Search Hugging Face datasets. Every word of `query` must appear in the dataset id or tags. "
+              "Returns ids, license, tags and whether the dataset is gated.")
     async def hf_search(query: str, ctx: Context, kind: str = "dataset", limit: int = 20) -> list[dict]:
         return await kit.call(ctx, "hf_search", {"query": query, "kind": kind, "limit": limit},
                               lambda c: tools.search(c, query, kind, limit))
@@ -155,7 +169,8 @@ def register_hf_tools(mcp, kit, tools: HfTools) -> None:
     @mcp.tool(name="hf_list_files", description="List a dataset repo's files with their sizes (bytes), "
               "without downloading: paths matching `pattern` (fnmatch; `*` also crosses folders, e.g. "
               "'videos/*.mp4'), sorted, one page of `limit` (default 200, at most 1000) from `offset`. "
-              "Also returns the pinned revision, license and the matching count and bytes.")
+              "Also returns the pinned revision, license, the matching count and bytes, and `gated` / `accessible` "
+              "(a gated dataset with accessible false cannot be downloaded with this token).")
     async def hf_list_files(repo: str, revision: str, ctx: Context, pattern: str = "*",
                             limit: int = LIST_PAGE, offset: int = 0) -> dict[str, Any]:
         return await kit.call(ctx, "hf_list_files",

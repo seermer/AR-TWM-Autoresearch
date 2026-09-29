@@ -61,9 +61,13 @@ class DataTools:
             for key in ("video", "caption", "camera_motion"):
                 if not c.get(key):
                     raise ToolError(f"candidate {i}: {key} is required")
+            host = {key: self._host(caller, c[key]) for key in ("video", "caption", "pose") if c.get(key)}
+            for key, path in host.items():
+                if not path.is_file():           # container paths only: host paths never reach the agent
+                    raise ToolError(f"candidate {i}: {key} {c[key]} does not exist (data_ingest moves each "
+                                    "staged file into the archive, so an already ingested file is gone)")
             built.append(Candidate(
-                video=self._host(caller, c["video"]), caption=self._host(caller, c["caption"]),
-                pose=self._host(caller, c["pose"]) if c.get("pose") else None,
+                video=host["video"], caption=host["caption"], pose=host.get("pose"),
                 camera_motion=c["camera_motion"], provenance=c["provenance"],
                 license=c.get("license"), derived_from=list(c.get("derived_from") or [])))
         conn = open_db(self.run_dir)
@@ -179,7 +183,8 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
 
     @mcp.tool(name="data_ingest", description="Ingest staged candidates (spec 5.5). Each: video, "
               "caption, optional pose (container paths under /workspace/staging), camera_motion "
-              "'moving'|'static', provenance, optional license and derived_from. Returns accepted + "
+              "'moving'|'static', provenance, optional license and derived_from. Ingest MOVES each "
+              "staged file into the archive: copy it first if you still need it. Returns accepted + "
               "clip_id + eligible formats, or rejected + reasons, per candidate.")
     async def data_ingest(candidates: list[dict[str, Any]], ctx: Context) -> list[dict]:
         return await kit.call(ctx, "data_ingest", {"candidates": candidates},
@@ -192,7 +197,8 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
         return await kit.call(ctx, "data_query", {"filter": filter}, lambda c: tools.query(c, filter))
 
     @mcp.tool(name="data_commit", description="Create an immutable data commit (spec 5.6). "
-              "datasets: {name: {format, prompt_mode, weight, clips: [clip_id]}}.")
+              "datasets: {name: {format, prompt_mode, weight, clips: [clip_id]}}. Set prompt_mode only for "
+              "format video_timed_prompts_camera; omit it for every other format.")
     async def data_commit(parent: str | None, datasets: dict[str, Any], message: str,
                           ctx: Context) -> dict:
         return await kit.call(ctx, "data_commit",
@@ -200,7 +206,8 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
                               lambda c: tools.commit(c, parent, datasets, message))
 
     @mcp.tool(name="recipe_check", description="Run every recipe-gate check (spec 8) on a recipe "
-              "and data commit without consuming an attempt. Returns ok and the failures.")
+              "and data commit without consuming an attempt. `recipe` is a flat {tunable key: value} map, "
+              "e.g. {\"optimizer.lr\": 1e-4}, with no wrapper key. Returns ok and the failures.")
     async def recipe_check(recipe: dict[str, Any], data_commit: str, ctx: Context) -> dict:
         return await kit.call(ctx, "recipe_check", {"recipe": recipe, "data_commit": data_commit},
                               lambda c: tools.recipe_check(c, recipe, data_commit))

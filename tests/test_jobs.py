@@ -262,3 +262,30 @@ def test_job_cancelled_while_waiting_for_the_gpu_lock_never_reaches_the_backend(
     follow_up = q.submit(a, "recording", {})
     assert q.wait(a, follow_up, 30)["state"] == "done"
     assert q.status(a, job_id)["state"] == "cancelled" and calls == [follow_up]
+
+
+def test_a_unique_id_prefix_finds_the_job(env):
+    q, a, _, _ = env
+    job_id = q.submit(a, "sleepy", {"steps": 1})
+    assert q.wait(a, job_id[:8], 30)["id"] == job_id
+
+
+def test_a_mistyped_id_lists_the_callers_own_jobs_and_never_anothers(env):
+    q, a, b, _ = env
+    mine, theirs = q.submit(a, "sleepy", {"steps": 1}), q.submit(b, "sleepy", {"steps": 1})
+    with pytest.raises(ToolError, match=mine) as exc:
+        q.status(a, "0" * 32)
+    assert theirs not in str(exc.value)
+    with pytest.raises(ToolError, match="no job"):
+        q.status(a, theirs[:8])                       # another caller's prefix does not resolve
+
+
+def test_a_short_or_ambiguous_prefix_is_refused(env):
+    q, a, _, _ = env
+    ids = [q.submit(a, "sleepy", {"steps": 1}) for _ in range(30)]
+    with pytest.raises(ToolError, match="no job"):
+        q.status(a, ids[0][:7])                       # under 8 characters never resolves
+    twin = next((p for p in {i[:8] for i in ids} if sum(j.startswith(p) for j in ids) > 1), None)
+    if twin:                                          # 8 hex characters: a clash is very unlikely
+        with pytest.raises(ToolError, match="matches 2 jobs"):
+            q.status(a, twin)

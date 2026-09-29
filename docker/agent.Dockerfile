@@ -1,7 +1,7 @@
 # docker/agent.Dockerfile -- base image for agent containers (CPU only, no network at runtime)
 FROM python:3.12-slim
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg \
+ && apt-get install -y --no-install-recommends ffmpeg unzip curl wget git p7zip-full \
  && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir \
       "langgraph==1.2.11" "langchain-core==1.6.3" "langchain-openai==1.6.2" \

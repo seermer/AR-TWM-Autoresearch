@@ -16,9 +16,19 @@ SHA = "a" * 40
 
 
 class FakeApi:
+    datasets = None
+    no_access = False
+
     def list_datasets(self, search, limit, full=True):
+        self.last_search = search
+        if self.datasets is not None:
+            return [SimpleNamespace(tags=[], downloads=0, last_modified=None, card_data={}, **d) for d in self.datasets]
         return [SimpleNamespace(id="org/walks", tags=["license:cc-by-4.0", "task:video"],
                                 downloads=12, last_modified=None, card_data={"license": "cc-by-4.0"})]
+
+    def auth_check(self, repo_id, repo_type=None):
+        if self.no_access:
+            raise hf_errors.GatedRepoError("gated", response=httpx.Response(403, request=httpx.Request("GET", "http://x")))
 
     def dataset_info(self, repo_id, revision=None, files_metadata=False):
         return SimpleNamespace(id=repo_id, sha=SHA, card_data={"license": "cc-by-4.0"},
@@ -47,7 +57,7 @@ def env(tmp_path):
 
 def test_search_reports_license(env):
     tools, caller = env
-    hits = tools.search(caller, "walking", "dataset", 5)
+    hits = tools.search(caller, "walks", "dataset", 5)
     assert hits[0]["id"] == "org/walks" and hits[0]["license"] == "cc-by-4.0"
 
 
@@ -259,3 +269,25 @@ def test_no_match_says_what_the_repo_holds(many):
     assert "no files match" in msg and "hf_list_files" in msg
     assert "clips/ (300 files)" in msg and "meta/ (3 files)" in msg
     assert ".tar: 300" in msg and ".json: 3" in msg
+
+
+def test_search_matches_all_words(env):
+    tools, caller = env
+    tools.api.datasets = [{"id": "a/TartanAir-videos"}, {"id": "b/TartanAir"}]
+    rows = tools.search(caller, "TartanAir videos")
+    assert [r["id"] for r in rows] == ["a/TartanAir-videos"]
+    assert tools.api.last_search == "tartanair"              # the longest word goes to the Hub
+
+
+def test_search_blank_query_is_an_error(env):
+    tools, caller = env
+    with pytest.raises(ToolError, match="empty"):
+        tools.search(caller, "  ")
+
+
+def test_list_files_reports_gated_and_access(env):
+    tools, caller = env
+    assert tools.list_files(caller, "org/walks", "main")["accessible"] is True
+    tools.api.no_access = True
+    out = tools.list_files(caller, "org/walks", "main")
+    assert out["accessible"] is False and "gated" in out
