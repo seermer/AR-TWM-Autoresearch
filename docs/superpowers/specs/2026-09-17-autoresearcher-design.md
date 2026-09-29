@@ -88,7 +88,7 @@ HGM `hgm.py`, `tree.py`, `hgm_utils.py`, `self_improve_step.py`; HyperAgents
 | `OPENAI_BASE_URL` | Upstream base URL of an OpenAI-compatible API (default `https://api.openai.com/v1`). Used exactly as given: the endpoint path (`/chat/completions`, `/responses`) is appended, nothing else (OpenAI's base includes `/v1`; other providers may have no version segment). |
 | `OPENAI_MODEL` | Default model for agents that do not choose one. |
 | `OPENAI_EFFORT` | Optional reasoning effort (e.g. `low`). When set, the gateway overrides every forwarded request with it (`reasoning_effort` for Chat Completions, `reasoning.effort` for Responses); empty leaves requests untouched. |
-| `VLM_API_KEY`, `VLM_API_URL`, `VLM_MODEL_NAME` | WBench VLM metrics. The 6 VLM metrics are computed **iff `VLM_API_KEY` is non-empty**. |
+| `VLM_API_KEY`, `VLM_API_URL`, `VLM_MODEL_NAME` | WBench VLM metrics. *(Amended 2026-09-29.)* The 6 VLM metrics are always computed: by this API judge when `VLM_API_KEY` is non-empty, otherwise by a local judge, the captioner's model served by vLLM for the `vlm` phase only (§11.2). |
 
 Existing shell variables (e.g. `HF_TOKEN`) take precedence; loaders never override them.
 
@@ -770,9 +770,17 @@ Stored in `configs/proxy_cases.txt`; fixed for the run.
    `paths.dmd_resume = weights/alaya-world-dmd`, `validation.per_sample_seed: true`, case
    ids = proxy subset, output `runs/<run>/nodes/<n>/eval/videos/`. The root node uses the
    released `transformer.pt` and `history_encoder.pt` unmerged.
-3. **WBench phases** (`wbench-main`, explicit `--gpus`): `precompute`, `gpu`; `vlm` iff VLM
-   metrics are in the metric set; `report`. `tools/run_visual_plausibility.py`
-   (`wbench-vp`) iff visual_plausibility is in the metric set.
+3. **WBench phases** (`wbench-main`, explicit `--gpus`) *(amended 2026-09-29)*: `precompute`, `gpu`,
+   `gpu` (the second pass only redoes cases that failed the first); `vlm`; then
+   `tools/run_visual_plausibility.py` (`wbench-vp`); then `report`. With the local judge a
+   `VllmServer` (`captioner` config, served under the model's id, up to `eval.judge.max_images`
+   images per prompt, on all the run's GPUs) is started before `vlm` and stopped, with a wait for
+   GPU memory, before VP. The request carries `eval.judge.extra_body` (thinking off: WBench asks
+   for a 10-token yes/no answer). This relies on WBench patch U2: `VLM_API_URL` may name a
+   self-hosted OpenAI-compatible server (any model id) and `VLM_EXTRA_BODY` is merged into the
+   request. The judge (kind, model, url) is recorded in `run.json`; `attach_run` refuses a
+   resume whose environment would select a different judge, because scores from different judges
+   are not comparable.
 4. **Score** (§11.3).
 5. **Aggregates for agents:** per-metric and per-dimension means, plus means by stratum
    (interaction type, scene category, perspective), computed from per-case JSONs. No case
@@ -784,20 +792,19 @@ Stored in `configs/proxy_cases.txt`; fixed for the run.
 
 ### 11.3 Score definition
 
-- **Metric set** (fixed at run start): the 22 metric names of WBench `DIMENSION_MAP`,
-  restricted to those computed in this run:
-  - the 6 VLM metrics iff `VLM_API_KEY` is non-empty;
-  - `visual_plausibility` iff the `wbench-vp` env and its weights are present.
+- **Metric set** *(amended 2026-09-29)*: always the 22 metric names of WBench `DIMENSION_MAP`. A
+  missing prerequisite (VP weights, judge model) is a `PreflightError` at run creation, never a
+  silent exclusion.
   `navigation_trajectory` is counted as one metric (the report's composite of accuracy and
   consistency, as listed in `DIMENSION_MAP`); the report's extra component keys
   `navigation_accuracy` and `navigation_consistency` are not counted separately.
 - **Score** = unweighted mean over the metric set of `report["full"][metric]["mean"]`.
-- **Preflight at run start:** the kernel proves every metric in the set is producible
-  before the first node — `VLM_API_KEY` present for the VLM metrics; the `wbench-vp` env
-  and the `qwen3vl-a3b-visual-plausibility` weights present for `visual_plausibility`;
-  each GPU metric's weights present. Metrics that fail preflight are excluded from the
-  metric set at run start and recorded, so a node cannot fail on a metric that was never
-  available.
+- **Preflight at run start:** the kernel proves every metric is producible before the first node:
+  the `qwen3vl-a3b-visual-plausibility` weights present, each GPU metric's weights present. There
+  is no exclusion: a failure stops the run from being created.
+- **Case counts** *(2026-09-29)*: the ten metrics computed for every case must have n equal to the
+  proxy size; the root's report then fixes every metric's n (`run.json["expected_n"]`) and every
+  later node must match it (`ScoreError` otherwise).
 - *(Amended 2026-09-27, Plan 4 as built / user decision: no pause, §14.2.)* If a metric in
   the set is still missing from a node's `report.json` (`score_from_report` raises
   `KeyError`), that is an eval failure like any other: the node ends `eval_failed`, an
@@ -1077,8 +1084,8 @@ list.)*
 - Leakage check: a near-duplicate of a WBench first frame is rejected (both signals fire);
   an unrelated flat frame (low entropy, pHash within 4 of a WBench frame but low NCC) is
   accepted and logged as a near-match.
-- Metric-set preflight: missing `VLM_API_KEY`, missing VP weights or missing `wbench-vp`
-  env each drop their metrics at run start instead of pausing the loop later.
+- Metric-set preflight: missing VP weights fail run creation with a `PreflightError` *(amended
+  2026-09-29; earlier versions dropped the metrics)*.
 - Eval path layout: `main.py` and the VP script both get the node's absolute `--work_dir`
   and `--model`; cleanup removes `da3_cache/`, `megasam/`, `masks/` and
   `_navi_videos_tmp/` and keeps videos, evaluation and report.

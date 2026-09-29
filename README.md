@@ -12,7 +12,7 @@ Every step ends with a check; do not continue if it fails.
 | Driver | `nvidia-smi` shows `CUDA Version: 13.2` or higher |
 | CUDA toolkit | `nvcc --version` works and says 12.x (usually `/usr/local/cuda-12.8`) |
 | RAM | 128 GB minimum, 256 GB recommended |
-| Disk | 600 GB free on one disk (downloads about 400 GB) |
+| Disk | 700 GB free on one disk (downloads about 460 GB) |
 | Software | `conda` (Miniforge), `git`, `ffmpeg`, `docker` (your user can run `docker ps` without `sudo`) |
 | Accounts | GitHub (SSH key), Hugging Face, an LLM API key (see step 3) |
 
@@ -93,7 +93,9 @@ OPENAI_BASE_URL=<provider base URL, e.g. https://api.openai.com/v1>
 OPENAI_MODEL=<model name as the provider spells it>
 OPENAI_EFFORT=<reasoning effort the provider accepts, e.g. high; empty = not set>
 
-# Leave empty: the six VLM metrics are switched off on purpose so scores stay comparable
+# Optional. With a key, the six VLM metrics are answered by that API (VLM_API_URL, VLM_MODEL_NAME).
+# Empty: a local Qwen3.8-27B-FP8 server answers them instead (the model of step 4). Both work, but
+# scores from the two judges are not comparable, and a run refuses to resume with the other one.
 VLM_API_KEY=
 
 # Login for the monitoring panel (step 8)
@@ -109,7 +111,7 @@ Check: `ls -l ../WorldModel/.env ../WBench/.env` both show `-> ../AutoResearcher
 
 Optional model context size: if your model's context window is not 128000 tokens, edit `agents.context_window_tokens` in `configs/kernel.yaml`.
 
-## 4. Download weights and data (about 400 GB)
+## 4. Download weights and data (about 460 GB)
 
 Run all of it, from `AutoResearcher`. Each command can be re-run; it skips finished files.
 
@@ -123,9 +125,9 @@ hf download google/gemma-3-12b-it-qat-q4_0-unquantized \
 hf download pkqbajng/ViGeo1.1 --local-dir ../WorldModel/third_party/ViGeo/checkpoints/ViGeo1.1
 
 # WBench (the benchmark): data and metric weights.
-# Keep the exclude: the visual-plausibility weights must NOT be present.
+# Includes the visual-plausibility weights (58 GB): every run scores all 22 metrics.
 hf download meituan-longcat/WBench --repo-type dataset --exclude "splits/*" --local-dir ../WBench/data
-hf download meituan-longcat/WBench-weights --exclude "qwen3vl*" --local-dir ../WBench/weights
+hf download meituan-longcat/WBench-weights --local-dir ../WBench/weights
 
 # Tools the agents can use
 hf download Tongyi-MAI/Z-Image-Turbo --revision f332072aa78be7aecdf3ee76d5c247082da564a6 \

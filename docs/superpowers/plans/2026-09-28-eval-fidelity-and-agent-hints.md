@@ -478,3 +478,17 @@ def test_train_summary_missing_log_is_empty(tmp_path):
 ## Open input
 
 - **D4:** run id and an empty git remote for the fresh acceptance run (Task 12, step 5). Everything else is decided (see the table above).
+
+## Execution notes (2026-09-29)
+
+Tasks 1-7 and 9-11 are on `main`; Task 8 (sandbox network) waits for the user's choice between the LAN/host
+firewall (sudo once), a plain default bridge, or a bridge with a `doctor` listening-port warning. Task 12 steps
+1-4 are done; step 5 (fresh run) is the user's. Differences from the text above: `VllmServer` takes a prebuilt
+command (`serve_command(c, gpus, port, served_name, media_dir, mm_limits)`), not `cfg`; `preflight_metrics`
+returns the metric list (it raises instead of returning exclusions); `judge_env(cfg, judge, base_url)` takes the
+config for `eval.judge.extra_body`; the judge server needs `eval.judge.max_images` (the interaction and causal
+metrics send frames as images); the warm caption server hangs off a `GpuLock` (`tools/jobs.py`) instead of a
+separate holder; the process digest reports `gpu_job_s` rather than `job_wait_s`; the planner prompt in the seed
+never contained the "negative control" wording (only a node's own edit had), so nothing was removed.
+Open finding: the token in the environment (`HF_TOKEN`, account `seermer`) reports `accessible: false` for
+`Kunho/RealEstate10K-videos` (gated `auto`), so access is not in place for that account.
