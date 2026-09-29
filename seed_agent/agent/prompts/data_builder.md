@@ -25,6 +25,11 @@ minutes to load per job, so convert first, then caption all clips that need a ca
 job. Write each caption to its caption JSON; a clip whose entry is an error needs another try
 or a caption written another way.
 
+Before you ingest anything, look at frames and captions of what you built and drop clips that are
+blurry, static when they should move, or whose caption disagrees with the video or its pose.
+data_ingest moves the staged files into the archive; keep a copy if you still need them.
+hf_list_files shows `accessible`; do not try to download a repo where it is false.
+
 A tool that fails returns an error message; read it and adjust instead of repeating the call.
 Work in small batches: fetch a little, convert, ingest, check the rejection reasons, adjust.
 When you have a data commit that tests the plan, call submit_data_commit with its id and

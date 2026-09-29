@@ -78,6 +78,14 @@ class RecipeDraft(BaseModel):
     rationale: str = Field(min_length=1)
 
 
+READ_ONLY_KERNEL_TOOLS = {"hf_search", "hf_list_files", "data_query"}
+
+
+def planner_tools(plan_tool, ktools: list) -> list:
+    """The planner may check that a source exists and is accessible, but never downloads or changes anything."""
+    return [plan_tool, *[t for t in ktools if t.name in READ_ONLY_KERNEL_TOOLS]]
+
+
 async def run_task(ctx: RecipeContext) -> RecipeResult:
     async with mcp_session() as session:
         ktools = await kernel_tools(session)
@@ -94,7 +102,7 @@ async def run_task(ctx: RecipeContext) -> RecipeResult:
                               "clip_pool_size": len(ctx.clip_pool), "tools": ctx.tools, "retry": ctx.retry,
                               "format_rules": ctx.format_rules}, default=str)[:BRIEF_CHARS]
         plan_tool, plan = submit_tool("submit_plan", "Submit the data plan for this node.", DataPlan)
-        await run_role(system_prompt("planner"), [plan_tool], context, plan)
+        await run_role(system_prompt("planner"), planner_tools(plan_tool, ktools), context, plan)
         failures: list = []
         for _ in range(CHECK_ROUNDS):
             build_tool, built = submit_tool("submit_data_commit", "Submit the data commit to train on.",

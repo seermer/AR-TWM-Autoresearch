@@ -335,3 +335,12 @@ def test_edit_file_parallel_calls_do_not_lose_edits(tmp_path):
         [t.start() for t in threads]
         [t.join() for t in threads]
         assert (tmp_path / "p.md").read_text() == "A B"
+
+
+def test_planner_gets_only_read_only_kernel_tools():
+    from types import SimpleNamespace as NS
+    from agent.orchestration import planner_tools
+    ktools = [NS(name=n) for n in ("hf_search", "hf_list_files", "hf_download", "data_query", "data_ingest",
+                                   "data_commit", "caption_videos", "job_wait")]
+    names = [t.name for t in planner_tools(NS(name="submit_plan"), ktools)]
+    assert names == ["submit_plan", "hf_search", "hf_list_files", "data_query"]

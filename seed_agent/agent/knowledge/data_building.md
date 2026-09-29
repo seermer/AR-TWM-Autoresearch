@@ -56,3 +56,19 @@
 - AlayaWorld follows translation actions reliably, rotation (turns, orbits) only weakly. Its
   captions have one segment per round, so its clips are eligible for
   video_timed_prompts_camera:per_chunk.
+
+## Known interface facts
+
+*(2026-09-29, from the acceptance run's tool errors.)*
+
+- `data_ingest` moves each staged file into the archive; copy first if you still need it.
+- Candidate paths are absolute container paths (`/workspace/staging/...`), and `caption` is the path of a
+  caption JSON file, not the caption text.
+- `prompt_mode` in `data_commit` is only for `video_timed_prompts_camera`; omit it for other formats.
+- `annotate_camera` takes at most 64 items per job; split larger batches.
+- `recipe_check` takes a flat `{key: value}` map of tunable keys, with no wrapper such as `rules`.
+- `unzip`, `curl`, `wget`, `git` and `7z` are in the container image; without them, `python -m zipfile` works.
+- `hf_search` needs every word of the query in the dataset id or tags; check `accessible` from
+  `hf_list_files` before downloading a gated repo.
+- Sources that worked: TartanAirVideos zips, the `Kunho/RealEstate10K-videos` mirror clips (when
+  `accessible` is true), Wan clips through `rollout_wan22`.
