@@ -1,6 +1,6 @@
 import subprocess
 from pathlib import Path
-from ar_kernel.train.runner import classify_failure, parse_train_lines, newest_checkpoint
+from ar_kernel.train.runner import classify_failure, newest_checkpoint
 from ar_kernel.config import KernelConfig
 from ar_kernel.subproc import SubprocTimeout
 from ar_kernel.train import runner as runner_mod
@@ -23,16 +23,6 @@ def test_host_oom_and_nccl_are_infra_failures():
 
 def test_clean_run_has_no_failure():
     assert classify_failure("[Train] step=2 loss=0.26 grad=0.05 lr=5.00e-05 time=7.9s", 0) == "none"
-
-def test_parse_train_lines_extracts_metrics():
-    log = ("[Train] step=1 epoch=0 source=cam video=abc fs=0 fe=120 K=4 sigma=0.99 "
-           "loss=0.261719 grad=0.0579 lr=5.00e-05 time=7.92s\n"
-           "[Train] step=2 epoch=0 source=cam video=def fs=8 fe=128 K=4 sigma=0.98 "
-           "loss=0.251000 grad=0.0611 lr=5.00e-05 time=7.81s\n")
-    rows = parse_train_lines(log)
-    assert [r["step"] for r in rows] == [1, 2]
-    assert rows[1]["loss"] == 0.251
-    assert rows[0]["lr"] == 5e-05
 
 def test_newest_checkpoint_picks_the_highest_step(tmp_path):
     for step in (100, 300, 200):
@@ -68,13 +58,6 @@ def test_incomplete_prompt_precache_is_infra():
     log = ("RuntimeError: text encoder is disabled (ALAYA_SKIP_TEXT_ENCODER=1) but a "
            "prompt missed the on-disk embedding cache. Re-run ...")
     assert classify_failure(log, 1) == "infra"
-
-
-def test_real_successful_run_log_parses_its_train_lines():
-    log = (Path(__file__).parent / "fixtures" / "real_successful_train.log").read_text()
-    rows = parse_train_lines(log)
-    assert [r["step"] for r in rows] == [1, 2]
-    assert rows[0]["loss"] == 0.431641 and rows[1]["loss"] == 0.251953
 
 
 def test_clean_exit_with_checkpoint_is_not_overridden_by_a_loose_log_token():

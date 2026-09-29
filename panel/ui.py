@@ -14,7 +14,6 @@ import plotly.graph_objects as go
 
 from . import media, problems, views
 
-FOLDED = {"system", "tools", "reasoning", "tool_call", "tool_output", "context"}
 TOOL_ERROR_MARK = "⚠ Tool error"
 # Passed to launch(css=...): the tool-error mark stays red even if the chat's sanitizer drops `style`.
 CSS = ".panel-tool-error { color: #cf222e; font-weight: 600; }"

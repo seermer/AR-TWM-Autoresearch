@@ -129,7 +129,7 @@ def test_isolation_holds_from_inside(tmp_path, mounts):
     The host paths checked below are derived from KernelConfig (project/repo
     roots), never hardcoded, so the test is portable across checkouts/machines.
     """
-    host_paths = [str(CFG.project_root), str(CFG.repo_root / "kernel"),
+    host_paths = [str(CFG.repo_root.parent), str(CFG.repo_root / "kernel"),
                   str(CFG.worldmodel), str(CFG.wbench), str(CFG.repo_root / ".env")]
     script = r"""
 import os, socket, urllib.request, json, sys

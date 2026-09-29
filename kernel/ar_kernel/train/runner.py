@@ -1,7 +1,8 @@
 from __future__ import annotations
-import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
+
+import yaml
 
 from ..config import KernelConfig
 from ..liveness import Liveness, tree_mark
@@ -23,17 +24,12 @@ INFRA_SIGNATURES = (
     # loader.py::_text_encoder_disabled, raised when the precache is incomplete.
     "missed the on-disk embedding cache",
 )
-TRAIN_LINE = re.compile(
-    r"\[Train\] step=(?P<step>\d+) epoch=(?P<epoch>\d+).*?"
-    r"loss=(?P<loss>[\d.naif]+) grad=(?P<grad>[\d.naif]+) lr=(?P<lr>[\d.e+-]+) time=(?P<time>[\d.]+)s"
-)
 
 @dataclass
 class TrainOutcome:
     checkpoint: Path | None
     failure: str
     log_path: Path
-    metrics: list[dict] = field(default_factory=list)
     detail: str = ""        # human-readable reason, surfaced to the agent on failure
 
 def classify_failure(log: str, returncode: int) -> str:
@@ -60,14 +56,6 @@ def final_failure(log: str, returncode: int, checkpoint_exists: bool) -> str:
     return "recipe" if failure == "none" and not checkpoint_exists else failure
 
 
-def parse_train_lines(log: str) -> list[dict]:
-    rows = []
-    for match in TRAIN_LINE.finditer(log):
-        rows.append({"step": int(match["step"]), "epoch": int(match["epoch"]),
-                     "loss": float(match["loss"]), "grad": float(match["grad"]),
-                     "lr": float(match["lr"]), "time": float(match["time"])})
-    return rows
-
 def newest_checkpoint(output_dir: Path) -> Path | None:
     candidates = [p for p in Path(output_dir).glob("checkpoint-*")
                   if (p / "lora.safetensors").exists()]
@@ -93,7 +81,6 @@ class TrainRunner:
             raise RuntimeError(f"prompt precache failed (rc={proc.returncode}): {output_tail(proc)}")
 
     def train(self, resolved: Path, gpus: list[int], node_id: str, node_dir: Path) -> TrainOutcome:
-        import yaml
         config = yaml.safe_load(Path(resolved).read_text(encoding="utf-8"))
         output_dir = Path(config["run"]["output_dir"])
         log_path = Path(node_dir) / "train" / "train.log"
@@ -114,10 +101,8 @@ class TrainRunner:
                                "ALAYA_DATASET_CACHE_DIR": str(Path(node_dir) / "dataset_cache")},
                     timeout=None, liveness=liveness, recorder=self.recorder, node=node_id,
                     phase="train", log_path=log_path)
-            except SubprocTimeout as exc:
-                log = exc.output or ""
+            except SubprocTimeout:
                 return TrainOutcome(checkpoint=None, failure="infra", log_path=log_path,
-                                    metrics=parse_train_lines(log),
                                     detail=f"training stalled: {liveness.reason}")
         log = proc.stdout
         checkpoint = newest_checkpoint(output_dir)
@@ -127,5 +112,4 @@ class TrainRunner:
             detail = "training exited cleanly but wrote no checkpoint"
         if checkpoint is not None and failure == "none":
             (checkpoint / "trainer_state.pt").unlink(missing_ok=True)     # spec 7.3.5 / 15
-        return TrainOutcome(checkpoint=checkpoint, failure=failure, log_path=log_path,
-                            metrics=parse_train_lines(log), detail=detail)
+        return TrainOutcome(checkpoint=checkpoint, failure=failure, log_path=log_path, detail=detail)

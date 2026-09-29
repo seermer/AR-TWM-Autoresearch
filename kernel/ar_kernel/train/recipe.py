@@ -1,9 +1,7 @@
 from __future__ import annotations
-import copy, math
+import math
 from pathlib import Path
 import yaml
-
-from ..config import KernelConfig
 
 TUNABLE_KEYS = frozenset({
     "data.overall_caption_prob",
@@ -81,11 +79,9 @@ def steps_per_epoch(manifest: dict, n_gpus: int, grad_accum: int) -> tuple[int, 
     per_rank = epoch_windows // n_gpus
     return epoch_windows, per_rank // grad_accum
 
-def build_resolved_config(cfg: KernelConfig, base_recipe: Path, recipe: dict,
-                          roots: dict[str, Path], manifest: dict, node_id: str,
-                          node_dir: Path, run_dir: Path) -> dict:
+def build_resolved_config(base_recipe: Path, recipe: dict, roots: dict[str, Path], manifest: dict,
+                          node_id: str, node_dir: Path, run_dir: Path) -> dict:
     resolved = yaml.safe_load(Path(base_recipe).read_text(encoding="utf-8"))
-    resolved = copy.deepcopy(resolved)
     for dotted, value in recipe.items():
         _assign(resolved, dotted, value)
 
@@ -109,7 +105,7 @@ def build_resolved_config(cfg: KernelConfig, base_recipe: Path, recipe: dict,
     resolved["optimizer"]["max_checkpoints"] = 1
     resolved["validation"]["enabled"] = False
     first = next(iter(datasets))
-    for mode in resolved.get("validation", {}).get("modes", {}).values():
+    for mode in resolved["validation"].get("modes", {}).values():
         mode.setdefault("dataset", {})["source"] = first
     return resolved
 
@@ -117,11 +113,9 @@ def lora_of(resolved: Path) -> tuple[int, int]:
     lora = yaml.safe_load(Path(resolved).read_text(encoding="utf-8"))["lora"]
     return int(lora["rank"]), int(lora["alpha"])
 
-def write_resolved_config(cfg: KernelConfig, base_recipe: Path, recipe: dict,
-                          roots: dict[str, Path], manifest: dict, node_id: str,
-                          node_dir: Path, run_dir: Path) -> Path:
-    resolved = build_resolved_config(cfg, base_recipe, recipe, roots, manifest, node_id,
-                                     node_dir, run_dir)
+def write_resolved_config(base_recipe: Path, recipe: dict, roots: dict[str, Path], manifest: dict,
+                          node_id: str, node_dir: Path, run_dir: Path) -> Path:
+    resolved = build_resolved_config(base_recipe, recipe, roots, manifest, node_id, node_dir, run_dir)
     target = Path(node_dir) / "train_config.yaml"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(yaml.safe_dump(resolved, sort_keys=True), encoding="utf-8")

@@ -33,7 +33,3 @@ class ClipStore:
 
     def all(self) -> list[dict]:
         return [self._row(r) for r in self.conn.execute("SELECT * FROM clips ORDER BY created_at")]
-
-    def eligible(self, fmt: str, prompt_mode: str | None = None) -> list[dict]:
-        key = fmt if prompt_mode is None else f"{fmt}:{prompt_mode}"
-        return [c for c in self.all() if key in c["formats"]]

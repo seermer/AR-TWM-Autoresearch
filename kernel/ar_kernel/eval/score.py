@@ -16,8 +16,6 @@ DIMENSION_METRICS = [
     "scene_adherence", "subject_adherence",
     "visual_plausibility", "causal_fidelity",
 ]
-VLM_METRICS = {"scene_adherence", "subject_adherence", "causal_fidelity",
-               "event_edit_adherence", "subject_action_adherence", "perspective_switch_adherence"}
 # _megasam_tmp: MegaSAM scratch, which WBench now writes beside its output rather than
 # inside WBench; a killed run leaves ~1 GB per in-flight case there.
 REGENERABLE = ("da3_cache", "megasam", "masks", "_navi_videos_tmp", "_megasam_tmp")

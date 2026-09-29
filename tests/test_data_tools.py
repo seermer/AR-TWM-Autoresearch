@@ -141,9 +141,14 @@ def test_recipe_check_reports_gate_failures_without_leaving_a_view(env, monkeypa
 
 
 def test_register_names_are_openai_safe():
+    import asyncio
     import re
-    from ar_kernel.tools.data_tools import TOOL_NAMES
-    assert all(re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", n) for n in TOOL_NAMES)
+    from ar_kernel.tools.data_tools import register_data_tools
+    from ar_kernel.tools.server import ToolKit, new_mcp
+    mcp = new_mcp()
+    register_data_tools(mcp, ToolKit(None, None), None)
+    names = [t.name for t in asyncio.run(mcp.list_tools())]
+    assert len(names) == 5 and all(re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", n) for n in names)
 
 
 def test_leakage_checker_is_built_once_across_concurrent_ingests(tmp_path, monkeypatch):

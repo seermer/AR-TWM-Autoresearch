@@ -14,10 +14,6 @@ def run_rel(run_dir: Path, path: Path | str) -> str:
     """A path under the run, stored relative to it so a moved run still resolves."""
     return str(Path(path).resolve().relative_to(Path(run_dir).resolve()))
 
-
-def run_abs(run_dir: Path, value: str | None) -> Path | None:
-    return None if value is None else Path(run_dir) / value
-
 class NodeStore:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
@@ -72,10 +68,6 @@ class NodeStore:
 
     def all(self) -> list[dict]:
         return [self._row(r) for r in self.conn.execute("SELECT * FROM nodes ORDER BY created_at")]
-
-    def children(self, node_id: str) -> list[dict]:
-        rows = self.conn.execute("SELECT * FROM nodes WHERE parent_id=? ORDER BY created_at", (node_id,))
-        return [self._row(r) for r in rows]
 
     def add_attempt(self, node_id: str, phase: str, index: int, outcome: str, detail: dict) -> None:
         self.conn.execute(

@@ -22,7 +22,6 @@ from ..train.gate import Gate
 from .context import PathError, to_host
 from .server import ToolError
 
-TOOL_NAMES = ("video_probe", "data_ingest", "data_query", "data_commit", "recipe_check")
 QUERY_LIMIT = 500
 
 

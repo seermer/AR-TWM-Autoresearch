@@ -9,7 +9,7 @@ MANIFEST = {"datasets": {"cam": {"format": "video_caption_camera", "prompt_mode"
 
 def test_resolved_config_injects_datasets_and_kernel_paths(tmp_path):
     resolved = build_resolved_config(
-        CFG, BASE, {"optimizer.lr": 1e-4}, {"cam": tmp_path / "view" / "cam"}, MANIFEST,
+        BASE, {"optimizer.lr": 1e-4}, {"cam": tmp_path / "view" / "cam"}, MANIFEST,
         node_id="n1", node_dir=tmp_path / "n1", run_dir=tmp_path)
     assert resolved["data"]["sources"] == {}
     assert resolved["data"]["datasets"]["cam"]["root"] == str(tmp_path / "view" / "cam")
@@ -23,7 +23,7 @@ def test_prompt_mode_is_emitted_only_for_timed_datasets(tmp_path):
     manifest = {"datasets": {"pencil": {"format": "video_timed_prompts_camera",
                                         "prompt_mode": "per_chunk", "weight": 2.0,
                                         "clips": ["a"] * 8}}}
-    resolved = build_resolved_config(CFG, BASE, {}, {"pencil": tmp_path / "p"}, manifest,
+    resolved = build_resolved_config(BASE, {}, {"pencil": tmp_path / "p"}, manifest,
                                      node_id="n2", node_dir=tmp_path / "n2", run_dir=tmp_path)
     assert resolved["data"]["datasets"]["pencil"]["prompt_mode"] == "per_chunk"
 

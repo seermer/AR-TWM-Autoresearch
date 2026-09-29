@@ -2,7 +2,7 @@ import sqlite3
 
 import pytest
 from ar_kernel.archive.db import open_db
-from ar_kernel.archive.nodes import NodeStore, run_abs, run_rel
+from ar_kernel.archive.nodes import NodeStore, run_rel
 
 def test_create_and_read_node(tmp_path):
     store = NodeStore(open_db(tmp_path))
@@ -27,7 +27,7 @@ def test_children_and_status_updates(tmp_path):
     store.create("n1", "root", 1)
     store.create("n2", "root", 1)
     store.set_status("n2", "invalid_code")
-    assert {c["node_id"] for c in store.children("root")} == {"n1", "n2"}
+    assert {n["node_id"] for n in store.all() if n["parent_id"] == "root"} == {"n1", "n2"}
     assert store.get("n2")["status"] == "invalid_code"
 
 def test_unknown_status_is_rejected(tmp_path):
@@ -101,5 +101,3 @@ def test_interrupted_is_a_status(tmp_path):
 def test_run_relative_paths(tmp_path):
     p = tmp_path / "nodes" / "n1" / "train" / "checkpoint-2"
     assert run_rel(tmp_path, p) == "nodes/n1/train/checkpoint-2"
-    assert run_abs(tmp_path / "moved", "nodes/n1/x") == tmp_path / "moved" / "nodes/n1/x"
-    assert run_abs(tmp_path, None) is None

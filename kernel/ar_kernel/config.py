@@ -49,10 +49,6 @@ class KernelConfig:
         return value if value.is_absolute() else (self.repo_root / value).resolve()
 
     @property
-    def project_root(self) -> Path:
-        return self.repo_root.parent
-
-    @property
     def worldmodel(self) -> Path:
         return self._path("paths.worldmodel")
 
