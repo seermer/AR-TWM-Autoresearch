@@ -35,7 +35,7 @@ down to the raw record.
   - a UI layer: Gradio Blocks built on the data layer;
   - `__main__.py`: the launcher.
 - Environment: its own prefix env `AutoResearcher/.envs/panel` (git-ignored like the other
-  `.envs/*`), created by `scripts/make_panel_env.sh` from a pinned `panel/requirements.txt`
+  `.envs/*`), created by `scripts/setup_envs.sh panel` (pins in `envs/panel.pip.txt`)
   (gradio, plotly, pandas, numpy, zstandard, pyyaml). The kernel's `autoresearcher` env is not
   touched, so Gradio's dependencies cannot disturb the gateway or MCP stack.
 - Launch: `.envs/panel/bin/python -m panel --run-id <run> [--port N] [--no-share] [--host ADDR]` (default 127.0.0.1). Prints
