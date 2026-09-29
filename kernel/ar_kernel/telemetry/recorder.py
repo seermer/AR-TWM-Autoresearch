@@ -28,9 +28,7 @@ class Recorder:
 
     def _scrub(self, obj: Any) -> Any:
         if isinstance(obj, str):
-            for secret in self.redact:
-                obj = obj.replace(secret, "[REDACTED]")
-            return obj
+            return self._scrub_text(obj)
         if isinstance(obj, dict):
             return {k: self._scrub(v) for k, v in obj.items()}
         if isinstance(obj, (list, tuple, set, frozenset)):

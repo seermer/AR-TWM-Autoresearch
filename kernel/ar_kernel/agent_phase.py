@@ -69,18 +69,12 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
     started = time.monotonic()
     if dirs["attempt"].exists():
         shutil.rmtree(dirs["attempt"])
-    if dirs["staging"].exists():
-        # Review fix: staging lives outside the attempt dir (its own host mount),
-        # so re-running the same attempt number must clear it too, or stale
-        # files pollute the before-snapshot and a later retry's shutil.move
-        # below would nest the old staging inside this one instead of replacing it.
+    if dirs["staging"].exists():            # outside the attempt dir: a rerun must clear it too
         shutil.rmtree(dirs["staging"])
     try:
         env.repo.checkout(code_commit, dirs["agent"])
-    except CheckoutError as exc:
-        # An agent-committed tree that cannot be extracted (e.g. a symlink out of
-        # the tree). Drop the partial checkout so edit_self commits nothing.
-        shutil.rmtree(dirs["agent"])
+    except CheckoutError as exc:            # e.g. a committed symlink out of the tree
+        shutil.rmtree(dirs["agent"])        # no tree: edit_self commits nothing
         return _failed_before_start(dirs, started, f"cannot check out the agent code: {exc}")
     if previous_workspace is not None and Path(previous_workspace).exists():
         prev_ws = Path(previous_workspace)
@@ -88,26 +82,19 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
             shutil.copytree(prev_ws, dirs["workspace"], symlinks=True)
         except (shutil.Error, OSError) as exc:     # FIFOs or files the agent made unreadable
             return _failed_before_start(dirs, started, f"cannot copy the previous workspace: {exc}")
-        # Controller ruling: the previous attempt's staging dir is named after its
-        # own attempt directory (prev_ws.parent.name); MOVE it into the new
-        # attempt's staging path, since a partial hf_download can be tens of GiB.
+        # Move (never copy) the previous attempt's staging: a partial hf_download can be tens of GiB.
         prev_staging = Path(env.run_dir) / "staging" / node / prev_ws.parent.name
         if prev_staging.exists():
             shutil.move(str(prev_staging), str(dirs["staging"]))
     for key in ("workspace", "context", "staging"):
         dirs[key].mkdir(parents=True, exist_ok=True)
+    # A retry's workspace is copied from the previous attempt, whose result.json must never
+    # pass for this one's. A symlink is unlinked, never followed.
     result_file = dirs["workspace"] / "result.json"
-    if result_file.is_symlink():
-        # Never follow a workspace symlink: unlink it without touching whatever
-        # host path it points at.
+    if result_file.is_symlink() or result_file.is_file():
         result_file.unlink()
     elif result_file.is_dir():
         shutil.rmtree(result_file)
-    elif result_file.is_file():
-        # Controller ruling: a retry's workspace is copied from the previous
-        # attempt (e.g. to keep edit_self's /workspace/edit_plan.json); that
-        # attempt's own result.json must never be mistaken for this one's.
-        result_file.unlink()
     (Path(env.run_dir) / "store").mkdir(exist_ok=True)
     write_bundle(ctx, dirs["context"])
     reqs = dirs["agent"] / "agent" / "requirements.txt"
@@ -122,11 +109,8 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
 
     caller = env.registry.issue(node=node, phase=phase, attempt=attempt, workspace_host=dirs["workspace"],
                                 staging_host=dirs["staging"], mock_script=mock_script)
-    # Review fix: open the try immediately after the token is issued -- a raise
-    # anywhere from here on (redaction, snapshots, the container call itself)
-    # must still revoke the token and cancel its jobs, or an ended phase could
-    # keep the GPUs. The nested try/finally guarantees cancel_for_token runs
-    # even if revoke() itself raises.
+    # From here on, any raise must still revoke the token and cancel its jobs, or an ended
+    # phase could keep the GPUs.
     try:
         env.recorder.add_redaction(caller.token)   # idempotent, regardless of who redacted it first
         soft = float(env.cfg.get(f"timeouts.{phase}_s"))
@@ -161,19 +145,16 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
         finally:
             env.queue.cancel_for_token(caller.token)     # an ended phase must not keep the GPUs
     out_file = dirs["workspace"] / "result.json"
-    body = _read_result(out_file)
+    body = read_result(out_file)
     diffs = {"agent": diff(before["agent"], snapshot(dirs["agent"], True)),
              "workspace": diff(before["workspace"], snapshot(dirs["workspace"], False)),
              "staging": diff(before["staging"], snapshot(dirs["staging"], False))}
     return dirs, result, body, diffs, time.monotonic() - started
 
 
-def _read_result(out_file: Path) -> dict | None:
-    """Read and parse workspace/result.json defensively: its bytes are entirely
-    agent-controlled. Returns None for "no result" (missing, a directory, or a
-    symlink -- never followed onto the wider host filesystem), a synthetic
-    failed body for anything that isn't parseable JSON or isn't a JSON object,
-    and otherwise the parsed body. Never raises into the kernel."""
+def read_result(out_file: Path) -> dict | None:
+    """The agent-written result.json: None when missing, a directory or a symlink (never
+    followed); a failed body when it is not a JSON object. Never raises."""
     if out_file.is_symlink() or not out_file.is_file():
         return None
     try:
@@ -186,11 +167,8 @@ def _read_result(out_file: Path) -> dict | None:
 
 
 def _validate_result(phase: str, body: dict) -> tuple[bool, dict | None, str | None]:
-    """Never trusts the container's result.json body: an untrusted `ok: true`
-    result is re-validated against the phase's pydantic model before any of its
-    fields are used. Returns (ok, result, error); never raises (controller
-    ruling -- a malformed result, e.g. missing `data_commit`, is a failed
-    attempt, never a KeyError in the kernel)."""
+    """(ok, result, error): an `ok: true` body is re-validated against the phase's model before
+    any field is used, so a malformed result is a failed attempt. Never raises."""
     if body.get("ok") is not True:                 # truthy-but-not-True is still a failure
         error = body.get("error")
         return False, None, str(error) if error is not None else "agent reported failure without an error"
@@ -229,10 +207,8 @@ def run_edit_self(env: PhaseEnv, *, conn, node: str, parent_id: str, base_commit
     dirs, result, body, diffs, duration = _run(env, phase="edit_self", node=node, attempt=attempt,
                                                code_commit=base_commit, ctx=ctx, mock_script=mock_script,
                                                agent_readonly=False, previous_workspace=previous_workspace)
-    # edit_self commits the edited code to an attempt ref whether or not the
-    # attempt succeeded (spec 5.2): a failed edit is still inspectable/resumable.
-    # No tree (checkout failed) or an uncommittable one (e.g. a file the agent
-    # made unreadable) means no commit and a failed attempt.
+    # The edited code is committed to an attempt ref whether or not the attempt succeeded (spec
+    # 5.2). No tree, or an uncommittable one, means no commit and a failed attempt.
     commit = None
     if dirs["agent"].exists():
         try:
@@ -260,9 +236,7 @@ def run_improve_recipe(env: PhaseEnv, *, conn, node: str, parent_id: str, agent_
                                                code_commit=agent_commit, ctx=ctx, mock_script=mock_script,
                                                agent_readonly=True, previous_workspace=previous_workspace)
 
-    def check_data_commit(res: dict) -> str | None:
-        # `res` is already the validated RecipeResult dump, so `data_commit` is
-        # guaranteed present here -- this never indexes the untrusted raw body.
+    def check_data_commit(res: dict) -> str | None:           # `res` is already validated
         try:
             CommitStore(conn, BlobStore(env.run_dir, conn), ClipStore(conn)).get(res["data_commit"])
         except KeyError:

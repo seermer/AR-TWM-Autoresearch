@@ -13,7 +13,6 @@ annotate_camera (ViGeo) on the clip for the pose it ingests with.
 """
 from __future__ import annotations
 
-import copy
 import json
 import shutil
 import subprocess
@@ -86,7 +85,7 @@ def render_config(cfg, *, variant: str, rounds_per_turn: int, seed: int, indices
     """configs/wbench_full.yaml as eval/render.py:build_render_config adapts it, pointed at this
     job's cases. The prompt cache is the run's (the eval's own holds only WBench's prompts)."""
     wm = cfg.worldmodel
-    c = copy.deepcopy(yaml.safe_load((wm / "configs" / "wbench_full.yaml").read_text(encoding="utf-8")))
+    c = yaml.safe_load((wm / "configs" / "wbench_full.yaml").read_text(encoding="utf-8"))
     for key, value in c["paths"].items():
         if isinstance(value, str) and value:
             c["paths"][key] = str(wm / value)

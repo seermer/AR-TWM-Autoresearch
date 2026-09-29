@@ -65,12 +65,16 @@ class Budget:
         return (fresh * self.prices["input"] + cached * self.prices["cached_input"]
                 + output * self.prices["output"]) / 1e6
 
+    def _add(self, usage, cost: float | None) -> None:
+        """Count one real call; the caller holds the lock."""
+        self.tokens += sum(usage_tokens(usage))
+        self.calls += 1
+        self.usd += cost or 0.0
+
     def record(self, status: int, usage) -> float | None:
         cost = self.cost(usage)
         with self._lock:
-            self.tokens += sum(usage_tokens(usage))
-            self.calls += 1
-            self.usd += cost or 0.0
+            self._add(usage, cost)
             self._statuses.append((time.monotonic(), int(status)))
         return cost
 
@@ -108,9 +112,7 @@ class Budget:
                     continue
                 cost = self.cost(event.get("usage"))
                 with self._lock:
-                    self.tokens += sum(usage_tokens(event.get("usage")))
-                    self.calls += 1
-                    self.usd += cost or 0.0
+                    self._add(event.get("usage"), cost)
 
     def snapshot(self) -> dict:
         with self._lock:

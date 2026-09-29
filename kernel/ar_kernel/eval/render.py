@@ -1,5 +1,4 @@
 from __future__ import annotations
-import copy
 from pathlib import Path
 import yaml
 
@@ -9,8 +8,7 @@ from ..subproc import output_tail, run_in_env
 
 def build_render_config(cfg: KernelConfig, merged: Path | None, history_encoder: Path,
                         videos_dir: Path, case_ids: list[str], node_dir: Path) -> Path:
-    source = yaml.safe_load((cfg.worldmodel / "configs" / "wbench_full.yaml").read_text())
-    config = copy.deepcopy(source)
+    config = yaml.safe_load((cfg.worldmodel / "configs" / "wbench_full.yaml").read_text())
     config["paths"]["resume_checkpoint"] = str(merged or (cfg.worldmodel / "weights/alaya-world-ar"))
     config["paths"]["history_encoder"] = str(history_encoder)
     config["paths"]["dmd_resume"] = str(cfg.worldmodel / "weights/alaya-world-dmd")

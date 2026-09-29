@@ -10,7 +10,7 @@ from pathlib import Path
 
 from ar_contract.models import EditContext, RecipeContext
 
-from ..agent_phase import _read_result
+from ..agent_phase import read_result
 from ..gateway.app import create_gateway_app
 from ..gateway.mock import MockBook
 from ..gateway.store import CallStore
@@ -54,10 +54,7 @@ def static_check(entry_source: str) -> ContractStep:
         tree = ast.parse(entry_source)
     except SyntaxError as exc:
         return ContractStep("static", False, f"syntax error in agent/entry.py: {exc}")
-    except (ValueError, RecursionError, MemoryError) as exc:
-        # Agent-controlled source, not a kernel bug: e.g. deeply nested expressions
-        # exhaust the parser's own recursion budget (spec 10/14.2 -- agent faults
-        # must become a failed step, never a kernel exception).
+    except (ValueError, RecursionError, MemoryError) as exc:   # e.g. deeply nested agent source
         return ContractStep("static", False,
                             f"cannot parse agent/entry.py: {type(exc).__name__}: {exc}")
     top = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
@@ -201,11 +198,7 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
             (ctx_dir / "context.json").write_text(json.dumps(context))
         caller = harness.registry.issue(node=node, phase="contract", attempt=attempt,
                                         workspace_host=ws, staging_host=staging, mock_script="smoke")
-        # `recorder` is not necessarily `harness.recorder` (a different Recorder
-        # instance, in every real caller): TokenRegistry.issue() only redacted the
-        # token on harness.recorder, so this runner call's own telemetry (and
-        # finish()'s contract.report event below) needs the redaction added here
-        # too, or a token an agent prints to stdout/stderr would leak into it.
+        # issue() redacted the token only on harness.recorder, which is not `recorder`.
         recorder.add_redaction(caller.token)
         # The two smoke runs get a liveness (spec 14.5); the import probe does not.
         liveness = Liveness.from_config(cfg, float(cfg.get("timeouts.contract_smoke_s")),
@@ -246,7 +239,7 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
             report.steps.append(ContractStep(name, False, f"timed out after {smoke_timeout_s:.0f}s"))
             return finish(False)
         # Never follows a symlink or opens a FIFO the agent planted there.
-        body = _read_result(ws / "result.json") or {"ok": False, "error": "no result.json"}
+        body = read_result(ws / "result.json") or {"ok": False, "error": "no result.json"}
         if result.exit_code != 0 or not body.get("ok"):
             tb = body.get("traceback")
             tb_tail = f"\n{tb[-2000:]}" if isinstance(tb, str) and tb else ""
