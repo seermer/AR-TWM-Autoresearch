@@ -10,6 +10,7 @@ from ar_contract.models import EditContext, RecipeContext
 from .archive.clips import ClipStore
 from .archive.nodes import NodeStore
 from .config import run_config_path
+from .process_digest import process_digest
 from .tools.data_tools import clip_record, dataset_stats, scores_by_clip
 from .train.recipe import RECIPE_RULES, TUNABLE_KEYS
 
@@ -71,6 +72,7 @@ def lineage(conn, run_dir: Path, repo, node_id: str) -> list[dict]:
             "rationale": rationale.read_text() if rationale.exists() else None,
             "edit": _read_json(_node_file(run_dir, node["node_id"], "edit.json")),
             "aggregates": _read_json(_node_file(run_dir, node["node_id"], "eval/aggregates.json")),
+            "process": process_digest(run_dir, node["node_id"]),
             "code_diff_stats": (repo.diff_stats(parent_commit, node["agent_commit"])
                                 if parent_commit and node["agent_commit"] else []),
         })

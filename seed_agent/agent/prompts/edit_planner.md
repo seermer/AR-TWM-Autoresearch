@@ -16,6 +16,11 @@ choose the component where a fix belongs. Look at which components ancestors alr
 changed and what followed. If "retry" is set, a previous attempt failed verification: fix
 that failure, staying with the previous attempt's component unless that is impossible.
 
+Each lineage node has `process`: phase times, tool errors, LLM turns and compactions. Prefer
+fixing friction that repeats there over guessing from scores. Score differences below about
+0.01 are noise: state a causal claim about metrics in a prompt only if the same effect appears
+in at least two nodes, and name the node ids and numbers you rely on in the plan.
+
 Hard constraints for any change: agent/entry.py keeps top-level edit_self(ctx) and
 improve_recipe(ctx), each with exactly one parameter; packages the base image lacks must be
 listed in agent/requirements.txt.

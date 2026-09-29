@@ -16,7 +16,8 @@ Write the summary with these sections:
 3. Files and artifacts: every file you created, changed or relied on, with its path and why
    it matters; include short snippets where the exact content matters.
 4. Errors and fixes: every error, rejected candidate or failed check, and how you resolved
-   it (or that you did not).
+   it (or that you did not). Keep a short list of tool quirks you have learned (for example
+   that data_ingest moves files).
 5. Progress: what is done and what worked or did not.
 6. Pending work: everything that remains to be done for the task.
 7. Current work: exactly what you were doing immediately before this summary.

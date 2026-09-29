@@ -322,3 +322,16 @@ def test_seed_agent_passes_contract_verification(tmp_path):
     finally:
         harness.stop()
     assert report.ok, report.to_retry()
+
+
+def test_edit_file_parallel_calls_do_not_lose_edits(tmp_path):
+    import threading
+    from agent.tools import make_file_tools
+    tools = {t.name: t for t in make_file_tools(str(tmp_path))}
+    for _ in range(200):
+        (tmp_path / "p.md").write_text("alpha beta")
+        threads = [threading.Thread(target=tools["edit_file"].invoke, args=({"path": "p.md", "old": o, "new": n},))
+                   for o, n in (("alpha", "A"), ("beta", "B"))]
+        [t.start() for t in threads]
+        [t.join() for t in threads]
+        assert (tmp_path / "p.md").read_text() == "A B"

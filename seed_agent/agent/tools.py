@@ -7,6 +7,7 @@ import itertools
 import json
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,6 +39,22 @@ def replace_once(text: str, old: str, new: str) -> str:
     return text.replace(old, new, 1)
 
 
+_path_locks: dict[Path, threading.Lock] = {}
+_path_locks_guard = threading.Lock()
+
+
+def _lock_for(path: Path) -> threading.Lock:
+    with _path_locks_guard:
+        return _path_locks.setdefault(path, threading.Lock())
+
+
+def _write_atomic(target: Path, text: str) -> None:
+    """Temp file + rename: a reader or a parallel call never sees a half-written file."""
+    tmp = target.with_name(f".{target.name}.{threading.get_ident()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, target)
+
+
 _command_ids = itertools.count(1)
 
 
@@ -67,19 +84,21 @@ def make_file_tools(root: str, *, writable: bool = True) -> list:
         """Create or overwrite a text file (path relative to the tool root)."""
         target = resolve_inside(root, path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        with _lock_for(target):
+            _write_atomic(target, content)
         return f"wrote {len(content)} chars to {path}"
 
     @tool
     def edit_file(path: str, old: str, new: str) -> str:
         """Replace one exact occurrence of `old` with `new` in a text file. `old` must appear exactly once."""
         target = resolve_inside(root, path)
-        try:        # strict: writing back text with replaced undecodable bytes would corrupt the file
-            text = target.read_text(encoding="utf-8")
-        except UnicodeDecodeError as exc:
-            raise ValueError(f"{path} is not UTF-8 text (byte {exc.start}); "
-                             f"change it with run_command instead") from None
-        target.write_text(replace_once(text, old, new), encoding="utf-8")
+        with _lock_for(target):     # parallel edits of one file are applied one after the other
+            try:        # strict: writing back text with replaced undecodable bytes would corrupt the file
+                text = target.read_text(encoding="utf-8")
+            except UnicodeDecodeError as exc:
+                raise ValueError(f"{path} is not UTF-8 text (byte {exc.start}); "
+                                 f"change it with run_command instead") from None
+            _write_atomic(target, replace_once(text, old, new))
         return f"edited {path}"
 
     @tool
