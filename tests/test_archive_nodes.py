@@ -1,5 +1,3 @@
-import sqlite3
-
 import pytest
 from ar_kernel.archive.db import open_db
 from ar_kernel.archive.nodes import NodeStore, run_rel
@@ -75,20 +73,6 @@ def test_new_fields_and_eval_failed(tmp_path):
     nodes.set_status("n1", "eval_failed")
     got = nodes.get("n1")
     assert (got["edit_component"], got["error"], got["status"]) == ("prompts", "render failed", "eval_failed")
-
-
-def test_old_database_gains_the_new_columns(tmp_path):
-    old = sqlite3.connect(tmp_path / "archive.db")
-    old.execute("CREATE TABLE nodes (node_id TEXT PRIMARY KEY, parent_id TEXT, depth INTEGER NOT NULL, "
-                "created_at REAL NOT NULL, status TEXT NOT NULL, agent_commit TEXT, data_commit TEXT, "
-                "recipe_hash TEXT, resolved_config_path TEXT, checkpoint_path TEXT, lora_rank INTEGER, "
-                "lora_alpha INTEGER, score REAL, metric_set TEXT, metrics TEXT, subtree_value REAL, "
-                "phase_timings TEXT, rationale_path TEXT)")
-    old.commit(), old.close()
-    conn = open_db(tmp_path)
-    cols = {r["name"] for r in conn.execute("PRAGMA table_info(nodes)")}
-    assert {"edit_component", "recipe_path", "attempt_counts", "error"} <= cols
-    assert conn.execute("SELECT count(*) FROM selection_events").fetchone()[0] == 0
 
 
 def test_interrupted_is_a_status(tmp_path):

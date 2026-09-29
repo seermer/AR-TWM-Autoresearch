@@ -373,17 +373,9 @@ def test_training_data_and_clips(run):
     got = media.clips(run, "n1", "ds1")
     [clip] = got["rows"]
     assert clip["video"] == "store/blobs/video/vd1.mp4" and clip["caption"]["caption"] == "a hallway"
-    assert clip["leakage"] == {"matches": [], "near": [{"case_id": "7"}], "inferred": False}
+    assert clip["leakage"] == {"matches": [], "near": [{"case_id": "7"}]}
     assert media.training_data(run, "root")["datasets"] == []
     assert media.clip_detail(run, "nope") is None
-
-
-def test_leakage_pairs_by_order_for_old_runs(run_dir):
-    from ar_kernel.telemetry.recorder import Recorder
-    rec = Recorder(run_dir)
-    rec.event("ingest.leakage", node="n3", phase="ingest", payload={"matches": [], "near": []})
-    rec.event("ingest.accepted", node="n3", phase="ingest", payload={"clip_id": "old1", "formats": [], "warnings": []})
-    assert media.leakage_index(views.Run(run_dir))["old1"]["inferred"] is True
 
 
 def test_ingest_calls_and_staging(run):

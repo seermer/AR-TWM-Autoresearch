@@ -61,34 +61,21 @@ def clip_detail(run: Run, clip_id: str, leakage: dict | None = None) -> dict | N
 
 
 def leakage_index(run: Run) -> dict[str, dict]:
-    """Clip id -> its leakage verdict. Events name their candidate since 2026-09-27; older
-    runs are paired by order (the leakage check directly precedes its accept) and marked."""
+    """Clip id -> its leakage verdict, paired with its accept by the candidate's staged video."""
     out: dict[str, dict] = {}
     for name in sorted({e["_file"] for e in run.log.events()} - {"run"}):
         by_video: dict[str, dict] = {}
-        pending = None
         for e in run.log.events(files=[name]):
             kind = e.get("type")
-            if kind not in ("ingest.leakage", "ingest.accepted", "ingest.rejected"):
+            if kind not in ("ingest.leakage", "ingest.accepted"):
                 continue
             p = run.log.payload(e.get("payload")) or {}
             video = (p.get("candidate") or {}).get("video")
             if kind == "ingest.leakage":
-                if video:
-                    by_video[video] = p
-                else:
-                    pending = p
-            elif kind == "ingest.accepted" and p.get("clip_id"):
-                if video and video in by_video:
-                    found, inferred = by_video[video], False
-                else:
-                    found, inferred = pending, True
-                if found is not None:
-                    out[p["clip_id"]] = {"matches": found.get("matches"), "near": found.get("near"),
-                                         "inferred": inferred}
-                pending = None
-            else:
-                pending = None
+                by_video[video] = p
+            elif p.get("clip_id") and video in by_video:
+                found = by_video[video]
+                out[p["clip_id"]] = {"matches": found.get("matches"), "near": found.get("near")}
     return out
 
 

@@ -54,17 +54,4 @@ def open_db(run_dir: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
-    _migrate(conn)
     return conn
-
-
-# Columns added after Plan 1; CREATE TABLE IF NOT EXISTS never adds columns to an existing table.
-NODE_COLUMNS_ADDED = {"edit_component": "TEXT", "recipe_path": "TEXT", "attempt_counts": "TEXT",
-                      "error": "TEXT"}
-
-
-def _migrate(conn: sqlite3.Connection) -> None:
-    have = {r["name"] for r in conn.execute("PRAGMA table_info(nodes)")}
-    for column, kind in NODE_COLUMNS_ADDED.items():
-        if column not in have:
-            conn.execute(f"ALTER TABLE nodes ADD COLUMN {column} {kind}")

@@ -285,7 +285,7 @@ def h_clips(run, node, dataset, page):
     got = media.clips(run, node, dataset, page=max(0, int(page or 1) - 1))
     rows = [{"clip_id": r["clip_id"], "camera_motion": r["camera_motion"], "formats": r["formats"],
              "frames": r["metadata"].get("frames"), "license": r["license"],
-             "leakage": "none" if not r["leakage"] else ("inferred " if r["leakage"]["inferred"] else "") +
+             "leakage": "none" if not r["leakage"] else
              f"{len(r['leakage']['matches'] or [])} matches / {len(r['leakage']['near'] or [])} near"}
             for r in got["rows"]]
     return df(rows, "clips"), f"{got['total']} clips · page {min(int(page or 1), got['pages'])} of {got['pages']}", \

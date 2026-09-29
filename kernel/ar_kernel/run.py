@@ -178,9 +178,6 @@ def score_node(cfg: KernelConfig, ctx: RunContext, node_id: str, checkpoint: Pat
         score, per_metric = score_from_report(report, ctx.metric_set, ctx.expected_n)
         if node_id == "root":
             _record_root_counts(ctx, report)
-        if "per_case" not in report:
-            ctx.recorder.event("eval.warning", node=node_id, phase="eval", payload={
-                "message": "report.json has no per_case scores (older WBench); aggregates are empty"})
         agg = aggregates(cfg, report, ctx.case_ids, ctx.metric_set)
         ctx.recorder.event("eval.scored", node=node_id, phase="eval",
                            payload={"score": score, "metrics": per_metric, "aggregates": agg})

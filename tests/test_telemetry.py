@@ -105,14 +105,6 @@ def test_payloads_are_zstd_and_round_trip(tmp_path):
     assert rec.load_payload(digest) == big
 
 
-def test_legacy_uncompressed_payloads_stay_readable(tmp_path):
-    from ar_kernel.telemetry.recorder import Recorder
-    rec = Recorder(tmp_path)
-    legacy = tmp_path / "telemetry" / "payloads" / "abc123.json"
-    legacy.write_text('{"old": true}')
-    assert rec.load_payload("abc123") == {"old": True}
-
-
 def test_concurrent_writes_of_the_same_payload_do_not_race_on_the_tmp_file(tmp_path):
     """store_payload used one FIXED tmp name: two threads racing to store the SAME
     content-addressed payload could both write it, and the loser's os.replace would target

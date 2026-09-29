@@ -141,11 +141,3 @@ def test_aggregates_strata_use_non_top_level_metrics_and_leak_no_case_ids():
     assert not set(_keys(full)) & set(per_case)
 
 
-def test_aggregates_degrade_to_empty_without_per_case_scores():
-    """An older WBench report.json (no "per_case") must not crash score_node after the
-    score is already computed; aggregates just come back empty."""
-    from ar_kernel.eval.score import aggregates
-    assert "per_case" not in REPORT
-    agg = aggregates(CFG, REPORT, FIXTURE_CASES, FIXTURE_METRICS)
-    assert agg == {"metrics": {}, "dimensions": {},
-                   "strata": {"interaction_type": {}, "category": {}, "perspective": {}}}

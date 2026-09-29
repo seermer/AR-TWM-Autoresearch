@@ -68,9 +68,7 @@ class Recorder:
 
     def load_payload(self, digest: str) -> dict:
         compressed = self._payloads / f"{digest}.json.zst"
-        if compressed.exists():
-            return json.loads(zstandard.ZstdDecompressor().decompress(compressed.read_bytes()))
-        return json.loads((self._payloads / f"{digest}.json").read_text())   # pre-zstd runs
+        return json.loads(zstandard.ZstdDecompressor().decompress(compressed.read_bytes()))
 
     def event(self, type: str, *, node: str = "run", phase: str = "-", attempt: int = 0,
               payload: dict | None = None, span_id: str | None = None,

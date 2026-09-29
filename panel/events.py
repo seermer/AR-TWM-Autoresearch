@@ -100,11 +100,7 @@ class EventLog:
                 return self._payloads[digest]
         folder = self.files.root / "telemetry" / "payloads"
         try:
-            compressed = folder / f"{digest}.json.zst"
-            if compressed.exists():
-                data = json.loads(zstandard.ZstdDecompressor().decompress(compressed.read_bytes()))
-            else:
-                data = json.loads((folder / f"{digest}.json").read_text())      # pre-zstd runs
+            data = json.loads(zstandard.ZstdDecompressor().decompress((folder / f"{digest}.json.zst").read_bytes()))
         except (OSError, ValueError, zstandard.ZstdError):
             return None
         with self._lock:
