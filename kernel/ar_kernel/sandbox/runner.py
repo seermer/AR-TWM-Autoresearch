@@ -109,11 +109,11 @@ def diff(before: dict[str, str], after: dict[str, str]) -> dict[str, list[str]]:
             "changed": sorted(k for k in set(before) & set(after) if before[k] != after[k])}
 
 
-def _docker_args(image, name, mounts: Mounts, command, env, cpus, memory_gb) -> list[str]:
+def _docker_args(image, name, mounts: Mounts, command, env, cpus, memory_gb, network="none") -> list[str]:
     base_env = {"HOME": "/workspace/.home", "PYTHONPATH": "/ar_contract", "AR_SOCKET_DIR": "/run/ar",
                 "AR_AGENT_DIR": "/agent", "AR_CONTEXT_DIR": "/context", "AR_WORKSPACE": "/workspace"}
     args = ["docker", "run", "-d", "--name", name,
-            "--network", "none", "--user", f"{os.getuid()}:{os.getgid()}",
+            "--network", network, "--user", f"{os.getuid()}:{os.getgid()}",
             "--read-only", "--tmpfs", "/tmp:rw,size=4g",
             "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "4096",
             "--cpus", str(cpus), "--memory", f"{memory_gb}g",
@@ -154,9 +154,9 @@ def _cpu(sample: dict) -> float:
 def run_container(*, image: str, name: str, mounts: Mounts, command: list[str], env: dict,
                   cpus: float, memory_gb: float, timeout_s: float, recorder, node: str, phase: str,
                   attempt: int, stats_every_s: float = 30.0, liveness=None,
-                  poll_s: float = 5.0) -> RunResult:
+                  poll_s: float = 5.0, network: str = "none") -> RunResult:
     (Path(mounts.workspace) / ".home").mkdir(parents=True, exist_ok=True)
-    args = _docker_args(image, name, mounts, command, env, cpus, memory_gb)
+    args = _docker_args(image, name, mounts, command, env, cpus, memory_gb, network)
     recorded_args = _redact_argv(args)
     base = dict(node=node, phase=phase, attempt=attempt, component="sandbox")
     recorder.event("sandbox.start", container=name, payload={"args": recorded_args}, **base)

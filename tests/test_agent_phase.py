@@ -533,3 +533,11 @@ def test_container_commits_data_through_the_real_tool_server(tmp_path):
     assert out.result["rationale"] == "4 clips"
     kinds = [e["type"] for e in rec.read_events("n1")]
     assert "tool.call" in kinds and "phase.end" in kinds
+
+
+def test_agent_phases_get_the_configured_network(env):
+    make, conn, root, rec, _ = env
+    runner = FakeRunner({"ok": True, "result": {"summary": "s"}})
+    run_edit_self(make(runner), conn=conn, node="n1", parent_id="root", base_commit=root, attempt=1,
+                  max_attempts=3, retry=None, nodes_remaining=5)
+    assert runner.calls[0]["network"] == CFG.get("sandbox.network") == "bridge"

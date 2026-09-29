@@ -680,7 +680,7 @@ exactly two ways:
 | `/ar_contract` | ro | Contract package |
 
 - Not mounted: `WorldModel/`, `WBench/`, `AutoResearcher/kernel`, `.env`, weights.
-- Network: **none** (`--network none`). The gateway and the tool server are reached over Unix
+- Network: `sandbox.network`, docker's default `bridge` for the `edit_self` and `improve_recipe` containers so pip, curl and wget work *(amended 2026-09-29, user decision; `none` restores the offline behaviour; contract verification containers stay `--network none`)*. The gateway and the tool server are reached over Unix
   domain sockets in a per-run socket directory mounted read-only at `/run/ar` (connecting needs no
   write access to the directory, so an agent cannot delete the sockets; final review, 2026-09-24). *(Amended 2026-09-21, Plan 2:
   a Docker `--internal` network was tested and still exposes host services on the bridge IP; SSH
@@ -904,7 +904,7 @@ recorded.)*
   (+ `run.jsonl` for run-level events), flushed per line.
 - Large payloads: `runs/<run>/telemetry/payloads/<sha256>.json.zst`, referenced by hash.
 - Query index: `runs/<run>/telemetry/index.db` (SQLite, WAL), rebuildable from JSONL.
-- Nothing is uploaded (containers have no network; LangSmith tracing is never enabled).
+- Nothing is uploaded by the kernel (LangSmith tracing is never enabled); the agent containers can reach the internet themselves (§8).
 
 ### 13.3 Captured data
 

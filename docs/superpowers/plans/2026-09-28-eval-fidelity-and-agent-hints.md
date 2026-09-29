@@ -37,7 +37,7 @@
 |---|---|
 | 1 | All 22 metrics, 50-case proxy; API judge if `VLM_API_KEY` set, else local `Qwen/Qwen3.8-27B-FP8`. |
 | 2 | Process digest in the edit planner's lineage; edit plans cite evidence. |
-| 3 | Tool-quirk fixes; more tools in the image. Network: internet for both agent containers, LAN blocked (Task 8). No license enforcement for URL sources. |
+| 3 | Tool-quirk fixes; more tools in the image. Network: internet for both agent containers on docker's default bridge (Task 8). No license enforcement for URL sources. |
 | 4 | Planner gets read-only HF tools; gated access is granted. |
 | 5 | One sentence on quality checking in `data_builder.md`. |
 | 6 | Recipe writer gets base values, a parameter guide and cost model; data-identical nodes stay rejected by the gate. |
@@ -333,23 +333,22 @@ plus `test_ingest.py::test_missing_source_error_uses_container_path` (ingest a c
 
 ---
 
-### Task 8: Sandbox network access for the agent containers
+### Task 8: Sandbox network access for the agent containers (done)
 
-**Files:**
-- Modify: `kernel/ar_kernel/sandbox/runner.py` (`_docker_args`, `run_container(..., network="none")`), `kernel/ar_kernel/agent_phase.py` (passes the configured network), `configs/kernel.yaml` (`sandbox.network`), `kernel/ar_kernel/doctor.py`
-- Create: `scripts/setup_egress_network.sh`, `tests/test_sandbox_network.py`
-- Docs: spec §8, `docs/PORTABILITY.md`
+Decision D3 (user): internet for both agent containers (`edit_self` and `improve_recipe`), which docker's default
+bridge already gives without sudo. An earlier draft of this task added a LAN/host firewall (`DOCKER-USER`
+iptables rules, an `ar-egress` network, `scripts/setup_egress_network.sh`, sudo once). The user never asked
+for it, and it is not part of the plan.
 
-Design (decision D3: internet for both agent containers, `edit_self` and `improve_recipe`): pip and curl/wget work from the existing non-root, read-only container (`pip install --user` writes under `/workspace/.home`); **apt-get does not** (needs root and a writable root filesystem, which would undo `--read-only --cap-drop ALL --user`), so tools go into the image instead (Task 7). A default bridge network reaches the host and LAN (the panel when bound to `0.0.0.0`, other lab machines), so private ranges are blocked with `DOCKER-USER` iptables rules (needs sudo, once). Contract verification containers (`contract/verify.py`: build, import, smoke) keep `--network none`, so verification stays deterministic. Data fetched with curl/wget has no pinned revision; provenance for it is `{"kind": "url", "url": ...}` and the kernel records the file's sha256 at ingest. **No license is required or checked** (user decision). Leakage checks are unchanged because every clip still passes `data_ingest`. Every command the agent runs is already in the recorded transcript, which is the audit trail for downloads.
-
-**Interfaces:**
-- Produces: config `sandbox.network: ar-egress` (value `none` restores the old behaviour); `run_container(..., network: str = "none")` passes it to `--network`, `agent_phase.py` passes the configured value for both phases, `contract/verify.py` never passes one; `scripts/setup_egress_network.sh` (idempotent, run by the user with sudo): `docker network create --driver bridge --opt com.docker.network.bridge.enable_icc=false ar-egress` plus `iptables -I DOCKER-USER -s <ar-egress subnet> -d {10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16,100.64.0.0/10} -j DROP` (and the same for the host's own addresses); `doctor` check `sandbox.egress`: from a throwaway container on `ar-egress`, `curl -sI https://pypi.org` succeeds and a connection to the host gateway IP and to `192.168.0.1` fails.
-- Provenance: `ingest.py` — when `provenance["kind"] == "url"`, require `url` and store `sha256` computed by the kernel. `license` is optional and never checked.
-
-- [ ] **Step 1: Failing tests** — `_docker_args` uses `--network ar-egress` when the agent phase passes it and `--network none` by default (contract verification); ingest rejects a `url` provenance without `url`, accepts one without `license`, and stores `sha256`.
-- [ ] **Step 2: Run** → FAIL. **Step 3: Implement.** **Step 4: Run** `pytest tests/test_sandbox_network.py tests/test_sandbox_runner.py tests/test_ingest.py -q` → PASS.
-- [ ] **Step 5: User runs** `sudo scripts/setup_egress_network.sh`, then `ar doctor`; the egress check must pass. Docker tests: `pytest tests/test_sandbox_runner.py -m docker -q`.
-- [ ] **Step 6: Commit** `git commit -m "feat(sandbox): egress network for agent containers with the LAN blocked; url provenance records sha256"`.
+- `sandbox.network: bridge` in `configs/kernel.yaml`; `run_container(..., network="none")` and `_docker_args` pass it to
+  `--network`; `agent_phase.py` passes the configured value; contract verification containers never pass one
+  and stay offline. The rest of the sandbox (`--read-only`, `--cap-drop ALL`, non-root user, `no-new-privileges`)
+  is unchanged. `sandbox.network: none` restores the old behaviour.
+- Tools that need root, `apt-get` among them, do not work in this container; they are in the image instead (Task 7).
+- Data fetched with curl/wget has no pinned revision: its provenance is `{"kind": "url", "url": ...}`; no license
+  is required or checked (user decision).
+- Tests: `tests/test_sandbox_network.py`, `tests/test_agent_phase.py::test_agent_phases_get_the_configured_network`.
+  Real check: from the sandbox flags on the bridge, `curl https://pypi.org` returns 200 and `pip install --user` works.
 
 ---
 
@@ -481,8 +480,7 @@ def test_train_summary_missing_log_is_empty(tmp_path):
 
 ## Execution notes (2026-09-29)
 
-Tasks 1-7 and 9-11 are on `main`; Task 8 (sandbox network) waits for the user's choice between the LAN/host
-firewall (sudo once), a plain default bridge, or a bridge with a `doctor` listening-port warning. Task 12 steps
+Tasks 1-11 are on `main`; Task 8 is a plain default bridge (no firewall, no sudo). Task 12 steps
 1-4 are done; step 5 (fresh run) is the user's. Differences from the text above: `VllmServer` takes a prebuilt
 command (`serve_command(c, gpus, port, served_name, media_dir, mm_limits)`), not `cfg`; `preflight_metrics`
 returns the metric list (it raises instead of returning exclusions); `judge_env(cfg, judge, base_url)` takes the
