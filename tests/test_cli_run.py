@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,8 +42,10 @@ def _existing_run(tmp_path, monkeypatch, gpus_default="0,1,2,3", root="scored"):
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     run = tmp_path / "r1"
     (run / "config").mkdir(parents=True)
-    (run / "config" / "run.json").write_text('{"metric_set": ["m"], "case_ids": ["1"], "versions": {}}')
     raw = yaml.safe_load((REPO / "configs" / "kernel.yaml").read_text())
+    judge = {"kind": "local", "model": raw["captioner"]["model"], "url": None}
+    (run / "config" / "run.json").write_text(json.dumps(
+        {"metric_set": ["m"], "case_ids": ["1"], "versions": {}, "judge": judge}))
     raw["gpus"]["default"] = gpus_default
     (run / "config" / "kernel.yaml").write_text(yaml.safe_dump(raw))
     Control(run).save_args(max_nodes=1)
