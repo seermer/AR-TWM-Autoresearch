@@ -175,7 +175,8 @@ def _scripts():
         [message("planned")],
         [_call("edit_file", {"path": "agent/prompts/planner.md", "old": "Finish by calling submit_plan.",
                              "new": "Prefer clips with poses. Finish by calling submit_plan."})],
-        [message("Changed the planner prompt to prefer clips with poses.")],
+        [_call("submit_edit", {"summary": "Changed the planner prompt to prefer clips with poses."})],
+        [message("done")],
     ]
     return {"recipe": recipe, "edit": edit}
 
@@ -299,6 +300,7 @@ def test_edit_self_plans_exactly_one_component(kernel, tmp_path):
     assert proc.returncode == 0 and body["ok"], (body, proc.stderr[-2000:])
     assert body["result"]["component"] == "prompts"
     assert body["result"]["summary"].startswith("[prompts] ask for posed clips first")
+    assert "prefer clips with poses" in body["result"]["summary"]
     assert "Prefer clips with poses." in (agent / "agent" / "prompts" / "planner.md").read_text()
     assert json.loads((tmp_path / "ws" / "edit_plan.json").read_text())["component"] == "prompts"
     assert any("Error invoking tool 'submit_edit_plan'" in o and "component" in o

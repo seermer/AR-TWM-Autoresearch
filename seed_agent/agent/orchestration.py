@@ -123,7 +123,7 @@ async def run_task(ctx: RecipeContext) -> RecipeResult:
                                             BuildOutcome)
             task = f"{block('plan', plan.value.model_dump_json(indent=2))}\n\n{context}"
             if failures:
-                task += ("\n\nTHE LAST RECIPE CHECK FAILED. Fix the data if the failures are about data:\n"
+                task += ("\n\nThe last recipe check failed. Fix the data if the failures are about data.\n\n"
                          + block("failures", json.dumps(failures)))
             await run_role(system_prompt("data_builder", knowledge=("data_building.md",)),
                            [*ktools, *make_file_tools(WORKSPACE), snap_timed_prompts,
@@ -152,6 +152,10 @@ async def run_task(ctx: RecipeContext) -> RecipeResult:
 
 
 # ---- edit_self ----
+
+class EditSummary(BaseModel):
+    summary: str = Field(min_length=1, description="one paragraph: what you changed and why")
+
 
 class EditPlan(BaseModel):
     component: EditComponent = Field(description="the ONE component this edit changes")
@@ -203,12 +207,13 @@ async def run_meta(ctx: EditContext) -> EditResult:
     for _ in range(SELFTEST_ROUNDS):
         task = block("edit_plan", p.model_dump_json(indent=2), component=p.component)
         if errors:
-            task += "\n\nTHE SELF-TEST FAILED; fix these first:\n" + block("errors", "\n".join(errors))
-        messages = await run_role(system_prompt("coder"), make_file_tools(AGENT_ROOT), task)
-        summary = messages[-1].text
+            task += "\n\nThe self-test failed. Fix these first.\n\n" + block("errors", "\n".join(errors))
+        summary_tool, done = submit_tool("submit_edit", "Submit the summary of the change you made.", EditSummary)
+        await run_role(system_prompt("coder"), [*make_file_tools(AGENT_ROOT), summary_tool], task, done)
+        summary = done.value.summary
         errors = selftest(AGENT_ROOT)
         if not errors:
             break
     note = f"\n\n(self-test still failing: {errors})" if errors else ""
-    return EditResult(summary=f"[{p.component}] {p.change}\n\n{summary or 'no summary'}{note}",
+    return EditResult(summary=f"[{p.component}] {p.change}\n\n{summary}{note}",
                       component=p.component)

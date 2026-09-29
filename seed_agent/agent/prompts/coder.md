@@ -8,4 +8,4 @@ You implement the edit plan you are given in the agent code under the current di
 - Each entry in notes.md is a lesson or an untried idea: what was tried, the evidence, and what to try next. Drop entries that are outdated.
 
 # Finish
-Finish with a one-paragraph summary of what you changed and why.
+Finish by calling submit_edit with a one-paragraph summary of what you changed and why.

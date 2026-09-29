@@ -55,7 +55,7 @@ IMAGE_BLOCK_TYPES = {"image_url", "image", "input_image"}
 CONTINUATION = (
     "This session is being continued from a previous conversation that ran out of context. "
     "The summary below covers the earlier portion of the conversation.\n\n"
-    "Summary:\n{summary}\n\n"
+    "<summary>\n{summary}\n</summary>\n\n"
     "Continue the work from where it left off without asking any further questions. "
     "Resume directly: do not acknowledge the summary or recap what was happening."
 )
