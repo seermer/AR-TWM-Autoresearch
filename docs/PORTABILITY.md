@@ -61,7 +61,7 @@ start; the first captioner start after that also rebuilds the vLLM compile cache
 *(Amended 2026-09-28: every environment lives in the project; user rule: environments, data,
 models and code all stay under the project folder.)* Each conda env is a **prefix** env,
 `AutoResearcher/.envs/<name>` (gitignored): `autoresearcher`, `alayaworld`, `wbench-main`,
-`wbench-vp`, `zhantaoy-vllm`, `gen-zimage`, `gen-wan22`, `gen-ltx25`, `panel`. Only the `conda`
+`wbench-vp`, `vllm`, `gen-zimage`, `gen-wan22`, `gen-ltx25`, `panel`. Only the `conda`
 executable itself stays outside (a conda/miniforge install is a prerequisite, like `git`).
 
 `ar_kernel.subproc.conda_command()` picks how an env value is run: a value containing "/"
@@ -75,7 +75,7 @@ project, `fail` for a missing one.
 
 **How the older named envs were moved (2026-09-28):**
 `conda create -y -p .envs/<name> --clone <name>` for `autoresearcher`, `alayaworld`,
-`wbench-main`, `wbench-vp` and `zhantaoy-vllm` (with `CONDA_PKGS_DIRS=$PWD/.cache/conda/pkgs`).
+`wbench-main`, `wbench-vp` and `vllm` (with `CONDA_PKGS_DIRS=$PWD/.cache/conda/pkgs`).
 A clone rewrites the prefix in scripts and editable installs, so `ar`, `pip` and friends point
 at the new location. Inside `AutoResearcher`, run the CLI as `.envs/autoresearcher/bin/ar`
 (or `conda activate $PWD/.envs/autoresearcher`).
@@ -257,7 +257,7 @@ distilled LoRA). Kernel launches set `PYTORCH_CUDA_ALLOC_CONF=expandable_segment
 ## What needs doing on a new machine
 
 1. **Create the conda environments in `.envs/`** — `autoresearcher`, `alayaworld`,
-   `wbench-main`, `wbench-vp`, `zhantaoy-vllm`, `gen-zimage`, `gen-wan22`, `gen-ltx25` (see
+   `wbench-main`, `wbench-vp`, `vllm`, `gen-zimage`, `gen-wan22`, `gen-ltx25` (see
    "Environments" above; `envs/<name>.yml`). Never use `base` or the
    system Python. `ar doctor` lists any env that is missing or lives outside `.envs/`.
 2. **System tools on PATH:** `ffmpeg`, `ffprobe`, `conda`, `git`.

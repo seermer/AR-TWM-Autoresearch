@@ -6,7 +6,7 @@
 
 **Architecture:** Eval changes live in the kernel (`kernel/ar_kernel/eval/*`, `run.py`, `configs/`) plus one small WBench patch; the judge reuses the captioner's vLLM launch code. Tool fixes are kernel-side (take effect on resume/new run). Prompt, knowledge and orchestration changes are in `seed_agent/` (only reach a fresh run, because nodes inherit their parent's agent code). Context additions (process digest, recipe guide) are computed by the kernel in `context_bundle.py` and travel in the contract models.
 
-**Tech Stack:** Python 3.12, pytest, sqlite, docker, vLLM (env `zhantaoy-vllm`), WBench (`wbench-main`, `wbench-vp` envs), huggingface_hub.
+**Tech Stack:** Python 3.12, pytest, sqlite, docker, vLLM (env `vllm`), WBench (`wbench-main`, `wbench-vp` envs), huggingface_hub.
 
 **Spec:** `docs/superpowers/specs/2026-09-17-autoresearcher-design.md` (§11 eval, §10 tools, §8 sandbox). Audit evidence: this conversation's report on run `acceptance_20260928` (telemetry under `runs/acceptance_20260928/telemetry`).
 

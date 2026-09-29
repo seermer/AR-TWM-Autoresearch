@@ -2,7 +2,7 @@
 
 Everything the project runs lives inside the project: code, weights, caches (`.cache/`) and
 every conda environment, as a prefix env under `AutoResearcher/.envs/<name>`:
-`autoresearcher` (kernel, `ar`), `alayaworld`, `wbench-main`, `wbench-vp`, `zhantaoy-vllm`,
+`autoresearcher` (kernel, `ar`), `alayaworld`, `wbench-main`, `wbench-vp`, `vllm`,
 `gen-zimage`, `gen-wan22`, `gen-ltx25`, `panel`.
 
     .envs/autoresearcher/bin/ar run --run-id <run> ...        # or: conda activate $PWD/.envs/autoresearcher
