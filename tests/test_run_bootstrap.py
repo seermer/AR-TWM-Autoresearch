@@ -224,3 +224,15 @@ def test_root_score_records_every_metrics_case_count(tmp_path, monkeypatch):
     saved = json.loads((ctx.run_dir / "config" / "run.json").read_text())["expected_n"]
     assert saved == {"aesthetic_quality": 50, "spatial_consistency": 8}
     assert run_mod.attach_run(CFG, "r-root", ENV4).expected_n == saved
+
+
+def test_bootstrap_records_the_judge_and_attach_refuses_a_different_one(tmp_path, monkeypatch):
+    _runs(tmp_path, monkeypatch)
+    ctx = bootstrap_run(CFG, run_id="r-judge", env=ENV4)
+    assert ctx.judge.kind == "local"
+    assert json.loads((ctx.run_dir / "config" / "run.json").read_text())["judge"]["kind"] == "local"
+    from ar_kernel.run import attach_run
+    assert attach_run(CFG, "r-judge", ENV4).judge == ctx.judge
+    with pytest.raises(PreflightError, match="local judge.*api judge"):
+        attach_run(CFG, "r-judge", {**ENV4, "VLM_API_KEY": "k"})
+    assert attach_run(CFG, "r-judge", {**ENV4, "VLM_API_KEY": "k"}, check_judge=False).judge is None

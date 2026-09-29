@@ -53,38 +53,63 @@ def _make_test_env(tmp_path, monkeypatch):
     return cfg, work_dir, model, gpus, fake_report, mock_recorder, node_id, phases_called
 
 
-def test_run_wbench_phases_retries_gpu_phase(tmp_path, monkeypatch):
-    """Verify that the gpu phase is run twice to handle transient CUDA OOM errors."""
-    cfg, work_dir, model, gpus, fake_report, mock_recorder, node_id, phases_called = \
-        _make_test_env(tmp_path, monkeypatch)
+def _fake_judge_server(monkeypatch, wbench_mod, events, fail_vlm=False):
+    class Server:
+        base_url = "http://127.0.0.1:1"
 
-    metric_set = ["test_metric"]
+        def start(self, timeout_s, **kw):
+            events.append("server_start")
+            return 1.0
 
-    # Run the function
-    result = run_wbench_phases(cfg, work_dir, model, gpus, metric_set, mock_recorder, node_id)
+        def stop(self):
+            events.append("server_stop")
 
-    # Verify the result
-    assert result == fake_report
-
-    # Verify the phase order includes gpu twice
-    assert phases_called == ["precompute", "gpu", "gpu", "report"], \
-        f"Expected phase order [precompute, gpu, gpu, report], but got {phases_called}"
+    monkeypatch.setattr(wbench_mod, "judge_server", lambda *a, **k: Server())
+    monkeypatch.setattr(wbench_mod, "gpu_memory_mib", lambda gpus: None)
 
 
-def test_run_wbench_phases_retries_gpu_phase_with_vlm(tmp_path, monkeypatch):
-    """Verify that the gpu phase is run twice before vlm phase."""
-    cfg, work_dir, model, gpus, fake_report, mock_recorder, node_id, phases_called = \
-        _make_test_env(tmp_path, monkeypatch)
+def test_local_judge_phase_order_is_server_around_vlm_then_vp_then_report(tmp_path, monkeypatch):
+    import ar_kernel.eval.wbench as wbench_mod
+    from ar_kernel.eval.judge import Judge
+    cfg, work_dir, model, gpus, fake_report, rec, node_id, phases = _make_test_env(tmp_path, monkeypatch)
+    real = wbench_mod.run_in_env
+    def logged(env, args, **kw):
+        if env == "wbench-vp":
+            phases.append("vp")
+            return Mock(returncode=0)
+        if "vlm" in args:
+            assert kw["extra_env"]["VLM_API_KEY"] == "local"
+        return real(env, args, **kw)
+    monkeypatch.setattr(wbench_mod, "run_in_env", logged)
+    _fake_judge_server(monkeypatch, wbench_mod, phases)
+    out = run_wbench_phases(cfg, work_dir, model, gpus, ["test_metric"], rec, node_id,
+                            Judge("local", "Qwen/x", None))
+    assert out == fake_report
+    assert phases == ["precompute", "gpu", "gpu", "server_start", "vlm", "server_stop", "vp", "report"]
 
-    # scene_adherence is a VLM metric
-    metric_set = ["test_metric", "scene_adherence"]
 
-    # Run the function
-    result = run_wbench_phases(cfg, work_dir, model, gpus, metric_set, mock_recorder, node_id)
+def test_the_judge_server_is_stopped_when_the_vlm_phase_fails(tmp_path, monkeypatch):
+    import pytest
+    import ar_kernel.eval.wbench as wbench_mod
+    from ar_kernel.eval.judge import Judge
+    cfg, work_dir, model, gpus, _, rec, node_id, phases = _make_test_env(tmp_path, monkeypatch)
+    def failing(env, args, **kw):
+        phases.append(args[args.index("--phase") + 1] if "--phase" in args else "vp")
+        return Mock(returncode=1 if "vlm" in args else 0, stdout="", stderr="boom")
+    monkeypatch.setattr(wbench_mod, "run_in_env", failing)
+    _fake_judge_server(monkeypatch, wbench_mod, phases)
+    with pytest.raises(RuntimeError, match="vlm failed"):
+        run_wbench_phases(cfg, work_dir, model, gpus, ["test_metric"], rec, node_id, Judge("local", "Qwen/x", None))
+    assert phases[-1] == "server_stop" and "vp" not in phases
 
-    # Verify the result
-    assert result == fake_report
 
-    # Verify the phase order includes gpu twice, then vlm, then report
-    assert phases_called == ["precompute", "gpu", "gpu", "vlm", "report"], \
-        f"Expected phase order [precompute, gpu, gpu, vlm, report], but got {phases_called}"
+def test_an_api_judge_starts_no_server(tmp_path, monkeypatch):
+    import ar_kernel.eval.wbench as wbench_mod
+    from ar_kernel.eval.judge import Judge
+    cfg, work_dir, model, gpus, _, rec, node_id, phases = _make_test_env(tmp_path, monkeypatch)
+    _fake_judge_server(monkeypatch, wbench_mod, phases)
+    real = wbench_mod.run_in_env
+    monkeypatch.setattr(wbench_mod, "run_in_env",
+                        lambda env, args, **kw: Mock(returncode=0) if env == "wbench-vp" else real(env, args, **kw))
+    run_wbench_phases(cfg, work_dir, model, gpus, ["test_metric"], rec, node_id, Judge("api", "d", "u"))
+    assert phases == ["precompute", "gpu", "gpu", "vlm", "report"]

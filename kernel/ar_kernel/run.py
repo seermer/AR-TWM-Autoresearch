@@ -1,13 +1,14 @@
 from __future__ import annotations
 import datetime as dt
 import json, os, shutil, subprocess
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Mapping
 
 from .archive.db import open_db
 from .doctor import wbench_weight_problems
 from .config import SNAPSHOT_FILES, KernelConfig, resolve_gpus, run_config_path
+from .eval.judge import Judge, resolve_judge
 from .eval.merge import merge_lora
 from .eval.render import build_render_config, render_proxy
 from .eval.score import (UNIVERSAL_METRICS, aggregates, cleanup_eval, resolve_metric_set,
@@ -25,6 +26,7 @@ class RunContext:
     case_ids: list[str]
     versions: dict
     expected_n: dict = field(default_factory=dict)   # metric -> case count on the proxy
+    judge: Judge | None = None                       # who answers the VLM metrics
 
 def preflight_metrics(cfg: KernelConfig, env: Mapping[str, str]) -> list[str]:
     """The run's metric set (always all 22). Raises PreflightError listing every unmet prerequisite."""
@@ -83,20 +85,21 @@ def bootstrap_run(cfg: KernelConfig, run_id: str | None, env: Mapping[str, str])
                 "kernel_sha": kernel_sha, "kernel_dirty": kernel_dirty}
     (run_dir / "config" / "versions.json").write_text(json.dumps(versions, indent=2))
     metric_set = preflight_metrics(cfg, env)
+    judge = resolve_judge(cfg, env)
     case_ids = (run_dir / "config" / "proxy_cases.txt").read_text().strip().split(",")
     expected_n = initial_expected_n(case_ids)
     # run.json is written last: its presence is what marks the run as created.
     (run_dir / "config" / "run.json").write_text(json.dumps(
-        {"run_id": run_id, "metric_set": metric_set,
+        {"run_id": run_id, "metric_set": metric_set, "judge": asdict(judge),
          "case_ids": case_ids, "versions": versions, "expected_n": expected_n}, indent=2))
-    recorder.event("run.start", payload={"gpus": gpus, "metric_set": metric_set, "versions": versions,
+    recorder.event("run.start", payload={"gpus": gpus, "metric_set": metric_set, "judge": asdict(judge), "versions": versions,
                                          "case_ids": case_ids})
     if wm_dirty or wb_dirty:
         recorder.event("run.warning", payload={"message": "sibling repo has uncommitted changes",
                                                "worldmodel_dirty": wm_dirty, "wbench_dirty": wb_dirty})
     return RunContext(run_dir=run_dir, conn=open_db(run_dir), recorder=recorder, gpus=gpus,
                       metric_set=metric_set, case_ids=case_ids, versions=versions,
-                      expected_n=expected_n)
+                      expected_n=expected_n, judge=judge)
 
 
 def initial_expected_n(case_ids: list[str]) -> dict:
@@ -115,7 +118,8 @@ def _record_root_counts(ctx: RunContext, report: dict) -> None:
     os.replace(tmp, path)
 
 
-def attach_run(cfg: KernelConfig, run_id: str, env: Mapping[str, str]) -> RunContext:
+def attach_run(cfg: KernelConfig, run_id: str, env: Mapping[str, str],
+               check_judge: bool = True) -> RunContext:
     """Open an existing run without modifying its snapshot or appending run.start.
 
     For `ar status`, `ar score-node`, and resuming. A missing run is an error --
@@ -126,10 +130,26 @@ def attach_run(cfg: KernelConfig, run_id: str, env: Mapping[str, str]) -> RunCon
     if not meta_path.exists():
         raise RunNotFound(f"no run {run_id!r} under {cfg.runs_dir}")
     meta = json.loads(meta_path.read_text())
+    judge = _stored_judge(cfg, env, meta) if check_judge else None
     return RunContext(run_dir=run_dir, conn=open_db(run_dir), recorder=_recorder(run_dir, env),
                       gpus=resolve_gpus(cfg, env), metric_set=meta["metric_set"],
                       case_ids=meta["case_ids"], versions=meta["versions"],
-                      expected_n=meta.get("expected_n", {}))
+                      expected_n=meta.get("expected_n", {}), judge=judge)
+
+
+def _stored_judge(cfg: KernelConfig, env: Mapping[str, str], meta: dict) -> Judge | None:
+    """The judge the run was created with. Scores from a different judge are not comparable, so
+    an environment that would pick another one is refused. Runs from before the judge was
+    recorded have none."""
+    if "judge" not in meta:
+        return None
+    stored, now = Judge(**meta["judge"]), resolve_judge(cfg, env)
+    if (stored.kind, stored.model) != (now.kind, now.model):
+        raise PreflightError(
+            f"this run was scored by the {stored.kind} judge {stored.model!r}, but the environment now "
+            f"selects the {now.kind} judge {now.model!r}; set VLM_API_KEY and VLM_MODEL_NAME "
+            "(or unset VLM_API_KEY) to match, or start a new run")
+    return stored
 
 
 def score_node(cfg: KernelConfig, ctx: RunContext, node_id: str, checkpoint: Path | None,
@@ -156,7 +176,8 @@ def score_node(cfg: KernelConfig, ctx: RunContext, node_id: str, checkpoint: Pat
             history = Path(checkpoint) / "history_encoder.pt"
         render_config = build_render_config(cfg, merged, history, videos_dir, ctx.case_ids, node_dir)
         render_proxy(cfg, render_config, ctx.gpus, node_id, ctx.recorder, ctx.case_ids)
-        report = run_wbench_phases(cfg, work_dir, model, ctx.gpus, ctx.metric_set, ctx.recorder, node_id)
+        report = run_wbench_phases(cfg, work_dir, model, ctx.gpus, ctx.metric_set, ctx.recorder, node_id,
+                                   ctx.judge)
         score, per_metric = score_from_report(report, ctx.metric_set, ctx.expected_n)
         if node_id == "root":
             _record_root_counts(ctx, report)

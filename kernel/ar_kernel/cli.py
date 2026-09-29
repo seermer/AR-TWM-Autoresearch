@@ -9,7 +9,7 @@ from .doctor import report, run_checks
 from .guards import alert, check_visible
 from .loop import Loop
 from .monitor import Monitor
-from .run import RunNotFound, attach_run, bootstrap_run, score_node
+from .run import PreflightError, RunNotFound, attach_run, bootstrap_run, score_node
 from .run_kit import build_run_kit
 from .status import format_status, run_status
 from .subproc import cache_env, proc_running, proc_start_time
@@ -91,8 +91,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # status / score-node act on an EXISTING run: attach, never create or rewrite it.
     try:
-        ctx = attach_run(cfg, args.run_id, os.environ)
-    except RunNotFound as exc:
+        ctx = attach_run(cfg, args.run_id, os.environ, check_judge=args.command != "status")
+    except (RunNotFound, PreflightError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     nodes = NodeStore(ctx.conn)
@@ -134,7 +134,11 @@ def _run(cfg, args) -> int:
         if args.git_remote and (error := AgentsRepo.check_remote(args.git_remote)):
             print(f"error: cannot reach --git-remote {args.git_remote}: {error}", file=sys.stderr)
             return 2
-    ctx = attach_run(cfg, args.run_id, os.environ) if args.resume else bootstrap_run(cfg, args.run_id, os.environ)
+    try:
+        ctx = attach_run(cfg, args.run_id, os.environ) if args.resume else bootstrap_run(cfg, args.run_id, os.environ)
+    except PreflightError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     if args.resume:
         try:
             status = NodeStore(ctx.conn).get("root")["status"]

@@ -131,7 +131,8 @@ def h_overview(run):
         f" — {loop['state_label']} state: {state.get('node')} · {state.get('phase')} · attempt {state.get('attempt')}"
     usd = "n/a" if spend["usd"] is None else f"${spend['usd']:.4f}"
     head += (f"\n\n**Spend:** {usd} · {spend['tokens']:,} tokens · {spend['calls']} calls · "
-             f"**Nodes:** {max(len(ov['nodes']) - 1, 0)} of {loop['max_nodes']} · **Disk free:** {ov['disk_free_gb']} GB")
+             f"**Nodes:** {max(len(ov['nodes']) - 1, 0)} of {loop['max_nodes']} · **Disk free:** {ov['disk_free_gb']} GB"
+             + (f" · **Judge:** {ov['judge']}" if ov.get("judge") else ""))
     scores = go.Figure(go.Scatter(x=[s["node"] for s in ov["scores"]], y=[s["score"] for s in ov["scores"]],
                                   mode="lines+markers"))
     scores.update_layout(title="Score by node", height=300, margin=dict(t=40, b=30))

@@ -77,7 +77,9 @@ def overview(run: Run) -> dict:
     responses = [e for e in events if e.get("type") == "llm.response"]
     costs = [e["cost_usd"] for e in responses if e.get("cost_usd") is not None]
     alerts = [e for e in events if e.get("type") == "alert"][-50:]
+    judge = (run.files.read_json("config/run.json") or {}).get("judge")
     return {
+        "judge": f"{judge['kind']} {judge['model']}" if judge else None,
         "loop": {"alive": pid is not None, "pid": pid, "state": run.files.read_json("control/state.json"),
                  "state_label": "current" if pid else "last recorded",
                  "max_nodes": (run.files.read_json("control/run_args.json") or {}).get("max_nodes")},

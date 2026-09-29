@@ -44,8 +44,10 @@ def run_status(run_dir: Path) -> dict:
     scored = [n for n in nodes if n["status"] == "scored" and n["score"] is not None]
     best = max(scored, key=lambda n: n["score"], default=None)
     alerts = _events(run_dir / "telemetry" / "events" / "run.jsonl", "alert")[-20:]
+    meta_path = run_dir / "config" / "run.json"
+    judge = json.loads(meta_path.read_text()).get("judge") if meta_path.exists() else None
     return {
-        "run_id": run_dir.name, "loop_pid": control.alive_pid(),
+        "run_id": run_dir.name, "judge": judge, "loop_pid": control.alive_pid(),
         "state": json.loads(state_file.read_text()) if state_file.exists() else None,
         "max_nodes": control.args().get("max_nodes"),
         "nodes": [{"node_id": n["node_id"], "parent_id": n["parent_id"], "depth": n["depth"],
@@ -61,6 +63,8 @@ def run_status(run_dir: Path) -> dict:
 
 def format_status(d: dict) -> str:
     lines = [f"run {d['run_id']}: loop {'running (pid %s)' % d['loop_pid'] if d['loop_pid'] else 'not running'}"]
+    if d.get("judge"):
+        lines.append(f"judge: {d['judge']['kind']} {d['judge']['model']}")
     if d["state"]:
         s = d["state"]
         lines.append(f"now: {s.get('node')} {s.get('phase')} attempt {s.get('attempt')}")
