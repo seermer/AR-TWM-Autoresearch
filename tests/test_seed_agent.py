@@ -289,7 +289,7 @@ def test_improve_recipe_full_flow(kernel, tmp_path):
     assert max(turns) >= 2                     # the harness's resent chat history links (Task 19)
     builder_tasks = [m["content"] for e in rec.read_events("n-recipe") if e["type"] == "llm.request"
                      for m in rec.load_payload(e["payload"])["body"]["messages"]
-                     if m.get("role") == "user" and str(m["content"]).startswith("PLAN:")]
+                     if m.get("role") == "user" and str(m["content"]).startswith("<plan>")]
     assert builder_tasks and all('"resolution_allowlist": [[352, 640]]' in t for t in builder_tasks)
 
 
@@ -344,3 +344,26 @@ def test_planner_gets_only_read_only_kernel_tools():
                                    "data_commit", "caption_videos", "job_wait")]
     names = [t.name for t in planner_tools(NS(name="submit_plan"), ktools)]
     assert names == ["submit_plan", "hf_search", "hf_list_files", "data_query"]
+
+
+def test_system_prompt_carries_reference_and_memory_in_blocks():
+    from agent.orchestration import system_prompt
+    text = system_prompt("planner", knowledge=("data_building.md",))
+    assert '<reference name="data_building.md">' in text and "<memory>" in text
+    assert "Lessons and untried ideas" in text
+    assert "\n\n\n" not in text and not text.endswith("\n")
+
+
+def test_brief_marks_a_cut_and_closes_its_block(monkeypatch):
+    from agent import orchestration
+    monkeypatch.setattr(orchestration, "BRIEF_CHARS", 20)
+    out = orchestration.brief({"lineage": "x" * 100})
+    assert out.startswith("<context>") and out.endswith("</context>") and "[truncated]" in out
+
+
+def test_prompts_and_knowledge_have_no_wrapped_commands_or_dated_notes():
+    agent = SEED / "agent"
+    for path in [*(agent / "prompts").glob("*.md"), *(agent / "knowledge").glob("*.md")]:
+        text = path.read_text()
+        assert not any(line.count("`") % 2 for line in text.splitlines()), f"{path.name}: inline code wraps"
+        assert "*(20" not in text, f"{path.name}: dated note"

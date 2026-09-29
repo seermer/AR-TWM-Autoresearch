@@ -1,6 +1,6 @@
 """Which roles run, in what order, with which tools and context.
 
-A role = a system prompt (+ reference knowledge) and a tool list, run on the harness. It returns
+A role = a system prompt (+ reference knowledge and memory) and a tool list, run on the harness. It returns
 its result by calling a submit_<x> tool; one that stops without submitting gets one reminder.
 - improve_recipe: plan -> (build data -> write recipe -> recipe_check) x up to CHECK_ROUNDS.
 - edit_self: plan ONE edit to ONE component -> implement -> self-test -> (fix | finish).
@@ -40,11 +40,25 @@ COMPONENTS = {
 
 # ---- roles ----
 
+def block(tag: str, text: str, **attrs) -> str:
+    attributes = "".join(f' {key}="{value}"' for key, value in attrs.items())
+    return f"<{tag}{attributes}>\n{text.strip()}\n</{tag}>"
+
+
 def system_prompt(name: str, knowledge: tuple[str, ...] = ()) -> str:
-    text = (AGENT_PKG / "prompts" / f"{name}.md").read_text()
-    for doc in knowledge:
-        text += f"\n\n# Reference: {doc}\n\n" + (AGENT_PKG / "knowledge" / doc).read_text()
-    return text
+    """The role's prompt, then its reference docs and the agent's memory, each in its own block."""
+    parts = [(AGENT_PKG / "prompts" / f"{name}.md").read_text()]
+    parts += [block("reference", (AGENT_PKG / "knowledge" / doc).read_text(), name=doc) for doc in knowledge]
+    parts.append(block("memory", (AGENT_PKG / "memory" / "notes.md").read_text()))
+    return "\n\n".join(part.strip() for part in parts)
+
+
+def brief(payload: dict) -> str:
+    """The JSON context for a role, capped at BRIEF_CHARS with a visible cut."""
+    text = json.dumps(payload, default=str)
+    if len(text) > BRIEF_CHARS:
+        text = text[:BRIEF_CHARS] + " ...[truncated]"
+    return block("context", text)
 
 
 async def run_role(system: str, tools: list, task: str, submission=None) -> list[AnyMessage]:
@@ -96,26 +110,26 @@ async def run_task(ctx: RecipeContext) -> RecipeResult:
                                           f"{messages[-1].text!r}")
         recipe_rules = {"rules": ctx.tunable_rules, "resolution_allowlist": ctx.resolution_allowlist,
                         "lora_allowlist": ctx.lora_allowlist}      # first, so the length cap never cuts them
-        context = json.dumps({**recipe_rules,
-                              "lineage": ctx.lineage, "archive": ctx.archive, "n_gpus": ctx.n_gpus,
-                              "parent_data_commit": ctx.parent_data_commit, "parent_recipe": ctx.parent_recipe,
-                              "clip_pool_size": len(ctx.clip_pool), "tools": ctx.tools, "retry": ctx.retry,
-                              "format_rules": ctx.format_rules}, default=str)[:BRIEF_CHARS]
+        context = brief({**recipe_rules,
+                         "lineage": ctx.lineage, "archive": ctx.archive, "n_gpus": ctx.n_gpus,
+                         "parent_data_commit": ctx.parent_data_commit, "parent_recipe": ctx.parent_recipe,
+                         "clip_pool_size": len(ctx.clip_pool), "tools": ctx.tools, "retry": ctx.retry,
+                         "format_rules": ctx.format_rules})
         plan_tool, plan = submit_tool("submit_plan", "Submit the data plan for this node.", DataPlan)
-        await run_role(system_prompt("planner"), planner_tools(plan_tool, ktools), context, plan)
+        await run_role(system_prompt("planner", knowledge=("data_building.md",)), planner_tools(plan_tool, ktools), context, plan)
         failures: list = []
         for _ in range(CHECK_ROUNDS):
             build_tool, built = submit_tool("submit_data_commit", "Submit the data commit to train on.",
                                             BuildOutcome)
-            task = f"PLAN:\n{plan.value.model_dump_json(indent=2)}\n\nCONTEXT:\n{context}"
+            task = f"{block('plan', plan.value.model_dump_json(indent=2))}\n\n{context}"
             if failures:
                 task += ("\n\nTHE LAST RECIPE CHECK FAILED. Fix the data if the failures are about data:\n"
-                         + json.dumps(failures))
+                         + block("failures", json.dumps(failures)))
             await run_role(system_prompt("data_builder", knowledge=("data_building.md",)),
                            [*ktools, *make_file_tools(WORKSPACE), snap_timed_prompts,
                             build_tool], task, built)
             recipe_tool, draft = submit_tool("submit_recipe", "Submit the training recipe.", RecipeDraft)
-            await run_role(system_prompt("recipe_writer"), [recipe_tool], json.dumps(
+            await run_role(system_prompt("recipe_writer", knowledge=("recipe_writing.md",)), [recipe_tool], brief(
                 {**recipe_rules, "n_gpus": ctx.n_gpus, "data_notes": built.value.notes,
                  "parent_recipe": ctx.parent_recipe, "base_recipe": ctx.base_recipe,
                  "recipe_guide": ctx.recipe_guide, "parent_train": ctx.parent_train,
@@ -177,19 +191,19 @@ async def run_meta(ctx: EditContext) -> EditResult:
     plan_tool, plan = submit_tool("submit_edit_plan",
                                   "Submit the edit plan: exactly one component and one focused change.",
                                   EditPlan)
-    brief = json.dumps({"components": COMPONENTS, "lineage": ctx.lineage, "archive": ctx.archive,
-                        "nodes_remaining": ctx.nodes_remaining, "retry": ctx.retry,
-                        "previous_attempt_plan": previous}, default=str)[:BRIEF_CHARS]
+    context = brief({"components": COMPONENTS, "lineage": ctx.lineage, "archive": ctx.archive,
+                     "nodes_remaining": ctx.nodes_remaining, "retry": ctx.retry,
+                     "previous_attempt_plan": previous})
     await run_role(system_prompt("edit_planner"), [*make_file_tools(AGENT_ROOT, writable=False), plan_tool],
-                   brief, plan)
+                   context, plan)
     p = plan.value
     plan_file.write_text(p.model_dump_json(indent=2))
     errors: list[str] = []
     summary = ""
     for _ in range(SELFTEST_ROUNDS):
-        task = f"EDIT PLAN (component: {p.component}):\n{p.model_dump_json(indent=2)}"
+        task = block("edit_plan", p.model_dump_json(indent=2), component=p.component)
         if errors:
-            task += "\n\nTHE SELF-TEST FAILED; fix these first:\n" + "\n".join(errors)
+            task += "\n\nTHE SELF-TEST FAILED; fix these first:\n" + block("errors", "\n".join(errors))
         messages = await run_role(system_prompt("coder"), make_file_tools(AGENT_ROOT), task)
         summary = messages[-1].text
         errors = selftest(AGENT_ROOT)
