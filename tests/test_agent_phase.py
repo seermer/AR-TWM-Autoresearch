@@ -149,7 +149,7 @@ def test_improve_recipe_lists_the_caption_tool_when_its_backend_is_registered(en
     run_improve_recipe(penv, conn=conn, node="n1", parent_id="root", agent_commit=root,
                        attempt=1, max_attempts=3, retry=None, nodes_remaining=5)
     tools = json.loads((penv.runner.calls[0]["mounts"].context / "context.json").read_text())["tools"]
-    assert "caption_videos" in tools and "job_wait" in tools
+    assert "caption_videos" in tools and "job_wait" in tools and "hf_list_files" in tools
 
 
 def test_retry_continues_from_the_previous_workspace(env):

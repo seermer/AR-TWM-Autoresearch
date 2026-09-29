@@ -225,7 +225,7 @@ def run_improve_recipe(env: PhaseEnv, *, conn, node: str, parent_id: str, agent_
                        previous_workspace: Path | None = None, mock_script: str | None = None,
                        dry_run: bool = False) -> PhaseOutcome:
     tools = ["video_probe", "data_ingest", "data_query", "data_commit", "recipe_check",
-             "hf_search", "hf_download", "job_status", "job_wait", "job_cancel",
+             "hf_search", "hf_list_files", "hf_download", "job_status", "job_wait", "job_cancel",
              *sorted(b.tool for b in env.queue.backends.values())]
     ctx = build_recipe_context(cfg=env.cfg, conn=conn, run_dir=env.run_dir, repo=env.repo, node_id=node,
                                parent_id=parent_id, attempt=attempt, max_attempts=max_attempts,
