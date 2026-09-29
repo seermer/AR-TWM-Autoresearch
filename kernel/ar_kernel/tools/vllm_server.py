@@ -143,9 +143,6 @@ class VllmServer:
                 time.sleep(self.poll_s)
         return None
 
-    def alive(self) -> bool:
-        return bool(self._thread and self._thread.is_alive())
-
     def stop(self):
         self._stop.set()
         if self._thread:

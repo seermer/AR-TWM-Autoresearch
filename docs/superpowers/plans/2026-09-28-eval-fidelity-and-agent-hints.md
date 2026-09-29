@@ -267,7 +267,7 @@ def test_draw_frequencies_follow_the_recorded_probabilities(tmp_path):
 
 ---
 
-### Task 6: Caption server reuse across caption calls (on-demand stop)
+### Task 6: Caption server reuse across caption calls (implemented, measured, reverted)
 
 **Files:**
 - Modify: `kernel/ar_kernel/tools/captioner.py`, `kernel/ar_kernel/tools/gpu_jobs.py`, `kernel/ar_kernel/tools/jobs.py`
@@ -340,9 +340,10 @@ bridge already gives without sudo. An earlier draft of this task added a LAN/hos
 iptables rules, an `ar-egress` network, `scripts/setup_egress_network.sh`, sudo once). The user never asked
 for it, and it is not part of the plan.
 
-- `sandbox.network: bridge` in `configs/kernel.yaml`; `run_container(..., network="none")` and `_docker_args` pass it to
-  `--network`; `agent_phase.py` passes the configured value; contract verification containers never pass one
-  and stay offline. The rest of the sandbox (`--read-only`, `--cap-drop ALL`, non-root user, `no-new-privileges`)
+- `sandbox.network: bridge` in `configs/kernel.yaml`; `run_container(..., network="bridge")` and `_docker_args` default
+  to the bridge (network on is the default);
+  `agent_phase.py` passes the configured value; contract verification passes `network="none"` explicitly and
+  stays offline. The rest of the sandbox (`--read-only`, `--cap-drop ALL`, non-root user, `no-new-privileges`)
   is unchanged. `sandbox.network: none` restores the old behaviour.
 - Tools that need root, `apt-get` among them, do not work in this container; they are in the image instead (Task 7).
 - Data fetched with curl/wget has no pinned revision: its provenance is `{"kind": "url", "url": ...}`; no license
@@ -490,3 +491,8 @@ separate holder; the process digest reports `gpu_job_s` rather than `job_wait_s`
 never contained the "negative control" wording (only a node's own edit had), so nothing was removed.
 Open finding: the token in the environment (`HF_TOKEN`, account `seermer`) reports `accessible: false` for
 `Kunho/RealEstate10K-videos` (gated `auto`), so access is not in place for that account.
+
+Task 6 (warm caption server) was implemented and then reverted at the user's request: from the acceptance
+run's telemetry it would have saved 147 s of 759 s of model loading across four nodes (one reload in n2; every
+other load followed a different GPU job, which stops a warm server anyway), under 1% of the run, for about 145
+net lines including a `GpuLock`. `VllmServer` (Task 3) stays: the local judge needs it.

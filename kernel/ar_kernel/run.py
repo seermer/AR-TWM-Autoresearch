@@ -137,12 +137,9 @@ def attach_run(cfg: KernelConfig, run_id: str, env: Mapping[str, str],
                       expected_n=meta.get("expected_n", {}), judge=judge)
 
 
-def _stored_judge(cfg: KernelConfig, env: Mapping[str, str], meta: dict) -> Judge | None:
+def _stored_judge(cfg: KernelConfig, env: Mapping[str, str], meta: dict) -> Judge:
     """The judge the run was created with. Scores from a different judge are not comparable, so
-    an environment that would pick another one is refused. Runs from before the judge was
-    recorded have none."""
-    if "judge" not in meta:
-        return None
+    an environment that would pick another one is refused."""
     stored, now = Judge(**meta["judge"]), resolve_judge(cfg, env)
     if (stored.kind, stored.model) != (now.kind, now.model):
         raise PreflightError(

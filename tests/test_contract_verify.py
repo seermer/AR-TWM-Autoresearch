@@ -45,8 +45,11 @@ def test_each_container_token_is_revoked_and_its_jobs_cancelled(tmp_path, monkey
     monkeypatch.setattr(h.queue, "cancel_for_token", lambda t: cancelled.append(t) or 0)
     monkeypatch.setattr("ar_kernel.contract.verify.ensure_image", lambda cfg, reqs, **k: "img:test")
 
+    networks = []
+
     def runner(*, mounts, env, **kw):
         tokens.append(env["AR_TOKEN"])
+        networks.append(kw["network"])
         (mounts.workspace / "result.json").write_text(json.dumps({"ok": True, "result": {}}))
         return RunResult(0, False, "", "", 0.1, [], "c")
 
@@ -58,6 +61,7 @@ def test_each_container_token_is_revoked_and_its_jobs_cancelled(tmp_path, monkey
     finally:
         h.queue.shutdown()
     assert report.ok, report.steps
+    assert networks and set(networks) == {"none"}          # verification containers stay offline
     assert len(tokens) == 3 and cancelled == tokens          # import + two smoke runs
     assert all(h.registry.lookup(t) is None for t in tokens)
 

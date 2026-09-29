@@ -90,7 +90,7 @@ sandbox:
   image: ar-agent
   cpus: 16
   memory_gb: 64
-  network: bridge                # docker's default network: outbound internet for pip, curl, wget in the
+  network: bridge                # default: docker's bridge, outbound internet for pip, curl, wget in the
                                  # edit_self and improve_recipe containers; `none` = offline. Contract
                                  # verification containers are always offline.
 timeouts:                        # soft timeouts (spec 14.5); Plan 2 enforces the hard cap = 4x soft

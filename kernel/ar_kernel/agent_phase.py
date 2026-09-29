@@ -160,7 +160,6 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
             env.registry.revoke(caller.token)
         finally:
             env.queue.cancel_for_token(caller.token)     # an ended phase must not keep the GPUs
-            env.queue.release_gpu_resident()             # nor a warm caption server
     out_file = dirs["workspace"] / "result.json"
     body = _read_result(out_file)
     diffs = {"agent": diff(before["agent"], snapshot(dirs["agent"], True)),

@@ -221,7 +221,8 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
                                                   "AR_CONTEXT_WINDOW": str(cfg.get("agents.context_window_tokens")),
                                                   "AR_COMPACT_AT": str(cfg.get("agents.compact_at"))},
                             cpus=4, memory_gb=8, timeout_s=timeout_s, liveness=liveness, recorder=recorder,
-                            node=node, phase="contract", attempt=attempt)
+                            node=node, phase="contract", attempt=attempt,
+                            network="none")         # verification stays offline and deterministic
         finally:
             harness.registry.revoke(caller.token)
             harness.queue.cancel_for_token(caller.token)   # as in the phase runner (Task 15)

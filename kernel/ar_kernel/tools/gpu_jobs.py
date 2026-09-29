@@ -21,7 +21,8 @@ from typing import Annotated, Any, Callable
 from mcp.server.mcpserver import Context
 from pydantic import WithJsonSchema
 
-from .captioner import clip_host_path, container_path, gpu_memory_mib, stage_clip, wait_gpu_release
+from .captioner import clip_host_path, container_path, stage_clip
+from .vllm_server import gpu_memory_mib, wait_gpu_release
 from .context import STAGING, PathError
 from .hf_tools import _move_into
 from .jobs import run_cancellable
