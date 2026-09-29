@@ -117,7 +117,9 @@ async def run_task(ctx: RecipeContext) -> RecipeResult:
             recipe_tool, draft = submit_tool("submit_recipe", "Submit the training recipe.", RecipeDraft)
             await run_role(system_prompt("recipe_writer"), [recipe_tool], json.dumps(
                 {**recipe_rules, "n_gpus": ctx.n_gpus, "data_notes": built.value.notes,
-                 "parent_recipe": ctx.parent_recipe, "previous_failures": failures}), draft)
+                 "parent_recipe": ctx.parent_recipe, "base_recipe": ctx.base_recipe,
+                 "recipe_guide": ctx.recipe_guide, "parent_train": ctx.parent_train,
+                 "previous_failures": failures}), draft)
             recipe = {key: int(round(value)) if ctx.tunable_rules.get(key, {}).get("type") == "int"
                       else float(value) for key, value in draft.value.recipe.items()}
             try:
