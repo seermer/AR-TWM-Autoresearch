@@ -103,9 +103,11 @@ class Loop:
             alert(self.ctx.recorder, "budget", why)
             raise StopRun(why)
 
-    def _check_outage(self) -> None:
-        """After a failed agent attempt: if the LLM provider is down, stop the run instead of
-        charging the attempt (user decision 2026-09-27, option A: a stop, never a pause)."""
+    def _check_failed_attempt(self) -> None:
+        """After a failed agent attempt: a spent budget (the gateway's 402) or an LLM provider outage
+        is not the agent's fault, so it stops the run instead of charging the attempt (user decision
+        2026-09-27, option A: a stop, never a pause)."""
+        self._check_budget()
         rate, calls = self.kit.budget.error_rate(60 * float(self.cfg.get("gateway.outage_window_min")))
         if calls >= int(self.cfg.get("gateway.outage_min_calls")) and \
                 rate >= float(self.cfg.get("gateway.outage_error_rate")):
@@ -204,8 +206,7 @@ class Loop:
             base = out.commit or base
             prev_ws = Path(out.attempt_dir) / "workspace"
             if not out.ok:
-                self._check_budget()        # a 402 from the gateway is a spent budget, not an agent failure
-                self._check_outage()        # a provider outage is not an agent failure either
+                self._check_failed_attempt()
                 retry = {"kind": "edit_self", "error": out.error}
                 self.nodes.add_attempt(child, "edit_self", k, "failed", retry)
                 continue
@@ -241,8 +242,7 @@ class Loop:
             adir = Path(out.attempt_dir)
             prev_ws = adir / "workspace"
             if not out.ok:
-                self._check_budget()        # a 402 from the gateway is a spent budget, not an agent failure
-                self._check_outage()        # a provider outage is not an agent failure either
+                self._check_failed_attempt()
                 retry, status = {"kind": "improve_recipe", "error": out.error}, "invalid_recipe"
                 self.nodes.add_attempt(child, "improve_recipe", k, "failed", retry)
                 continue
