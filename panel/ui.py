@@ -331,7 +331,7 @@ def h_training(run, node, attempt):
 
 
 @guarded(3)
-def h_eval(run, node, other):
+def h_eval(run, node):
     ev = media.eval_view(run, node)
     rows = [{"case": c["case"], "perspective": c["perspective"], **c["scores"]} for c in ev["cases"]]
     cases = [c["case"] for c in ev["cases"]]
@@ -623,7 +623,7 @@ def build_app(run_dir) -> gr.Blocks:
         ce_att_out = [ce_att_head, ce_att_diff, ce_contract, ce_err]
         td_out = [td_head, td_sets, td_dataset, td_ingest, td_staging, td_video, td_caption, td_plot, td_info, td_err]
         clips_out = [td_clips, td_count, td_page, td_err]
-        node_eval_in, ev_out = [node, ev_other], [ev_cases, ev_case, ev_agg, ev_err]
+        ev_out = [ev_cases, ev_case, ev_agg, ev_err]
         ev_case_out = [ev_video, ev_video2, ev_table, ev_meta, ev_prompt, ev_err]
         tn_out = [tn_head, tn_loss, tn_config, tn_gates, tn_gpu, tn_err]
         for trigger in (app.load, node.change):
@@ -635,7 +635,7 @@ def build_app(run_dir) -> gr.Blocks:
             trigger(bind(h_node), node, nd_out)
             trigger(bind(h_code), node, ce_out).then(bind(h_code_attempt), [node, ce_attempt], ce_att_out)
             trigger(bind(h_training_data), node, td_out).then(bind(h_clips), [node, td_dataset, td_page], clips_out)
-            trigger(bind(h_eval), node_eval_in, ev_out).then(bind(h_eval_case), [node, ev_other, ev_case], ev_case_out)
+            trigger(bind(h_eval), node, ev_out).then(bind(h_eval_case), [node, ev_other, ev_case], ev_case_out)
         cv_attempt.input(bind(h_conversations), [node, cv_attempt], conv_out) \
             .then(bind(h_chat), [node, cv_attempt, cv_conv], chat_out)
         cv_conv.input(bind(h_chat), [node, cv_attempt, cv_conv], chat_out)
@@ -655,7 +655,7 @@ def build_app(run_dir) -> gr.Blocks:
             return select_clip(run, evt)
         td_clips.select(on_clip_select, None, [td_video, td_caption, td_plot, td_info, td_err])
 
-        ev_load.click(bind(h_eval), node_eval_in, ev_out).then(bind(h_eval_case), [node, ev_other, ev_case], ev_case_out)
+        ev_load.click(bind(h_eval), node, ev_out).then(bind(h_eval_case), [node, ev_other, ev_case], ev_case_out)
         ev_case.input(bind(h_eval_case), [node, ev_other, ev_case], ev_case_out)
         ev_other.input(bind(h_eval_case), [node, ev_other, ev_case], ev_case_out)
 

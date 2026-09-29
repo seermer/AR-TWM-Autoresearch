@@ -38,7 +38,7 @@ def test_every_handler_runs_on_the_fake_run(run, tmp_path):
     _ok(ui.h_tool_log(run, "nodes/n1/attempts/improve_recipe-1/workspace/tool_output/run_command-20260927-120000-0001.log"))
     _ok(ui.h_code(run, "n1")), _ok(ui.h_code_attempt(run, "n1", 1)), _ok(ui.h_code(run, "root"))
     _ok(ui.h_training_data(run, "n1")), _ok(ui.h_clips(run, "n1", "ds1", 1)), _ok(ui.h_clip(run, "clip1"))
-    _ok(ui.h_training(run, "n1", 1)), _ok(ui.h_eval(run, "n1", "root")), _ok(ui.h_eval_case(run, "n1", "root", "7"))
+    _ok(ui.h_training(run, "n1", 1)), _ok(ui.h_eval(run, "n1")), _ok(ui.h_eval_case(run, "n1", "root", "7"))
     _ok(ui.h_selection(run)), _ok(ui.h_cost(run)), _ok(ui.h_files(run, "")), _ok(ui.h_preview(run, "config/run.json"))
 
 

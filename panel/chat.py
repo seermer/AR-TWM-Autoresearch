@@ -125,7 +125,8 @@ def chains(segs: list[Segment], load: Load) -> list[list[Segment]]:
             a = max(options, key=lambda s: s.last_ts)
             prev[b.conversation_id] = a
             taken.add(a.conversation_id)
-    following = {a.conversation_id: b for b in segs for b_id, a in prev.items() if b.conversation_id == b_id}
+    by_id = {s.conversation_id: s for s in segs}
+    following = {a.conversation_id: by_id[b_id] for b_id, a in prev.items()}
     out = []
     for s in segs:
         if s.conversation_id in prev:
