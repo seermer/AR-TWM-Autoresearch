@@ -1,14 +1,23 @@
 import json
 from pathlib import Path
+import pytest
 from ar_kernel.config import KernelConfig
-from ar_kernel.run import bootstrap_run, preflight_metrics
+from ar_kernel.eval.score import DIMENSION_METRICS
+from ar_kernel.run import PreflightError, bootstrap_run, initial_expected_n, preflight_metrics
 
 CFG = KernelConfig.load()
 
-def test_preflight_reports_exclusions_with_reasons():
-    metrics, excluded = preflight_metrics(CFG, {"VLM_API_KEY": ""})
-    assert "scene_adherence" not in metrics
-    assert any("VLM_API_KEY" in reason for reason in excluded)
+@pytest.mark.real_preflight
+def test_preflight_fails_when_vp_weights_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(KernelConfig, "wbench", property(lambda self: tmp_path))
+    with pytest.raises(PreflightError, match="visual_plausibility"):
+        preflight_metrics(CFG, {"VLM_API_KEY": "abc"})
+
+@pytest.mark.real_preflight
+def test_preflight_passes_with_vp_weights(tmp_path, monkeypatch):
+    monkeypatch.setattr(KernelConfig, "wbench", property(lambda self: tmp_path))
+    (tmp_path / CFG.get("eval.vp_weights")).mkdir(parents=True)
+    assert preflight_metrics(CFG, {}) == DIMENSION_METRICS
 
 def test_bootstrap_creates_run_layout_and_records_versions(tmp_path, monkeypatch):
     monkeypatch.setattr(KernelConfig, "runs_dir", property(lambda self: tmp_path))
@@ -19,7 +28,7 @@ def test_bootstrap_creates_run_layout_and_records_versions(tmp_path, monkeypatch
     assert "worldmodel_sha" in versions and "wbench_sha" in versions
     assert versions["worldmodel_dirty"] in (True, False)
     assert ctx.gpus == [0, 1, 2, 3]
-    assert len(ctx.case_ids) == 40
+    assert len(ctx.case_ids) == 50
     assert ctx.metric_set
 
 def test_bootstrap_refuses_too_few_gpus(tmp_path, monkeypatch):
@@ -187,10 +196,31 @@ def test_score_node_skips_cleanup_on_a_base_exception(tmp_path, monkeypatch):
     assert len(cleanups) == 0
 
 
-def test_bootstrap_records_expected_case_counts_from_the_reference(tmp_path, monkeypatch):
+def test_expected_n_universal_metrics_use_case_count():
+    n = initial_expected_n(["1", "2", "3"])
+    assert n["aesthetic_quality"] == 3 and "perspective_consistency" not in n
+
+
+def test_bootstrap_records_universal_counts_and_attach_reads_them(tmp_path, monkeypatch):
     _runs(tmp_path, monkeypatch)
     ctx = bootstrap_run(CFG, run_id="r_n", env=ENV4)
-    assert ctx.expected_n.get("geometric_consistency") == 40
-    assert ctx.expected_n.get("spatial_consistency") == 8
+    assert ctx.expected_n["geometric_consistency"] == 50 and "spatial_consistency" not in ctx.expected_n
     from ar_kernel.run import attach_run
     assert attach_run(CFG, "r_n", ENV4).expected_n == ctx.expected_n
+
+
+def test_root_score_records_every_metrics_case_count(tmp_path, monkeypatch):
+    import ar_kernel.run as run_mod
+    _runs(tmp_path, monkeypatch)
+    ctx = bootstrap_run(CFG, run_id="r-root", env=ENV4)
+    ctx.metric_set = ["aesthetic_quality", "spatial_consistency"]
+    ctx.expected_n = {"aesthetic_quality": 50}
+    report = {"full": {"aesthetic_quality": {"mean": 0.5, "n": 50},
+                       "spatial_consistency": {"mean": 0.4, "n": 8}}}
+    monkeypatch.setattr(run_mod, "build_render_config", lambda *a, **k: object())
+    monkeypatch.setattr(run_mod, "render_proxy", lambda *a, **k: None)
+    monkeypatch.setattr(run_mod, "run_wbench_phases", lambda *a, **k: report)
+    run_mod.score_node(CFG, ctx, "root", checkpoint=None, rank=8, alpha=16)
+    saved = json.loads((ctx.run_dir / "config" / "run.json").read_text())["expected_n"]
+    assert saved == {"aesthetic_quality": 50, "spatial_consistency": 8}
+    assert run_mod.attach_run(CFG, "r-root", ENV4).expected_n == saved

@@ -1,6 +1,6 @@
 from __future__ import annotations
 import datetime as dt
-import json, shutil, subprocess
+import json, os, shutil, subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
@@ -10,7 +10,8 @@ from .doctor import wbench_weight_problems
 from .config import SNAPSHOT_FILES, KernelConfig, resolve_gpus, run_config_path
 from .eval.merge import merge_lora
 from .eval.render import build_render_config, render_proxy
-from .eval.score import (aggregates, cleanup_eval, resolve_metric_set, score_from_report)
+from .eval.score import (UNIVERSAL_METRICS, aggregates, cleanup_eval, resolve_metric_set,
+                         score_from_report)
 from .eval.wbench import run_wbench_phases
 from .telemetry.recorder import Recorder
 
@@ -25,16 +26,15 @@ class RunContext:
     versions: dict
     expected_n: dict = field(default_factory=dict)   # metric -> case count on the proxy
 
-def preflight_metrics(cfg: KernelConfig, env: Mapping[str, str]) -> tuple[list[str], list[str]]:
-    """The run's metric set plus one human-readable reason per exclusion."""
-    metrics = resolve_metric_set(cfg, env)   # single source of truth for the rule
-    excluded = []
-    if not env.get("VLM_API_KEY", "").strip():
-        excluded.append("VLM metrics excluded: VLM_API_KEY is empty")
+def preflight_metrics(cfg: KernelConfig, env: Mapping[str, str]) -> list[str]:
+    """The run's metric set (always all 22). Raises PreflightError listing every unmet prerequisite."""
+    problems = []
     vp_weights = cfg.wbench / cfg.get("eval.vp_weights")
     if not vp_weights.exists():
-        excluded.append(f"visual_plausibility excluded: weights missing at {vp_weights}")
-    return metrics, excluded
+        problems.append(f"visual_plausibility needs the VP weights at {vp_weights}")
+    if problems:
+        raise PreflightError("the full metric set cannot be computed:\n  " + "\n  ".join(problems))
+    return resolve_metric_set(cfg, env)
 
 def _git_state(repo: Path) -> tuple[str, bool]:
     sha = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
@@ -82,15 +82,14 @@ def bootstrap_run(cfg: KernelConfig, run_id: str | None, env: Mapping[str, str])
                 "wbench_sha": wb_sha, "wbench_dirty": wb_dirty,
                 "kernel_sha": kernel_sha, "kernel_dirty": kernel_dirty}
     (run_dir / "config" / "versions.json").write_text(json.dumps(versions, indent=2))
-    metric_set, excluded = preflight_metrics(cfg, env)
+    metric_set = preflight_metrics(cfg, env)
     case_ids = (run_dir / "config" / "proxy_cases.txt").read_text().strip().split(",")
-    expected_n = _expected_case_counts(cfg, metric_set, recorder)
+    expected_n = initial_expected_n(case_ids)
     # run.json is written last: its presence is what marks the run as created.
     (run_dir / "config" / "run.json").write_text(json.dumps(
-        {"run_id": run_id, "metric_set": metric_set, "excluded_metrics": excluded,
+        {"run_id": run_id, "metric_set": metric_set,
          "case_ids": case_ids, "versions": versions, "expected_n": expected_n}, indent=2))
-    recorder.event("run.start", payload={"gpus": gpus, "metric_set": metric_set,
-                                         "excluded_metrics": excluded, "versions": versions,
+    recorder.event("run.start", payload={"gpus": gpus, "metric_set": metric_set, "versions": versions,
                                          "case_ids": case_ids})
     if wm_dirty or wb_dirty:
         recorder.event("run.warning", payload={"message": "sibling repo has uncommitted changes",
@@ -100,23 +99,20 @@ def bootstrap_run(cfg: KernelConfig, run_id: str | None, env: Mapping[str, str])
                       expected_n=expected_n)
 
 
-REFERENCE_REPORT = Path("reference") / "wbench_alayaworld_proxy" / "report.json"
+def initial_expected_n(case_ids: list[str]) -> dict:
+    """Case counts known up front: the universal metrics cover every proxy case. The root's
+    report adds the rest (score_node), and every later node must match them."""
+    return {m: len(case_ids) for m in UNIVERSAL_METRICS}
 
 
-def _expected_case_counts(cfg: KernelConfig, metric_set: list[str], recorder) -> dict:
-    """Per-metric case counts on the proxy subset, from the reference report.
-
-    Counts are fixed by case metadata, so every node must match them; a smaller
-    count means a precompute step dropped cases. Metrics the reference lacks (the
-    VLM ones) get no expectation.
-    """
-    path = cfg.repo_root / REFERENCE_REPORT
-    if not path.exists():
-        recorder.event("run.warning", payload={
-            "message": f"no reference report at {path}; per-metric case counts will not be checked"})
-        return {}
-    full = json.loads(path.read_text())["full"]
-    return {m: int(full[m]["n"]) for m in metric_set if m in full and "n" in full[m]}
+def _record_root_counts(ctx: RunContext, report: dict) -> None:
+    ctx.expected_n = {m: int(report["full"][m]["n"]) for m in ctx.metric_set}
+    path = ctx.run_dir / "config" / "run.json"
+    meta = json.loads(path.read_text())
+    meta["expected_n"] = ctx.expected_n
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(meta, indent=2))
+    os.replace(tmp, path)
 
 
 def attach_run(cfg: KernelConfig, run_id: str, env: Mapping[str, str]) -> RunContext:
@@ -162,6 +158,8 @@ def score_node(cfg: KernelConfig, ctx: RunContext, node_id: str, checkpoint: Pat
         render_proxy(cfg, render_config, ctx.gpus, node_id, ctx.recorder, ctx.case_ids)
         report = run_wbench_phases(cfg, work_dir, model, ctx.gpus, ctx.metric_set, ctx.recorder, node_id)
         score, per_metric = score_from_report(report, ctx.metric_set, ctx.expected_n)
+        if node_id == "root":
+            _record_root_counts(ctx, report)
         if "per_case" not in report:
             ctx.recorder.event("eval.warning", node=node_id, phase="eval", payload={
                 "message": "report.json has no per_case scores (older WBench); aggregates are empty"})

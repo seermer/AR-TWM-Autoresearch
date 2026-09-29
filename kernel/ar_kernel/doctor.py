@@ -171,7 +171,7 @@ def _dotenv(cfg: KernelConfig) -> list[Finding]:
     for repo in (cfg.repo_root, cfg.worldmodel, cfg.wbench):
         p = Path(repo) / ".env"
         if not p.exists() and not p.is_symlink():
-            out.append(Finding("warn", f"dotenv.{Path(repo).name}", "no .env; VLM metrics are excluded unless VLM_API_KEY is set in the shell"))
+            out.append(Finding("warn", f"dotenv.{Path(repo).name}", "no .env; without VLM_API_KEY in the shell the VLM metrics use the local judge"))
         elif p.is_symlink() and Path(os.readlink(str(p))).is_absolute():
             out.append(Finding("fail", f"dotenv.{Path(repo).name}",
                                f"symlink target is absolute ({os.readlink(str(p))}); use a relative target"))

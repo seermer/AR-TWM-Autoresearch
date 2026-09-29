@@ -6,16 +6,13 @@ sends the video; no video bytes pass through the agent or the paid agent model.
 """
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import stat
-import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -23,11 +20,11 @@ from mcp.server.mcpserver import Context
 
 from .context import WORKSPACE, PathError, to_container, to_host
 from ..subproc import free_port
-from .jobs import run_cancellable
 from .server import ToolError
+from .vllm_server import (VllmServer, gpu_memory_mib, serve_command,  # noqa: F401 -- re-exported
+                          wait_gpu_release, _tail)
 
 TOOL = "caption_videos"
-RELEASE_SLACK_MIB = 512          # GPU memory counts as released within this of its pre-job level
 
 
 def container_path(path: str) -> str:
@@ -71,42 +68,6 @@ def stage_clip(caller, path: str, dst: Path) -> None:
         os.close(fd)
 
 
-def gpu_memory_mib(gpus: list[int]) -> dict[int, int] | None:
-    """memory.used per GPU (nvidia-smi indices, i.e. PCI bus order), or None when it cannot be read."""
-    try:
-        out = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used", "--format=csv,noheader,nounits"],
-                             capture_output=True, text=True, timeout=30, check=True).stdout
-        used = {int(i): int(m) for i, m in (line.split(",") for line in out.strip().splitlines())}
-    except (OSError, subprocess.SubprocessError, ValueError):    # ValueError: "[N/A]", "[Not Supported]"
-        return None
-    return {g: used[g] for g in gpus if g in used}
-
-
-def _tail(path: Path, limit: int = 3000) -> str:
-    return path.read_text(encoding="utf-8", errors="replace")[-limit:] if path.exists() else ""
-
-
-def wait_gpu_release(gpu_memory, gpus: list[int], before: dict | None,
-                     timeout_s: float) -> tuple[dict | None, bool | None]:
-    """Wait until every GPU is back within RELEASE_SLACK_MIB of its pre-job memory.
-
-    (None, None) when GPU memory cannot be read. Shared by every GPU job backend
-    (captioner and the GpuJob subclasses), not just this one.
-    """
-    if before is None:
-        return None, None
-    deadline = time.monotonic() + timeout_s
-    while True:
-        after = gpu_memory(gpus)
-        if after is None:
-            return None, None
-        if all(after.get(g, 0) <= used + RELEASE_SLACK_MIB for g, used in before.items()):
-            return after, True
-        if time.monotonic() > deadline:
-            return after, False
-        time.sleep(1.0)
-
-
 class CaptionBackend:
     """JobQueue backend for caption_videos. Args: {"paths": [container paths], "prompt": str}.
     Result: {"clips": {path: {"caption"} | {"error"}}, "load_s", "gpu_memory_mib", "gpu_memory_released"}."""
@@ -118,20 +79,7 @@ class CaptionBackend:
         self.registry, self.recorder, self.gpu_memory, self.poll_s = registry, recorder, gpu_memory, poll_s
 
     def server_command(self, port: int, media_dir: Path) -> list[str]:
-        c = self.cfg.get("captioner")
-        return ["vllm", "serve", c["model"], "--host", "127.0.0.1", "--port", str(port),
-                "--served-model-name", "captioner",
-                "--tensor-parallel-size", str(c.get("tensor_parallel") or 1 << (len(self.gpus).bit_length() - 1)),
-                "--max-model-len", str(c["max_model_len"]),
-                "--gpu-memory-utilization", str(c["gpu_memory_utilization"]),
-                "--max-num-seqs", str(c["max_num_seqs"]),
-                "--max-num-batched-tokens", str(c["max_num_batched_tokens"]),
-                "--reasoning-parser", c["reasoning_parser"],
-                "--mm-encoder-tp-mode", c["mm_encoder_tp_mode"],
-                *(["--speculative-config", json.dumps(c["speculative_config"])] if c.get("speculative_config") else []),
-                "--limit-mm-per-prompt", json.dumps({"image": 0, "video": 1}),
-                "--media-io-kwargs", json.dumps(c["media_io_kwargs"]),
-                "--allowed-local-media-path", str(media_dir), *c.get("extra_args", [])]
+        return serve_command(self.cfg.get("captioner"), self.gpus, port, "captioner", media_dir)
 
     def run(self, job, cancel: threading.Event, report) -> dict:
         c = self.cfg.get("captioner")
@@ -153,20 +101,7 @@ class CaptionBackend:
 
         if not clips:
             return {"clips": results, "load_s": None, "gpu_memory_mib": None, "gpu_memory_released": None}
-        port, stop, exit_code = free_port(), threading.Event(), []
-        log = work / "vllm.log"
-
-        def serve() -> None:
-            try:
-                exit_code.append(run_cancellable(
-                    c["env"], self.server_command(port, media), cwd=work, log_path=log,
-                    cancel=SimpleNamespace(is_set=lambda: stop.is_set() or cancel.is_set()),
-                    extra_env={"CUDA_VISIBLE_DEVICES": ",".join(map(str, self.gpus)),
-                               "CUDA_DEVICE_ORDER": "PCI_BUS_ID", "HF_HUB_OFFLINE": "1"},
-                    recorder=self.recorder, node=job.node, phase=TOOL))
-            except Exception as exc:              # noqa: BLE001 -- reported as a startup failure
-                exit_code.append(f"launch failed: {type(exc).__name__}: {exc}")
-
+        port = free_port()
         before = self.gpu_memory(self.gpus)
         peak = dict(before or {})
 
@@ -175,30 +110,14 @@ class CaptionBackend:
             for g, used in now.items():
                 peak[g] = max(peak.get(g, 0), used)
 
-        server = threading.Thread(target=serve, name=f"ar-captioner-{job.id[:8]}", daemon=True)
-        started = time.monotonic()
-        server.start()
-        base, load_s, outcome = f"http://127.0.0.1:{port}", None, "failed"
+        server = VllmServer(c["env"], self.server_command(port, media), self.gpus, port, cwd=work,
+                            log_path=work / "vllm.log", recorder=self.recorder, node=job.node,
+                            phase=TOOL, poll_s=self.poll_s, label="caption server")
+        base, load_s, outcome = server.base_url, None, "failed"
         try:
+            load_s = server.start(float(c["startup_timeout_s"]), cancel, on_poll=sample)
             with httpx.Client(timeout=float(c["clip_timeout_s"]), trust_env=False) as http:
-                deadline = started + float(c["startup_timeout_s"])
-                while not cancel.is_set():
-                    if not server.is_alive():
-                        raise RuntimeError(f"the caption server exited during startup ({exit_code[0]}):\n"
-                                           f"{_tail(log)}")
-                    try:
-                        if http.get(f"{base}/health", timeout=5).status_code == 200:
-                            load_s = time.monotonic() - started
-                            break
-                    except httpx.HTTPError:
-                        pass
-                    if time.monotonic() > deadline:
-                        raise RuntimeError(f"the caption server was not ready within {c['startup_timeout_s']} s:"
-                                           f"\n{_tail(log)}")
-                    sample()
-                    time.sleep(self.poll_s)
                 if load_s is not None:
-                    sample()
                     self.recorder.event("caption.server_ready", node=job.node, component="tools",
                                         job_id=job.id, load_s=load_s,
                                         payload={"gpus": self.gpus, "model": c["model"]})
@@ -227,14 +146,13 @@ class CaptionBackend:
                         f.result()
             outcome = "done"
         finally:
-            stop.set()
-            server.join()
+            exit_code = server.stop()
             shutil.rmtree(media, ignore_errors=True)
             # run_cancellable reports every stop we make as a cancel (-15, subproc.cancelled);
             # this event says why the server stopped.
             self.recorder.event("caption.server_stopped", node=job.node, component="tools", job_id=job.id,
                                 reason="cancelled" if cancel.is_set() else outcome,
-                                exit_code=exit_code[0] if exit_code else None)
+                                exit_code=exit_code)
         # A cancelled job may be part of JobQueue.shutdown, whose join deadline a full wait would
         # overrun; Plan 4's check that GPU memory is free before each phase is the real guard.
         timeout = float(c["memory_release_timeout_s"])

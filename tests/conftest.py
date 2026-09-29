@@ -37,3 +37,13 @@ def clip_dir(tmp_path):
     write_caption(root / "captions" / "c1.json")
     write_poses(root / "poses" / "c1.npz", n_frames=120)
     return root
+
+
+@pytest.fixture(autouse=True)
+def _skip_eval_prerequisites(request, monkeypatch):
+    """Tests that create runs do not need the 62 GB VP weights; tests marked
+    `real_preflight` exercise the actual prerequisite check."""
+    if request.node.get_closest_marker("real_preflight"):
+        return
+    import ar_kernel.run as run
+    monkeypatch.setattr(run, "preflight_metrics", lambda cfg, env: run.resolve_metric_set(cfg, env))

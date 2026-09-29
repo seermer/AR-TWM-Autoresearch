@@ -30,6 +30,7 @@ markers = [
     "manual: GPU verification, run explicitly",
     "gpu: launches a real GPU job (the gate's describe step); run with -m gpu",
     "docker: starts real containers; run with -m docker",
+    "real_preflight: uses the real eval prerequisite check instead of the test stub",
 ]
 # Spec 16.1: the default unit suite uses no GPU. A GPU test running alongside a
 # real job has already produced a spurious gate failure through contention.

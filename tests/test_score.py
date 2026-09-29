@@ -10,14 +10,9 @@ def test_dimension_metrics_are_the_22_wbench_metrics():
     assert "navigation_trajectory" in DIMENSION_METRICS
     assert "navigation_accuracy" not in DIMENSION_METRICS
 
-def test_metric_set_excludes_vlm_metrics_without_a_key():
-    metrics = resolve_metric_set(CFG, {"VLM_API_KEY": ""})
-    assert "scene_adherence" not in metrics
-    assert "aesthetic_quality" in metrics
-
-def test_metric_set_includes_vlm_metrics_with_a_key():
-    metrics = resolve_metric_set(CFG, {"VLM_API_KEY": "abc"})
-    assert "causal_fidelity" in metrics
+def test_metric_set_is_always_all_22():
+    assert resolve_metric_set(CFG, {"VLM_API_KEY": ""}) == DIMENSION_METRICS
+    assert resolve_metric_set(CFG, {"VLM_API_KEY": "abc"}) == DIMENSION_METRICS
 
 def test_score_is_the_mean_over_the_metric_set():
     metric_set = [m for m in DIMENSION_METRICS if m in REPORT["full"]]

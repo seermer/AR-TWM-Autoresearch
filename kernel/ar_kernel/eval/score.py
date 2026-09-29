@@ -22,14 +22,17 @@ VLM_METRICS = {"scene_adherence", "subject_adherence", "causal_fidelity",
 # inside WBench; a killed run leaves ~1 GB per in-flight case there.
 REGENERABLE = ("da3_cache", "megasam", "masks", "_navi_videos_tmp", "_megasam_tmp")
 
+# Computed for every proxy case, so their n is known before any node is scored. The other
+# metrics apply to a subset of cases; their n is taken from the root's report.
+UNIVERSAL_METRICS = (
+    "aesthetic_quality", "imaging_quality", "temporal_flickering", "dynamic_degree",
+    "motion_smoothness", "hpsv3_quality", "background_consistency", "segment_continuity",
+    "geometric_consistency", "photometric_consistency",
+)
+
 def resolve_metric_set(cfg: KernelConfig, env: Mapping[str, str]) -> list[str]:
-    metrics = list(DIMENSION_METRICS)
-    if not env.get("VLM_API_KEY", "").strip():
-        metrics = [m for m in metrics if m not in VLM_METRICS]
-    vp_weights = cfg.wbench / cfg.get("eval.vp_weights")
-    if not vp_weights.exists():
-        metrics = [m for m in metrics if m != "visual_plausibility"]
-    return metrics
+    """Every node is scored on all 22 metrics; missing prerequisites are preflight errors."""
+    return list(DIMENSION_METRICS)
 
 class ScoreError(ValueError):
     """The report cannot yield a score comparable with the rest of the run."""

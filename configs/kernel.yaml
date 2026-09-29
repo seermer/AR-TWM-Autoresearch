@@ -40,6 +40,10 @@ eval:
   free_ram_before_render_gb: 120
   ram_wait_alert_min: 10
   vp_weights: weights/qwen3vl-a3b-visual-plausibility
+  judge:                         # local judge (used when VLM_API_KEY is empty): the captioner's model
+    # WBench asks for a 10-token yes/no answer, so the model must not think first.
+    extra_body: {chat_template_kwargs: {enable_thinking: false}}
+    max_images: 64               # frames per prompt: causal_fidelity sends a whole video as images
 disk:
   merge_min_free_gb: 30
   alert_below_gb: 50

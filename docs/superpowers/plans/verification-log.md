@@ -1146,3 +1146,25 @@ Fix: `exit_process` ends the process with `os._exit` after `drive()` returns or 
 leftover threads as a `shutdown` alert (checked in a subprocess with a worker stuck in a 60 s sleep:
 exit in well under 15 s, alert names the thread); `ar stop --force` waits for the recorded (pid,
 start time) to exit, treating a zombie as exited; a resume clears `hf_tmp`.
+
+
+## 2026-09-29: eval fidelity plan, Task 3 spikes (local judge and VP)
+
+Inputs: the 40 videos of `acceptance_20260928`'s root (copied, the run tree untouched); GPUs 0-3.
+
+- **VP weights:** `meituan-longcat/WBench-weights`, `qwen3vl-a3b-visual-plausibility/*`, 58 GB on disk, in
+  `WBench/weights/`. `tools/run_visual_plausibility.py` (env `wbench-vp`): 40 videos scored, 0 errors, mean
+  0.5804, 163 s including the model load.
+- **Local judge:** `Qwen/Qwen3.8-27B-FP8` served by `VllmServer` (tp 4, ready in 78 s on a quiet disk; 466 s
+  once, while a 58 GB download shared the disk). WBench `--phase vlm` with `VLM_API_URL`, `VLM_EXTRA_BODY`.
+  - Without `chat_template_kwargs: {enable_thinking: false}` every yes/no request (10 tokens) ran out of tokens
+    while thinking (`content: null, finish_reason: length`). With it: `"yes"`.
+  - The interaction and causal metrics send frames as images, so the server needs `image` above 0 in
+    `--limit-mm-per-prompt` (the captioner's 0 gave HTTP 400 for every such request). `eval.judge.max_images: 64`.
+  - Two full runs on 40 cases: 0 failed requests, 252 s and 253 s wall (about 5.3 min for 50 cases).
+  - Per-metric n (both runs): scene 22, subject 16, causal_fidelity 4, event_edit 11, subject_action 12,
+    perspective_switch 5. Means run 1/run 2: 0.568/0.555, 0.919/0.919, 0.348/0.356, 0.236/0.243, 0.258/0.260,
+    0.000/0.000. Per-case RMS difference between the runs: 0.00-0.04 (0.12 for causal_fidelity, 4 cases).
+  - `perspective_switch_adherence` is 0.000 for all 5 cases in both runs: check it when the first full root
+    score exists (a judge that always answers "no" would look the same).
+  - Local-judge scores are on a different scale from the API judge's; no Doubao reference exists here.
