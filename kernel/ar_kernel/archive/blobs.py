@@ -7,6 +7,11 @@ KINDS = {"video": ".mp4", "caption": ".json", "pose": ".npz"}
 class BlobError(ValueError):
     """The blob cannot be stored."""
 
+def sha256_file(path: Path) -> str:
+    with Path(path).open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
 class BlobStore:
     def __init__(self, run_dir: Path, conn: sqlite3.Connection) -> None:
         self.root = Path(run_dir) / "store" / "blobs"
@@ -19,15 +24,6 @@ class BlobStore:
             raise BlobError(f"unknown kind {kind!r}; allowed: {sorted(KINDS)}")
         return self.root / kind / f"{digest}{KINDS[kind]}"
 
-    def exists(self, digest: str) -> bool:
-        return self.conn.execute("SELECT 1 FROM blobs WHERE digest=?", (digest,)).fetchone() is not None
-
-    def size(self, digest: str) -> int:
-        row = self.conn.execute("SELECT bytes FROM blobs WHERE digest=?", (digest,)).fetchone()
-        if row is None:
-            raise KeyError(digest)
-        return int(row["bytes"])
-
     def put(self, path: Path, kind: str) -> str:
         """Move `path` into the store under its SHA-256 and return the digest.
 
@@ -36,8 +32,6 @@ class BlobStore:
         a final content-addressed name, and an existing target is only trusted if
         its size matches -- a torn earlier write is replaced, not kept forever.
         """
-        if kind not in KINDS:
-            raise BlobError(f"unknown kind {kind!r}; allowed: {sorted(KINDS)}")
         path = Path(path)
         # A source inside the store is either a stored blob (put would unlink it
         # as the "duplicate source", destroying the only copy while the DB still
@@ -45,12 +39,8 @@ class BlobStore:
         if path.resolve().is_relative_to(self.root.resolve()):
             raise BlobError(f"{path} is inside the blob store; only staged files can be stored")
 
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1 << 20), b""):
-                digest.update(chunk)
-        hexdigest = digest.hexdigest()
-        target = self.root / kind / f"{hexdigest}{KINDS[kind]}"
+        hexdigest = sha256_file(path)
+        target = self.path(hexdigest, kind)
         nbytes = path.stat().st_size
 
         if target.exists() and target.stat().st_size == nbytes:

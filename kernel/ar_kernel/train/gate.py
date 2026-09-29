@@ -5,7 +5,7 @@ from pathlib import Path
 import yaml
 
 from ..config import KernelConfig, run_config_path
-from ..subproc import run_in_env, _tail
+from ..subproc import output_tail, run_in_env
 from .recipe import TUNABLE_KEYS, steps_per_epoch, validate_recipe_values, write_resolved_config
 
 @dataclass
@@ -94,7 +94,7 @@ class Gate:
                               extra_env={"CUDA_VISIBLE_DEVICES": gpu_list, **extra},
                               timeout=3600, recorder=self.recorder, node=node_id, phase="gate")
             if proc.returncode != 0:
-                failures.append(f"{label} failed (rc={proc.returncode}): {_tail(proc, 2000)}")
+                failures.append(f"{label} failed (rc={proc.returncode}): {output_tail(proc, 2000)}")
 
         describe = run_in_env(
             "alayaworld", ["bash", "scripts/finetune/lowcompute_4x4090.sh"],
@@ -103,7 +103,7 @@ class Gate:
                        "DESCRIBE": "1"},
             timeout=3600, recorder=self.recorder, node=node_id, phase="gate")
         if describe.returncode != 0:
-            failures.append(f"describe failed (rc={describe.returncode}): {_tail(describe, 2000)}")
+            failures.append(f"describe failed (rc={describe.returncode}): {output_tail(describe, 2000)}")
 
         ok = not failures
         self.recorder.event("gate.passed" if ok else "gate.failed", node=node_id, phase="gate",

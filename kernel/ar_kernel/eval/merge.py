@@ -3,13 +3,7 @@ import shutil, subprocess, time
 from pathlib import Path
 
 from ..config import KernelConfig
-from ..subproc import run_in_env, _tail
-
-def available_ram_gb() -> float:
-    for line in Path("/proc/meminfo").read_text().splitlines():
-        if line.startswith("MemAvailable:"):
-            return int(line.split()[1]) / (1024 ** 2)
-    raise RuntimeError("MemAvailable not found in /proc/meminfo")
+from ..subproc import meminfo_gib, output_tail, run_in_env
 
 def free_disk_gb(path: Path) -> float:
     usage = shutil.disk_usage(path)
@@ -21,10 +15,10 @@ def wait_for_ram(cfg: KernelConfig, recorder, node_id: str, threshold_gb: float 
     deadline = alert_after_s if alert_after_s is not None else float(cfg.get("eval.ram_wait_alert_min")) * 60
     subprocess.run(["sync"], check=True)
     started = time.monotonic()
-    while available_ram_gb() < threshold:
+    while meminfo_gib()["MemAvailable"] < threshold:
         if time.monotonic() - started > deadline:
             recorder.event("eval.ram_wait_alert", node=node_id, phase="eval",
-                           payload={"available_gb": available_ram_gb(), "threshold_gb": threshold})
+                           payload={"available_gb": meminfo_gib()["MemAvailable"], "threshold_gb": threshold})
             raise TimeoutError(f"host RAM stayed below {threshold} GB for {deadline}s")
         time.sleep(poll_s)
 
@@ -45,6 +39,6 @@ def merge_lora(cfg: KernelConfig, checkpoint: Path, rank: int, alpha: int, run_d
              "--output", str(slot), "--lora_rank", str(rank), "--lora_alpha", str(alpha)],
             cwd=cfg.worldmodel, timeout=7200, recorder=recorder, node=node_id, phase="eval")
     if proc.returncode != 0:
-        raise RuntimeError(f"merge failed (rc={proc.returncode}): {_tail(proc)}")
+        raise RuntimeError(f"merge failed (rc={proc.returncode}): {output_tail(proc)}")
     wait_for_ram(cfg, recorder, node_id)
     return slot

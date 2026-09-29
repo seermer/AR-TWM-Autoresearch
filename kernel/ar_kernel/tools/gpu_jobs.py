@@ -21,12 +21,14 @@ from typing import Annotated, Any, Callable
 from mcp.server.mcpserver import Context
 from pydantic import WithJsonSchema
 
+from ..archive.blobs import sha256_file
+from ..subproc import file_tail
 from .captioner import clip_host_path, container_path, stage_clip
-from .vllm_server import gpu_memory_mib, wait_gpu_release
 from .context import STAGING, PathError
-from .hf_tools import _move_into
+from .hf_tools import move_into
 from .jobs import run_cancellable
 from .server import ToolError
+from .vllm_server import gpu_memory_mib, wait_gpu_release
 
 
 def _items(properties: dict, required: list[str]) -> WithJsonSchema:
@@ -66,21 +68,9 @@ def canonical_hash(obj) -> str:
     return hashlib.sha256(json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def file_sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for block in iter(lambda: f.read(1 << 20), b""):
-            h.update(block)
-    return h.hexdigest()
-
-
 def split_gpus(gpus: list[int], per_worker: int, workers: int | None) -> list[list[int]]:
     groups = [gpus[i:i + per_worker] for i in range(0, len(gpus) - per_worker + 1, per_worker)]
     return groups[:workers] if workers else groups
-
-
-def _tail(path: Path, limit: int = 2000) -> str:
-    return path.read_text(encoding="utf-8", errors="replace")[-limit:] if path.exists() else ""
 
 
 class GpuJob:
@@ -168,7 +158,7 @@ class GpuJob:
                 dst = inp / f"{index}_{key}{Path(item[key]).suffix}"
                 stage_clip(caller, item[key], dst)
                 staged[key] = str(dst)
-                staged["hashes"][key] = file_sha256(dst)
+                staged["hashes"][key] = sha256_file(dst)
         return staged
 
     def produce(self, job, items: list[dict], work: Path, out: Path, cancel, report):
@@ -200,7 +190,7 @@ class GpuJob:
                     # metadata files get their role in the name, so they never pass for a pose
                     name = "" if role in ("video", "caption", "pose", "image") else f".{role}"
                     rel = f"{self.kind}s/{job.id}/{index}{name}{src.suffix}"
-                    _move_into(src, caller.staging_host, rel)
+                    move_into(src, caller.staging_host, rel)
                     published[role] = str(STAGING / rel)
         except Exception as exc:            # noqa: BLE001 -- a bad/truncated status or a finish()
             # bug must be this item's error, not a job failure that orphans the others.
@@ -287,7 +277,7 @@ class GpuJob:
             if code not in (0, None) and not (out / f"{index}.json").exists():
                 reason = f"timeout after {self.timeout_s}s" if timed_out.is_set() else f"exit code {code}"
                 missing[index] = (f"worker {index % world} failed ({reason}); log tail:\n"
-                                  f"{_tail(work / f'worker{index % world}.log')}")
+                                  f"{file_tail(work / f'worker{index % world}.log', 2000)}")
         return codes, missing
 
 

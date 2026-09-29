@@ -26,7 +26,7 @@ import yaml
 from PIL import Image
 
 from ..data.probe import aspect_ok, probe_video
-from ..subproc import free_port
+from ..subproc import file_tail, free_port, meminfo_gib
 from .gpu_jobs import GpuJob, check_item_seed, split_gpus
 from .jobs import run_cancellable
 from .server import ToolError
@@ -118,12 +118,6 @@ def checked_repo(cfg, key: str, label: str) -> Path:
         raise RuntimeError(f"{repo} is at commit {head}, but {key}.commit pins {pinned}; re-clone the "
                            f"pinned commit or update the pin")
     return repo
-
-
-def meminfo_gib() -> dict[str, float]:
-    """/proc/meminfo's MemTotal and MemAvailable, in GiB."""
-    fields = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
-    return {k: int(fields[k].split()[0]) / 2**20 for k in ("MemTotal", "MemAvailable")}
 
 
 def round_segments(schedule: list[dict], first: int, trim: int, frames: int) -> list[dict]:
@@ -280,7 +274,7 @@ class AlayaWorldBackend(GpuJob):
                 raise RuntimeError(f"prompt precache timed out (job timeout_s {self.timeout_s}s)")
             if code != 0:
                 raise RuntimeError(f"prompt precache failed (exit {code}):\n"
-                                   f"{(work / 'precache.log').read_text(errors='replace')[-2000:]}")
+                                   f"{file_tail(work / 'precache.log', 2000)}")
             # run_wbench.py sets CUDA_VISIBLE_DEVICES from --gpus itself (PCI order is inherited).
             codes, missing = self.run_workers(env, lambda r, w: [
                 "python", *RUN_WBENCH, "--config", str(config), "--gpus", ",".join(map(str, self.gpus)),

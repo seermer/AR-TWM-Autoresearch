@@ -28,7 +28,7 @@ def _layout(names: list[str]) -> str:
             "; extensions: " + ", ".join(f"{k}: {v}" for k, v in exts.most_common(12)))
 
 
-def _move_into(src: Path, base: Path, rel: str) -> None:
+def move_into(src: Path, base: Path, rel: str) -> None:
     """Move `src` to base/rel without following any link under `base`: each directory is opened
     with O_NOFOLLOW and the move is relative to that directory's fd, so a link the agent plants
     or swaps in (it owns staging, and its container runs meanwhile) raises instead of redirecting."""
@@ -133,7 +133,7 @@ class HfTools:
                             f"patterns (exact paths work). Largest matches: {largest}. hf_list_files lists "
                             f"paths and sizes")
         # The agent owns staging. Refuse early (before a large transfer) if a planted link already
-        # sends the destination outside it; _move_into below is the guard that cannot be raced.
+        # sends the destination outside it; move_into below is the guard that cannot be raced.
         rel, staging = f"hf/{repo.replace('/', '__')}/{info.sha}", caller.staging_host.resolve()
         if not (staging / rel).resolve().is_relative_to(staging):
             raise ToolError("download destination resolves outside staging; refusing")
@@ -147,7 +147,7 @@ class HfTools:
                 raise ToolError(str(exc)) from None
             for f in files:
                 try:
-                    _move_into(tmp / f, staging, f"{rel}/{f}")
+                    move_into(tmp / f, staging, f"{rel}/{f}")
                 except OSError as exc:
                     raise ToolError(f"cannot place {f} in staging (a link or non-directory in the way?): "
                                     f"{exc}") from None

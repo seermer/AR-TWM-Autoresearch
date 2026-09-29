@@ -23,6 +23,7 @@ from .contract.verify import verify_contract
 from .guards import alert
 from .run import score_node
 from .selection import select_parent, selection_seed, update_values
+from .subproc import file_tail
 from .train.gate import Gate
 from .train.recipe import lora_of
 from .train.runner import TrainOutcome, TrainRunner
@@ -65,13 +66,6 @@ class Phases:
     gate: Callable = _gate
     train: Callable = _train
     score: Callable = _score
-
-
-def _tail(path: Path, limit: int = 4000) -> str:
-    try:
-        return Path(path).read_text(encoding="utf-8", errors="replace")[-limit:]
-    except OSError:
-        return ""
 
 
 class Loop:
@@ -264,7 +258,7 @@ class Loop:
             trained = self.phases.train(self, gate.resolved_path, child, adir)
             if trained.checkpoint is None or trained.failure != "none":   # e.g. nan loss after a checkpoint
                 retry = {"kind": "train", "failure": trained.failure, "detail": trained.detail,
-                         "log_tail": _tail(trained.log_path)}
+                         "log_tail": file_tail(trained.log_path, 4000)}
                 status = "train_failed"
                 self.nodes.add_attempt(child, "improve_recipe", k, "train_failed", retry)
                 alert(self.ctx.recorder, "train_failed", f"{child} attempt {k}: {trained.failure} "

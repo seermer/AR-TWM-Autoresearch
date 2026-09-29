@@ -4,7 +4,7 @@ from pathlib import Path
 
 from ..config import KernelConfig
 from ..liveness import Liveness, tree_mark
-from ..subproc import run_in_env, _tail
+from ..subproc import output_tail, run_in_env
 from ..tools.vllm_server import gpu_memory_mib, wait_gpu_release
 from .judge import Judge, judge_env, judge_server
 
@@ -23,7 +23,7 @@ def run_wbench_phases(cfg: KernelConfig, work_dir: Path, model: str, gpus: list[
             proc = run_in_env(env, args, cwd=cfg.wbench, extra_env=extra_env, timeout=timeout,
                               liveness=liveness, recorder=recorder, node=node_id, phase="eval")
         if proc.returncode != 0:
-            raise RuntimeError(f"wbench {name} failed (rc={proc.returncode}): {_tail(proc)}")
+            raise RuntimeError(f"wbench {name} failed (rc={proc.returncode}): {output_tail(proc)}")
 
     def main_phase(phase: str, extra_env: dict | None = None, timeout=None) -> None:
         wbench("wbench-main", ["python", "main.py", "--model", model, "--work_dir", str(work_dir),

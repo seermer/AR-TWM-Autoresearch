@@ -86,35 +86,14 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
                cancel: "threading.Event | None" = None,
                poll_s: float = 1.0,
                liveness: "object | None" = None) -> subprocess.CompletedProcess:
-    """Run `args` inside conda env `env`.
+    """Run `args` inside conda env `env`, in its own session.
 
-    The job runs in its own session, so a timeout kills the WHOLE process group:
-    killing only `conda run` orphaned torchrun ranks and multiprocessing workers,
-    which kept holding GPUs and made the next job OOM.
-
-    With `log_path`, stdout and stderr stream to that file as the job runs (for
-    long training jobs, instead of buffering hours of output in memory); the
-    returned CompletedProcess carries the file's contents as stdout.
-
-    With `cancel` set, the wait is polled every `poll_s` seconds and, once the
-    event is set, the process group is killed the same way a timeout kills it
-    (the GPU job queue uses this so `job_cancel` cannot orphan a torch rank).
-    A cancellation is reported as its own `subproc.cancelled` event, distinct
-    from `subproc.end`. The returned `CompletedProcess` carries an extra
-    `.cancelled` bool so a caller can tell a real cancellation apart from a
-    process that happened to exit with a matching returncode on its own,
-    instead of guessing from `returncode` (which is whatever the killed group
-    actually exited with -- SIGTERM's -15 unless the job ignored it and needed
-    SIGKILL). Callers that never pass `cancel` see exactly the prior behaviour,
-    with `.cancelled` always `False`.
-
-    With `AR_PGID_DIR` set, the job's process group is recorded there as `<pgid>` (holding its
-    start time) until the wait ends, so a kernel that dies mid-job leaves a record that
-    `control.kill_recorded_groups` uses to kill the orphaned group on resume.
-
-    Every exit path records an event: subproc.end (or subproc.cancelled), or
-    subproc.error on timeout or launch failure, including the output captured
-    so far.
+    Timeouts, `cancel`, `liveness` expiry and any exception kill the WHOLE process group:
+    killing only `conda run` orphaned torchrun ranks that kept holding GPUs. With `log_path`,
+    output streams to that file and comes back as stdout. The result's `.cancelled` tells a
+    cancel apart from an exit code that happens to match. With `AR_PGID_DIR` set, the group
+    is recorded there until the wait ends, so a resume can kill what a dead kernel left.
+    Every exit path records subproc.end, subproc.cancelled or subproc.error.
     """
     command = conda_command(env, args)
     process_env = {**os.environ, **cache_env(), **(extra_env or {})}
@@ -128,12 +107,9 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
         if log_path is not None:
             Path(log_path).parent.mkdir(parents=True, exist_ok=True)
             sink = open(log_path, "w", encoding="utf-8")
-            proc = subprocess.Popen(command, cwd=str(cwd), env=process_env, text=True,
-                                    stdout=sink, stderr=subprocess.STDOUT, start_new_session=True)
-        else:
-            proc = subprocess.Popen(command, cwd=str(cwd), env=process_env, text=True,
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    start_new_session=True)
+        proc = subprocess.Popen(command, cwd=str(cwd), env=process_env, text=True, start_new_session=True,
+                                stdout=subprocess.PIPE if sink is None else sink,
+                                stderr=subprocess.PIPE if sink is None else subprocess.STDOUT)
     except OSError as exc:
         if sink is not None:
             sink.close()
@@ -186,15 +162,8 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
 
 def _wait(proc: subprocess.Popen, timeout: int | None, cancel: "threading.Event | None",
          poll_s: float, liveness=None) -> tuple[str, str, bool]:
-    """Wait for `proc`, polling `cancel` and `liveness` when given; returns
-    (stdout, stderr, cancelled).
-
-    The fast path (a single blocking `communicate(timeout=)`) applies only when
-    neither `cancel` nor `liveness` is given. Otherwise `communicate(timeout=poll_s)`
-    is safe to retry on TimeoutExpired (it does not kill the child); each retry
-    checks `cancel`, then `liveness.expired()`, and, when a `timeout` was also
-    given, the hard deadline.
-    """
+    """Wait for `proc`; returns (stdout, stderr, cancelled). With `cancel` or `liveness`,
+    poll every `poll_s` (a timed-out communicate() does not kill the child)."""
     if cancel is None and liveness is None:
         stdout, stderr = proc.communicate(timeout=timeout)
         return stdout, stderr, False
@@ -243,16 +212,26 @@ def _error(recorder, node, phase, message, stdout, stderr, log_path) -> None:
                                 "log_path": str(log_path) if log_path else None})
 
 
-def _tail(proc, limit: int = 4000) -> str:
-    """Last `limit` chars of stdout AND stderr.
-
-    Tracebacks go to stderr, so an error message built from stdout alone hides
-    the actual cause -- a render that died in a ValueError reported only the
-    progress banner it had printed before failing.
-    """
+def output_tail(proc, limit: int = 4000) -> str:
+    """Last `limit` chars of stdout AND stderr: tracebacks go to stderr, so a message built
+    from stdout alone hides the actual cause."""
     parts = []
     for name in ("stdout", "stderr"):
         text = (getattr(proc, name, "") or "").strip()
         if text:
             parts.append(f"--- {name} (last {limit}) ---\n{text[-limit:]}")
     return "\n".join(parts) if parts else "(no output captured)"
+
+
+def file_tail(path: Path, limit: int) -> str:
+    """The last `limit` characters of a text file; "" when it cannot be read."""
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace")[-limit:]
+    except OSError:
+        return ""
+
+
+def meminfo_gib() -> dict[str, float]:
+    """/proc/meminfo's MemTotal and MemAvailable, in GiB."""
+    fields = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
+    return {k: int(fields[k].split()[0]) / 2**20 for k in ("MemTotal", "MemAvailable")}

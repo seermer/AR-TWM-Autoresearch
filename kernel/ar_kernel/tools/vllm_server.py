@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import httpx
 
+from ..subproc import file_tail
 from .jobs import run_cancellable
 
 log = logging.getLogger(__name__)
@@ -26,10 +27,6 @@ def gpu_memory_mib(gpus: list[int]) -> dict[int, int] | None:
     except (OSError, subprocess.SubprocessError, ValueError):    # ValueError: "[N/A]", "[Not Supported]"
         return None
     return {g: used[g] for g in gpus if g in used}
-
-
-def _tail(path: Path, limit: int = 3000) -> str:
-    return path.read_text(encoding="utf-8", errors="replace")[-limit:] if path.exists() else ""
 
 
 def wait_gpu_release(gpu_memory, gpus: list[int], before: dict | None,
@@ -127,7 +124,7 @@ class VllmServer:
             while not (cancel and cancel.is_set()):
                 if not self._thread.is_alive():
                     raise RuntimeError(f"the {self.label} exited during startup ({self._exit[0]}):\n"
-                                       f"{_tail(self.log_path)}")
+                                       f"{file_tail(self.log_path, 3000)}")
                 try:
                     if http.get(f"{self.base_url}/health").status_code == 200:
                         if on_poll:
@@ -137,7 +134,7 @@ class VllmServer:
                     pass
                 if time.monotonic() > deadline:
                     raise RuntimeError(f"the {self.label} was not ready within {startup_timeout_s:g} s:"
-                                       f"\n{_tail(self.log_path)}")
+                                       f"\n{file_tail(self.log_path, 3000)}")
                 if on_poll:
                     on_poll()
                 time.sleep(self.poll_s)

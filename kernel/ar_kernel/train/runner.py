@@ -5,7 +5,7 @@ from pathlib import Path
 
 from ..config import KernelConfig
 from ..liveness import Liveness, tree_mark
-from ..subproc import SubprocTimeout, run_in_env, _tail
+from ..subproc import SubprocTimeout, output_tail, run_in_env
 
 RECIPE_SIGNATURES = (
     "CUDA out of memory", "torch.OutOfMemoryError", "loss=nan", "loss=inf",
@@ -90,7 +90,7 @@ class TrainRunner:
             extra_env={"CUDA_VISIBLE_DEVICES": two, "ALAYA_GEMMA_MAX_MEMORY": "0=13GiB,1=13GiB"},
             timeout=7200, recorder=self.recorder, node=node_id, phase="precache")
         if proc.returncode != 0:
-            raise RuntimeError(f"prompt precache failed (rc={proc.returncode}): {_tail(proc)}")
+            raise RuntimeError(f"prompt precache failed (rc={proc.returncode}): {output_tail(proc)}")
 
     def train(self, resolved: Path, gpus: list[int], node_id: str, node_dir: Path) -> TrainOutcome:
         import yaml

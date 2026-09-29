@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ..archive.blobs import BlobStore
+from ..archive.blobs import BlobStore, sha256_file
 from ..archive.clips import ClipStore
 from ..config import KernelConfig, run_config_path
 from .checker import check_clip_formats
@@ -29,13 +29,6 @@ class IngestResult:
     formats: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
-
-def _digest(path: Path) -> str:
-    h = hashlib.sha256()
-    with Path(path).open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 class Ingestor:
     def __init__(self, cfg: KernelConfig, run_dir: Path, conn, recorder,
@@ -133,7 +126,7 @@ class Ingestor:
             self._event(candidate, "ingest.rejected", node_id, {"reasons": reasons})
             return IngestResult(accepted=False, reasons=reasons)
 
-        probe_root = self.run_dir / "tmp" / f"probe_{_digest(video)[:12]}"
+        probe_root = self.run_dir / "tmp" / f"probe_{sha256_file(video)[:12]}"
         shutil.rmtree(probe_root, ignore_errors=True)
         (probe_root / "videos").mkdir(parents=True)
         (probe_root / "captions").mkdir(parents=True)
