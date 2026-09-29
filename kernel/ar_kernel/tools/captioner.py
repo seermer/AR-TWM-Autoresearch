@@ -155,7 +155,8 @@ class CaptionBackend:
         # A cancelled job may be part of JobQueue.shutdown, whose join deadline a full wait would
         # overrun; Plan 4's check that GPU memory is free before each phase is the real guard.
         timeout = float(c["memory_release_timeout_s"])
-        after, released = self._released(before, min(timeout, 5.0) if cancel.is_set() else timeout)
+        after, released = wait_gpu_release(self.gpu_memory, self.gpus, before,
+                                           min(timeout, 5.0) if cancel.is_set() else timeout)
         if released is False:
             self.recorder.event("caption.gpu_not_released", node=job.node, component="tools",
                                 job_id=job.id, payload={"before": before, "after": after})
@@ -183,9 +184,6 @@ class CaptionBackend:
             return {"error": f"unexpected response ({type(exc).__name__}): {r.text[-2000:]}"}
         out = {"caption": text.strip()} if text and text.strip() else {"error": "empty caption"}
         return {**out, "reasoning": reasoning} if reasoning else out
-
-    def _released(self, before: dict | None, timeout_s: float) -> tuple[dict | None, bool | None]:
-        return wait_gpu_release(self.gpu_memory, self.gpus, before, timeout_s)
 
 
 def submit(q, caller, paths: list[str], prompt: str) -> dict:

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from .gpu_jobs import GpuJob, check_item_seed, split_gpus
+from .gpu_jobs import GpuJob, check_item_seed, is_int, split_gpus
 from .server import ToolError
 
 BRIDGE = Path(__file__).resolve().parents[1] / "bridges" / "zimage_generate.py"
@@ -16,7 +16,7 @@ _MIN_SIDE, _MAX_SIDE = 256, 1920
 
 
 def _valid_side(n) -> bool:
-    return isinstance(n, int) and not isinstance(n, bool) and _MIN_SIDE <= n <= _MAX_SIDE and n % 16 == 0
+    return is_int(n) and _MIN_SIDE <= n <= _MAX_SIDE and n % 16 == 0
 
 
 class ImageBackend(GpuJob):
@@ -43,7 +43,7 @@ class ImageBackend(GpuJob):
             check_item_seed(n, item)
 
     def produce(self, job, items, work, out, cancel, report):
-        i = self.cfg.get("images")
+        i = self.block
         width, height = job.args.get("width", 1280), job.args.get("height", 720)
         weights = self.cfg.repo_root / i["weights"]
         return self.run_workers(i["env"], lambda r, w: [

@@ -27,7 +27,7 @@ from PIL import Image
 
 from ..data.probe import aspect_ok, probe_video
 from ..subproc import file_tail, free_port, meminfo_gib
-from .gpu_jobs import GpuJob, check_item_seed, split_gpus
+from .gpu_jobs import GpuJob, check_item_seed, enabled_variants, is_int, split_gpus
 from .jobs import run_cancellable
 from .server import ToolError
 
@@ -120,6 +120,25 @@ def checked_repo(cfg, key: str, label: str) -> Path:
     return repo
 
 
+def check_clip_items(items: list[dict]) -> None:
+    """Items of a text/image-to-video job: {'prompt': str, 'image'?: path, 'seed': int}."""
+    for n, item in enumerate(items):
+        if not isinstance(item.get("prompt"), str) or not item["prompt"].strip():
+            raise ToolError(f"item {n}: prompt must be a non-empty string")
+        if item.get("image") is not None and not isinstance(item["image"], str):
+            raise ToolError(f"item {n}: image must be a file path")
+        check_item_seed(n, item)
+
+
+def check_published(info) -> None:
+    """A published clip is 24 fps and within 2% of 16:9."""
+    if round(info.fps) != FPS:
+        raise ValueError(f"published clip is {info.fps} fps, not 24")
+    if not aspect_ok(info, 0.02):
+        raise ValueError(f"published clip's aspect {info.display_aspect:.4f} is not within "
+                         f"2% of 16:9 ({info.width}x{info.height})")
+
+
 def round_segments(schedule: list[dict], first: int, trim: int, frames: int) -> list[dict]:
     """One caption segment per round (rounds start at mp4 frame first + 32r), in seconds of the
     trimmed clip; adjacent equal prompts merged; spans [0, frames/24]."""
@@ -163,14 +182,12 @@ class AlayaWorldBackend(GpuJob):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.block = self.cfg.get(self.config_key) or {}
         self.max_turns = int(self.block.get("max_turns", self.max_turns))
-        self.license = self.block.get("license", "")
         variants = "; ".join(f"'{v}': {VARIANT_TEXT[v]}" for v in self.enabled_variants())
         self.description = self.description.replace("{variants}", variants)   # disabled variants omitted
 
     def enabled_variants(self) -> list[str]:
-        return [v for v in VARIANTS if (self.block.get("variants", {}).get(v) or {}).get("enabled")]
+        return enabled_variants(self.block, VARIANTS)
 
     def check_args(self, args):
         args.setdefault("variant", (self.enabled_variants() or ["dmd4"])[0])
@@ -180,9 +197,9 @@ class AlayaWorldBackend(GpuJob):
             raise ToolError(f"variant must be one of the enabled variants {self.enabled_variants()}: "
                             f"got {args['variant']!r}")
         rpt = args["rounds_per_turn"]
-        if not (isinstance(rpt, int) and not isinstance(rpt, bool) and 1 <= rpt <= 3):
+        if not (is_int(rpt) and 1 <= rpt <= 3):
             raise ToolError(f"rounds_per_turn must be an int in 1..3: got {rpt!r}")
-        if not isinstance(args["seed"], int) or isinstance(args["seed"], bool):
+        if not is_int(args["seed"]):
             raise ToolError(f"seed must be an int: got {args['seed']!r}")
         for n, item in enumerate(args["items"]):
             self._check_item(n, item)
@@ -350,8 +367,6 @@ class Wan22Backend(GpuJob):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.block = self.cfg.get(self.config_key) or {}
-        self.license = self.block.get("license", "")
         default, maximum = self.block["frames"]
         self.description = (
             "Render training clips with Wan 2.2 TI2V-5B (text-to-video, or image-to-video when an "
@@ -367,19 +382,13 @@ class Wan22Backend(GpuJob):
     def check_args(self, args):
         default, maximum = self.block["frames"]
         frames = args.get("frames", default)
-        if not (isinstance(frames, int) and not isinstance(frames, bool)
-                and 1 < frames <= maximum and frames % 4 == 1):
+        if not (is_int(frames) and 1 < frames <= maximum and frames % 4 == 1):
             raise ToolError(f"frames must be 4k+1 with 1 < frames <= {maximum}: got {frames!r}")
         args["frames"] = frames
-        for n, item in enumerate(args["items"]):
-            if not isinstance(item.get("prompt"), str) or not item["prompt"].strip():
-                raise ToolError(f"item {n}: prompt must be a non-empty string")
-            if item.get("image") is not None and not isinstance(item["image"], str):
-                raise ToolError(f"item {n}: image must be a file path")
-            check_item_seed(n, item)
+        check_clip_items(args["items"])
 
     def produce(self, job, items, work, out, cancel, report):
-        repo = checked_repo(self.cfg, "generators.wan22", "Wan2.2")
+        repo = checked_repo(self.cfg, self.config_key, "Wan2.2")
         ckpt = self.cfg.repo_root / self.block["weights"]
         extra = self.block.get("extra_args") or {}
         offload = "--offload-model" if extra.get("offload_model", True) else "--no-offload-model"
@@ -406,11 +415,7 @@ class Wan22Backend(GpuJob):
                         "crop=1248:704:16:0", "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p",
                         "-an", str(cropped)], check=True, timeout=FFMPEG_TIMEOUT_S)
         info = probe_video(cropped)
-        if round(info.fps) != 24:
-            raise ValueError(f"published clip is {info.fps} fps, not 24")
-        if not aspect_ok(info, 0.02):
-            raise ValueError(f"published clip's aspect {info.display_aspect:.4f} is not within "
-                             f"2% of 16:9 ({info.width}x{info.height})")
+        check_published(info)
         caption = self.write_caption(out, item, {"caption": item["prompt"]})
         return {"video": cropped, "caption": caption, "frames": info.frames}
 
@@ -430,8 +435,6 @@ class Ltx25Backend(GpuJob):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.block = self.cfg.get(self.config_key) or {}
-        self.license = self.block.get("license", "")
         (h, w), (default, maximum) = self.block["resolutions"][0], self.block["frames"]
         self.description = (
             "Render training clips with LTX-2.5 (text-to-video, or image-to-video when an item carries a "
@@ -446,7 +449,7 @@ class Ltx25Backend(GpuJob):
             "LTX often ignores camera instructions like 'camera steady'; never label a clip 'static' from its prompt; run annotate_camera, or check the frames, first. Batch many prompts per call.")
 
     def enabled_variants(self) -> list[str]:
-        return [v for v in ("distilled", "dev") if (self.block.get("variants", {}).get(v) or {}).get("enabled")]
+        return enabled_variants(self.block, ("distilled", "dev"))
 
     def generator_name(self, job) -> str:
         return f"ltx-2.5-{job.args['variant']}"
@@ -458,22 +461,17 @@ class Ltx25Backend(GpuJob):
             raise ToolError(f"variant must be one of the enabled variants {enabled}: got {args['variant']!r}")
         default, maximum = self.block["frames"]
         frames = args.setdefault("frames", default)
-        if not (isinstance(frames, int) and not isinstance(frames, bool) and 1 < frames <= maximum):
+        if not (is_int(frames) and 1 < frames <= maximum):
             raise ToolError(f"frames must be 8k+1 with 1 < frames <= {maximum}: got {frames!r}")
         if frames % 8 != 1:
             raise ToolError(f"frames must be 8k+1: got {frames!r}")
         h, w = self.block["resolutions"][0]
         size = [args.setdefault("height", h), args.setdefault("width", w)]
-        if not all(isinstance(v, int) and not isinstance(v, bool) for v in size):
+        if not all(is_int(v) for v in size):
             raise ToolError(f"height and width must be ints: got {size}")
         if size not in [list(r) for r in self.block["resolutions"]]:
             raise ToolError(f"[height, width] must be one of the resolutions {self.block['resolutions']}: got {size}")
-        for n, item in enumerate(args["items"]):
-            if not isinstance(item.get("prompt"), str) or not item["prompt"].strip():
-                raise ToolError(f"item {n}: prompt must be a non-empty string")
-            if item.get("image") is not None and not isinstance(item["image"], str):
-                raise ToolError(f"item {n}: image must be a file path")
-            check_item_seed(n, item)
+        check_clip_items(args["items"])
 
     def worker_groups(self, variant: str, n_items: int) -> list[list[int]]:
         """One GPU per worker; workers = min(GPUs (capped by the config's `workers`), items,
@@ -512,11 +510,7 @@ class Ltx25Backend(GpuJob):
         info = probe_video(silent)
         if (info.width, info.height) != (a["width"], a["height"]):
             raise ValueError(f"rendered clip is {info.width}x{info.height}, not {a['width']}x{a['height']}")
-        if round(info.fps) != 24:
-            raise ValueError(f"published clip is {info.fps} fps, not 24")
-        if not aspect_ok(info, 0.02):
-            raise ValueError(f"published clip's aspect {info.display_aspect:.4f} is not within "
-                             f"2% of 16:9 ({info.width}x{info.height})")
+        check_published(info)
         if info.frames != a["frames"]:
             raise ValueError(f"rendered clip has {info.frames} frames, not {a['frames']}")
         caption = self.write_caption(out, item, {"caption": item["prompt"]})

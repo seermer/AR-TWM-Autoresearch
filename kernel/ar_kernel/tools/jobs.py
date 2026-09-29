@@ -112,11 +112,7 @@ class JobQueue:
             return self._view(self._own(caller, job_id))
 
     def wait(self, caller, job_id: str, timeout_s: float) -> dict:
-        # A lax-mode client (e.g. JSON-RPC "nan") can hand us a non-finite float.
-        # min(nan, cap) is nan whenever nan sorts first -- Python's min() never
-        # raises on it, so `remaining <= 0` never becomes true and this busy-spins
-        # past the cap until the job ends. Route non-finite (and negative) values
-        # through the cap explicitly instead of trusting min()/max() with them.
+        # A client can send nan/inf; min() and max() would pass nan through and never time out.
         timeout_s = float(timeout_s)
         capped = self.wait_cap_s if not math.isfinite(timeout_s) else max(0.0, min(timeout_s, self.wait_cap_s))
         deadline = time.monotonic() + capped
@@ -209,21 +205,9 @@ class JobQueue:
 def run_cancellable(env: str, args: list[str], *, cwd: Path, cancel: threading.Event,
                     extra_env: dict | None = None, log_path: Path, poll_s: float = _DEFAULT_POLL_S,
                     recorder=None, node: str = "run", phase: str = "-") -> int:
-    """Run a GPU job's command, killing its whole process group on cancel.
-
-    Backends must use this, not a subprocess of their own: it is a thin wrapper
-    over `run_in_env`'s cancellation hook, so a cancelled job gets exactly the
-    same process-group kill and telemetry as a timed-out one (verification
-    finding 6) instead of a second, divergent launcher. `recorder`/`node`/`phase`
-    are passed straight through so the job's subproc.start/end/cancelled events
-    land in the run's telemetry, not just the job.* events the queue itself
-    records.
-
-    Returns the process's exit code, or -15 whenever `cancel` actually caused
-    the kill -- taken from `run_in_env`'s `.cancelled` flag rather than the raw
-    returncode, so a job that ignored SIGTERM and needed SIGKILL (returncode
-    -9) is still reported as the -15 a caller checks for.
-    """
+    """Run a GPU job's command via `run_in_env`, killing its whole process group on cancel.
+    Backends launch every command through this. Returns the exit code, or -15 whenever `cancel`
+    caused the kill (also when the job ignored SIGTERM and needed SIGKILL)."""
     result = run_in_env(env, args, cwd=cwd, extra_env=extra_env, log_path=log_path,
                         cancel=cancel, poll_s=poll_s, recorder=recorder, node=node, phase=phase)
     return -15 if result.cancelled else result.returncode

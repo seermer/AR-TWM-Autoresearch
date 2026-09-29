@@ -31,7 +31,7 @@ class AnnotateBackend(GpuJob):
                 raise ToolError(f"{item.get('video')!r} is not an .mp4")
 
     def produce(self, job, items, work, out, cancel, report):
-        a = self.cfg.get("annotate")
+        a = self.block
         wm = self.cfg.worldmodel
         return self.run_workers(a["env"], lambda r, w: [
             "python", str(BRIDGE), "--items", str(work / "items.json"), "--out", str(out), "--rank", str(r),

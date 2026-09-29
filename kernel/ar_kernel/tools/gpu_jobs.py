@@ -53,6 +53,10 @@ CaseItems = Annotated[list[dict[str, Any]], _items(
     ["image", "perspective", "environment_prompt", "turns"])]
 
 
+def is_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def check_item_seed(n: int, item: dict) -> None:
     """An item's `seed` must be an int; integer text ("7") is taken as that int, in place."""
     if "seed" not in item:
@@ -60,8 +64,13 @@ def check_item_seed(n: int, item: dict) -> None:
     seed = item["seed"]
     if isinstance(seed, str) and seed.strip().lstrip("+-").isdigit():
         item["seed"] = seed = int(seed)
-    if not isinstance(seed, int) or isinstance(seed, bool):
+    if not is_int(seed):
         raise ToolError(f"item {n}: seed must be an int: got {seed!r}")
+
+
+def enabled_variants(block: dict, names: tuple[str, ...]) -> list[str]:
+    """The `names` whose `variants.<name>.enabled` is set in config `block`, in `names` order."""
+    return [v for v in names if ((block.get("variants") or {}).get(v) or {}).get("enabled")]
 
 
 def canonical_hash(obj) -> str:
@@ -76,8 +85,8 @@ def split_gpus(gpus: list[int], per_worker: int, workers: int | None) -> list[li
 class GpuJob:
     """Base JobQueue backend. Subclasses set name/tool, kind ("rollout" | "annotation" | "image"),
     generator (provenance name), license, file_keys (item fields naming workspace files),
-    optionally config_key (a dotted kernel.yaml path whose "max_items"/"timeout_s" override
-    the class defaults below) and implement check_args, produce and finish."""
+    optionally config_key (the kernel.yaml block, `self.block`, whose max_items, timeout_s and
+    license override the class defaults) and implement check_args, produce and finish."""
     name = tool = kind = generator = license = description = config_key = ""
     file_keys: tuple[str, ...] = ()
     max_items = 16
@@ -87,10 +96,10 @@ class GpuJob:
                  gpu_memory=gpu_memory_mib) -> None:
         self.cfg, self.run_dir, self.gpus = cfg, Path(run_dir), list(gpus)
         self.registry, self.recorder, self.gpu_memory = registry, recorder, gpu_memory
-        block = cfg.get(self.config_key) if self.config_key else None
-        if isinstance(block, dict):
-            self.max_items = int(block.get("max_items", self.max_items))
-            self.timeout_s = block.get("timeout_s", self.timeout_s)
+        self.block = (cfg.get(self.config_key) if self.config_key else None) or {}
+        self.max_items = int(self.block.get("max_items", self.max_items))
+        self.timeout_s = self.block.get("timeout_s", self.timeout_s)
+        self.license = self.block.get("license", self.license)
 
     # ---- submit (tool call; fast; ToolError goes back to the agent) ----
     def submit(self, q, caller, args: dict) -> dict:
@@ -286,6 +295,11 @@ def register_gpu_tools(mcp, kit, q) -> None:
     simply absent (spec 10: disabled variants are omitted from tool schemas)."""
     b = q.backends
 
+    def submit(ctx: Context, name: str, **args):
+        """Queue a job for backend `name`; unset (None) parameters are left out."""
+        args = {k: v for k, v in args.items() if v is not None}
+        return kit.call(ctx, name, args, lambda c: b[name].submit(q, c, dict(args)))
+
     if "annotate_camera" in b:
         @mcp.tool(name="annotate_camera", description=b["annotate_camera"].description)
         async def annotate_camera(paths: list[str], ctx: Context) -> dict[str, Any]:
@@ -296,36 +310,27 @@ def register_gpu_tools(mcp, kit, q) -> None:
         @mcp.tool(name="rollout_alayaworld", description=b["rollout_alayaworld"].description)
         async def rollout_alayaworld(items: CaseItems, ctx: Context, variant: str | None = None,
                                      rounds_per_turn: int | None = None, seed: int | None = None) -> dict[str, Any]:
-            params = {k: v for k, v in {"variant": variant, "rounds_per_turn": rounds_per_turn,
-                                        "seed": seed}.items() if v is not None}
-            return await kit.call(ctx, "rollout_alayaworld", {"items": items, **params},
-                                  lambda c: b["rollout_alayaworld"].submit(q, c, {"items": items, **params}))
+            return await submit(ctx, "rollout_alayaworld", items=items, variant=variant,
+                                rounds_per_turn=rounds_per_turn, seed=seed)
 
     if "generate_images" in b:
         @mcp.tool(name="generate_images", description=b["generate_images"].description)
         async def generate_images(items: ImageItems, ctx: Context, width: int | None = None,
                                   height: int | None = None) -> dict[str, Any]:
-            params = {k: v for k, v in {"width": width, "height": height}.items() if v is not None}
-            return await kit.call(ctx, "generate_images", {"items": items, **params},
-                                  lambda c: b["generate_images"].submit(q, c, {"items": items, **params}))
+            return await submit(ctx, "generate_images", items=items, width=width, height=height)
 
     if "rollout_wan22" in b:
         @mcp.tool(name="rollout_wan22", description=b["rollout_wan22"].description)
-        async def rollout_wan22(items: ClipItems, ctx: Context,
-                                frames: int | None = None) -> dict[str, Any]:
-            params = {k: v for k, v in {"frames": frames}.items() if v is not None}
-            return await kit.call(ctx, "rollout_wan22", {"items": items, **params},
-                                  lambda c: b["rollout_wan22"].submit(q, c, {"items": items, **params}))
+        async def rollout_wan22(items: ClipItems, ctx: Context, frames: int | None = None) -> dict[str, Any]:
+            return await submit(ctx, "rollout_wan22", items=items, frames=frames)
 
     if "rollout_ltx25" in b:
         @mcp.tool(name="rollout_ltx25", description=b["rollout_ltx25"].description)
         async def rollout_ltx25(items: ClipItems, ctx: Context, variant: str | None = None,
                                 frames: int | None = None, height: int | None = None,
                                 width: int | None = None) -> dict[str, Any]:
-            params = {k: v for k, v in {"variant": variant, "frames": frames, "height": height,
-                                        "width": width}.items() if v is not None}
-            return await kit.call(ctx, "rollout_ltx25", {"items": items, **params},
-                                  lambda c: b["rollout_ltx25"].submit(q, c, {"items": items, **params}))
+            return await submit(ctx, "rollout_ltx25", items=items, variant=variant, frames=frames,
+                                height=height, width=width)
 
 
 def build_gpu_backends(cfg, run_dir: Path, gpus: list[int], registry, recorder) -> list:
@@ -338,15 +343,10 @@ def build_gpu_backends(cfg, run_dir: Path, gpus: list[int], registry, recorder) 
     from .images import ImageBackend
     from .rollouts import AlayaWorldBackend, Ltx25Backend, Wan22Backend
 
-    backends = [CaptionBackend(cfg, run_dir, gpus, registry, recorder)]
-    if cfg.get("annotate.enabled"):
-        backends.append(AnnotateBackend(cfg, run_dir, gpus, registry, recorder))
-    if cfg.get("images.enabled"):
-        backends.append(ImageBackend(cfg, run_dir, gpus, registry, recorder))
-    if any((v or {}).get("enabled") for v in (cfg.get("generators.alayaworld.variants") or {}).values()):
-        backends.append(AlayaWorldBackend(cfg, run_dir, gpus, registry, recorder))
-    if any((v or {}).get("enabled") for v in (cfg.get("generators.wan22.variants") or {}).values()):
-        backends.append(Wan22Backend(cfg, run_dir, gpus, registry, recorder))
-    if any((v or {}).get("enabled") for v in (cfg.get("generators.ltx25.variants") or {}).values()):
-        backends.append(Ltx25Backend(cfg, run_dir, gpus, registry, recorder))
-    return backends
+    def generator_on(name: str) -> bool:
+        return any((v or {}).get("enabled") for v in (cfg.get(f"generators.{name}.variants") or {}).values())
+
+    enabled = [(True, CaptionBackend), (cfg.get("annotate.enabled"), AnnotateBackend),
+               (cfg.get("images.enabled"), ImageBackend), (generator_on("alayaworld"), AlayaWorldBackend),
+               (generator_on("wan22"), Wan22Backend), (generator_on("ltx25"), Ltx25Backend)]
+    return [backend(cfg, run_dir, gpus, registry, recorder) for on, backend in enabled if on]

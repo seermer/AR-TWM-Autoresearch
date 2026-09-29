@@ -31,11 +31,8 @@ def gpu_memory_mib(gpus: list[int]) -> dict[int, int] | None:
 
 def wait_gpu_release(gpu_memory, gpus: list[int], before: dict | None,
                      timeout_s: float) -> tuple[dict | None, bool | None]:
-    """Wait until every GPU is back within RELEASE_SLACK_MIB of its pre-job memory.
-
-    (None, None) when GPU memory cannot be read. Shared by every GPU job backend
-    (captioner and the GpuJob subclasses), not just this one.
-    """
+    """Wait until every GPU is back within RELEASE_SLACK_MIB of its pre-job memory; returns
+    (memory after, released), or (None, None) when GPU memory cannot be read."""
     if before is None:
         return None, None
     deadline = time.monotonic() + timeout_s
