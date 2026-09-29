@@ -46,12 +46,8 @@ class Ingestor:
         return [self._one(c, node_id) for c in candidates]
 
     def _outside_staging(self, path: Path) -> bool:
-        """Only files under <run_dir>/staging/ may be ingested.
-
-        The whole run dir was too wide: it includes store/ (a stored blob handed
-        back in would be unlinked as a duplicate source) and other nodes' views
-        (ingesting one removes that view's hardlink).
-        """
+        """Only staged files may be ingested: store/ and other nodes' views are under the run
+        dir too, and ingesting consumes the source file."""
         return not Path(path).resolve().is_relative_to((self.run_dir / "staging").resolve())
 
     def _event(self, candidate: Candidate, kind: str, node_id: str, payload: dict) -> None:
@@ -59,6 +55,10 @@ class Ingestor:
         staged = {k: str(v) if v is not None else None
                   for k, v in (("video", candidate.video), ("caption", candidate.caption), ("pose", candidate.pose))}
         self.recorder.event(kind, node=node_id, phase="ingest", payload={"candidate": staged, **payload})
+
+    def _reject(self, candidate: Candidate, node_id: str, reasons: list[str], **payload) -> IngestResult:
+        self._event(candidate, "ingest.rejected", node_id, {"reasons": reasons, **payload})
+        return IngestResult(accepted=False, reasons=reasons)
 
     def _one(self, candidate: Candidate, node_id: str) -> IngestResult:
         reasons: list[str] = []
@@ -70,10 +70,7 @@ class Ingestor:
             reasons.append("static clips must not carry poses (video_caption_static uses identity poses)")
         if candidate.camera_motion == "moving" and candidate.pose is None:
             reasons.append("moving clips need poses/<id>.npz")
-        # BlobStore.put() moves/consumes its source file (tests/test_blobs.py asserts this
-        # intentionally). Ingest must never be handed a path outside the run's own directory,
-        # or it will silently delete files it does not own (see the Task 14 incident where the
-        # manual test's real WorldModel example clips were consumed this way).
+        # BlobStore.put() consumes its source: anything outside staging would be deleted.
         for label, path in (("video", candidate.video), ("caption", candidate.caption),
                             ("pose", candidate.pose)):
             if path is not None and self._outside_staging(path):
@@ -81,13 +78,10 @@ class Ingestor:
                     f"{label} path {path} is outside the staging directory "
                     f"{self.run_dir / 'staging'}; ingest only accepts files staged there")
         if reasons:
-            self._event(candidate, "ingest.rejected", node_id, {"reasons": reasons})
-            return IngestResult(accepted=False, reasons=reasons)
+            return self._reject(candidate, node_id, reasons)
 
-        # Quarantine before ANY check: every check and the store then act on the
-        # same bytes. Checking the staged path and re-reading it at put() time let
-        # an agent process swap the file after the leakage check (review I2).
-        # quarantine/ is kernel-private; agents only ever see staging/.
+        # Quarantine before ANY check, so every check and the store act on the same bytes (the
+        # agent keeps running and could swap a staged file). quarantine/ is kernel-private.
         staged = {"video": candidate.video, "caption": candidate.caption, "pose": candidate.pose}
         qdir = self.run_dir / "quarantine" / uuid.uuid4().hex
         qdir.mkdir(parents=True)
@@ -98,9 +92,8 @@ class Ingestor:
             except (subprocess.CalledProcessError, ValueError, IndexError, KeyError) as exc:
                 # A file ffprobe/decoding cannot read is the candidate's fault: record
                 # a rejection and carry on with the batch instead of crashing the node.
-                reasons = [f"could not read the candidate video: {type(exc).__name__}: {exc}"[:500]]
-                self._event(candidate, "ingest.rejected", node_id, {"reasons": reasons})
-                result = IngestResult(accepted=False, reasons=reasons)
+                result = self._reject(candidate, node_id, [
+                    f"could not read the candidate video: {type(exc).__name__}: {exc}"[:500]])
         finally:
             # Anything not consumed by the store goes back where the agent staged it.
             for key, qpath in held.items():
@@ -114,17 +107,15 @@ class Ingestor:
         video, caption, pose = held["video"], held["caption"], held.get("pose")
         info = probe_video(video)
         if info.rotation:
-            reasons = [f"video carries a {info.rotation} degree display rotation; WorldModel decodes "
-                       f"frames in stored orientation, so they would train rotated. re-encode with "
-                       f"the rotation applied (ffmpeg applies it when transcoding: "
-                       f"ffmpeg -i in.mp4 -c:v libx264 -pix_fmt yuv420p out.mp4)"]
-            self._event(candidate, "ingest.rejected", node_id, {"reasons": reasons})
-            return IngestResult(accepted=False, reasons=reasons)
+            return self._reject(candidate, node_id, [
+                f"video carries a {info.rotation} degree display rotation; WorldModel decodes "
+                f"frames in stored orientation, so they would train rotated. re-encode with "
+                f"the rotation applied (ffmpeg applies it when transcoding: "
+                f"ffmpeg -i in.mp4 -c:v libx264 -pix_fmt yuv420p out.mp4)"])
         if not aspect_ok(info, self.tolerance):
-            reasons = [f"display aspect ratio {info.display_aspect:.4f} (coded {info.width}x{info.height}, "
-                       f"sar {info.sar:.4f}) is not within {self.tolerance:.0%} of 16:9"]
-            self._event(candidate, "ingest.rejected", node_id, {"reasons": reasons})
-            return IngestResult(accepted=False, reasons=reasons)
+            return self._reject(candidate, node_id, [
+                f"display aspect ratio {info.display_aspect:.4f} (coded {info.width}x{info.height}, "
+                f"sar {info.sar:.4f}) is not within {self.tolerance:.0%} of 16:9"])
 
         probe_root = self.run_dir / "tmp" / f"probe_{sha256_file(video)[:12]}"
         shutil.rmtree(probe_root, ignore_errors=True)
@@ -144,17 +135,15 @@ class Ingestor:
         formats = [key for key, report in reports.items() if report["ok"]]
         warnings = sorted({w for report in reports.values() for w in report["warnings"]})
         if not formats:
-            reasons = sorted({e for report in reports.values() for e in report["errors"]})
-            self._event(candidate, "ingest.rejected", node_id, {"reasons": reasons, "reports": reports})
-            return IngestResult(accepted=False, reasons=reasons)
+            return self._reject(candidate, node_id, sorted({e for report in reports.values() for e in report["errors"]}),
+                                reports=reports)
 
         verdict = self.leakage.check(video)
         self._event(candidate, "ingest.leakage", node_id, {"matches": verdict.matches, "near": verdict.near_matches})
         if verdict.rejected:
-            reasons = [f"matches WBench case {m['case_id']} "
-                       f"(phash {m['phash_distance']}, ncc {m['ncc']:.3f})" for m in verdict.matches]
-            self._event(candidate, "ingest.rejected", node_id, {"reasons": reasons})
-            return IngestResult(accepted=False, reasons=reasons)
+            return self._reject(candidate, node_id, [f"matches WBench case {m['case_id']} "
+                                                     f"(phash {m['phash_distance']}, ncc {m['ncc']:.3f})"
+                                                     for m in verdict.matches])
 
         has_segments = bool(json.loads(caption.read_text(encoding="utf-8")).get("segments"))
         has_intrinsics = False
