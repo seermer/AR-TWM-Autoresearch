@@ -14,7 +14,7 @@ from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools import captioner
 from ar_kernel.tools.captioner import CaptionBackend, submit
 from ar_kernel.tools.context import TokenRegistry
-from ar_kernel.tools.jobs import JobQueue
+from ar_kernel.tools.jobs import GpuLock, JobQueue
 from ar_kernel.tools.server import ToolError
 
 FAKE = Path(__file__).parent / "fixtures" / "fake_vllm.py"
@@ -40,7 +40,7 @@ def make(tmp_path):
     def build(cfg=None):
         rec = Recorder(tmp_path / "run")
         reg = TokenRegistry(rec)
-        q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
+        q = JobQueue(rec, GpuLock(), wait_cap_s=120)
         q.register(FakeServer(cfg or fake_cfg(), tmp_path / "run", [0, 1, 4, 5], reg, rec,
                               gpu_memory=lambda gpus: {g: 100 for g in gpus}, poll_s=0.2))
         ws, staging = tmp_path / "ws", tmp_path / "staging"
@@ -54,9 +54,9 @@ def make(tmp_path):
         q.shutdown()
 
 
-def _pid_gone(run_dir: Path, job_id: str) -> bool:
-    pid = int((run_dir / "jobs" / job_id / "fake_vllm.pid").read_text())
-    deadline = time.monotonic() + 15
+def _pid_gone(run_dir: Path, job_id: str, wait_s: float = 15) -> bool:
+    pid = int((run_dir / "caption_server" / "fake_vllm.pid").read_text())
+    deadline = time.monotonic() + wait_s
     while time.monotonic() < deadline:
         try:
             os.kill(pid, 0)
@@ -66,7 +66,7 @@ def _pid_gone(run_dir: Path, job_id: str) -> bool:
     return False
 
 
-def test_batch_success_captions_every_clip_then_stops_the_server(make, tmp_path):
+def test_batch_success_captions_every_clip_and_leaves_the_server_warm(make, tmp_path):
     q, caller, rec, ws, staging = make()
     (ws / "clips" / "a.mp4").write_bytes(b"x" * 10)
     (staging / "b.mp4").write_bytes(b"y" * 20)
@@ -78,19 +78,67 @@ def test_batch_success_captions_every_clip_then_stops_the_server(make, tmp_path)
     assert clips == {
         "/workspace/clips/a.mp4": {"caption": "Describe the camera motion. [10 bytes, tp=4, gpus=0,1,4,5]"},
         "/workspace/staging/b.mp4": {"caption": "Describe the camera motion. [20 bytes, tp=4, gpus=0,1,4,5]"}}
-    assert out["result"]["load_s"] > 0 and out["result"]["gpu_memory_released"] is True
+    assert out["result"]["load_s"] > 0 and out["result"]["gpu_memory_released"] is None   # still up
     assert out["progress"] == {"captioned": 2, "total": 2}
     run = tmp_path / "run"
-    assert _pid_gone(run, job) and not (run / "jobs" / job / "media").exists()
-    argv = json.loads((run / "jobs" / job / "fake_vllm.argv.json").read_text())
-    assert argv[argv.index("--allowed-local-media-path") + 1] == str(run / "jobs" / job / "media")
+    assert not _pid_gone(run, job, wait_s=1) and not (run / "caption_media" / job).exists()
+    argv = json.loads((run / "caption_server" / "fake_vllm.argv.json").read_text())
+    assert argv[argv.index("--allowed-local-media-path") + 1] == str(run / "caption_media")
     assert argv[argv.index("--host") + 1] == "127.0.0.1"
     events = rec.read_events("n1")
-    assert [(e["reason"], e["exit_code"]) for e in events if e["type"] == "caption.server_stopped"] == \
-        [("done", -15)]
+    assert [e["type"] for e in events if e["type"] == "caption.server_stopped"] == []
     assert [e["ok"] for e in events if e["type"] == "caption.clip"] == [True, True]
     assert all(e["latency_s"] >= 0 for e in events if e["type"] == "caption.clip")
     assert any(e["type"] == "caption.server_ready" for e in events)
+    with q.gpu_lock:                                    # anything else taking the GPUs stops it
+        pass
+    assert _pid_gone(run, job)
+    assert [(e["reason"], e["exit_code"]) for e in rec.read_events("n1") if e["type"] == "caption.server_stopped"] == \
+        [("released", -15)]
+
+
+def test_two_caption_jobs_in_a_row_start_the_server_once(make, tmp_path):
+    q, caller, rec, ws, _ = make()
+    (ws / "a.mp4").write_bytes(b"ok")
+    for _ in range(2):
+        out = q.wait(caller, submit(q, caller, ["a.mp4"], "Caption.")["job_id"], 120)
+        assert out["state"] == "done" and "caption" in out["result"]["clips"]["/workspace/a.mp4"]
+    events = [e["type"] for e in rec.read_events("n1")]
+    assert events.count("caption.server_ready") == 1 and events.count("caption.server_reused") == 1
+    assert "caption.server_stopped" not in events                     # no idle timer either
+
+
+def test_another_gpu_job_stops_the_warm_server_before_it_starts(make, tmp_path):
+    q, caller, rec, ws, _ = make()
+    (ws / "a.mp4").write_bytes(b"ok")
+    assert q.wait(caller, submit(q, caller, ["a.mp4"], "Caption.")["job_id"], 120)["state"] == "done"
+    run = tmp_path / "run"
+    seen = []
+
+    class Other:
+        name = tool = "other_gpu"
+
+        def run(self, job, cancel, report):
+            pid = int((run / "caption_server" / "fake_vllm.pid").read_text())
+            try:
+                os.kill(pid, 0)
+                seen.append("server still alive")
+            except ProcessLookupError:
+                seen.append("server gone")
+            return {}
+
+    q.register(Other())
+    assert q.wait(caller, q.submit(caller, "other_gpu", {}), 60)["state"] == "done"
+    assert seen == ["server gone"]
+
+
+def test_release_gpu_resident_stops_the_server_at_phase_end(make, tmp_path):
+    q, caller, rec, ws, _ = make()
+    (ws / "a.mp4").write_bytes(b"ok")
+    job = submit(q, caller, ["a.mp4"], "Caption.")["job_id"]
+    assert q.wait(caller, job, 120)["state"] == "done"
+    q.release_gpu_resident()
+    assert _pid_gone(tmp_path / "run", job)
 
 
 def test_a_clip_the_server_rejects_is_a_per_clip_error_not_a_failed_job(make):
@@ -307,12 +355,12 @@ def test_caption_videos_over_mcp_queues_a_job_and_reports_path_errors(tmp_path):
 
 
 @pytest.mark.gpu
-def test_real_model_captions_two_example_clips(tmp_path):
-    """Run with an explicit device list, e.g. CUDA_VISIBLE_DEVICES=0,1,4,5 pytest -m gpu -k real_model."""
+def test_real_model_captions_two_example_clips_and_stays_warm(tmp_path):
+    """Run with an explicit device list, e.g. CUDA_VISIBLE_DEVICES=0,1,2,3 pytest -m gpu -k real_model."""
     gpus = resolve_gpus(REAL, os.environ)
     rec = Recorder(tmp_path / "run")
     reg = TokenRegistry(rec)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=300)
+    q = JobQueue(rec, GpuLock(), wait_cap_s=300)
     q.register(CaptionBackend(REAL, tmp_path / "run", gpus, reg, rec))
     ws, staging = tmp_path / "ws", tmp_path / "staging"
     ws.mkdir(), staging.mkdir()
@@ -320,19 +368,26 @@ def test_real_model_captions_two_example_clips(tmp_path):
     shutil.copy(examples / "video_caption_camera" / "videos" / "clip_0001.mp4", staging / "cam.mp4")
     shutil.copy(examples / "video_caption_static" / "videos" / "clip_0001.mp4", staging / "static.mp4")
     caller = reg.issue(node="gpu", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
+    prompt = "Write one factual caption (1-3 sentences) describing the scene and how the camera moves."
+    outs = []
     try:
-        job = submit(q, caller, ["/workspace/staging/cam.mp4", "/workspace/staging/static.mp4"],
-                     "Write one factual caption (1-3 sentences) describing the scene and how the camera "
-                     "moves.")["job_id"]
-        out = q.wait(caller, job, 300)
-        while out["state"] not in ("done", "failed", "cancelled"):
+        for i in range(2):
+            if i:
+                time.sleep(30)
+            job = submit(q, caller, ["/workspace/staging/cam.mp4", "/workspace/staging/static.mp4"], prompt)["job_id"]
             out = q.wait(caller, job, 300)
+            while out["state"] not in ("done", "failed", "cancelled"):
+                out = q.wait(caller, job, 300)
+            outs.append((out, time.monotonic()))
     finally:
         q.shutdown()
-    latencies = [e["latency_s"] for e in rec.read_events("gpu") if e["type"] == "caption.clip"]
-    print(json.dumps({"gpus": gpus, "state": out["state"], "error": out["error"], "result": out["result"],
-                      "latencies_s": latencies}, indent=2))
-    assert out["state"] == "done", out["error"]
-    clips = out["result"]["clips"]
-    assert all(len(v.get("caption", "")) > 20 for v in clips.values()), clips
-    assert out["result"]["gpu_memory_released"] is True
+    events = rec.read_events("gpu")
+    print(json.dumps({"gpus": gpus, "results": [o["result"] for o, _ in outs],
+                      "events": [e["type"] for e in events if e["type"].startswith("caption.server")]}, indent=2))
+    for out, _ in outs:
+        assert out["state"] == "done", out["error"]
+        assert all(len(v.get("caption", "")) > 20 for v in out["result"]["clips"].values()), out["result"]
+    types = [e["type"] for e in events]
+    assert types.count("caption.server_ready") == 1 and types.count("caption.server_reused") == 1
+    assert types.count("caption.server_stopped") == 1                  # by shutdown
+    assert "caption.gpu_not_released" not in types

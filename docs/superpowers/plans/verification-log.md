@@ -1168,3 +1168,11 @@ Inputs: the 40 videos of `acceptance_20260928`'s root (copied, the run tree unto
   - `perspective_switch_adherence` is 0.000 for all 5 cases in both runs: check it when the first full root
     score exists (a judge that always answers "no" would look the same).
   - Local-judge scores are on a different scale from the API judge's; no Doubao reference exists here.
+
+## 2026-09-29: warm caption server (plan Task 6)
+
+Real Qwen3.8-27B-FP8 on GPUs 0-3 (`pytest -m gpu -k real_model_captions`): two `caption_videos` jobs 30 s
+apart. One `caption.server_ready`, one `caption.server_reused` (second job `load_s` 0.0), the server kept 21-23
+GB on each GPU between jobs, and `q.shutdown()` stopped it (`caption.server_stopped`, no
+`caption.gpu_not_released`). Any other GPU holder (`GpuLock`), a failed or cancelled caption job, a phase end and
+run shutdown release it; there is no idle timer.

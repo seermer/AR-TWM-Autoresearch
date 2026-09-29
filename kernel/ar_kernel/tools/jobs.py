@@ -7,6 +7,7 @@ import threading
 import time
 import traceback
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -51,6 +52,40 @@ class Job:
 _TERMINAL = {"done", "failed", "cancelled"}
 
 
+class GpuLock:
+    """The run's GPU lock. A resident (the warm caption server) may keep GPU memory between holds:
+    every hold releases it first, except `warm()`, which is the resident's own job."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.resident = None                    # an object with release(); set by JobQueue.register
+
+    def acquire(self) -> bool:
+        self._lock.acquire()
+        try:
+            if self.resident is not None:
+                self.resident.release()
+        except BaseException:
+            self._lock.release()
+            raise
+        return True
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def __enter__(self) -> "GpuLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.release()
+
+    @contextmanager
+    def warm(self):
+        with self._lock:
+            yield
+
+
 class JobQueue:
     """Runs at most one job at a time on the run's GPUs, under `gpu_lock`.
 
@@ -71,6 +106,15 @@ class JobQueue:
 
     def register(self, backend: JobBackend) -> None:
         self._backends[backend.name] = backend
+        if getattr(backend, "keeps_gpu_warm", False) and isinstance(self.gpu_lock, GpuLock):
+            self.gpu_lock.resident = backend
+
+    def release_gpu_resident(self) -> None:
+        """Free the GPUs of a warm server (a phase or the run ended): take the lock as any other job would."""
+        with self.gpu_lock:
+            for backend in self._backends.values():
+                if getattr(backend, "keeps_gpu_warm", False):
+                    backend.release()
 
     @property
     def backends(self) -> dict[str, JobBackend]:
@@ -160,6 +204,7 @@ class JobQueue:
                 f"GPU job worker did not stop within {_SHUTDOWN_JOIN_S}s of shutdown; "
                 "a job may still be holding a GPU"
             )
+        self.release_gpu_resident()
 
     def _loop(self) -> None:
         while True:
@@ -176,7 +221,9 @@ class JobQueue:
                     self._cond.notify_all()
 
             tb = None
-            with self.gpu_lock:
+            warm = getattr(self._backends[job.backend], "keeps_gpu_warm", False) \
+                and isinstance(self.gpu_lock, GpuLock)
+            with (self.gpu_lock.warm() if warm else self.gpu_lock):
                 # Running starts once the GPUs are held, so gpu_seconds excludes the lock
                 # wait; a job cancelled before or during that wait is already final.
                 with self._cond:

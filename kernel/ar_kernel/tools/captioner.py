@@ -1,8 +1,11 @@
 """caption_videos (spec 10): caption clips with a local video model, as a GPU job.
 
-Each job starts `vllm serve` (the `captioner` config) on the node's GPUs, sends every clip
-file to it through the OpenAI-compatible endpoint, and always stops it again. The kernel
-sends the video; no video bytes pass through the agent or the paid agent model.
+A job starts `vllm serve` (the `captioner` config) on the node's GPUs unless one is already
+running, and sends every clip file to it through the OpenAI-compatible endpoint. The server then
+stays up for the next caption call, and is stopped as soon as anything else wants the GPUs: the
+run's GpuLock calls `CaptionBackend.release()` whenever another holder takes the lock, and a
+failed or cancelled job stops it at once. The kernel sends the video; no video bytes pass through
+the agent or the paid agent model.
 """
 from __future__ import annotations
 
@@ -77,17 +80,63 @@ class CaptionBackend:
                  gpu_memory=gpu_memory_mib, poll_s: float = 2.0) -> None:
         self.cfg, self.run_dir, self.gpus = cfg, Path(run_dir), list(gpus)
         self.registry, self.recorder, self.gpu_memory, self.poll_s = registry, recorder, gpu_memory, poll_s
+        self.keeps_gpu_warm = True            # JobQueue takes the GPU lock without releasing this server
+        self._server: VllmServer | None = None
+        self._before: dict | None = None      # GPU memory before the server started
+        self._node = "run"                    # the node whose job started the server
 
     def server_command(self, port: int, media_dir: Path) -> list[str]:
         return serve_command(self.cfg.get("captioner"), self.gpus, port, "captioner", media_dir)
+
+    def release(self, reason: str = "released", node: str | None = None, job_id: str | None = None):
+        """Stop the warm server, if any, and wait for its GPU memory. Called with the GPU lock held
+        (by the lock itself, or by a job that is ending). Returns (memory after, released)."""
+        server, self._server = self._server, None
+        if server is None:
+            return None, None
+        node = node or self._node
+        exit_code = server.stop()
+        # run_cancellable reports every stop we make as a cancel (-15, subproc.cancelled);
+        # this event says why the server stopped.
+        self.recorder.event("caption.server_stopped", node=node, component="tools", job_id=job_id,
+                            reason=reason, exit_code=exit_code)
+        # A cancelled job may be part of JobQueue.shutdown, whose join deadline a full wait would
+        # overrun; the check that GPU memory is free before each phase is the real guard.
+        timeout = float(self.cfg.get("captioner.memory_release_timeout_s"))
+        after, released = wait_gpu_release(self.gpu_memory, self.gpus, self._before,
+                                           min(timeout, 5.0) if reason == "cancelled" else timeout)
+        if released is False:
+            self.recorder.event("caption.gpu_not_released", node=node, component="tools", job_id=job_id,
+                                payload={"before": self._before, "after": after})
+        return after, released
+
+    def _start_server(self, job, cancel, sample) -> float | None:
+        """Load time in seconds (0.0 when the warm server is reused), None when cancelled while loading."""
+        c = self.cfg.get("captioner")
+        if self._server is not None and self._server.alive():
+            self.recorder.event("caption.server_reused", node=job.node, component="tools", job_id=job.id)
+            return 0.0
+        self.release("dead", job.node, job.id)              # a server that died between jobs
+        work = self.run_dir / "caption_server"
+        work.mkdir(parents=True, exist_ok=True)
+        port = free_port()
+        self._before, self._node = self.gpu_memory(self.gpus), job.node
+        self._server = VllmServer(c["env"], self.server_command(port, self.run_dir / "caption_media"),
+                                  self.gpus, port, cwd=work, log_path=work / "vllm.log",
+                                  recorder=self.recorder, node=job.node, phase=TOOL, poll_s=self.poll_s,
+                                  label="caption server")
+        load_s = self._server.start(float(c["startup_timeout_s"]), cancel, on_poll=sample)
+        if load_s is not None:
+            self.recorder.event("caption.server_ready", node=job.node, component="tools",
+                                job_id=job.id, load_s=load_s, payload={"gpus": self.gpus, "model": c["model"]})
+        return load_s
 
     def run(self, job, cancel: threading.Event, report) -> dict:
         c = self.cfg.get("captioner")
         caller = self.registry.lookup(job.token)
         if caller is None:
             raise RuntimeError("the phase that submitted this job has ended")
-        work = self.run_dir / "jobs" / job.id
-        media = work / "media"                    # the only directory the server may read
+        media = self.run_dir / "caption_media" / job.id     # under the only directory the server may read
         media.mkdir(parents=True)
         clips: dict[str, Path] = {}
         results: dict[str, dict] = {}
@@ -100,27 +149,20 @@ class CaptionBackend:
                 results[path] = {"error": str(exc)}
 
         if not clips:
+            shutil.rmtree(media, ignore_errors=True)
             return {"clips": results, "load_s": None, "gpu_memory_mib": None, "gpu_memory_released": None}
-        port = free_port()
-        before = self.gpu_memory(self.gpus)
-        peak = dict(before or {})
+        peak = dict(self.gpu_memory(self.gpus) or {})
 
         def sample() -> None:
             now = self.gpu_memory(self.gpus) or {}
             for g, used in now.items():
                 peak[g] = max(peak.get(g, 0), used)
 
-        server = VllmServer(c["env"], self.server_command(port, media), self.gpus, port, cwd=work,
-                            log_path=work / "vllm.log", recorder=self.recorder, node=job.node,
-                            phase=TOOL, poll_s=self.poll_s, label="caption server")
-        base, load_s, outcome = server.base_url, None, "failed"
+        load_s, outcome, after, released = None, "failed", None, None
         try:
-            load_s = server.start(float(c["startup_timeout_s"]), cancel, on_poll=sample)
+            load_s = self._start_server(job, cancel, sample)
+            base = self._server.base_url
             with httpx.Client(timeout=float(c["clip_timeout_s"]), trust_env=False) as http:
-                if load_s is not None:
-                    self.recorder.event("caption.server_ready", node=job.node, component="tools",
-                                        job_id=job.id, load_s=load_s,
-                                        payload={"gpus": self.gpus, "model": c["model"]})
                 # Up to max_num_seqs requests at once, so the server batches them; each clip
                 # still gets its own event, and results keep the submitted order.
                 done_lock, captioned = threading.Lock(), [0]
@@ -146,23 +188,15 @@ class CaptionBackend:
                         f.result()
             outcome = "done"
         finally:
-            exit_code = server.stop()
             shutil.rmtree(media, ignore_errors=True)
-            # run_cancellable reports every stop we make as a cancel (-15, subproc.cancelled);
-            # this event says why the server stopped.
-            self.recorder.event("caption.server_stopped", node=job.node, component="tools", job_id=job.id,
-                                reason="cancelled" if cancel.is_set() else outcome,
-                                exit_code=exit_code)
-        # A cancelled job may be part of JobQueue.shutdown, whose join deadline a full wait would
-        # overrun; Plan 4's check that GPU memory is free before each phase is the real guard.
-        timeout = float(c["memory_release_timeout_s"])
-        after, released = self._released(before, min(timeout, 5.0) if cancel.is_set() else timeout)
-        if released is False:
-            self.recorder.event("caption.gpu_not_released", node=job.node, component="tools",
-                                job_id=job.id, payload={"before": before, "after": after})
+            if outcome != "done" or cancel.is_set():        # only a clean job leaves the server warm
+                after, released = self.release("cancelled" if cancel.is_set() else outcome, job.node, job.id)
+        if outcome == "done" and not cancel.is_set():
+            sample()
+            after = self.gpu_memory(self.gpus)
         results = {p: results[p] for p in job.args["paths"] if p in results}     # the submitted order
         return {"clips": results, "load_s": load_s,
-                "gpu_memory_mib": {"before": before, "peak": peak or None, "after": after},
+                "gpu_memory_mib": {"before": self._before, "peak": peak or None, "after": after},
                 "gpu_memory_released": released}
 
     def _caption(self, http: httpx.Client, base: str, file: Path, prompt: str, c: dict) -> dict:
@@ -184,9 +218,6 @@ class CaptionBackend:
             return {"error": f"unexpected response ({type(exc).__name__}): {r.text[-2000:]}"}
         out = {"caption": text.strip()} if text and text.strip() else {"error": "empty caption"}
         return {**out, "reasoning": reasoning} if reasoning else out
-
-    def _released(self, before: dict | None, timeout_s: float) -> tuple[dict | None, bool | None]:
-        return wait_gpu_release(self.gpu_memory, self.gpus, before, timeout_s)
 
 
 def submit(q, caller, paths: list[str], prompt: str) -> dict:

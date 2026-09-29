@@ -17,7 +17,7 @@ from .tools.context import TokenRegistry
 from .tools.data_tools import DataTools, register_data_tools
 from .tools.gpu_jobs import build_gpu_backends, register_gpu_tools
 from .tools.hf_tools import HfTools, register_hf_tools
-from .tools.jobs import JobQueue, register_job_tools
+from .tools.jobs import GpuLock, JobQueue, register_job_tools
 from .tools.server import ToolKit, build_tool_app, new_mcp
 
 
@@ -25,7 +25,7 @@ from .tools.server import ToolKit, build_tool_app, new_mcp
 class RunKit:
     registry: TokenRegistry
     queue: JobQueue
-    gpu_lock: threading.Lock
+    gpu_lock: GpuLock
     budget: Budget
     services: RunServices
     harness: ContractHarness
@@ -58,7 +58,7 @@ def build_run_kit(cfg, run_dir: Path, gpus: list[int], recorder, environ) -> Run
     budget = Budget.from_config(cfg)
     budget.load(run_dir)
     registry = TokenRegistry(recorder)
-    gpu_lock = threading.Lock()
+    gpu_lock = GpuLock()
     queue = JobQueue(recorder, gpu_lock, wait_cap_s=float(cfg.get("tools.job_wait_max_s")))
     for backend in build_gpu_backends(cfg, run_dir, gpus, registry, recorder):
         queue.register(backend)
