@@ -107,3 +107,45 @@ def test_descendants_of_an_interrupted_node_count_nowhere():
             node("a11", "a1", score=0.2), node("a12", "a1", status="crashed")]
     row = by_id(candidates(tree, CFG))["a"]
     assert row["value"] == pytest.approx(0.8) and row["size"] == 0
+
+
+# Simulation behind these tests (2026-09-28, the shipped `candidates`, 6-node chain): with pure-noise
+# scores (SD 0.008) the newest node holds P = 0.206 against a uniform 0.167, because the size penalty
+# gives the newest leaf weight 1; a node that is truly +0.02 better receives P = 0.35. The acceptance
+# run's "always the newest" picks were luck (joint probability about 0.09).
+import random
+from collections import Counter
+
+
+def chain(scores):
+    return [node(f"n{i}", None if i == 0 else f"n{i-1}", score=s) for i, s in enumerate(scores)]
+
+
+def test_truly_better_node_beats_uniform_in_a_chain():
+    ps = [r["P"] for r in candidates(chain([0.787, 0.807, 0.787, 0.787, 0.787, 0.787]), CFG)]
+    assert ps[1] == max(ps) and ps[1] > 2 * (1 / 6)
+
+
+def test_pure_noise_does_not_strongly_prefer_the_newest():
+    rng, newest = random.Random(0), 0.0
+    for _ in range(500):
+        newest += candidates(chain([0.79 + rng.gauss(0, 0.008) for _ in range(6)]), CFG)[-1]["P"]
+    assert newest / 500 < 0.24                  # measured 0.206; uniform would be 0.167
+
+
+def test_draw_frequencies_follow_the_recorded_probabilities(tmp_path):
+    conn, rec = open_db(tmp_path), Recorder(tmp_path)
+    nodes = NodeStore(conn)
+    for i, score in enumerate((0.7871, 0.7945, 0.7917, 0.7907)):
+        nid = "root" if i == 0 else f"n{i}"
+        nodes.create(nid, None if i == 0 else ("root" if i == 1 else f"n{i-1}"), i)
+        nodes.record_score(nid, score, ["m"], {"m": score})
+    expected = {r["node_id"]: r["P"] for r in candidates(NodeStore(conn).all(), CFG)}
+    picks = Counter(select_parent(conn, CFG, f"c{seed}", seed, rec) for seed in range(4000))
+    for nid, p in expected.items():
+        assert abs(picks[nid] / 4000 - p) < 0.03
+
+
+def test_all_scores_equal_gives_a_valid_distribution():
+    ps = [r["P"] for r in candidates(chain([0.79] * 6), CFG)]
+    assert math.isclose(sum(ps), 1.0) and min(ps) > 0
