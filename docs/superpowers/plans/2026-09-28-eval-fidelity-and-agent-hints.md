@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Python is always `/home/zhantaoy/miniforge3/envs/autoresearcher/bin/python` (never base/system Python). Tests: `cd AutoResearcher && /home/zhantaoy/miniforge3/envs/autoresearcher/bin/python -m pytest tests/<file> -q`.
+- Python is always `AutoResearcher/.envs/autoresearcher/bin/python` (never base/system Python). Tests: `cd AutoResearcher && AutoResearcher/.envs/autoresearcher/bin/python -m pytest tests/<file> -q`.
 - **GPU count is never assumed.** Act as if the machine has exactly the GPUs the run was given (`0,1,2,3` here); the project may move to a 2- or 8-GPU machine. GPU device lists are passed explicitly everywhere, and every GPU job, tool, train or eval phase uses **all** the GPUs it is passed. No hard-coded counts or indices (`min_count` is configuration: set `gpus.min_count` to match the machine). vLLM servers (captioner, judge) derive tensor-parallel size from the passed list.
 - Commit messages carry **no** Claude/co-author attribution (user rule, overrides any default). Finished work is fast-forwarded to `main` and pushed in every repo touched (AutoResearcher, WBench).
 - Disk: ask before freeing space; never delete outside the project folder. The VP weights download is ~62 GB (2.0 TB free at time of writing).

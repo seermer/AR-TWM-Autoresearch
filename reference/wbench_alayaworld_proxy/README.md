@@ -1,5 +1,7 @@
 # Reference: released AlayaWorld on the 40-case WBench proxy
 
+> This reference describes the original 40 cases; the proxy is now 50 (a superset, see spec §11.1).
+
 Produced 2026-09-13 with the released v1.1 checkpoint (stage2b + stage3 DMD student),
 `configs/wbench_full.yaml`, seeded per-case rendering, on 5x RTX 4090.
 

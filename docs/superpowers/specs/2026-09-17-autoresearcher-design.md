@@ -13,7 +13,7 @@ AlayaWorld world model's **WBench (full split)** performance **through training-
 construction**. The loop grows a tree of nodes; every node is a new version of the agent
 code (produced by its parent's self-edit) plus a training recipe (data + data-coupled
 training config), trained from the **released base checkpoint** and scored on a cheap
-stratified **40-case WBench proxy**.
+stratified **50-case WBench proxy**.
 
 The tree and parent selection draw on HGM (clade-metaproductivity: value a node by its
 subtree) and HyperAgents (score- and child-count-weighted parent sampling; a
@@ -41,7 +41,7 @@ HGM `hgm.py`, `tree.py`, `hgm_utils.py`, `self_improve_step.py`; HyperAgents
    verified programmatically after every self-edit.
 5. **Isolation.** Agents never touch WBench, the model inference path or the kernel.
 6. **No chaining.** Every node trains from the same released checkpoint.
-7. **Proxy only.** The loop scores nodes on the 40-case proxy only. A full WBench run is a
+7. **Proxy only.** The loop scores nodes on the 50-case proxy only. A full WBench run is a
    manual command, never triggered by the loop.
 8. **Telemetry is the most critical component.** Every input/output that could be useful
    is recorded, at choke points agents cannot reach.
@@ -191,7 +191,7 @@ AutoResearcher/
   configs/
     kernel.yaml           # all kernel defaults (§17)
     base_recipe.yaml      # copy of WorldModel/configs/examples/finetune_video_caption_camera.yaml
-    proxy_cases.txt       # the 40 proxy case ids (§11.1)
+    proxy_cases.txt       # the 50 proxy case ids (§11.1)
   tests/
   weights/                # git-ignored
   runs/<run_id>/          # git-ignored: archive.db, agents.git, store/, nodes/, cache/, telemetry/
@@ -437,7 +437,7 @@ One node at a time. GPU phases never overlap.
  5  improve_recipe : run c's code (container); tools; data commits; recipe  ┐ loop
  6  recipe gate    : materialize view, then checks + dry runs (§8)           ┘ ≤ N_recipe (default 3)
  7  precache prompts; train on the GPU list, reusing the gate's view (§7.3)
- 8  merge → render proxy (40 cases) → WBench phases → score (§11)
+ 8  merge → render proxy (50 cases) → WBench phases → score (§11)
  9  record; update subtree values; delete transient files; store aggregates
 10  stop checks (node count, graceful/force flags)
 ```
@@ -744,8 +744,9 @@ tool's description lists only its enabled variants.)*
 
 ### 11.1 Proxy subset
 
-40 of 289 cases, stratified by interaction mix (seed 20260913):
-`2,25,47,63,66,70,78,84,89,90,91,96,109,114,133,136,139,142,145,164,167,172,177,178,180,188,195,200,204,206,215,237,242,246,247,248,260,272,284,289`.
+50 of 289 cases: the original 40 (stratified by interaction mix, seed 20260913) plus 10 added by
+`scripts/make_proxy_cases.py` (seed 20260928, greedy toward the full set's interaction mix):
+`2,10,17,25,47,63,65,66,70,72,78,82,84,89,90,91,96,102,109,114,133,136,138,139,142,145,147,164,167,168,172,177,178,180,188,195,200,204,206,214,215,237,242,246,247,248,260,272,284,289`.
 Stored in `configs/proxy_cases.txt`; fixed for the run.
 
 ### 11.2 Eval pipeline per node
@@ -808,7 +809,7 @@ Stored in `configs/proxy_cases.txt`; fixed for the run.
 - `ar status` reports the best node by highest own proxy score.
 - `ar full-eval <node>` *(amended 2026-09-27, Plan 4 as built: not implemented — there is no
   full 289-case WBench command)*. `ar score-node --run-id <id> --node <node>` scores a node
-  on the 40-case proxy set (§11.1), the same path the loop itself uses.
+  on the 50-case proxy set (§11.1), the same path the loop itself uses.
 
 ---
 
