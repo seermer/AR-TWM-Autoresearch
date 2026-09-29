@@ -1,6 +1,6 @@
 import json, pytest
 from ar_kernel.config import KernelConfig
-from ar_kernel.eval.score import DIMENSION_METRICS, resolve_metric_set, score_from_report, cleanup_eval
+from ar_kernel.eval.score import DIMENSION_METRICS, score_from_report, cleanup_eval
 
 CFG = KernelConfig.load()
 REPORT = json.loads((CFG.repo_root / "reference" / "wbench_alayaworld_proxy" / "report.json").read_text())
@@ -9,10 +9,6 @@ def test_dimension_metrics_are_the_22_wbench_metrics():
     assert len(DIMENSION_METRICS) == 22
     assert "navigation_trajectory" in DIMENSION_METRICS
     assert "navigation_accuracy" not in DIMENSION_METRICS
-
-def test_metric_set_is_always_all_22():
-    assert resolve_metric_set(CFG, {"VLM_API_KEY": ""}) == DIMENSION_METRICS
-    assert resolve_metric_set(CFG, {"VLM_API_KEY": "abc"}) == DIMENSION_METRICS
 
 def test_score_is_the_mean_over_the_metric_set():
     metric_set = [m for m in DIMENSION_METRICS if m in REPORT["full"]]

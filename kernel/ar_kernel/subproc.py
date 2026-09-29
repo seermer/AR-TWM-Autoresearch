@@ -183,25 +183,32 @@ def _wait(proc: subprocess.Popen, timeout: int | None, cancel: "threading.Event 
                 raise
 
 
+def kill_group(pgid: int, reap=None) -> bool:
+    """SIGTERM process group `pgid`, then SIGKILL whatever is left. False if it was already gone.
+    `reap` runs while waiting: a direct child's zombie would otherwise keep the group "alive"."""
+    for sig, wait in ((signal.SIGTERM, KILL_GRACE_SECONDS), (signal.SIGKILL, KILL_FORCE_GRACE_SECONDS)):
+        try:
+            os.killpg(pgid, sig)
+        except (ProcessLookupError, PermissionError):
+            return sig != signal.SIGTERM
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            if reap is not None:
+                reap()
+            try:
+                os.killpg(pgid, 0)
+            except (ProcessLookupError, PermissionError):
+                return True
+            time.sleep(0.2)
+    return True
+
+
 def _kill_group(proc: subprocess.Popen) -> None:
-    """SIGTERM the job's process group, then SIGKILL whatever is left."""
     try:
         pgid = os.getpgid(proc.pid)
     except ProcessLookupError:
         return
-    for sig, wait in ((signal.SIGTERM, KILL_GRACE_SECONDS), (signal.SIGKILL, KILL_FORCE_GRACE_SECONDS)):
-        try:
-            os.killpg(pgid, sig)
-        except ProcessLookupError:
-            return
-        deadline = time.monotonic() + wait
-        while time.monotonic() < deadline:
-            proc.poll()            # reap our direct child, or its zombie keeps the group "alive"
-            try:
-                os.killpg(pgid, 0)
-            except ProcessLookupError:
-                return
-            time.sleep(0.2)
+    kill_group(pgid, reap=proc.poll)
 
 
 def _error(recorder, node, phase, message, stdout, stderr, log_path) -> None:

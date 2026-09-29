@@ -52,9 +52,6 @@ class RunKit:
 
 
 def build_run_kit(cfg, run_dir: Path, gpus: list[int], recorder, environ) -> RunKit:
-    for key in ("OPENAI_API_KEY", "OPENAI_MODEL"):
-        if not environ.get(key, "").strip():
-            raise ValueError(f"{key} is empty; set it in AutoResearcher/.env before `ar run`")
     budget = Budget.from_config(cfg)
     budget.load(run_dir)
     registry = TokenRegistry(recorder)

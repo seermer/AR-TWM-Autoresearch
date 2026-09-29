@@ -6,13 +6,12 @@ import os
 import signal
 import sys
 import threading
-import time
 from pathlib import Path
 
 from .archive.nodes import NodeStore
 from .guards import alert
 from .sandbox.runner import kill_run_containers
-from .subproc import proc_start_time
+from .subproc import kill_group, proc_start_time
 
 
 class ForceStop(BaseException):
@@ -23,32 +22,26 @@ class ForceStop(BaseException):
 class Control:
     def __init__(self, run_dir: Path) -> None:
         self.dir = Path(run_dir) / "control"
-
-    def _pid_file(self) -> Path:
-        return self.dir / "loop.pid"
-
-    @staticmethod
-    def _start_time(pid: int) -> str | None:
-        return proc_start_time(pid)
+        self.pid_file = self.dir / "loop.pid"
 
     def alive_pid(self) -> int | None:
         try:
-            pid_s, started = self._pid_file().read_text().split()
+            pid_s, started = self.pid_file.read_text().split()
             pid = int(pid_s)
         except (OSError, ValueError):
             return None
-        return pid if self._start_time(pid) == started else None
+        return pid if proc_start_time(pid) == started else None
 
     def claim(self) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
         other = self.alive_pid()
         if other is not None and other != os.getpid():
             raise RuntimeError(f"a loop is already running for this run (pid {other})")
-        self._pid_file().write_text(f"{os.getpid()} {self._start_time(os.getpid())}")
+        self.pid_file.write_text(f"{os.getpid()} {proc_start_time(os.getpid())}")
 
     def release(self) -> None:
         if self.alive_pid() == os.getpid():
-            self._pid_file().unlink(missing_ok=True)
+            self.pid_file.unlink(missing_ok=True)
 
     def request_stop(self) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -93,21 +86,8 @@ def kill_recorded_groups(control: Control) -> list[int]:
     for marker in sorted(folder.glob("*")) if folder.is_dir() else []:
         pgid, started = int(marker.name), marker.read_text().strip()
         current = proc_start_time(pgid)
-        if started and (current is None or current == started):
-            for sig, wait in ((signal.SIGTERM, 30.0), (signal.SIGKILL, 10.0)):
-                try:
-                    os.killpg(pgid, sig)
-                except (ProcessLookupError, PermissionError):
-                    break
-                if sig == signal.SIGTERM:
-                    killed.append(pgid)
-                deadline = time.monotonic() + wait
-                while time.monotonic() < deadline:
-                    try:
-                        os.killpg(pgid, 0)
-                    except (ProcessLookupError, PermissionError):
-                        break
-                    time.sleep(0.2)
+        if started and (current is None or current == started) and kill_group(pgid):
+            killed.append(pgid)
         marker.unlink(missing_ok=True)
     return killed
 

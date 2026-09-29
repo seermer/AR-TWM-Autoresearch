@@ -7,12 +7,11 @@ from typing import Mapping
 
 from .archive.db import open_db
 from .doctor import wbench_weight_problems
-from .config import SNAPSHOT_FILES, KernelConfig, resolve_gpus, run_config_path
+from .config import SNAPSHOT_FILES, KernelConfig, resolve_gpus
 from .eval.judge import Judge, resolve_judge
 from .eval.merge import merge_lora
 from .eval.render import build_render_config, render_proxy
-from .eval.score import (UNIVERSAL_METRICS, aggregates, cleanup_eval, resolve_metric_set,
-                         score_from_report)
+from .eval.score import DIMENSION_METRICS, UNIVERSAL_METRICS, aggregates, cleanup_eval, score_from_report
 from .eval.wbench import run_wbench_phases
 from .telemetry.recorder import Recorder
 
@@ -28,15 +27,13 @@ class RunContext:
     expected_n: dict = field(default_factory=dict)   # metric -> case count on the proxy
     judge: Judge | None = None                       # who answers the VLM metrics
 
-def preflight_metrics(cfg: KernelConfig, env: Mapping[str, str]) -> list[str]:
-    """The run's metric set (always all 22). Raises PreflightError listing every unmet prerequisite."""
-    problems = []
+def preflight_metrics(cfg: KernelConfig) -> list[str]:
+    """The run's metric set (always all 22); PreflightError when it cannot be computed."""
     vp_weights = cfg.wbench / cfg.get("eval.vp_weights")
     if not vp_weights.exists():
-        problems.append(f"visual_plausibility needs the VP weights at {vp_weights}")
-    if problems:
-        raise PreflightError("the full metric set cannot be computed:\n  " + "\n  ".join(problems))
-    return resolve_metric_set(cfg, env)
+        raise PreflightError("the full metric set cannot be computed:\n  "
+                             f"visual_plausibility needs the VP weights at {vp_weights}")
+    return list(DIMENSION_METRICS)
 
 def _git_state(repo: Path) -> tuple[str, bool]:
     sha = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
@@ -84,7 +81,7 @@ def bootstrap_run(cfg: KernelConfig, run_id: str | None, env: Mapping[str, str])
                 "wbench_sha": wb_sha, "wbench_dirty": wb_dirty,
                 "kernel_sha": kernel_sha, "kernel_dirty": kernel_dirty}
     (run_dir / "config" / "versions.json").write_text(json.dumps(versions, indent=2))
-    metric_set = preflight_metrics(cfg, env)
+    metric_set = preflight_metrics(cfg)
     judge = resolve_judge(cfg, env)
     case_ids = (run_dir / "config" / "proxy_cases.txt").read_text().strip().split(",")
     expected_n = initial_expected_n(case_ids)

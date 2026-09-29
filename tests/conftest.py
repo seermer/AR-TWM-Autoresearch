@@ -46,4 +46,4 @@ def _skip_eval_prerequisites(request, monkeypatch):
     if request.node.get_closest_marker("real_preflight"):
         return
     import ar_kernel.run as run
-    monkeypatch.setattr(run, "preflight_metrics", lambda cfg, env: run.resolve_metric_set(cfg, env))
+    monkeypatch.setattr(run, "preflight_metrics", lambda cfg: list(run.DIMENSION_METRICS))

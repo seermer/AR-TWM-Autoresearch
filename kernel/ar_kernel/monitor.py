@@ -12,7 +12,12 @@ from .guards import alert, smi
 from .liveness import tree_mark
 
 
-def gpu_usage_detailed(gpus: list[int] | None = None) -> dict[int, dict] | None:
+def _num(value: str) -> float | None:
+    return float(value) if value.replace(".", "", 1).isdigit() else None     # "[N/A]" -> None
+
+
+def gpu_usage_detailed() -> dict[int, dict] | None:
+    """Per-GPU utilization, memory, power, temperature and compute pids from nvidia-smi."""
     table = smi(["--query-gpu=index,uuid,utilization.gpu,memory.used,power.draw,temperature.gpu",
                   "--format=csv,noheader,nounits"])
     apps = smi(["--query-compute-apps=pid,gpu_uuid", "--format=csv,noheader"])
@@ -24,15 +29,14 @@ def gpu_usage_detailed(gpus: list[int] | None = None) -> dict[int, dict] | None:
             continue
         index, uuid, util, mem, power, temp = (s.strip() for s in line.split(","))
         by_uuid[uuid] = int(index)
-        num = lambda v: float(v) if v.replace(".", "", 1).isdigit() else None   # "[N/A]" -> None
-        out[int(index)] = {"util": num(util), "memory_mib": num(mem), "power_w": num(power),
-                           "temp_c": num(temp), "pids": []}
+        out[int(index)] = {"util": _num(util), "memory_mib": _num(mem), "power_w": _num(power),
+                           "temp_c": _num(temp), "pids": []}
     for line in apps.splitlines():
         if line.strip():
             pid, uuid = (s.strip() for s in line.split(","))
             if uuid in by_uuid:
                 out[by_uuid[uuid]]["pids"].append(int(pid))
-    return out if gpus is None else {g: v for g, v in out.items() if g in gpus}
+    return out
 
 
 def _descends_from(pid: int, ancestor: int) -> bool:
@@ -65,7 +69,7 @@ class Monitor:
             alert(self.recorder, kind, message, **payload)
 
     def tick(self) -> None:
-        usage = self.usage(None)
+        usage = self.usage()
         if usage is not None:
             self.recorder.event("gpu.sample", node="gpu",
                                 gpus={str(g): {k: v for k, v in u.items() if k != "pids"} for g, u in usage.items()})
@@ -95,7 +99,7 @@ class Monitor:
         if calls >= 5 and rate > float(self.cfg.get("alerts.gateway_error_rate")):
             self._once(("gateway", int(now // 300)), "gateway_errors",
                        f"{rate:.0%} of the last {calls} LLM calls failed")
-        usage = self.usage(None) or {}
+        usage = self.usage() or {}
         me = os.getpid()
         for gpu, u in usage.items():
             if gpu in self.gpus:

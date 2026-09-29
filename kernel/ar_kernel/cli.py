@@ -95,7 +95,6 @@ def main(argv: list[str] | None = None) -> int:
     except (RunNotFound, PreflightError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    nodes = NodeStore(ctx.conn)
     if args.command == "status":
         d = run_status(ctx.run_dir)
         print(json.dumps(d, indent=1) if args.json else format_status(d))
@@ -103,6 +102,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "score-node":
         checkpoint = Path(args.checkpoint) if args.checkpoint else None
+        nodes = NodeStore(ctx.conn)
         try:
             nodes.get(args.node)
         except KeyError:
@@ -122,14 +122,13 @@ def _run(cfg, args) -> int:
     if args.resume and not existing:
         print(f"error: no run {args.run_id!r} to resume", file=sys.stderr)
         return 2
-    if not args.resume:                                      # before bootstrap_run creates the run
-        if args.max_nodes is None:
-            print("error: --max-nodes is required for a new run", file=sys.stderr)
-            return 2
-        for key in ("OPENAI_API_KEY", "OPENAI_MODEL"):
-            if not os.environ.get(key, "").strip():
-                print(f"error: {key} is empty; set it in AutoResearcher/.env before `ar run`", file=sys.stderr)
-                return 2
+    if not args.resume and args.max_nodes is None:           # before bootstrap_run creates the run
+        print("error: --max-nodes is required for a new run", file=sys.stderr)
+        return 2
+    for key in ("OPENAI_API_KEY", "OPENAI_MODEL"):           # before anything is created or claimed
+        if not os.environ.get(key, "").strip():
+            raise ValueError(f"{key} is empty; set it in AutoResearcher/.env before `ar run`")
+    if not args.resume:
         check_visible(resolve_gpus(cfg, os.environ))          # the live config is what the run will freeze
         if args.git_remote and (error := AgentsRepo.check_remote(args.git_remote)):
             print(f"error: cannot reach --git-remote {args.git_remote}: {error}", file=sys.stderr)

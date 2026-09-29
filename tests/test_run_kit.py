@@ -20,11 +20,6 @@ def test_kit_uses_the_run_config_and_registers_enabled_tools(tmp_path, monkeypat
         kit.queue.shutdown()
 
 
-def test_missing_key_is_refused(tmp_path):
-    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
-        build_run_kit(KernelConfig.load(), tmp_path, [0, 1, 2, 3], Recorder(tmp_path), {"OPENAI_MODEL": "m"})
-
-
 def test_stop_survives_a_stuck_job_worker(tmp_path, monkeypatch):
     monkeypatch.setattr("ar_kernel.run_kit.build_gpu_backends", lambda *a, **k: [])
     rec = Recorder(tmp_path)

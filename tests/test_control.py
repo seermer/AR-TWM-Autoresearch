@@ -34,7 +34,7 @@ def test_a_live_loop_is_detected_and_blocks_a_second_claim(tmp_path):
     other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
         Control(tmp_path).dir.mkdir(parents=True)
-        (tmp_path / "control" / "loop.pid").write_text(f"{other.pid} {Control._start_time(other.pid)}")
+        (tmp_path / "control" / "loop.pid").write_text(f"{other.pid} {proc_start_time(other.pid)}")
         assert Control(tmp_path).alive_pid() == other.pid
         with pytest.raises(RuntimeError, match="already running"):
             Control(tmp_path).claim()

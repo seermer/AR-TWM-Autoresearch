@@ -1,13 +1,5 @@
-"""Portability / environment preflight.
-
-Everything that made this tree non-portable in practice, checked in one place.
-The failure that motivated it: WBench's MegaSAM weight symlinks still pointed at
-a previous checkout location after the tree moved, so every navigation case
-failed, the tool still exited 0, and the run produced a report silently missing
-five metrics.
-
-Run: `ar doctor` (add --strict to exit non-zero on warnings).
-"""
+"""`ar doctor`: everything that has made this tree non-portable in practice, checked in one
+place (e.g. WBench weight links left dangling by a moved checkout silently dropped five metrics)."""
 from __future__ import annotations
 
 import os
@@ -46,9 +38,12 @@ WBENCH_WEIGHTS = {
 }
 
 
-def _broken_links(root: Path) -> list[tuple[Path, str]]:
+def _broken_links(root: Path, skip: Path | None = None) -> list[tuple[Path, str]]:
+    """(link, target) for every dangling symlink under `root`, except those under `skip`."""
     out = []
     for link in sorted(Path(root).rglob("*")):
+        if skip is not None and skip in link.parents:
+            continue
         try:
             if link.is_symlink() and not link.exists():
                 out.append((link, os.readlink(str(link))))
@@ -58,13 +53,8 @@ def _broken_links(root: Path) -> list[tuple[Path, str]]:
 
 
 def wbench_weight_problems(cfg: KernelConfig) -> list[str]:
-    """Missing GPU-metric weights, or broken links under WBench/weights.
-
-    Run by bootstrap_run as well as `ar doctor`: a moved checkout left MegaSAM's
-    weight links dangling, every navigation case failed, and the report came out
-    missing five metrics. Metric preflight only checked the VLM key and the VP
-    weights, so nothing stopped the run starting.
-    """
+    """Missing GPU-metric weights, or broken links under WBench/weights. bootstrap_run refuses
+    to start a run on any of these, as well as `ar doctor` reporting them."""
     weights = cfg.wbench / "weights"
     problems = [f"{name} weights missing: {weights / rel}"
                 for name, rel in WBENCH_WEIGHTS.items() if not (weights / rel).exists()]
@@ -111,23 +101,10 @@ def _symlinks(cfg: KernelConfig) -> list[Finding]:
     """Broken links are the concrete way a move has broken this tree before. The package cache
     under `.cache/` is skipped: conda's extracted packages hold relative links whose targets exist
     only once a package is linked into an env."""
-    out = []
     skip = Path(cfg.repo_root) / ".cache"
-    for root in (cfg.wbench, cfg.worldmodel, cfg.repo_root):
-        for link in sorted(Path(root).rglob("*")):
-            if skip in link.parents:
-                continue
-            try:
-                if not link.is_symlink():
-                    continue
-            except OSError:
-                continue
-            if link.exists():
-                continue
-            target = os.readlink(str(link))
-            out.append(Finding("fail", "symlink",
-                               f"broken: {link} -> {target} "
-                               f"(typical after moving the tree; re-run the tool that creates it)"))
+    out = [Finding("fail", "symlink", f"broken: {link} -> {target} "
+                                      f"(typical after moving the tree; re-run the tool that creates it)")
+           for root in (cfg.wbench, cfg.worldmodel, cfg.repo_root) for link, target in _broken_links(root, skip)]
     return out or [Finding("ok", "symlink", "no broken symlinks")]
 
 

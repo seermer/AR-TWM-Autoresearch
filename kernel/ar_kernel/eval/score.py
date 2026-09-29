@@ -1,7 +1,6 @@
 from __future__ import annotations
 import json, math, shutil
 from pathlib import Path
-from typing import Mapping
 
 from ..config import KernelConfig
 
@@ -27,10 +26,6 @@ UNIVERSAL_METRICS = (
     "motion_smoothness", "hpsv3_quality", "background_consistency", "segment_continuity",
     "geometric_consistency", "photometric_consistency",
 )
-
-def resolve_metric_set(cfg: KernelConfig, env: Mapping[str, str]) -> list[str]:
-    """Every node is scored on all 22 metrics; missing prerequisites are preflight errors."""
-    return list(DIMENSION_METRICS)
 
 class ScoreError(ValueError):
     """The report cannot yield a score comparable with the rest of the run."""

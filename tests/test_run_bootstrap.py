@@ -11,13 +11,13 @@ CFG = KernelConfig.load()
 def test_preflight_fails_when_vp_weights_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(KernelConfig, "wbench", property(lambda self: tmp_path))
     with pytest.raises(PreflightError, match="visual_plausibility"):
-        preflight_metrics(CFG, {"VLM_API_KEY": "abc"})
+        preflight_metrics(CFG)
 
 @pytest.mark.real_preflight
 def test_preflight_passes_with_vp_weights(tmp_path, monkeypatch):
     monkeypatch.setattr(KernelConfig, "wbench", property(lambda self: tmp_path))
     (tmp_path / CFG.get("eval.vp_weights")).mkdir(parents=True)
-    assert preflight_metrics(CFG, {}) == DIMENSION_METRICS
+    assert preflight_metrics(CFG) == DIMENSION_METRICS
 
 def test_bootstrap_creates_run_layout_and_records_versions(tmp_path, monkeypatch):
     monkeypatch.setattr(KernelConfig, "runs_dir", property(lambda self: tmp_path))
@@ -85,7 +85,7 @@ def test_bootstrapping_an_existing_run_id_does_not_overwrite_it(tmp_path, monkey
 def test_run_uses_its_own_config_snapshot(tmp_path, monkeypatch):
     """Gate and bootstrap must read the run's snapshot, not the live repo config,
     so a mid-run edit or pull cannot change what an in-flight run does."""
-    from ar_kernel.run import run_config_path
+    from ar_kernel.config import run_config_path
     _runs(tmp_path, monkeypatch)
     ctx = bootstrap_run(CFG, run_id="r3", env=ENV4)
     for name in ("kernel.yaml", "base_recipe.yaml", "proxy_cases.txt"):

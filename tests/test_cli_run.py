@@ -40,6 +40,8 @@ def test_a_new_run_without_max_nodes_creates_nothing(tmp_path, monkeypatch, caps
 def _existing_run(tmp_path, monkeypatch, gpus_default="0,1,2,3", root="scored"):
     monkeypatch.setattr(cli.KernelConfig, "runs_dir", property(lambda self: tmp_path))
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("OPENAI_MODEL", "m")
     run = tmp_path / "r1"
     (run / "config").mkdir(parents=True)
     raw = yaml.safe_load((REPO / "configs" / "kernel.yaml").read_text())
@@ -90,14 +92,25 @@ def test_resume_resolves_gpus_from_the_runs_frozen_config(tmp_path, monkeypatch)
     assert seen == [[4, 5, 6, 7]]
 
 
-def test_a_new_run_without_the_llm_settings_creates_nothing(tmp_path, monkeypatch, capsys):
+def test_a_new_run_without_the_llm_settings_creates_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.KernelConfig, "runs_dir", property(lambda self: tmp_path))
     monkeypatch.setattr(cli, "load_dotenv", lambda path, env: [])
     monkeypatch.setattr(cli, "check_visible", lambda gpus: None)
     monkeypatch.setenv("OPENAI_API_KEY", "")
     monkeypatch.setenv("OPENAI_MODEL", "m")
-    assert cli.main(["run", "--run-id", "r2", "--max-nodes", "1"]) == 2
-    assert "OPENAI_API_KEY" in capsys.readouterr().err and not (tmp_path / "r2").exists()
+    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
+        cli.main(["run", "--run-id", "r2", "--max-nodes", "1"])
+    assert not (tmp_path / "r2").exists()
+
+
+def test_a_resume_without_the_llm_settings_is_refused_before_claiming(tmp_path, monkeypatch):
+    run = _existing_run(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli, "load_dotenv", lambda path, env: [])
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("OPENAI_MODEL", "")
+    with pytest.raises(ValueError, match="OPENAI_MODEL"):
+        cli.main(["run", "--run-id", "r1", "--resume"])
+    assert Control(run).alive_pid() is None
 
 
 def test_a_new_run_on_invisible_gpus_creates_nothing(tmp_path, monkeypatch):
