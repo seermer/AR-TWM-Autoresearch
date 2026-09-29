@@ -165,7 +165,7 @@ Check: the last line says `[Precache] done` and `ls ../WorldModel/cache/text_emb
 ar doctor                       # must end with "0 failed"
 docker run --rm python:3.12-slim true && echo docker ok
 nvidia-smi --query-gpu=index,memory.used --format=csv     # every GPU near 0 MiB
-pytest tests -q                 # optional: unit tests, no GPU needed
+pytest tests -q                 # optional: unit tests, no GPU needed, about 12 minutes
 ```
 
 `ar doctor` names anything missing (weights, environments, broken links). Fix what it names and run it again.
