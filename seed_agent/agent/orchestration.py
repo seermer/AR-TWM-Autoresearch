@@ -26,6 +26,7 @@ from langchain_core.tools import ToolException
 from pydantic import BaseModel, Field
 
 from .entry import AGENT_ROOT, BRIEF_CHARS, COMPACT_AT, CONTEXT_WINDOW, MAX_ROUNDS, MODEL, WORKSPACE
+from .briefing import edit_context, recipe_context
 from .harness import build_react_agent
 from .tools import (ARXIV_TOOLS, discarded_changes, kernel_tools, make_file_tools, result_text, snap_timed_prompts,
                     submit_tool)
@@ -40,8 +41,8 @@ COMPONENTS = {
     "prompts": "agent/prompts/*.md -- the system prompt of each role",
     "tools": "agent/tools.py -- agent-local tools and the kernel-tool adapter (not the kernel tools themselves)",
     "harness": "agent/harness.py -- the single-agent inner loop: ReAct graph, tool execution, auto-compaction",
-    "orchestration": "agent/orchestration.py (+ agent/entry.py settings) -- which roles run, in what order, "
-                     "with which tools and context",
+    "orchestration": "agent/orchestration.py (+ agent/briefing.py, agent/entry.py settings) -- which roles "
+                     "run, in what order, with which tools and what they are told first",
     "knowledge": "agent/knowledge/*.md -- reference material that roles read",
 }
 
@@ -71,10 +72,9 @@ def local_tools(root: str) -> list:
     return [*make_file_tools(root), *ARXIV_TOOLS]
 
 
-def brief(payload: dict) -> str:
-    """The JSON context for a role, capped at BRIEF_CHARS with a visible cut: callers put the small keys
-    first and the lineage last, so a cut only shortens the lineage."""
-    text = json.dumps(payload, default=str)
+def brief(text: str) -> str:
+    """The context digest (briefing.py) in a <context> block. BRIEF_CHARS is only a safety cap: the digest
+    ends with the lineage, so a cut would only shorten that."""
     if len(text) > BRIEF_CHARS:
         text = text[:BRIEF_CHARS] + " ...[truncated: the full context is in /context/context.json]"
     return block("context", text)
@@ -214,13 +214,7 @@ async def run_task(ctx: RecipeContext) -> RecipeResult:
                                           f"model said {await ping()!r}")
         record = Path(WORKSPACE) / "plans.json"             # carried to a retry with the workspace
         previous = json.loads(record.read_text()) if ctx.retry and record.exists() else None
-        context = brief({"rules": ctx.tunable_rules, "resolution_allowlist": ctx.resolution_allowlist,
-                         "lora_allowlist": ctx.lora_allowlist, "n_gpus": ctx.n_gpus,
-                         "parent_data_commit": ctx.parent_data_commit, "parent_recipe": ctx.parent_recipe,
-                         "tools": ctx.tools, "retry": ctx.retry, "previous_attempt_plans": previous,
-                         "format_rules": ctx.format_rules, "recipe_guide": ctx.recipe_guide,
-                         "base_recipe": ctx.base_recipe, "clip_pool_size": len(ctx.clip_pool),
-                         "archive": ctx.archive, "lineage": ctx.lineage})
+        context = brief(recipe_context(ctx, previous))
         await plan_and_engineer(team, task=context, show=lambda p: block("plan", p.model_dump_json(indent=2)),
                                 engineer_context=context, record=record)
     r = team.done.value
@@ -288,8 +282,7 @@ async def run_meta(ctx: EditContext) -> EditResult:
     previous = json.loads(record.read_text()) if ctx.retry and record.exists() else None
     await plan_and_engineer(
         team, record=record, engineer_context=None,
-        task=brief({"components": COMPONENTS, "nodes_remaining": ctx.nodes_remaining, "retry": ctx.retry,
-                    "previous_attempt_plans": previous, "archive": ctx.archive, "lineage": ctx.lineage}),
+        task=brief(edit_context(ctx, COMPONENTS, previous)),
         show=lambda p: block("edit_plan", p.model_dump_json(indent=2), component=p.component))
     p = team.plan.value
     return EditResult(summary=f"[{p.component}] {p.change}\n\n{team.done.value.summary}", component=p.component)

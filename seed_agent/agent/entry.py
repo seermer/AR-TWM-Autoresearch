@@ -10,7 +10,7 @@ COMPACT_AT = float(os.environ.get("AR_COMPACT_AT", "0.6"))           # auto-comp
 AGENT_ROOT = os.environ.get("AR_AGENT_DIR", "/agent")
 WORKSPACE = os.environ.get("AR_WORKSPACE", "/workspace")
 MAX_ROUNDS = 4               # plans per phase: the first and up to three replans the engineer asks for
-BRIEF_CHARS = 150_000        # cap on the JSON context handed to a role
+BRIEF_CHARS = 150_000        # safety cap on the context digest handed to a role
 
 
 async def edit_self(ctx: EditContext) -> EditResult:

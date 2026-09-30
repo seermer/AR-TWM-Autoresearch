@@ -172,11 +172,36 @@ def test_check_roles_builds_every_role_and_the_selftest_uses_it(tmp_path, monkey
     assert any("coder.md" in e for e in selftest(str(copy)))
 
 
-def test_brief_puts_the_lineage_last_so_a_cut_keeps_the_small_keys(monkeypatch):
+def _lineage(depth):
+    node = {"status": "scored", "score": 0.7, "component": "prompts", "edit": {"summary": "[prompts] x\n\ncoder text"},
+            "data": {"d": {"format": "video_caption_camera", "clips": 8, "weight": 1.0}}, "recipe": {"optimizer.lr": 1e-4},
+            "aggregates": {"dimensions": {"quality": 0.7}, "strata": {"category": {"Urban": 0.7}},
+                           "metrics": {"aesthetic_quality": 0.6}}, "process": {"phases": {"train_s": 600}}}
+    return [{"node_id": "root", "score": 0.6, "status": "scored", "aggregates": node["aggregates"]},
+            *[{**node, "node_id": f"n{i}"} for i in range(1, depth)]]
+
+
+def test_the_digest_describes_the_recent_lineage_and_keeps_the_root_as_baseline():
+    from ar_contract.models import RecipeContext
+    from agent.briefing import LINEAGE_SHOWN, recipe_context
+    ctx = RecipeContext(nodes_remaining=1, attempt=2, max_attempts=3, lineage=_lineage(100), n_gpus=4,
+                        tunable_rules={"optimizer.lr": {"type": "float", "min": 0, "max": None}},
+                        recipe_guide={"optimizer.lr": {"base": 1e-4, "meaning": "peak rate"}},
+                        resolution_allowlist=[[416, 736]], lora_allowlist=[[64, 64]], format_rules="rules text",
+                        retry={"kind": "train", "log_tail": "oom\nline", "data_commit": "c1"})
+    text = recipe_context(ctx, [{"plan": {"hypothesis": "h"}, "report": "r"}])
+    assert text.index("## Retry") < text.index("## Recipe") < text.index("## Lineage")      # small sections first
+    assert "```\noom\nline\n```" in text and '"hypothesis": "h"' in text
+    assert text.count("\n### n") == LINEAGE_SHOWN and "### n99:" in text and "### n89:" not in text
+    assert "|  | root | n90 | n91 |" in text                    # score tables: the root, then the last 10
+    assert len(text) < 40_000                                   # the same size at any depth
+
+
+def test_brief_marks_a_cut_and_points_to_the_full_context(monkeypatch):
     from agent import orchestration
-    monkeypatch.setattr(orchestration, "BRIEF_CHARS", 60)
-    out = orchestration.brief({"retry": {"kind": "gate"}, "lineage": ["x" * 100]})
-    assert '"retry": {"kind": "gate"}' in out and out.endswith("/context/context.json]\n</context>")
+    monkeypatch.setattr(orchestration, "BRIEF_CHARS", 20)
+    out = orchestration.brief("x" * 100)
+    assert out.startswith("<context>") and out.endswith("/context/context.json]\n</context>")
 
 
 def test_replans_stop_at_the_round_limit():
@@ -427,7 +452,7 @@ def test_improve_recipe_full_flow(kernel, tmp_path):
     tasks = {str(m["content"]) for e in rec.read_events("n-recipe") if e["type"] == "llm.request"
              for m in rec.load_payload(e["payload"])["body"]["messages"] if m.get("role") == "user"}
     first = [t for t in tasks if t.startswith("<plan>")]
-    assert first and all('"resolution_allowlist": [[352, 640]]' in t for t in first)
+    assert first and all("Resolutions (height x width): 352x640." in t for t in first)
     assert any(t.startswith("<engineer_report>\ndownloads are disabled") for t in tasks)      # back to the planner
     assert any(t.startswith("The planner revised the plan.") and "pool clips suffice" in t for t in tasks)
     rounds = json.loads((tmp_path / "ws" / "plans.json").read_text())
@@ -520,13 +545,6 @@ def test_knowledge_files_start_with_their_name_and_when_to_use_them():
 def test_every_role_prompt_points_to_the_knowledge_index():
     for name in ("planner", "data_engineer", "edit_planner", "coder"):
         assert "read the knowledge files whose descriptions match" in (SEED / "agent" / "prompts" / f"{name}.md").read_text()
-
-
-def test_brief_marks_a_cut_and_closes_its_block(monkeypatch):
-    from agent import orchestration
-    monkeypatch.setattr(orchestration, "BRIEF_CHARS", 20)
-    out = orchestration.brief({"lineage": "x" * 100})
-    assert out.startswith("<context>") and out.endswith("</context>") and "[truncated:" in out
 
 
 def test_prompts_and_knowledge_have_no_wrapped_commands_or_dated_notes():
