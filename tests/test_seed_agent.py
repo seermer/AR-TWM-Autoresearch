@@ -287,6 +287,18 @@ def _tool_outputs(rec, node) -> list[str]:
     return out
 
 
+def _panel_chats(rec, node, phase) -> list[tuple[str, list[dict]]]:
+    """(role, chat items) per conversation, as the run panel builds them."""
+    from panel.chat import chains, chat_items, infer_role, request_messages, segments, text_of
+    prompts = {p.stem: p.read_text() for p in (SEED / "agent" / "prompts").glob("*.md")}
+    out = []
+    for chain in chains(segments(rec.read_events(node), node, phase, 1), rec.load_payload):
+        system = next(text_of(m["content"]) for m in request_messages(rec.load_payload(chain[0].calls[0].request))
+                      if m.get("role") == "system")
+        out.append((infer_role(system, prompts), chat_items(chain, rec.load_payload, awaiting=False)))
+    return out
+
+
 def _tools_of(rec, node, system_start) -> set[str]:
     """The tools offered in the requests of the role whose system prompt starts with `system_start`."""
     names = set()
@@ -354,6 +366,13 @@ def test_improve_recipe_full_flow(kernel, tmp_path):
     planner_tools = _tools_of(rec, "n-recipe", "# Role\nYou plan the training-data work")
     assert {"hf_search", "data_query", "read_file", "arxiv_search"} <= planner_tools
     assert not {"write_file", "run_command", "hf_download", "data_ingest", "data_commit"} & planner_tools
+    # The panel shows one conversation per role, each holding all of its rounds.
+    chats = _panel_chats(rec, "n-recipe", "improve_recipe")
+    assert [role for role, _ in chats] == ["planner", "data_engineer"]
+    planner_users = [i["text"] for i in chats[0][1] if i["kind"] == "user"]
+    assert planner_users[0].startswith("<context>") and planner_users[-1].startswith("<engineer_report>")
+    engineer_users = [i["text"] for i in chats[1][1] if i["kind"] == "user"]
+    assert engineer_users[0].startswith("<plan>") and engineer_users[-1].startswith("The planner revised the plan.")
 
 
 def test_edit_self_plans_exactly_one_component(kernel, tmp_path):
@@ -369,6 +388,7 @@ def test_edit_self_plans_exactly_one_component(kernel, tmp_path):
     outputs = _tool_outputs(rec, "n-edit")
     assert any("Error invoking tool 'submit_edit_plan'" in o and "component" in o for o in outputs)
     assert any("The self-test failed" in o and "exactly one parameter" in o for o in outputs)   # submit refused
+    assert [role for role, _ in _panel_chats(rec, "n-edit", "edit_self")] == ["edit_planner", "coder"]
     planner_tools = _tools_of(rec, "n-edit", "# Role\nYou plan one improvement")
     assert {"read_file", "list_dir", "arxiv_search", "arxiv_read"} <= planner_tools
     assert not {"write_file", "edit_file", "run_command"} & planner_tools
