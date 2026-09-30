@@ -161,7 +161,9 @@ generators:                       # rollout_* GPU jobs; a variant is enabled onl
     variants: {distilled: {enabled: true, peak_rss_gib: 40}, dev: {enabled: false, peak_rss_gib: 40}}
     quantization: fp8-cast        # 24 GB cards: fp8-cast + CPU offload, one GPU per worker (Plan 3 fact 7)
     offload: cpu
-    host_reserve_gib: 60          # workers = min(GPUs, items, floor((MemAvailable - this) / peak_rss_gib)),
+    # host_reserve_gib also holds the ~36 GiB of shared mmapped weights, which MemAvailable counts as
+    # free: at 60, 4 workers thrashed page cache and systemd-oomd killed the loop (2026-09-30).
+    host_reserve_gib: 100         # workers = min(GPUs, items, floor((MemAvailable - this) / peak_rss_gib)),
     workers: null                 # checked at job start; fails only below 1. Optional cap on the GPU count.
     frames: [121, 241]            # [default, max]; 8k+1
     resolutions: [[576, 1024]]    # [height, width], each divisible by 64 (two-stage), 16:9

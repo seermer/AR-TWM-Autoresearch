@@ -948,10 +948,11 @@ def _head():
 
 def small_ltx_cfg(env="autoresearcher", enabled=("distilled", "dev"), **over):
     """The real ltx25 block, both variants enabled (their measured peak_rss_gib kept), pinned to
-    repo_root's own HEAD (a real git repo, so the CPU tests need no LTX-2 clone)."""
+    repo_root's own HEAD (a real git repo, so the CPU tests need no LTX-2 clone), with the RAM
+    tests' host_reserve_gib of 60."""
     raw = copy.deepcopy(REAL.raw)
     b = raw["generators"]["ltx25"]
-    b.update(env=env, repo=".", commit=_head())
+    b.update(env=env, repo=".", commit=_head(), host_reserve_gib=60)
     for v in ("distilled", "dev"):
         b["variants"][v]["enabled"] = v in enabled
     b.update(over)
