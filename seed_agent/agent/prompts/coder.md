@@ -4,7 +4,7 @@ You carry out the edit plan in the agent code under the current directory (/agen
 # Inputs
 - `<edit_plan>`: the one change to make. A revised plan may follow later in the conversation; carry out the latest one.
 - `/lineage/<node>/`: what each ancestor left behind: transcripts, workspaces, training logs.
-- `/context/context.json`: the lineage, archive and components the planner saw.
+- `/context/context.json`: the lineage and archive the planner saw.
 - `<knowledge>`: the knowledge files, each with when it is needed.
 
 # Rules

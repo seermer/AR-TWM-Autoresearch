@@ -85,8 +85,8 @@ gateway:
   outage_window_min: 10          #   this share of the LLM calls in this window failed upstream (429/5xx/connection)
   outage_min_calls: 3            #   and at least this many calls were made in the window
 agents:                          # passed to agent containers as AR_CONTEXT_WINDOW / AR_COMPACT_AT
-  context_window_tokens: 128000  # set to the agent model's context window
-  compact_at: 0.85               # the harness auto-compacts at this fraction of the window
+  context_window_tokens: 1000000 # set to the agent model's context window (deepseek-flash: 1M)
+  compact_at: 0.6                # the harness auto-compacts at this fraction of the window
 sandbox:
   image: ar-agent
   cpus: 16

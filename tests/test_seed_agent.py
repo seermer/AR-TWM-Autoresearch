@@ -105,9 +105,78 @@ def test_read_file_shows_a_small_head_of_a_large_file_and_reads_line_ranges(tmp_
     assert read.invoke({"path": "big.txt", "offset": 10, "limit": 2}) == "[lines 11-12 of 20000]\nline 10\nline 11\n"
 
 
-def test_planners_file_tools_are_read_only(tmp_path):
+def test_discarded_changes_restores_the_tree_but_keeps_logs(tmp_path):
+    from agent.tools import KEEP_BYTES, discarded_changes
+    (tmp_path / "keep").mkdir()
+    (tmp_path / "keep" / "a.txt").write_text("old")
+    (tmp_path / "gone.txt").write_text("deleted, then back")
+    (tmp_path / "link").symlink_to("keep/a.txt")
+    (tmp_path / "big.bin").write_bytes(b"0" * (KEEP_BYTES + 1))
+    with discarded_changes(str(tmp_path), keep=(str(tmp_path / "tool_output"),)):
+        (tmp_path / "keep" / "a.txt").write_text("new")
+        (tmp_path / "gone.txt").unlink()
+        (tmp_path / "link").unlink()
+        (tmp_path / "new" / "deep").mkdir(parents=True)
+        (tmp_path / "new" / "deep" / "x.txt").write_text("x")
+        (tmp_path / "keep" / "y.txt").write_text("y")
+        (tmp_path / "big.bin").write_bytes(b"1")
+        (tmp_path / "tool_output").mkdir()
+        (tmp_path / "tool_output" / "cmd.log").write_text("log")
+    assert (tmp_path / "keep" / "a.txt").read_text() == "old"
+    assert (tmp_path / "gone.txt").read_text() == "deleted, then back"
+    assert (tmp_path / "link").is_symlink() and (tmp_path / "link").read_text() == "old"
+    assert not (tmp_path / "new").exists() and not (tmp_path / "keep" / "y.txt").exists()
+    assert (tmp_path / "big.bin").read_bytes() == b"1"          # too large to keep a copy of
+    assert (tmp_path / "tool_output" / "cmd.log").read_text() == "log"
+
+
+def test_run_command_timeout_kills_what_the_shell_started(tmp_path, monkeypatch):
+    import time
     from agent.tools import make_file_tools
-    assert {t.name for t in make_file_tools(str(tmp_path), writable=False)} == {"read_file", "list_dir"}
+    monkeypatch.setenv("AR_WORKSPACE", str(tmp_path))
+    run = {t.name: t for t in make_file_tools(str(tmp_path))}["run_command"]
+    out = run.invoke({"command": "(sleep 3; touch late.txt) & wait", "timeout_s": 1})
+    assert out.startswith("timed out after 1s")
+    time.sleep(3)
+    assert not (tmp_path / "late.txt").exists()
+
+
+def test_snap_timed_prompts_refuses_overlaps_and_names_dropped_segments():
+    from agent.tools import snap_segments, snap_timed_prompts
+    with pytest.raises(ValueError, match="overlap"):
+        snap_segments([{"time_range_s": [0, 3], "prompt": "a"}, {"time_range_s": [2.9, 8], "prompt": "c"}], 8)
+    out = snap_timed_prompts.invoke({"segments_json": json.dumps(
+        [{"time_range_s": [0.0, 1.0], "prompt": "a"}, {"time_range_s": [1.0, 1.1], "prompt": "b"},
+         {"time_range_s": [1.1, 6.0], "prompt": "c"}]), "duration": 6.0})
+    assert out.endswith('Dropped, shorter than a round after snapping: ["b"]')
+
+
+def test_long_tool_results_go_to_a_file(tmp_path, monkeypatch):
+    from agent.harness import TOOL_RESULT_LIMIT, TOOL_RESULT_SHOWN, cap_result
+    monkeypatch.setenv("AR_WORKSPACE", str(tmp_path))
+    assert cap_result("t", "short") == "short"
+    text = "".join(f"{i}\n" for i in range(TOOL_RESULT_LIMIT))
+    out = cap_result("data_query", text)
+    [saved] = (tmp_path / "tool_output").glob("data_query-*.txt")
+    assert saved.read_text() == text and str(saved) in out and len(out) < TOOL_RESULT_SHOWN + 500
+    assert out.split("\n", 2)[1] == "0" and out.endswith(text[-100:])          # head and tail
+
+
+def test_check_roles_builds_every_role_and_the_selftest_uses_it(tmp_path, monkeypatch):
+    monkeypatch.setenv("AR_TOKEN", "t")
+    from agent.orchestration import check_roles, selftest
+    check_roles()
+    copy = tmp_path / "copy"
+    shutil.copytree(SEED, copy)
+    (copy / "agent" / "prompts" / "coder.md").unlink()
+    assert any("coder.md" in e for e in selftest(str(copy)))
+
+
+def test_brief_puts_the_lineage_last_so_a_cut_keeps_the_small_keys(monkeypatch):
+    from agent import orchestration
+    monkeypatch.setattr(orchestration, "BRIEF_CHARS", 60)
+    out = orchestration.brief({"retry": {"kind": "gate"}, "lineage": ["x" * 100]})
+    assert '"retry": {"kind": "gate"}' in out and out.endswith("/context/context.json]\n</context>")
 
 
 def test_replans_stop_at_the_round_limit():
@@ -160,7 +229,8 @@ def test_edit_components_match_the_contract():
         assert (SEED / where.split(" ")[0].split("*")[0]).exists(), f"{component} -> {where}"
 
 
-def test_selftest_passes_on_the_seed_and_catches_a_broken_entry(tmp_path):
+def test_selftest_passes_on_the_seed_and_catches_a_broken_entry(tmp_path, monkeypatch):
+    monkeypatch.setenv("AR_TOKEN", "t")                  # set in every container; building roles needs it
     from agent.orchestration import selftest
     copy = tmp_path / "copy"
     shutil.copytree(SEED, copy)
@@ -188,21 +258,22 @@ def _call(name, args):
 def _scripts():
     from ar_kernel.gateway.mock import message
     recipe = [
-        [_call("submit_plan", {"hypotheses": ["more walking clips"]})],            # invalid: no actions
-        [_call("submit_plan", {"hypotheses": ["more walking clips"], "actions": ["download walking clips"]})],
+        [_call("submit_plan", {"hypothesis": "more walking clips"})],               # invalid: no actions
+        [_call("submit_plan", {"hypothesis": "more walking clips", "actions": ["download walking clips"]})],
         [message("planned")],
         [_call("data_query", {"filter": {"format": "video_caption_camera"}}), _call("no_such_tool", {}),
          _call("hf_download", {"repo": "x/y", "revision": "main", "patterns": ["*.mp4"]})],
         [_call("request_replan", {"report": "downloads are disabled; the pool has clips"})],
         [message("asked for a new plan")],
-        [_call("submit_plan", {"hypotheses": ["pool clips suffice"], "actions": ["commit the pool clips"]})],
+        [_call("submit_plan", {"hypothesis": "pool clips suffice", "actions": ["commit the pool clips"]})],
         [message("replanned")],
         [_call("submit_data_and_recipe", {"data_commit": C0, "notes": "pool clips", "rationale": "fits the data",
                                           "recipe": {"optimizer.max_steps": 200.4, "optimizer.lr": 1e-5}})],
         [message("done")],
     ]
     edit = [
-        [_call("read_file", {"path": "agent/prompts/planner.md"})],
+        [_call("read_file", {"path": "agent/prompts/planner.md"}),       # planning may try things out ...
+         _call("run_command", {"command": "echo junk >> agent/prompts/coder.md && touch agent/stray.py"})],
         [_call("submit_edit_plan", {"component": "everything", "change": "x", "files": [],
                                     "rationale": "r", "expected_effect": "e"})],   # invalid component
         [_call("submit_edit_plan", {"component": "prompts", "change": "ask for posed clips first",
@@ -360,12 +431,12 @@ def test_improve_recipe_full_flow(kernel, tmp_path):
     assert any(t.startswith("<engineer_report>\ndownloads are disabled") for t in tasks)      # back to the planner
     assert any(t.startswith("The planner revised the plan.") and "pool clips suffice" in t for t in tasks)
     rounds = json.loads((tmp_path / "ws" / "plans.json").read_text())
-    assert [r["plan"]["hypotheses"] for r in rounds] == [["more walking clips"], ["pool clips suffice"]]
+    assert [r["plan"]["hypothesis"] for r in rounds] == ["more walking clips", "pool clips suffice"]
     assert rounds[0]["report"].startswith("downloads are disabled") and "report" not in rounds[1]
-    assert "more walking clips" in body["result"]["rationale"] and "pool clips suffice" in body["result"]["rationale"]
+    assert "pool clips suffice" in body["result"]["rationale"]                  # the final plan
     planner_tools = _tools_of(rec, "n-recipe", "# Role\nYou plan the training-data work")
-    assert {"hf_search", "data_query", "read_file", "arxiv_search"} <= planner_tools
-    assert not {"write_file", "run_command", "hf_download", "data_ingest", "data_commit"} & planner_tools
+    assert {"hf_search", "data_query", "read_file", "run_command", "arxiv_search"} <= planner_tools
+    assert not {"hf_download", "data_ingest", "data_commit", "caption_videos"} & planner_tools
     # The panel shows one conversation per role, each holding all of its rounds.
     chats = _panel_chats(rec, "n-recipe", "improve_recipe")
     assert [role for role, _ in chats] == ["planner", "data_engineer"]
@@ -383,6 +454,10 @@ def test_edit_self_plans_exactly_one_component(kernel, tmp_path):
     assert body["result"]["summary"].startswith("[prompts] ask for posed clips first")
     assert "prefer clips with poses" in body["result"]["summary"]
     assert "Prefer clips with poses." in (agent / "agent" / "prompts" / "planner.md").read_text()
+    # ... but what the planner changed is undone before the coder starts; its command log stays
+    assert (agent / "agent" / "prompts" / "coder.md").read_text() == (SEED / "agent" / "prompts" / "coder.md").read_text()
+    assert not (agent / "agent" / "stray.py").exists()
+    assert list((tmp_path / "ws" / "tool_output").glob("run_command-*.log"))
     [round_] = json.loads((tmp_path / "ws" / "plans.json").read_text())
     assert round_["plan"]["component"] == "prompts" and "report" not in round_
     outputs = _tool_outputs(rec, "n-edit")
@@ -390,8 +465,7 @@ def test_edit_self_plans_exactly_one_component(kernel, tmp_path):
     assert any("The self-test failed" in o and "exactly one parameter" in o for o in outputs)   # submit refused
     assert [role for role, _ in _panel_chats(rec, "n-edit", "edit_self")] == ["edit_planner", "coder"]
     planner_tools = _tools_of(rec, "n-edit", "# Role\nYou plan one improvement")
-    assert {"read_file", "list_dir", "arxiv_search", "arxiv_read"} <= planner_tools
-    assert not {"write_file", "edit_file", "run_command"} & planner_tools
+    assert {"read_file", "list_dir", "run_command", "arxiv_search", "arxiv_read"} <= planner_tools
 
 
 @pytest.mark.docker
@@ -452,7 +526,7 @@ def test_brief_marks_a_cut_and_closes_its_block(monkeypatch):
     from agent import orchestration
     monkeypatch.setattr(orchestration, "BRIEF_CHARS", 20)
     out = orchestration.brief({"lineage": "x" * 100})
-    assert out.startswith("<context>") and out.endswith("</context>") and "[truncated]" in out
+    assert out.startswith("<context>") and out.endswith("</context>") and "[truncated:" in out
 
 
 def test_prompts_and_knowledge_have_no_wrapped_commands_or_dated_notes():

@@ -14,7 +14,7 @@ _MEANING = {
     "optimizer.grad_accum_steps": "Micro-batches per optimizer step (the effective batch per GPU).",
     "data.overall_caption_prob": ("Probability of using the clip's overall caption instead of its segment prompts. "
                                   "Not in the base recipe file: the trainer default applies. Only matters for "
-                                  "timed-prompt datasets."),
+                                  "timed-prompt datasets in segment mode; per_chunk mode never uses the caption."),
     "sample.height": "Training frame height; must pair with sample.width from the allowlist.",
     "sample.width": "Training frame width; must pair with sample.height from the allowlist.",
     "lora.rank": "LoRA rank; must pair with lora.alpha from the allowlist.",

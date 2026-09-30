@@ -6,12 +6,15 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import shutil
+import signal
 import subprocess
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from html.parser import HTMLParser
 from pathlib import Path
 from xml.etree import ElementTree
@@ -23,7 +26,8 @@ from pydantic import BaseModel
 
 # Past a limit, show much less than the limit: an output that large is better searched than read.
 READ_LIMIT, READ_SHOWN = 100_000, 20_000          # read_file: chars, head shown
-OUTPUT_LIMIT, OUTPUT_SHOWN = 10_000, 3_000        # run_command: chars, tail shown
+OUTPUT_LIMIT, OUTPUT_SHOWN = 20_000, 6_000        # run_command: chars, tail shown
+KEEP_BYTES = 1 << 20               # discarded_changes restores pre-existing files up to this size
 FIRST_ROUND_END = 25 / 24          # the 25 history frames
 ROUND = 32 / 24                    # one rollout round
 
@@ -92,7 +96,7 @@ def read_text(path: Path, offset: int = 0, limit: int | None = None) -> str:
     return text
 
 
-def make_file_tools(root: str, *, writable: bool = True) -> list:
+def make_file_tools(root: str) -> list:
     @tool
     def read_file(path: str, offset: int = 0, limit: int | None = None) -> str:
         """Read a text file (absolute, or relative to the tool root). `offset` and `limit` select lines."""
@@ -128,23 +132,74 @@ def make_file_tools(root: str, *, writable: bool = True) -> list:
     @tool
     def run_command(command: str, timeout_s: int = 600) -> str:
         """Run a shell command in the tool root (ffmpeg, ffprobe, python, ...). Returns the exit code and the output tail."""
+        # Its own process group, so a timeout also kills what the shell started (python, ffmpeg, ...).
+        proc = subprocess.Popen(["bash", "-lc", command], cwd=root, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, start_new_session=True)
         try:
-            r = subprocess.run(["bash", "-lc", command], cwd=root, capture_output=True, text=True,
-                               timeout=min(int(timeout_s), 3600))
-            status, output = f"exit {r.returncode}", r.stdout + r.stderr
-        except subprocess.TimeoutExpired as exc:
+            stdout, stderr = proc.communicate(timeout=min(int(timeout_s), 3600))
+            status = f"exit {proc.returncode}"
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            stdout, stderr = proc.communicate()
             status = f"timed out after {timeout_s}s"
-            output = "".join(p.decode(errors="replace") if isinstance(p, bytes) else p or ""
-                             for p in (exc.stdout, exc.stderr))
+        output = stdout + stderr
         log = _keep_output(command, status, output)
         if len(output) <= OUTPUT_LIMIT:
             return f"{status}\n{output}"
         return (f"{status}\n[Long output: {len(output)} chars. Only the last {OUTPUT_SHOWN} are shown; the full "
                 f"output is in {log}.]\n{output[-OUTPUT_SHOWN:]}")
 
-    if not writable:
-        return [read_file, list_dir]
     return [read_file, list_dir, write_file, edit_file, run_command]
+
+
+def _entries(root: str, keep: set[Path]) -> tuple[set[Path], set[Path]]:
+    """(directories, everything else) under root, never following a link, skipping the `keep` dirs."""
+    dirs, others = set(), set()
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames if Path(dirpath) / name not in keep]
+        for name in dirnames:
+            path = Path(dirpath) / name
+            (others if path.is_symlink() else dirs).add(path)
+        others.update(Path(dirpath) / name for name in filenames)
+    return dirs, others
+
+
+@contextmanager
+def discarded_changes(*roots: str, keep: tuple[str, ...] = ()):
+    """Undo, after the block, what it changed under roots: new files and directories are removed, and
+    changed or deleted files and links come back. The `keep` directories (logs) are left alone. A
+    pre-existing file over KEEP_BYTES (a video) is not copied, so it is left as the block left it."""
+    skip = {Path(k) for k in keep}
+    kept: dict[Path, tuple] = {}
+    dirs: set[Path] = set()
+    for root in roots:
+        root_dirs, others = _entries(root, skip)
+        dirs |= root_dirs
+        for path in others:
+            if path.is_symlink():
+                kept[path] = ("link", os.readlink(path))
+            elif path.is_file() and path.stat().st_size <= KEEP_BYTES:
+                kept[path] = ("file", path.read_bytes())
+            else:
+                kept[path] = ("large", None)
+    try:
+        yield
+    finally:
+        for root in roots:
+            root_dirs, others = _entries(root, skip)
+            for path in sorted(others - set(kept)):
+                path.unlink(missing_ok=True)
+            for path in sorted(root_dirs - dirs, reverse=True):         # children before parents
+                shutil.rmtree(path, ignore_errors=True)
+        for path in sorted(dirs):
+            path.mkdir(parents=True, exist_ok=True)
+        for path, (kind, value) in kept.items():
+            if kind == "link" and not (path.is_symlink() and os.readlink(path) == value):
+                path.unlink(missing_ok=True)
+                path.symlink_to(value)
+            elif kind == "file" and (path.is_symlink() or not path.is_file() or path.read_bytes() != value):
+                path.unlink(missing_ok=True)
+                path.write_bytes(value)
 
 
 # ---- arXiv ----
@@ -235,13 +290,16 @@ ARXIV_TOOLS = [arxiv_search, arxiv_read]
 # ---- timed prompts ----
 
 def snap_segments(segments: list[dict], duration: float) -> list[dict]:
-    """Snap internal boundaries to 25/24 + k*32/24 s (per_chunk rule), keep the ends,
-    make segments contiguous, and drop any that collapse to zero length."""
+    """Snap internal boundaries to 25/24 + k*32/24 s (per_chunk rule), stretch the first and last segment
+    to the clip's ends, close gaps, and drop any segment that collapses to zero length. Overlaps raise."""
     bounds, t = [], FIRST_ROUND_END
     while t < duration:
         bounds.append(t)
         t += ROUND
     ordered = sorted(segments, key=lambda s: s["time_range_s"][0])
+    for a, b in zip(ordered, ordered[1:]):
+        if b["time_range_s"][0] < a["time_range_s"][1] - 1e-9:
+            raise ValueError(f"segments overlap: {a['prompt']!r} ends after {b['prompt']!r} starts")
     cuts = [0.0]
     for seg in ordered[:-1]:
         end = seg["time_range_s"][1]
@@ -254,8 +312,14 @@ def snap_segments(segments: list[dict], duration: float) -> list[dict]:
 @tool
 def snap_timed_prompts(segments_json: str, duration: float) -> str:
     """Snap timed-prompt segment boundaries to rollout-round boundaries. Input and output: a JSON list of
-    {"time_range_s": [start, end], "prompt": str}."""
-    return json.dumps(snap_segments(json.loads(segments_json), duration))
+    {"time_range_s": [start, end], "prompt": str}. Overlapping segments are refused, gaps are closed, and a
+    segment that shrinks to nothing is dropped and named."""
+    segments = json.loads(segments_json)
+    snapped = snap_segments(segments, duration)
+    kept = [s["prompt"] for s in snapped]
+    dropped = [s["prompt"] for s in segments if s["prompt"] not in kept]
+    out = json.dumps(snapped)
+    return f"{out}\nDropped, shorter than a round after snapping: {json.dumps(dropped)}" if dropped else out
 
 
 # ---- kernel tools over one MCP session (MCP 2.x: is_error, structured_content, input_schema) ----

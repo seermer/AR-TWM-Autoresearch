@@ -5,12 +5,12 @@ import os
 from ar_contract.models import EditContext, EditResult, RecipeContext, RecipeResult
 
 MODEL = os.environ.get("AR_DEFAULT_MODEL", "mock-model")
-CONTEXT_WINDOW = int(os.environ.get("AR_CONTEXT_WINDOW", "128000"))   # the model's window, in tokens
-COMPACT_AT = float(os.environ.get("AR_COMPACT_AT", "0.85"))           # auto-compact threshold
+CONTEXT_WINDOW = int(os.environ.get("AR_CONTEXT_WINDOW", "1000000"))   # the model's window, in tokens
+COMPACT_AT = float(os.environ.get("AR_COMPACT_AT", "0.6"))           # auto-compact threshold
 AGENT_ROOT = os.environ.get("AR_AGENT_DIR", "/agent")
 WORKSPACE = os.environ.get("AR_WORKSPACE", "/workspace")
 MAX_ROUNDS = 4               # plans per phase: the first and up to three replans the engineer asks for
-BRIEF_CHARS = 60_000         # cap on the JSON context handed to a role
+BRIEF_CHARS = 150_000        # cap on the JSON context handed to a role
 
 
 async def edit_self(ctx: EditContext) -> EditResult:

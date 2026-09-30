@@ -14,7 +14,7 @@ description: Use when looking into what earlier nodes did: their transcripts, wo
 - `attempts/edit_self-<k>/agent/`: the agent code as that attempt left it. `workspace/plans.json` holds every plan of the attempt, with the coder's report when it asked for a new one.
 - `attempts/improve_recipe-<k>/workspace/`: the data engineer's files: scripts, `tool_output/run_command-*.log` (full output of every command), `plans.json` (every plan, with the engineer's report when it asked for a new one), `result.json`.
 - `attempts/improve_recipe-<k>/train/train.log`: the full training log. Each `[Train] step=` line is one optimizer step with the dataset `source`, `sigma`, `loss`, `grad` and `lr`; its `time=` covers only the last micro-batch of the step. The loss depends mostly on `sigma`, so compare losses at similar sigma.
-- `attempts/improve_recipe-<k>/train_config.yaml`: the full training config that ran. `recipe_check/` holds the kernel's gate output.
+- `attempts/improve_recipe-<k>/train_config.yaml`: the full training config that ran.
 - `attempts/improve_recipe-<k>/view/<dataset>/`: the data commit as the trainer saw it: captions and poses per clip.
 - `attempts/<phase>-<k>/context/context.json`: the complete context that attempt received, never truncated.
 - `contract/attempt-<k>/`: the kernel's checks of the edited code.

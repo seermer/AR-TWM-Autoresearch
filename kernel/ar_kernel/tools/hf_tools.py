@@ -1,4 +1,4 @@
-"""hf_search / hf_list_files / hf_download (spec 10). The kernel downloads; the container has no network."""
+"""hf_search / hf_list_files / hf_download (spec 10). The kernel downloads, with its own token and size caps."""
 from __future__ import annotations
 
 import fnmatch

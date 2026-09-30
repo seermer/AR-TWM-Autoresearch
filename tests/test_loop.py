@@ -76,6 +76,7 @@ def test_training_failure_goes_back_to_the_agent_then_train_failed(make_loop):
     recipes = [r for r in script.retries if r[0] == "improve_recipe"]
     assert [r[3]["kind"] if r[3] else None for r in recipes] == [None, "train", "train"]
     assert "CUDA out of memory" in recipes[1][3]["log_tail"]
+    assert recipes[1][3]["data_commit"] == "c" * 64 and recipes[1][3]["recipe"] == {"optimizer.max_steps": 2}
     assert NodeStore(loop.ctx.conn).get("n1")["status"] == "train_failed"
 
 
@@ -104,7 +105,8 @@ def test_gate_failure_then_success(make_loop):
     loop = make(script)
     loop.run()
     recipes = [r for r in script.retries if r[0] == "improve_recipe"]
-    assert recipes[1][3] == {"kind": "gate", "failures": ["dataset d has 1 clips, fewer than 4 GPUs"]}
+    assert recipes[1][3] == {"kind": "gate", "failures": ["dataset d has 1 clips, fewer than 4 GPUs"],
+                             "data_commit": "c" * 64, "recipe": {"optimizer.max_steps": 2}, "rationale": "why"}
     assert NodeStore(loop.ctx.conn).get("n1")["status"] == "scored"
 
 

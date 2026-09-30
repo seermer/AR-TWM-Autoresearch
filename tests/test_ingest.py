@@ -131,6 +131,24 @@ def test_corrupt_video_is_rejected_and_the_batch_continues(tmp_path):
     assert events, "a rejected candidate must leave an ingest.rejected event"
 
 
+def test_a_checker_crash_rejects_only_its_candidate(tmp_path, monkeypatch):
+    from ar_kernel.data import ingest
+    from ar_kernel.data.checker import CheckerError
+    real = ingest.check_clip_formats
+    calls = []
+
+    def flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise CheckerError("checker bridge failed (rc=1)")
+        return real(*args, **kwargs)
+    monkeypatch.setattr(ingest, "check_clip_formats", flaky)
+    ing = _ingestor(tmp_path)
+    results = ing.ingest([_candidate(tmp_path, "a"), _candidate(tmp_path, "b", seconds=5.0)], node_id="n1")
+    assert not results[0].accepted and "checker bridge failed" in results[0].reasons[0]
+    assert results[1].accepted
+
+
 def test_rejected_candidate_files_are_returned_to_staging(tmp_path):
     """Quarantine is only for the duration of the checks; a rejected candidate's
     files go back where the agent staged them so it can inspect or fix them."""

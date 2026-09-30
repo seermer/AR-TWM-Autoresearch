@@ -2,9 +2,10 @@
 
 A role = a system prompt (+ the knowledge index) and a tool list, run on the harness. It returns its result
 by calling a submit tool; one that stops without submitting gets one reminder.
-Both phases are a planner/engineer loop: the planner (read-only tools) submits a plan, the engineer carries
-it out, then either finishes the phase or reports back for a new plan, up to MAX_ROUNDS plans. Each role
-keeps its conversation across rounds. The last plan is the final one; every plan is recorded.
+Both phases are a planner/engineer loop: the planner submits a plan, the engineer carries it out, then either
+finishes the phase or reports back for a new plan, up to MAX_ROUNDS plans. Each role keeps its conversation
+across rounds. The last plan is the final one; every plan is recorded. A planner has the same local tools as
+an engineer, but what it changes on disk is undone after each of its turns, and its kernel tools are read-only.
 - improve_recipe: planner -> data engineer, who builds the data commit and writes the recipe
   (recipe_check must pass before the submission is accepted).
 - edit_self: edit planner (ONE component) -> coder (the self-test must pass before the submission is accepted).
@@ -15,6 +16,7 @@ import ast
 import json
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from ar_contract.client import chat_model, mcp_session
@@ -25,7 +27,8 @@ from pydantic import BaseModel, Field
 
 from .entry import AGENT_ROOT, BRIEF_CHARS, COMPACT_AT, CONTEXT_WINDOW, MAX_ROUNDS, MODEL, WORKSPACE
 from .harness import build_react_agent
-from .tools import ARXIV_TOOLS, kernel_tools, make_file_tools, result_text, snap_timed_prompts, submit_tool
+from .tools import (ARXIV_TOOLS, discarded_changes, kernel_tools, make_file_tools, result_text, snap_timed_prompts,
+                    submit_tool)
 
 AGENT_PKG = Path(__file__).resolve().parent
 REMIND = ("You stopped without calling {tools}. Finish the task, then call {tools} with the result. "
@@ -64,25 +67,29 @@ def system_prompt(name: str) -> str:
     return f"{prompt.strip()}\n\n{block('knowledge', index)}"
 
 
-def local_tools(root: str, *, writable: bool = True) -> list:
-    return [*make_file_tools(root, writable=writable), *ARXIV_TOOLS]
+def local_tools(root: str) -> list:
+    return [*make_file_tools(root), *ARXIV_TOOLS]
 
 
 def brief(payload: dict) -> str:
-    """The JSON context for a role, capped at BRIEF_CHARS with a visible cut."""
+    """The JSON context for a role, capped at BRIEF_CHARS with a visible cut: callers put the small keys
+    first and the lineage last, so a cut only shortens the lineage."""
     text = json.dumps(payload, default=str)
     if len(text) > BRIEF_CHARS:
-        text = text[:BRIEF_CHARS] + " ...[truncated]"
+        text = text[:BRIEF_CHARS] + " ...[truncated: the full context is in /context/context.json]"
     return block("context", text)
 
 
 class Role:
     """One role on the harness. Its conversation continues across calls to run()."""
 
-    def __init__(self, name: str, tools: list, submissions: list) -> None:
+    def __init__(self, name: str, tools: list, submissions: list, discard: tuple[str, ...] = ()) -> None:
         self.submissions = submissions            # the boxes of its submit tools
+        self.discard = discard                    # dirs whose changes are undone after each run (planners)
         self.messages: list = []
-        self.agent = build_react_agent(chat_model(MODEL), tools, system_prompt(name),
+        model = chat_model(MODEL)
+        model.bind_tools(tools)                   # a broken tool schema fails here, not at the first call
+        self.agent = build_react_agent(model, tools, system_prompt(name),
                                        context_window=CONTEXT_WINDOW, compact_at=COMPACT_AT)
 
     def _submitted(self):
@@ -93,16 +100,17 @@ class Role:
         for box in self.submissions:
             box.value = None
         names = " or ".join(box.name for box in self.submissions)
-        for message in (task, REMIND.format(tools=names)):
-            state = await self.agent.ainvoke({"messages": [*self.messages, HumanMessage(content=message)]})
-            self.messages = state["messages"]
-            if self._submitted() is not None:
-                return self._submitted()
+        with discarded_changes(*self.discard, keep=(str(Path(WORKSPACE) / "tool_output"),)):
+            for message in (task, REMIND.format(tools=names)):
+                state = await self.agent.ainvoke({"messages": [*self.messages, HumanMessage(content=message)]})
+                self.messages = state["messages"]
+                if self._submitted() is not None:
+                    return self._submitted()
         raise RuntimeError(f"the role finished without calling {names}")
 
 
 async def ping() -> str:
-    """Contract smoke run: prove the wiring, do no work."""
+    """Contract smoke run: after building every role, one model call proves the wiring."""
     agent = build_react_agent(chat_model(MODEL), [], "Reply with the single word ok.",
                               context_window=CONTEXT_WINDOW, compact_at=COMPACT_AT)
     return (await agent.ainvoke({"messages": [HumanMessage(content="ping")]}))["messages"][-1].text
@@ -120,31 +128,46 @@ def replan_tool(rounds: list) -> tuple:
                        Replan, check)
 
 
-async def plan_and_engineer(planner: Role, plan, engineer: Role, done, replan, *, rounds: list, task: str,
-                            show, engineer_context: str | None, record: Path) -> None:
-    """Plan, carry out, and replan when the engineer asks, until the engineer finishes. Every plan (with
-    the engineer's report when it asked for a new one) is appended to `rounds` and saved to `record`."""
+@dataclass
+class Team:
+    planner: Role
+    plan: object                  # the submit boxes
+    engineer: Role
+    done: object
+    replan: object
+    rounds: list                  # every plan, with the engineer's report when it asked for a new one
+
+
+async def plan_and_engineer(team: Team, *, task: str, show, engineer_context: str | None, record: Path) -> None:
+    """Plan, carry out, and replan when the engineer asks, until the engineer finishes. Every round is
+    appended to team.rounds and saved to `record`."""
     while True:
-        await planner.run(task)
-        rounds.append({"plan": plan.value.model_dump()})
-        record.write_text(json.dumps(rounds, indent=1))
-        work = show(plan.value)
-        if engineer.messages:
+        await team.planner.run(task)
+        team.rounds.append({"plan": team.plan.value.model_dump()})
+        record.write_text(json.dumps(team.rounds, indent=1))
+        work = show(team.plan.value)
+        if team.engineer.messages:
             work = f"The planner revised the plan.\n\n{work}"
         elif engineer_context:
             work = f"{work}\n\n{engineer_context}"
-        if await engineer.run(work) is done:
+        if await team.engineer.run(work) is team.done:
             return
-        rounds[-1]["report"] = replan.value.report
-        record.write_text(json.dumps(rounds, indent=1))
-        task = f"{block('engineer_report', replan.value.report)}\n\n{REPLAN}"
+        team.rounds[-1]["report"] = team.replan.value.report
+        record.write_text(json.dumps(team.rounds, indent=1))
+        task = f"{block('engineer_report', team.replan.value.report)}\n\n{REPLAN}"
+
+
+def check_roles() -> None:
+    """Build every role of both phases (prompts, knowledge index, tool schemas) without calling a model."""
+    recipe_team(None, None, [])
+    edit_team()
 
 
 # ---- improve_recipe ----
 
 class DataPlan(BaseModel):
-    hypotheses: list[str] = Field(min_length=1, description="1-3 testable data hypotheses")
-    actions: list[str] = Field(min_length=1, description="concrete steps that test them")
+    hypothesis: str = Field(min_length=1, description="the one testable data hypothesis of this node")
+    actions: list[str] = Field(min_length=1, description="concrete steps that test it")
 
 
 class DataAndRecipe(BaseModel):
@@ -154,7 +177,7 @@ class DataAndRecipe(BaseModel):
     rationale: str = Field(min_length=1, description="why each changed key has its value")
 
 
-READ_ONLY_KERNEL_TOOLS = {"hf_search", "hf_list_files", "data_query"}
+PLANNING_KERNEL_TOOLS = {"hf_search", "hf_list_files", "data_query"}       # read-only: planning changes nothing
 
 
 def typed(recipe: dict, rules: dict) -> dict:
@@ -162,41 +185,47 @@ def typed(recipe: dict, rules: dict) -> dict:
             for key, value in recipe.items()}
 
 
+def recipe_team(ctx: RecipeContext | None, session, ktools: list) -> Team:
+    async def recipe_passes(result: DataAndRecipe) -> None:
+        check = json.loads(result_text(await session.call_tool("recipe_check", {
+            "recipe": typed(result.recipe, ctx.tunable_rules), "data_commit": result.data_commit})))
+        if not check.get("ok"):
+            raise ToolException(f"recipe_check failed: {check.get('failures')}")
+
+    plan_tool, plan = submit_tool("submit_plan", "Submit the data plan for this node.", DataPlan)
+    done_tool, done = submit_tool("submit_data_and_recipe", "Submit the data commit and the recipe to train on. "
+                                  "It is accepted only if recipe_check passes.", DataAndRecipe, recipe_passes)
+    rounds: list[dict] = []
+    replan_t, replan = replan_tool(rounds)
+    planner = Role("planner", [plan_tool, *[t for t in ktools if t.name in PLANNING_KERNEL_TOOLS],
+                               *local_tools(WORKSPACE)], [plan], discard=(WORKSPACE,))
+    engineer = Role("data_engineer", [*ktools, *local_tools(WORKSPACE), snap_timed_prompts, done_tool, replan_t],
+                    [done, replan])
+    return Team(planner, plan, engineer, done, replan, rounds)
+
+
 async def run_task(ctx: RecipeContext) -> RecipeResult:
     async with mcp_session() as session:
         ktools = await kernel_tools(session)
+        team = recipe_team(ctx, session, ktools)
         if ctx.dry_run:
             return RecipeResult(data_commit=ctx.parent_data_commit or "dry-run", recipe={},
-                                rationale=f"dry run: {len(ktools)} kernel tools, model said {await ping()!r}")
+                                rationale=f"dry run: roles built, {len(ktools)} kernel tools, "
+                                          f"model said {await ping()!r}")
+        record = Path(WORKSPACE) / "plans.json"             # carried to a retry with the workspace
+        previous = json.loads(record.read_text()) if ctx.retry and record.exists() else None
         context = brief({"rules": ctx.tunable_rules, "resolution_allowlist": ctx.resolution_allowlist,
-                         "lora_allowlist": ctx.lora_allowlist,        # first, so the length cap never cuts them
-                         "lineage": ctx.lineage, "archive": ctx.archive, "n_gpus": ctx.n_gpus,
+                         "lora_allowlist": ctx.lora_allowlist, "n_gpus": ctx.n_gpus,
                          "parent_data_commit": ctx.parent_data_commit, "parent_recipe": ctx.parent_recipe,
-                         "base_recipe": ctx.base_recipe, "recipe_guide": ctx.recipe_guide,
-                         "clip_pool_size": len(ctx.clip_pool), "tools": ctx.tools, "retry": ctx.retry,
-                         "format_rules": ctx.format_rules})
-
-        async def recipe_passes(result: DataAndRecipe) -> None:
-            check = json.loads(result_text(await session.call_tool("recipe_check", {
-                "recipe": typed(result.recipe, ctx.tunable_rules), "data_commit": result.data_commit})))
-            if not check.get("ok"):
-                raise ToolException(f"recipe_check failed: {check.get('failures')}")
-
-        plan_tool, plan = submit_tool("submit_plan", "Submit the data plan for this node.", DataPlan)
-        done_tool, done = submit_tool("submit_data_and_recipe", "Submit the data commit and the recipe to train "
-                                      "on. It is accepted only if recipe_check passes.", DataAndRecipe, recipe_passes)
-        rounds: list[dict] = []
-        replan_t, replan = replan_tool(rounds)
-        planner = Role("planner", [plan_tool, *[t for t in ktools if t.name in READ_ONLY_KERNEL_TOOLS],
-                                   *local_tools(WORKSPACE, writable=False)], [plan])
-        engineer = Role("data_engineer", [*ktools, *local_tools(WORKSPACE), snap_timed_prompts, done_tool, replan_t],
-                        [done, replan])
-        await plan_and_engineer(planner, plan, engineer, done, replan, rounds=rounds, task=context,
-                                         show=lambda p: block("plan", p.model_dump_json(indent=2)),
-                                         engineer_context=context, record=Path(WORKSPACE) / "plans.json")
-    r = done.value
+                         "tools": ctx.tools, "retry": ctx.retry, "previous_attempt_plans": previous,
+                         "format_rules": ctx.format_rules, "recipe_guide": ctx.recipe_guide,
+                         "base_recipe": ctx.base_recipe, "clip_pool_size": len(ctx.clip_pool),
+                         "archive": ctx.archive, "lineage": ctx.lineage})
+        await plan_and_engineer(team, task=context, show=lambda p: block("plan", p.model_dump_json(indent=2)),
+                                engineer_context=context, record=record)
+    r = team.done.value
     return RecipeResult(data_commit=r.data_commit, recipe=typed(r.recipe, ctx.tunable_rules),
-                        rationale=f"{r.rationale}\n\nPlans: {json.dumps(rounds)}\nData: {r.notes}")
+                        rationale=f"{r.rationale}\n\nPlan: {json.dumps(team.rounds[-1]['plan'])}\nData: {r.notes}")
 
 
 # ---- edit_self ----
@@ -214,8 +243,8 @@ class EditPlan(BaseModel):
 
 
 def selftest(root: str) -> list[str]:
-    """The contract's static and import checks, run locally so the agent can fix itself.
-    agent.orchestration is imported too: agent.entry imports it only when an entry point runs."""
+    """The contract's static and import checks, plus building every role, run locally so the agent can fix
+    itself. agent.orchestration is imported too: agent.entry imports it only when an entry point runs."""
     errors = []
     try:
         tree = ast.parse((Path(root) / "agent" / "entry.py").read_text())
@@ -227,19 +256,14 @@ def selftest(root: str) -> list[str]:
                 errors.append(f"agent/entry.py needs top-level {name}(ctx) with exactly one parameter")
     except (OSError, SyntaxError, ValueError, RecursionError) as exc:
         errors.append(f"agent/entry.py: {exc}")
-    r = subprocess.run([sys.executable, "-c", "import agent.entry, agent.orchestration"], cwd=root,
-                       capture_output=True, text=True, timeout=60)
+    r = subprocess.run([sys.executable, "-c", "import agent.entry, agent.orchestration as o; o.check_roles()"],
+                       cwd=root, capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
         errors.append(r.stderr[-3000:])
     return errors
 
 
-async def run_meta(ctx: EditContext) -> EditResult:
-    if ctx.dry_run:
-        return EditResult(summary=f"dry run: model said {await ping()!r}")
-    record = Path(WORKSPACE) / "plans.json"                 # carried to a retry with the workspace
-    previous = json.loads(record.read_text()) if ctx.retry and record.exists() else None
-
+def edit_team() -> Team:
     async def selftest_passes(_) -> None:
         errors = selftest(AGENT_ROOT)
         if errors:
@@ -251,13 +275,21 @@ async def run_meta(ctx: EditContext) -> EditResult:
                                   "only if the self-test passes.", EditSummary, selftest_passes)
     rounds: list[dict] = []
     replan_t, replan = replan_tool(rounds)
-    planner = Role("edit_planner", [plan_tool, *local_tools(AGENT_ROOT, writable=False)], [plan])
+    planner = Role("edit_planner", [plan_tool, *local_tools(AGENT_ROOT)], [plan], discard=(AGENT_ROOT, WORKSPACE))
     engineer = Role("coder", [*local_tools(AGENT_ROOT), done_tool, replan_t], [done, replan])
+    return Team(planner, plan, engineer, done, replan, rounds)
+
+
+async def run_meta(ctx: EditContext) -> EditResult:
+    team = edit_team()
+    if ctx.dry_run:
+        return EditResult(summary=f"dry run: roles built, model said {await ping()!r}")
+    record = Path(WORKSPACE) / "plans.json"                 # carried to a retry with the workspace
+    previous = json.loads(record.read_text()) if ctx.retry and record.exists() else None
     await plan_and_engineer(
-        planner, plan, engineer, done, replan, rounds=rounds, record=record, engineer_context=None,
-        task=brief({"components": COMPONENTS, "lineage": ctx.lineage, "archive": ctx.archive,
-                    "nodes_remaining": ctx.nodes_remaining, "retry": ctx.retry,
-                    "previous_attempt_plans": previous}),
+        team, record=record, engineer_context=None,
+        task=brief({"components": COMPONENTS, "nodes_remaining": ctx.nodes_remaining, "retry": ctx.retry,
+                    "previous_attempt_plans": previous, "archive": ctx.archive, "lineage": ctx.lineage}),
         show=lambda p: block("edit_plan", p.model_dump_json(indent=2), component=p.component))
-    p = plan.value
-    return EditResult(summary=f"[{p.component}] {p.change}\n\n{done.value.summary}", component=p.component)
+    p = team.plan.value
+    return EditResult(summary=f"[{p.component}] {p.change}\n\n{team.done.value.summary}", component=p.component)

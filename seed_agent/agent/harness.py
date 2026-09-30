@@ -6,7 +6,7 @@ with no middleware, no response_format and async tools:
   else one Send("tools", [call]) per tool call (parallel); tools -> model.
 Tool execution follows langgraph.prebuilt.ToolNode's default messages.
 
-Two deliberate differences from create_agent's default:
+Three deliberate differences from create_agent's default:
   1. A tool that raises is reported to the model as an error ToolMessage
      (create_agent re-raises and ends the run).
   2. Auto-compact: call_model estimates the context size before every model call
@@ -20,11 +20,16 @@ Two deliberate differences from create_agent's default:
      that append, maximizing prompt-cache hits. If the model calls a tool instead of
      writing the summary, the call is retried once with tool_choice="none" to force text.
      The history is then replaced by one user message -- a continuation preamble plus the
-     summary -- before the real model call runs on it.
+     summary -- before the real model call runs on it. An empty summary raises.
+  3. A text result longer than TOOL_RESULT_LIMIT is saved to /workspace/tool_output and the model gets
+     its head and tail with the file's path.
 """
 from __future__ import annotations
 
+import itertools
 import json
+import os
+import time
 from pathlib import Path
 from typing import Annotated, Any, TypedDict
 
@@ -47,6 +52,7 @@ TOOL_ERROR = "Error: {error}\n Please fix your mistakes."   # ToolNode's handle_
 TOOL_BLOCK_TYPES = {"text", "image_url", "image", "json", "search_result", "custom_tool_call_output",
                     "document", "file"}
 
+TOOL_RESULT_LIMIT, TOOL_RESULT_SHOWN = 100_000, 20_000     # chars
 CHARS_PER_TOKEN = 4          # no tokenizer offline (tiktoken downloads its encodings)
 # An image costs a bounded number of vision tokens however long its base64 is, so it is
 # counted as a fixed, generous estimate instead of by characters.
@@ -59,6 +65,22 @@ CONTINUATION = (
     "Continue the work from where it left off without asking any further questions. "
     "Resume directly: do not acknowledge the summary or recap what was happening."
 )
+
+
+_saved = itertools.count(1)
+
+
+def cap_result(name: str, text: str) -> str:
+    """A result past TOOL_RESULT_LIMIT: saved whole to a file; the model sees its head and tail."""
+    if len(text) <= TOOL_RESULT_LIMIT:
+        return text
+    path = (Path(os.environ.get("AR_WORKSPACE", "/workspace")) / "tool_output"
+            / f"{name}-{time.strftime('%Y%m%d-%H%M%S')}-{next(_saved):04d}.txt")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    half = TOOL_RESULT_SHOWN // 2
+    return (f"[Long result: {len(text)} chars. Only the first and last {half} are shown; the full result is in "
+            f"{path}.]\n{text[:half]}\n[...]\n{text[-half:]}")
 
 
 class ReactState(TypedDict):
@@ -91,6 +113,8 @@ async def run_tool(tools: dict[str, BaseTool], call: ToolCall) -> ToolMessage:
         return ToolMessage(TOOL_ERROR.format(error=repr(exc)), name=call["name"],
                            tool_call_id=call["id"], status="error")
     message.content = _content(message.content)
+    if isinstance(message.content, str):
+        message.content = cap_result(call["name"], message.content)
     return message
 
 
@@ -146,6 +170,8 @@ def build_react_agent(model: BaseChatModel, tools: list[BaseTool], system_prompt
             if reply.tool_calls and not reply.text.strip():
                 fallback = model.bind_tools(tools, tool_choice="none") if tools else model.bind()
                 reply = await fallback.ainvoke(prompt)
+            if not reply.text.strip():
+                raise RuntimeError("compaction produced no summary")
             messages = [HumanMessage(content=CONTINUATION.format(summary=reply.text.strip()))]
             reset = [RemoveMessage(id=REMOVE_ALL_MESSAGES), *messages]
         return {"messages": [*reset, await bound.ainvoke([*system, *messages])]}

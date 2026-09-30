@@ -5,10 +5,10 @@ from pathlib import Path
 
 import numpy as np
 
-from ..archive.blobs import BlobStore, sha256_file
+from ..archive.blobs import BlobStore
 from ..archive.clips import ClipStore
 from ..config import KernelConfig, run_config_path
-from .checker import check_clip_formats
+from .checker import CheckerError, check_clip_formats
 from .leakage import LeakageChecker
 from .probe import aspect_ok, probe_video
 
@@ -89,9 +89,9 @@ class Ingestor:
         try:
             try:
                 result = self._check_and_store(candidate, held, node_id)
-            except (subprocess.CalledProcessError, ValueError, IndexError, KeyError) as exc:
-                # A file ffprobe/decoding cannot read is the candidate's fault: record
-                # a rejection and carry on with the batch instead of crashing the node.
+            except (subprocess.CalledProcessError, ValueError, IndexError, KeyError, CheckerError) as exc:
+                # A file ffprobe, decoding or the checker bridge cannot handle: record a rejection
+                # and carry on with the batch instead of failing the whole call.
                 result = self._reject(candidate, node_id, [
                     f"could not read the candidate video: {type(exc).__name__}: {exc}"[:500]])
         finally:
@@ -117,7 +117,7 @@ class Ingestor:
                 f"display aspect ratio {info.display_aspect:.4f} (coded {info.width}x{info.height}, "
                 f"sar {info.sar:.4f}) is not within {self.tolerance:.0%} of 16:9"])
 
-        probe_root = self.run_dir / "tmp" / f"probe_{sha256_file(video)[:12]}"
+        probe_root = self.run_dir / "tmp" / f"probe_{uuid.uuid4().hex}"     # parallel ingests never share it
         shutil.rmtree(probe_root, ignore_errors=True)
         (probe_root / "videos").mkdir(parents=True)
         (probe_root / "captions").mkdir(parents=True)

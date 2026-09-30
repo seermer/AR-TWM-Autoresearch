@@ -42,6 +42,11 @@ def save_root(cache: Path, eval_dir: Path, score: float, metrics: dict, expected
     tmp.rename(cache)
 
 
+def _submitted(result: dict) -> dict:
+    """What a failed improve_recipe attempt submitted: its data commit is still valid for a retry."""
+    return {k: result[k] for k in ("data_commit", "recipe", "rationale")}
+
+
 class StopRun(Exception):
     """End the run now (budget spent); resume marks the running node `interrupted`."""
 
@@ -283,7 +288,7 @@ class Loop:
             self._state(child, "gate", k)
             gate = self.phases.gate(self, res["recipe"], res["data_commit"], parent["data_commit"], child, adir)
             if not gate.ok:
-                retry, status = {"kind": "gate", "failures": gate.failures}, "invalid_recipe"
+                retry, status = {"kind": "gate", "failures": gate.failures, **_submitted(res)}, "invalid_recipe"
                 self.nodes.add_attempt(child, "improve_recipe", k, "gate_failed", retry)
                 continue
             self._record_recipe(child, res, gate.resolved_path)
@@ -291,7 +296,7 @@ class Loop:
             trained = self.phases.train(self, gate.resolved_path, child, adir)
             if trained.checkpoint is None or trained.failure != "none":   # e.g. nan loss after a checkpoint
                 retry = {"kind": "train", "failure": trained.failure, "detail": trained.detail,
-                         "log_tail": file_tail(trained.log_path, 4000)}
+                         "log_tail": file_tail(trained.log_path, 4000), **_submitted(res)}
                 status = "train_failed"
                 self.nodes.add_attempt(child, "improve_recipe", k, "train_failed", retry)
                 alert(self.ctx.recorder, "train_failed", f"{child} attempt {k}: {trained.failure} "

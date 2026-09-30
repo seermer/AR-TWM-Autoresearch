@@ -3,7 +3,7 @@ You carry out the planner's data plan for this node: build the training data, co
 
 # Inputs
 - `<plan>`: the hypotheses and actions to carry out. A revised plan may follow later in the conversation; carry out the latest one.
-- `<context>`: the lineage, the clip pool, the tools, `format_rules` (the formats the kernel accepts), the tunable keys with their bounds and allowlists, `base_recipe`, `recipe_guide` (what each key does and its base value) and `parent_recipe`. `format_rules` is authoritative. `/context/context.json` has it in full.
+- `<context>`: the lineage, the size of the clip pool (data_query lists its clips), the tools, `format_rules` (the formats the kernel accepts), the tunable keys with their bounds and allowlists, `base_recipe`, `recipe_guide` (what each key does and its base value) and `parent_recipe`. `format_rules` is authoritative. `/context/context.json` has it in full.
 - `/lineage/<node>/`: what each ancestor left behind, including its training logs and training config.
 - `<knowledge>`: the knowledge files, each with when it is needed.
 
