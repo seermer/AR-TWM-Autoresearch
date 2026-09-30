@@ -1,3 +1,8 @@
+---
+name: kernel_tool_details
+description: Use when calling hf_download, hf_search, hf_list_files, data_ingest, data_commit, job_wait or recipe_check, or when you need to know what the container provides.
+---
+
 # Kernel tool details
 
 - hf_download puts files under `/workspace/staging/hf/` and returns a ready provenance record. For a clip you derive (cropped, trimmed, re-captioned), use `{"kind": "derived", "from": [clip_ids], "transform": "<what you did>"}` and set `derived_from`.

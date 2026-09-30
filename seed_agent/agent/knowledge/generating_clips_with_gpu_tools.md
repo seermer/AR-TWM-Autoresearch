@@ -1,3 +1,8 @@
+---
+name: generating_clips_with_gpu_tools
+description: Use when generating clips, first frames or poses with the GPU tools (rollout_alayaworld, rollout_wan22, rollout_ltx25, generate_images, annotate_camera).
+---
+
 # Generating clips with the GPU tools
 
 - rollout_alayaworld renders WBench-style cases, rollout_wan22 and rollout_ltx25 turn text or a first frame into video, generate_images makes first frames, and annotate_camera estimates poses for a video.

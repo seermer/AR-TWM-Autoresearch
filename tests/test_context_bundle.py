@@ -98,18 +98,11 @@ def test_parent_recipe_is_read_from_the_node_artifact(world):
     assert ctx.parent_recipe == {"optimizer.lr": 2e-5}
 
 
-def test_recipe_context_carries_the_guide_and_the_parents_training_summary(world):
+def test_recipe_context_carries_the_guide(world):
     conn, repo, run = world
-    kwargs = dict(cfg=CFG, conn=conn, run_dir=run, repo=repo, node_id="n1", parent_id="root", attempt=1,
-                  max_attempts=3, retry=None, nodes_remaining=1, n_gpus=4, tools=[])
-    ctx = build_recipe_context(**kwargs)
-    assert set(ctx.recipe_guide) == set(ctx.tunable_rules) and ctx.parent_train == {}   # the root never trained
-    for attempt in (1, 2):                             # the last attempt that trained is the one summarised
-        log = run / "nodes" / "root" / "attempts" / f"improve_recipe-{attempt}" / "train" / "train.log"
-        log.parent.mkdir(parents=True)
-        log.write_text("".join(
-            f"[Train] step={i} epoch=0 sigma=0.9 loss={attempt} grad=0.1 lr=1e-05 time=10.0s\\n" for i in range(1, 9)))
-    assert build_recipe_context(**kwargs).parent_train["loss_by_sigma"]["sigma>=0.6"]["second_half"] == 2.0
+    ctx = build_recipe_context(cfg=CFG, conn=conn, run_dir=run, repo=repo, node_id="n1", parent_id="root", attempt=1,
+                               max_attempts=3, retry=None, nodes_remaining=1, n_gpus=4, tools=[])
+    assert set(ctx.recipe_guide) == set(ctx.tunable_rules)
 
 
 def test_lineage_entries_carry_the_process_digest(world):

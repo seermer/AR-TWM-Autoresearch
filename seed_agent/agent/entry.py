@@ -9,8 +9,7 @@ CONTEXT_WINDOW = int(os.environ.get("AR_CONTEXT_WINDOW", "128000"))   # the mode
 COMPACT_AT = float(os.environ.get("AR_COMPACT_AT", "0.85"))           # auto-compact threshold
 AGENT_ROOT = os.environ.get("AR_AGENT_DIR", "/agent")
 WORKSPACE = os.environ.get("AR_WORKSPACE", "/workspace")
-CHECK_ROUNDS = 3             # build -> recipe -> recipe_check loops inside one attempt
-SELFTEST_ROUNDS = 2          # implement -> self-test loops inside one attempt
+MAX_ROUNDS = 4               # plans per phase: the first and up to three replans the engineer asks for
 BRIEF_CHARS = 60_000         # cap on the JSON context handed to a role
 
 

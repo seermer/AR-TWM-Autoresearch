@@ -1,3 +1,8 @@
+---
+name: video_conversion_to_standard_format
+description: Use when converting a downloaded or generated video to the standard format: probing, aspect ratio, cropping, rotation, frame rate, trimming.
+---
+
 # Converting a video to the standard format
 
 - Probe: `ffprobe -v error -select_streams v:0 -show_entries stream=width,height,avg_frame_rate,nb_frames,sample_aspect_ratio:stream_side_data=rotation -of json in.mp4`

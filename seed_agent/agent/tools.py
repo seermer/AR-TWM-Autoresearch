@@ -6,14 +6,12 @@ from __future__ import annotations
 import itertools
 import json
 import os
-import shutil
 import subprocess
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from contextlib import contextmanager
 from html.parser import HTMLParser
 from pathlib import Path
 from xml.etree import ElementTree
@@ -23,9 +21,9 @@ from typing import Any
 from langchain_core.tools import StructuredTool, ToolException, tool
 from pydantic import BaseModel
 
-MAX_READ = 200_000
-MAX_OUTPUT = 8_000
-KEEP_BYTES = 1 << 20               # discarded_changes restores pre-existing files up to this size
+# Past a limit, show much less than the limit: an output that large is better searched than read.
+READ_LIMIT, READ_SHOWN = 100_000, 20_000          # read_file: chars, head shown
+OUTPUT_LIMIT, OUTPUT_SHOWN = 10_000, 3_000        # run_command: chars, tail shown
 FIRST_ROUND_END = 25 / 24          # the 25 history frames
 ROUND = 32 / 24                    # one rollout round
 
@@ -81,11 +79,24 @@ def _keep_output(command: str, status: str, output: str) -> Path:
     return log
 
 
-def make_file_tools(root: str) -> list:
+def read_text(path: Path, offset: int = 0, limit: int | None = None) -> str:
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+    part = lines[offset:offset + limit if limit else None]
+    text = "".join(part)
+    if len(text) > READ_LIMIT:
+        return (f"[Large file: {len(lines)} lines, {sum(map(len, lines))} chars. Only the first {READ_SHOWN} chars "
+                f"of the requested lines are shown. Read fewer lines with offset and limit, or search the file.]\n"
+                + text[:READ_SHOWN])
+    if offset or limit:
+        return f"[lines {offset + 1}-{offset + len(part)} of {len(lines)}]\n{text}"
+    return text
+
+
+def make_file_tools(root: str, *, writable: bool = True) -> list:
     @tool
-    def read_file(path: str) -> str:
-        """Read a text file (absolute, or relative to the tool root)."""
-        return resolve_read(root, path).read_text(encoding="utf-8", errors="replace")[:MAX_READ]
+    def read_file(path: str, offset: int = 0, limit: int | None = None) -> str:
+        """Read a text file (absolute, or relative to the tool root). `offset` and `limit` select lines."""
+        return read_text(resolve_read(root, path), offset, limit)
 
     @tool
     def list_dir(path: str = ".") -> list[str]:
@@ -126,60 +137,14 @@ def make_file_tools(root: str) -> list:
             output = "".join(p.decode(errors="replace") if isinstance(p, bytes) else p or ""
                              for p in (exc.stdout, exc.stderr))
         log = _keep_output(command, status, output)
-        if len(output) <= MAX_OUTPUT:
+        if len(output) <= OUTPUT_LIMIT:
             return f"{status}\n{output}"
-        return f"{status}\n[output cut to its last {MAX_OUTPUT} of {len(output)} chars; full output: {log}]\n" \
-               f"{output[-MAX_OUTPUT:]}"
+        return (f"{status}\n[Long output: {len(output)} chars. Only the last {OUTPUT_SHOWN} are shown; the full "
+                f"output is in {log}.]\n{output[-OUTPUT_SHOWN:]}")
 
+    if not writable:
+        return [read_file, list_dir]
     return [read_file, list_dir, write_file, edit_file, run_command]
-
-
-def _entries(root: str) -> tuple[set[Path], set[Path]]:
-    """(directories, everything else) under root, never following a link."""
-    dirs, others = set(), set()
-    for dirpath, dirnames, filenames in os.walk(root):
-        for name in dirnames:
-            path = Path(dirpath) / name
-            (others if path.is_symlink() else dirs).add(path)
-        others.update(Path(dirpath) / name for name in filenames)
-    return dirs, others
-
-
-@contextmanager
-def discarded_changes(*roots: str):
-    """Undo, after the block, what it changed under roots: new files and directories are removed, and
-    changed or deleted files and links come back. A pre-existing file over KEEP_BYTES (a video) is not
-    copied, so it is left as the block left it."""
-    kept: dict[Path, tuple] = {}
-    dirs: set[Path] = set()
-    for root in roots:
-        root_dirs, others = _entries(root)
-        dirs |= root_dirs
-        for path in others:
-            if path.is_symlink():
-                kept[path] = ("link", os.readlink(path))
-            elif path.is_file() and path.stat().st_size <= KEEP_BYTES:
-                kept[path] = ("file", path.read_bytes())
-            else:
-                kept[path] = ("large", None)
-    try:
-        yield
-    finally:
-        for root in roots:
-            root_dirs, others = _entries(root)
-            for path in sorted(others - set(kept)):
-                path.unlink(missing_ok=True)
-            for path in sorted(root_dirs - dirs, reverse=True):         # children before parents
-                shutil.rmtree(path, ignore_errors=True)
-        for path in sorted(dirs):
-            path.mkdir(parents=True, exist_ok=True)
-        for path, (kind, value) in kept.items():
-            if kind == "link" and not (path.is_symlink() and os.readlink(path) == value):
-                path.unlink(missing_ok=True)
-                path.symlink_to(value)
-            elif kind == "file" and (path.is_symlink() or not path.is_file() or path.read_bytes() != value):
-                path.unlink(missing_ok=True)
-                path.write_bytes(value)
 
 
 # ---- arXiv ----
@@ -318,11 +283,16 @@ async def kernel_tools(session) -> list[StructuredTool]:
 # ---- result tools: a role finishes by calling submit_<x>; invalid arguments come back
 # to the model as a tool error (the harness), so it can correct them ----
 
-def submit_tool(name: str, description: str, schema: type[BaseModel]) -> tuple[StructuredTool, SimpleNamespace]:
+def submit_tool(name: str, description: str, schema: type[BaseModel],
+                check=None) -> tuple[StructuredTool, SimpleNamespace]:
+    """`check`: an async function that raises ToolException when the submission cannot be accepted yet."""
     box = SimpleNamespace(value=None, name=name)       # box.value: the validated submission, once submitted
 
     async def submit(**kwargs) -> str:
-        box.value = schema.model_validate(kwargs)
+        value = schema.model_validate(kwargs)
+        if check is not None:
+            await check(value)
+        box.value = value
         return "submitted"
 
     return StructuredTool(name=name, description=description, args_schema=schema, coroutine=submit), box

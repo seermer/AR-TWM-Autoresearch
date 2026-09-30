@@ -1,3 +1,8 @@
+---
+name: clip_quality_checks
+description: Use when checking clips for defects before ingesting them: frozen, black, blurry or cut video, camera motion that disagrees with the pose, captions that disagree with the video.
+---
+
 # Checking clip quality
 
 You cannot view images, so measure. The container has internet access and `pip install --user` works, so install what helps (for example `opencv-python-headless`, `scenedetect`, or a small CLIP or aesthetic model).

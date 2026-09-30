@@ -1,3 +1,8 @@
+---
+name: camera_pose_files_cam_c2w
+description: Use when writing, converting or checking camera poses (poses/<id>.npz, cam_c2w), or deciding whether a clip is static.
+---
+
 # Camera pose files
 
 - `poses/<id>.npz` holds `cam_c2w` with shape [N, 4, 4], N equal to the mp4 frame count: camera-to-world, OpenCV convention (x right, y down, z forward).

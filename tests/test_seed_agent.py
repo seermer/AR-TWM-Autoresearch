@@ -70,7 +70,7 @@ def test_edit_file_refuses_non_utf8_files_and_leaves_them_untouched(tmp_path):
 
 
 def test_run_command_keeps_the_full_output_in_the_workspace(tmp_path, monkeypatch):
-    from agent.tools import MAX_OUTPUT, make_file_tools
+    from agent.tools import OUTPUT_SHOWN, make_file_tools
     agent, workspace = tmp_path / "agent", tmp_path / "ws"
     agent.mkdir(), workspace.mkdir()
     monkeypatch.setenv("AR_WORKSPACE", str(workspace))
@@ -81,7 +81,8 @@ def test_run_command_keeps_the_full_output_in_the_workspace(tmp_path, monkeypatc
     full = logs[0].read_text()
     assert full.startswith("$ echo first; seq 1 20000\nexit 0\n") and "first\n1\n2\n" in full
     assert full.endswith("20000\n")
-    assert out.endswith("20000\n") and str(logs[0]) in out and len(out) < MAX_OUTPUT + 500
+    assert out.endswith("20000\n") and str(logs[0]) in out and len(out) < OUTPUT_SHOWN + 500
+    assert "Long output" in out
     short = run.invoke({"command": "echo hi"})
     assert short == "exit 0\nhi\n" and len(list((workspace / "tool_output").glob("*.log"))) == 2
 
@@ -95,26 +96,33 @@ def test_read_tools_take_absolute_paths_anywhere(tmp_path):
     assert tools["list_dir"].invoke({"path": str(tmp_path / "elsewhere")}) == ["k.md"]
 
 
-def test_discarded_changes_restores_the_tree(tmp_path):
-    from agent.tools import KEEP_BYTES, discarded_changes
-    (tmp_path / "keep").mkdir()
-    (tmp_path / "keep" / "a.txt").write_text("old")
-    (tmp_path / "gone.txt").write_text("deleted, then back")
-    (tmp_path / "link").symlink_to("keep/a.txt")
-    (tmp_path / "big.bin").write_bytes(b"0" * (KEEP_BYTES + 1))
-    with discarded_changes(str(tmp_path)):
-        (tmp_path / "keep" / "a.txt").write_text("new")
-        (tmp_path / "gone.txt").unlink()
-        (tmp_path / "link").unlink()
-        (tmp_path / "new" / "deep").mkdir(parents=True)
-        (tmp_path / "new" / "deep" / "x.txt").write_text("x")
-        (tmp_path / "keep" / "y.txt").write_text("y")
-        (tmp_path / "big.bin").write_bytes(b"1")
-    assert (tmp_path / "keep" / "a.txt").read_text() == "old"
-    assert (tmp_path / "gone.txt").read_text() == "deleted, then back"
-    assert (tmp_path / "link").is_symlink() and (tmp_path / "link").read_text() == "old"
-    assert not (tmp_path / "new").exists() and not (tmp_path / "keep" / "y.txt").exists()
-    assert (tmp_path / "big.bin").read_bytes() == b"1"          # too large to keep a copy of
+def test_read_file_shows_a_small_head_of_a_large_file_and_reads_line_ranges(tmp_path):
+    from agent.tools import READ_LIMIT, READ_SHOWN, make_file_tools
+    read = {t.name: t for t in make_file_tools(str(tmp_path))}["read_file"]
+    (tmp_path / "big.txt").write_text("".join(f"line {i}\n" for i in range(READ_LIMIT // 5)))
+    out = read.invoke({"path": "big.txt"})
+    assert out.startswith("[Large file: 20000 lines") and len(out) < READ_SHOWN + 300
+    assert read.invoke({"path": "big.txt", "offset": 10, "limit": 2}) == "[lines 11-12 of 20000]\nline 10\nline 11\n"
+
+
+def test_planners_file_tools_are_read_only(tmp_path):
+    from agent.tools import make_file_tools
+    assert {t.name for t in make_file_tools(str(tmp_path), writable=False)} == {"read_file", "list_dir"}
+
+
+def test_replans_stop_at_the_round_limit():
+    from langchain_core.tools import ToolException
+    from agent.entry import MAX_ROUNDS
+    from agent.orchestration import replan_tool
+    rounds = [{}] * (MAX_ROUNDS - 1)
+    tool, box = replan_tool(rounds)
+    asyncio.run(tool.ainvoke({"report": "r"}))
+    assert box.value.report == "r"
+    rounds.append({})
+    box.value = None
+    with pytest.raises(ToolException, match="No replans left"):
+        asyncio.run(tool.ainvoke({"report": "r"}))
+    assert box.value is None
 
 
 def test_submit_tool_validates_then_captures():
@@ -181,25 +189,31 @@ def _scripts():
     from ar_kernel.gateway.mock import message
     recipe = [
         [_call("submit_plan", {"hypotheses": ["more walking clips"]})],            # invalid: no actions
-        [_call("submit_plan", {"hypotheses": ["more walking clips"], "actions": ["reuse the pool"]})],
+        [_call("submit_plan", {"hypotheses": ["more walking clips"], "actions": ["download walking clips"]})],
         [message("planned")],
         [_call("data_query", {"filter": {"format": "video_caption_camera"}}), _call("no_such_tool", {}),
          _call("hf_download", {"repo": "x/y", "revision": "main", "patterns": ["*.mp4"]})],
-        [_call("submit_data_commit", {"data_commit": C0, "notes": "pool clips"})],
-        [message("built")],
-        [_call("submit_recipe", {"recipe": {"optimizer.max_steps": 200.4, "optimizer.lr": 1e-5},
-                                 "rationale": "fits the data"})],
-        [message("recipe written")],
+        [_call("request_replan", {"report": "downloads are disabled; the pool has clips"})],
+        [message("asked for a new plan")],
+        [_call("submit_plan", {"hypotheses": ["pool clips suffice"], "actions": ["commit the pool clips"]})],
+        [message("replanned")],
+        [_call("submit_data_and_recipe", {"data_commit": C0, "notes": "pool clips", "rationale": "fits the data",
+                                          "recipe": {"optimizer.max_steps": 200.4, "optimizer.lr": 1e-5}})],
+        [message("done")],
     ]
     edit = [
-        [_call("read_file", {"path": "agent/prompts/planner.md"}),       # planning may try things out ...
-         _call("run_command", {"command": "echo junk >> agent/prompts/coder.md && touch agent/stray.py"})],
+        [_call("read_file", {"path": "agent/prompts/planner.md"})],
         [_call("submit_edit_plan", {"component": "everything", "change": "x", "files": [],
                                     "rationale": "r", "expected_effect": "e"})],   # invalid component
         [_call("submit_edit_plan", {"component": "prompts", "change": "ask for posed clips first",
                                     "files": ["agent/prompts/planner.md"], "rationale": "static-only clips",
                                     "expected_effect": "more moving clips"})],
         [message("planned")],
+        [_call("edit_file", {"path": "agent/entry.py", "old": "def edit_self(ctx: EditContext)",
+                             "new": "def edit_self(ctx: EditContext, extra)"})],       # breaks the self-test
+        [_call("submit_edit", {"summary": "too early"})],
+        [_call("edit_file", {"path": "agent/entry.py", "old": "def edit_self(ctx: EditContext, extra)",
+                             "new": "def edit_self(ctx: EditContext)"})],
         [_call("edit_file", {"path": "agent/prompts/planner.md", "old": "Finish by calling submit_plan.",
                              "new": "Prefer clips with poses. Finish by calling submit_plan."})],
         [_call("submit_edit", {"summary": "Changed the planner prompt to prefer clips with poses."})],
@@ -273,6 +287,18 @@ def _tool_outputs(rec, node) -> list[str]:
     return out
 
 
+def _tools_of(rec, node, system_start) -> set[str]:
+    """The tools offered in the requests of the role whose system prompt starts with `system_start`."""
+    names = set()
+    for event in rec.read_events(node):
+        if event["type"] == "llm.request":
+            body = rec.load_payload(event["payload"])["body"]
+            if str(body["messages"][0].get("content", "")).startswith(system_start):
+                names |= {t["function"]["name"] for t in body.get("tools") or []}
+    assert names, f"no requests for {system_start!r}"
+    return names
+
+
 def test_chat_model_works_sync_and_async_over_the_socket(kernel, tmp_path, monkeypatch):
     """The container has no network: both the sync and the async client must use the socket."""
     _, registry, services = kernel
@@ -315,10 +341,19 @@ def test_improve_recipe_full_flow(kernel, tmp_path):
     assert "tool.call" in kinds and "tool.error" in kinds                        # kernel-side records
     turns = [e["turn_index"] for e in rec.read_events("n-recipe") if e["type"] == "llm.request"]
     assert max(turns) >= 2                     # the harness's resent chat history links (Task 19)
-    builder_tasks = [m["content"] for e in rec.read_events("n-recipe") if e["type"] == "llm.request"
-                     for m in rec.load_payload(e["payload"])["body"]["messages"]
-                     if m.get("role") == "user" and str(m["content"]).startswith("<plan>")]
-    assert builder_tasks and all('"resolution_allowlist": [[352, 640]]' in t for t in builder_tasks)
+    tasks = {str(m["content"]) for e in rec.read_events("n-recipe") if e["type"] == "llm.request"
+             for m in rec.load_payload(e["payload"])["body"]["messages"] if m.get("role") == "user"}
+    first = [t for t in tasks if t.startswith("<plan>")]
+    assert first and all('"resolution_allowlist": [[352, 640]]' in t for t in first)
+    assert any(t.startswith("<engineer_report>\ndownloads are disabled") for t in tasks)      # back to the planner
+    assert any(t.startswith("The planner revised the plan.") and "pool clips suffice" in t for t in tasks)
+    rounds = json.loads((tmp_path / "ws" / "plans.json").read_text())
+    assert [r["plan"]["hypotheses"] for r in rounds] == [["more walking clips"], ["pool clips suffice"]]
+    assert rounds[0]["report"].startswith("downloads are disabled") and "report" not in rounds[1]
+    assert "more walking clips" in body["result"]["rationale"] and "pool clips suffice" in body["result"]["rationale"]
+    planner_tools = _tools_of(rec, "n-recipe", "# Role\nYou plan the training-data work")
+    assert {"hf_search", "data_query", "read_file", "arxiv_search"} <= planner_tools
+    assert not {"write_file", "run_command", "hf_download", "data_ingest", "data_commit"} & planner_tools
 
 
 def test_edit_self_plans_exactly_one_component(kernel, tmp_path):
@@ -329,12 +364,14 @@ def test_edit_self_plans_exactly_one_component(kernel, tmp_path):
     assert body["result"]["summary"].startswith("[prompts] ask for posed clips first")
     assert "prefer clips with poses" in body["result"]["summary"]
     assert "Prefer clips with poses." in (agent / "agent" / "prompts" / "planner.md").read_text()
-    # ... but what the planner changed is gone before the coder starts
-    assert (agent / "agent" / "prompts" / "coder.md").read_text() == (SEED / "agent" / "prompts" / "coder.md").read_text()
-    assert not (agent / "agent" / "stray.py").exists()
-    assert json.loads((tmp_path / "ws" / "edit_plan.json").read_text())["component"] == "prompts"
-    assert any("Error invoking tool 'submit_edit_plan'" in o and "component" in o
-               for o in _tool_outputs(rec, "n-edit"))
+    [round_] = json.loads((tmp_path / "ws" / "plans.json").read_text())
+    assert round_["plan"]["component"] == "prompts" and "report" not in round_
+    outputs = _tool_outputs(rec, "n-edit")
+    assert any("Error invoking tool 'submit_edit_plan'" in o and "component" in o for o in outputs)
+    assert any("The self-test failed" in o and "exactly one parameter" in o for o in outputs)   # submit refused
+    planner_tools = _tools_of(rec, "n-edit", "# Role\nYou plan one improvement")
+    assert {"read_file", "list_dir", "arxiv_search", "arxiv_read"} <= planner_tools
+    assert not {"write_file", "edit_file", "run_command"} & planner_tools
 
 
 @pytest.mark.docker
@@ -369,29 +406,26 @@ def test_edit_file_parallel_calls_do_not_lose_edits(tmp_path):
         assert (tmp_path / "p.md").read_text() == "A B"
 
 
-def test_planner_gets_every_tool_but_the_archive_writes():
-    from types import SimpleNamespace as NS
-    from agent.orchestration import planner_tools
-    ktools = [NS(name=n) for n in ("hf_search", "hf_list_files", "hf_download", "data_query", "data_ingest",
-                                   "data_commit", "caption_videos", "job_wait")]
-    names = [t.name for t in planner_tools(NS(name="submit_plan"), ktools)]
-    assert names[:7] == ["submit_plan", "hf_search", "hf_list_files", "hf_download", "data_query",
-                         "caption_videos", "job_wait"]
-    assert {"run_command", "write_file", "arxiv_search", "arxiv_read"} <= set(names)
-    assert not {"data_ingest", "data_commit"} & set(names)
-
-
-def test_system_prompt_is_the_role_prompt_then_memory():
+def test_system_prompt_is_the_role_prompt_then_the_knowledge_index():
     from agent.orchestration import system_prompt
     text = system_prompt("planner")
-    assert text.startswith("# Role") and "<reference" not in text
-    assert "<memory>" in text and "Lessons and untried ideas" in text
+    assert text.startswith("# Role") and "<memory>" not in text
+    index = text.split("<knowledge>\n", 1)[1]
+    for path in (SEED / "agent" / "knowledge").glob("*.md"):
+        assert f"{path.resolve()}: Use when" in index
     assert "\n\n\n" not in text and not text.endswith("\n")
 
 
-def test_every_role_prompt_points_to_the_knowledge_files():
-    for name in ("planner", "data_builder", "recipe_writer", "edit_planner", "coder"):
-        assert "Start by listing /agent/knowledge" in (SEED / "agent" / "prompts" / f"{name}.md").read_text()
+def test_knowledge_files_start_with_their_name_and_when_to_use_them():
+    for path in (SEED / "agent" / "knowledge").glob("*.md"):
+        head = path.read_text().split("\n")
+        assert head[0] == "---" and head[1] == f"name: {path.stem}" and head[2].startswith("description: Use when")
+        assert head[3] == "---"
+
+
+def test_every_role_prompt_points_to_the_knowledge_index():
+    for name in ("planner", "data_engineer", "edit_planner", "coder"):
+        assert "read the knowledge files whose descriptions match" in (SEED / "agent" / "prompts" / f"{name}.md").read_text()
 
 
 def test_brief_marks_a_cut_and_closes_its_block(monkeypatch):

@@ -13,7 +13,7 @@ from .config import run_config_path
 from .process_digest import process_digest
 from .tools.data_tools import clip_record, dataset_stats, scores_by_clip
 from .train.recipe import RECIPE_RULES, TUNABLE_KEYS
-from .train.recipe_guide import recipe_guide, train_summary
+from .train.recipe_guide import recipe_guide
 
 FORMAT_RULES = """\
 Standard data formats (the only ones accepted), from WorldModel docs/TRAINING.md:
@@ -105,13 +105,6 @@ def build_edit_context(*, conn, run_dir: Path, repo, parent_id: str, attempt: in
                        retry=retry, dry_run=dry_run)
 
 
-def _parent_train(run_dir: Path, node_id: str) -> dict:
-    """train_summary of the node's last improve_recipe attempt that trained ({} for the root)."""
-    logs = sorted(_node_file(run_dir, node_id, "attempts").glob("improve_recipe-*/train/train.log"),
-                  key=lambda p: int(p.parts[-3].rsplit("-", 1)[1]))
-    return train_summary(logs[-1]) if logs else {}
-
-
 def build_recipe_context(*, cfg, conn, run_dir: Path, repo, node_id: str, parent_id: str, attempt: int,
                          max_attempts: int, retry: dict | None, nodes_remaining: int, n_gpus: int,
                          tools: list[str], dry_run: bool = False) -> RecipeContext:
@@ -124,7 +117,7 @@ def build_recipe_context(*, cfg, conn, run_dir: Path, repo, node_id: str, parent
         dry_run=dry_run, clip_pool=clip_pool_summary(conn),
         parent_data_commit=parent["data_commit"],
         parent_recipe=yaml.safe_load(recipe_path.read_text()) if recipe_path.exists() else {},
-        base_recipe=base, recipe_guide=recipe_guide(base), parent_train=_parent_train(run_dir, parent_id),
+        base_recipe=base, recipe_guide=recipe_guide(base),
         tunable_rules={k: {"type": RECIPE_RULES[k][0], "min": RECIPE_RULES[k][1], "max": RECIPE_RULES[k][2]}
                        for k in sorted(TUNABLE_KEYS)},
         resolution_allowlist=[list(p) for p in cfg.get("train.resolution_allowlist")],
