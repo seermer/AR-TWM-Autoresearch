@@ -1,5 +1,5 @@
-"""What the recipe writer is told about the tunable keys: base values from the run's own snapshot,
-what each key does, what is worth trying and what it costs; plus how the parent's training went."""
+"""What the recipe writer is told about the tunable keys: base values from the run's own snapshot
+and what each key does; plus how the parent's training went."""
 from __future__ import annotations
 
 import re
@@ -7,39 +7,25 @@ from pathlib import Path
 
 from .recipe import TUNABLE_KEYS
 
-# key -> (meaning, what is worth trying, cost)
-_TEXT = {
-    "optimizer.lr": ("Peak learning rate of the LoRA weights (after warmup).",
-                     "Lower (2e-5) when the new data is close to the model's own outputs or the loss is noisy; "
-                     "higher (1e-4) only with many steps: at few steps a high rate overshoots.",
-                     "None on time."),
-    "optimizer.weight_decay": ("Weight decay on the LoRA weights.",
-                               "Rarely worth changing; larger values pull the update toward zero.", "None."),
-    "optimizer.max_grad_norm": ("Gradient clipping threshold.",
-                                "Lower it if the parent's `mean_grad_norm` shows spikes; the base value rarely clips.",
-                                "None."),
-    "optimizer.warmup_steps": ("Steps of linear learning-rate warmup.",
-                               "Keep it near a sixth of max_steps.", "None."),
-    "optimizer.max_steps": ("Optimizer steps in total.",
-                            "Scale with the amount of new data: more windows justify more steps. The base value "
-                            "is the reference budget; a much smaller value trains far less than the base run.",
-                            "Time grows linearly with max_steps x grad_accum_steps."),
-    "optimizer.epochs": ("Upper bound on passes over the data.",
-                         "Set it so epochs x steps_per_epoch >= max_steps (the gate checks this).", "None."),
-    "optimizer.grad_accum_steps": ("Micro-batches per optimizer step (the effective batch per GPU).",
-                                   "Larger values smooth the update; steps_per_epoch shrinks accordingly.",
-                                   "Time grows linearly with it."),
-    "data.overall_caption_prob": ("Probability of using the clip's overall caption instead of its segment prompts.",
-                                  "Not in the base recipe file: the trainer default applies. Only matters for timed-prompt datasets.", "None."),
-    "sample.height": ("Training frame height; must pair with sample.width from the allowlist.",
-                      "A smaller allowed size is faster and uses less memory.", "Tokens grow with height x width."),
-    "sample.width": ("Training frame width; must pair with sample.height from the allowlist.", "As above.", "As above."),
-    "lora.rank": ("LoRA rank; must pair with lora.alpha from the allowlist.",
-                  "Higher rank fits more new content; lower rank stays closer to the base model.",
-                  "Small memory increase."),
-    "lora.alpha": ("LoRA scaling; must pair with lora.rank from the allowlist.", "Follow the allowed pair.", "None."),
+_MEANING = {
+    "optimizer.lr": "Peak learning rate of the LoRA weights (after warmup).",
+    "optimizer.weight_decay": "Weight decay on the LoRA weights.",
+    "optimizer.max_grad_norm": "Gradient clipping threshold.",
+    "optimizer.warmup_steps": "Steps of linear learning-rate warmup.",
+    "optimizer.max_steps": "Optimizer steps in total.",
+    "optimizer.epochs": "Upper bound on passes over the data.",
+    "optimizer.grad_accum_steps": "Micro-batches per optimizer step (the effective batch per GPU).",
+    "data.overall_caption_prob": ("Probability of using the clip's overall caption instead of its segment prompts. "
+                                  "Not in the base recipe file: the trainer default applies. Only matters for "
+                                  "timed-prompt datasets."),
+    "sample.height": "Training frame height; must pair with sample.width from the allowlist.",
+    "sample.width": "Training frame width; must pair with sample.height from the allowlist.",
+    "lora.rank": "LoRA rank; must pair with lora.alpha from the allowlist.",
+    "lora.alpha": "LoRA scaling; must pair with lora.rank from the allowlist.",
 }
-_STEP = re.compile(r"\[Train\] step=(\d+) .*?loss=([\d.eE+-]+) grad=([\d.eE+-]+) .*?time=([\d.]+)s")
+_STEP = re.compile(r"\[Train\] step=(\d+) .*?sigma=([\d.eE+-]+) loss=([\d.eE+-]+) grad=([\d.eE+-]+)")
+# The loss depends mostly on the sampled noise level, so its trend is only readable within a sigma bin.
+_SIGMA_BINS = {"sigma<0.3": (0.0, 0.3), "0.3<=sigma<0.6": (0.3, 0.6), "sigma>=0.6": (0.6, float("inf"))}
 
 
 def _dig(recipe: dict, dotted: str):
@@ -52,13 +38,12 @@ def _dig(recipe: dict, dotted: str):
 
 
 def recipe_guide(base_recipe: dict) -> dict:
-    assert set(_TEXT) == TUNABLE_KEYS, "every tunable key needs guide text"
-    return {key: {"base": _dig(base_recipe, key), "meaning": meaning, "try": tip, "cost": cost}
-            for key, (meaning, tip, cost) in sorted(_TEXT.items())}
+    assert set(_MEANING) == TUNABLE_KEYS, "every tunable key needs guide text"
+    return {key: {"base": _dig(base_recipe, key), "meaning": meaning} for key, meaning in sorted(_MEANING.items())}
 
 
 def train_summary(train_log: Path) -> dict:
-    """Loss (first vs last quarter), mean gradient norm and seconds per step from a train.log."""
+    """Mean loss per sigma bin in the first and second half of training, and the mean gradient norm."""
     try:
         text = Path(train_log).read_text(errors="replace")
     except OSError:
@@ -66,10 +51,10 @@ def train_summary(train_log: Path) -> dict:
     rows = [(float(m[2]), float(m[3]), float(m[4])) for m in map(_STEP.search, text.splitlines()) if m]
     if not rows:
         return {}
-    quarter = max(1, len(rows) // 4)
-    mean = lambda xs: sum(xs) / len(xs)
+    half = len(rows) // 2
+    mean = lambda xs: round(sum(xs) / len(xs), 4) if xs else None
     return {"steps": len(rows),
-            "loss_first_quarter": round(mean([r[0] for r in rows[:quarter]]), 4),
-            "loss_last_quarter": round(mean([r[0] for r in rows[-quarter:]]), 4),
-            "mean_grad_norm": round(mean([r[1] for r in rows]), 4),
-            "sec_per_step": round(mean([r[2] for r in rows]), 1)}
+            "loss_by_sigma": {name: {"first_half": mean([r[1] for r in rows[:half] if lo <= r[0] < hi]),
+                                     "second_half": mean([r[1] for r in rows[half:] if lo <= r[0] < hi])}
+                              for name, (lo, hi) in _SIGMA_BINS.items()},
+            "mean_grad_norm": mean([r[2] for r in rows])}

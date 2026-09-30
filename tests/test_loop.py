@@ -241,3 +241,33 @@ def test_node_end_deletes_only_raw_downloads_from_staging(make_loop):
     assert not (attempt / "hf").exists()                                   # raw downloads: recorded, deleted
     for rel in ("rollouts/job1/r.mp4", "work/rejected.mp4", "annotations/job2/p.npz"):
         assert (attempt / rel).exists()                                    # prepared candidates are kept
+
+
+def test_a_scored_root_is_reused_by_the_next_run(tmp_path):
+    cache = tmp_path / "root_cache"
+
+    def run_once(name, scores):
+        run = tmp_path / name
+        (run / "config").mkdir(parents=True)
+        (run / "config" / "run.json").write_text("{}")
+        rec = Recorder(run)
+        ctx = RunContext(run_dir=run, conn=open_db(run), recorder=rec, gpus=[0, 1, 2, 3],
+                         metric_set=["m"], case_ids=["1"], versions={})
+        kit = SimpleNamespace(registry=None, queue=None, gpu_lock=threading.Lock(), budget=Budget(),
+                              harness=None, socket_dir=tmp_path / "sock", default_model="mock-model")
+        script = Script(run, score=scores)
+        loop = Loop(CFG, ctx, kit, AgentsRepo(run / "agents.git"), max_nodes=0, phases=script.phases(),
+                    root_cache=cache)
+        if name == "a":                                    # what scoring the root leaves behind
+            (run / "nodes" / "root" / "eval").mkdir(parents=True)
+            (run / "nodes" / "root" / "eval" / "video.mp4").write_text("v")
+        loop.run()
+        return run, loop, script
+
+    first, _, _ = run_once("a", [0.7])
+    second, loop, script = run_once("b", [0.1])          # would score 0.1 if the root were scored again
+    assert NodeStore(loop.ctx.conn).get("root")["score"] == 0.7
+    assert json.loads((second / "config" / "run.json").read_text())["expected_n"] == loop.ctx.expected_n
+    assert (second / "nodes" / "root" / "eval" / "video.mp4").read_text() == "v"
+    assert json.loads((second / "nodes" / "root" / "eval" / "aggregates.json").read_text())["metrics"]["m"] == 0.7
+    assert [e["type"] for e in loop.ctx.recorder.read_events("root")].count("root.reused") == 1

@@ -42,6 +42,18 @@ def test_kill_run_containers_removes_only_the_prefix(monkeypatch):
     assert ["docker", "rm", "-f", "ar-r1-n2-edit_self-1-abc"] in calls
 
 
+def test_lineage_is_mounted_read_only_with_eval_hidden(tmp_path):
+    from ar_kernel.sandbox.runner import _docker_args
+    n1, root = tmp_path / "n1", tmp_path / "root"
+    (n1 / "eval").mkdir(parents=True)
+    root.mkdir()
+    m = Mounts(agent=tmp_path, workspace=tmp_path, staging=tmp_path, context=tmp_path, store=tmp_path,
+               contract=tmp_path, sockets=tmp_path, lineage={"n1": n1, "root": root})
+    args = _docker_args("img", "c", m, ["true"], {}, 1, 1)
+    assert f"{n1}:/lineage/n1:ro" in args and f"{root}:/lineage/root:ro" in args
+    assert "/lineage/n1/eval:ro,size=4k" in args and not any(a.startswith("/lineage/root/eval") for a in args)
+
+
 def test_snapshot_diff_reports_changes(tmp_path):
     (tmp_path / "a.txt").write_text("1")
     (tmp_path / "b.txt").write_text("2")

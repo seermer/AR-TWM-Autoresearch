@@ -60,6 +60,10 @@ class KernelConfig:
     def runs_dir(self) -> Path:
         return self._path("paths.runs_dir")
 
+    @property
+    def root_cache(self) -> Path:
+        return self._path("paths.root_cache")
+
 SNAPSHOT_FILES = ("kernel.yaml", "base_recipe.yaml", "proxy_cases.txt")
 
 

@@ -186,7 +186,7 @@ def _run(cfg, args) -> int:
                                                           "hf_tmp": partial})
     mark_interrupted(ctx, "unfinished when the loop stopped (forced stop, kernel death or spent budget)")
     kit = build_run_kit(run_cfg, ctx.run_dir, ctx.gpus, ctx.recorder, os.environ)
-    loop = Loop(run_cfg, ctx, kit, repo, max_nodes=max_nodes)
+    loop = Loop(run_cfg, ctx, kit, repo, max_nodes=max_nodes, root_cache=run_cfg.root_cache)
     monitor = Monitor(run_cfg, ctx.run_dir, ctx.recorder, ctx.gpus, kit.budget)
     try:
         reason = drive(loop, kit, control, ctx.recorder, monitor)

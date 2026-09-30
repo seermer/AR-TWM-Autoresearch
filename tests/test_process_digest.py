@@ -30,14 +30,22 @@ def test_tool_errors_are_grouped_and_normalised(tmp_path):
     assert len(row["example"]) <= 160
 
 
+def _reply(text):
+    return {"body": {"choices": [{"message": {"role": "assistant", "content": text}}]}}
+
+
 def test_conversations_turns_and_compactions_per_phase(tmp_path):
     rec = _rec(tmp_path)
-    for conv, turns in (("c1", 3), ("c2", 2)):
+    # c1 is compacted into c2; c3 is another role's conversation, not a compaction.
+    firsts = {"c1": "build data", "c2": "Continued. <summary>\nSUMMARY-TEXT\n</summary>", "c3": "write a recipe"}
+    for conv, turns in (("c1", 3), ("c2", 2), ("c3", 1)):
         for t in range(turns):
             rec.event("llm.request", node="n1", phase="improve_recipe", conversation_id=conv,
-                      payload={"body": {"messages": []}})
+                      payload={"body": {"messages": [{"role": "user", "content": firsts[conv]}]}})
+        rec.event("llm.response", node="n1", phase="improve_recipe", conversation_id=conv,
+                  payload=_reply("SUMMARY-TEXT" if conv == "c1" else f"done {conv}"))
     assert process_digest(tmp_path, "n1")["llm"] == {
-        "improve_recipe": {"conversations": 2, "turns": 5, "compactions": 1}}
+        "improve_recipe": {"conversations": 3, "turns": 6, "compactions": 1}}
 
 
 def test_phase_times_gates_and_local_errors(tmp_path):

@@ -1,4 +1,4 @@
 # Extra runtime packages for this agent version. The base image already provides
 # langgraph, langchain-core, langchain-openai, mcp, httpx, httpx2, pydantic, numpy,
-# opencv-python-headless, Pillow and ffmpeg. The container has no network, so
-# anything listed here is baked into the image at build time.
+# opencv-python-headless, Pillow and ffmpeg. Anything listed here is baked into the
+# image at build time; a `pip install --user` at run time lasts only for one container.

@@ -2,6 +2,7 @@ paths:
   worldmodel: ../WorldModel
   wbench: ../WBench
   runs_dir: runs
+  root_cache: root_cache           # scored roots shared across runs, one dir per run.root_key
 gpus:
   default: "0,1,2,3"
   min_count: 4

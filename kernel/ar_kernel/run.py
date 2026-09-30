@@ -1,6 +1,6 @@
 from __future__ import annotations
 import datetime as dt
-import json, os, shutil, subprocess
+import hashlib, json, os, shutil, subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Mapping
@@ -105,14 +105,24 @@ def initial_expected_n(case_ids: list[str]) -> dict:
     return {m: len(case_ids) for m in UNIVERSAL_METRICS}
 
 
-def _record_root_counts(ctx: RunContext, report: dict) -> None:
-    ctx.expected_n = {m: int(report["full"][m]["n"]) for m in ctx.metric_set}
+def record_root_counts(ctx: RunContext, expected_n: dict) -> None:
+    ctx.expected_n = dict(expected_n)
     path = ctx.run_dir / "config" / "run.json"
     meta = json.loads(path.read_text())
     meta["expected_n"] = ctx.expected_n
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(meta, indent=2))
     os.replace(tmp, path)
+
+
+def root_key(ctx: RunContext) -> str:
+    """What the root's score depends on: the same key means the same unedited model, cases, metrics
+    and judge, so a root scored by any earlier run can be reused."""
+    fields = {"metric_set": ctx.metric_set, "case_ids": ctx.case_ids,
+              "judge": [ctx.judge.kind, ctx.judge.model] if ctx.judge else None,
+              "versions": {k: ctx.versions.get(k) for k in ("worldmodel_sha", "worldmodel_dirty",
+                                                           "wbench_sha", "wbench_dirty")}}
+    return hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()[:16]
 
 
 def attach_run(cfg: KernelConfig, run_id: str, env: Mapping[str, str],
@@ -174,7 +184,7 @@ def score_node(cfg: KernelConfig, ctx: RunContext, node_id: str, checkpoint: Pat
                                    ctx.judge)
         score, per_metric = score_from_report(report, ctx.metric_set, ctx.expected_n)
         if node_id == "root":
-            _record_root_counts(ctx, report)
+            record_root_counts(ctx, {m: int(report["full"][m]["n"]) for m in ctx.metric_set})
         agg = aggregates(cfg, report, ctx.case_ids, ctx.metric_set)
         ctx.recorder.event("eval.scored", node=node_id, phase="eval",
                            payload={"score": score, "metrics": per_metric, "aggregates": agg})

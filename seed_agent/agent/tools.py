@@ -1,15 +1,22 @@
-"""The agent's tools: file/shell tools bound to one root, the timed-prompt helper, the kernel
-tools (the MCP tool server) as LangChain tools, and submit_<x> result tools. Captioning is the
-kernel's caption_videos GPU job."""
+"""The agent's tools: file/shell tools bound to one root, arXiv search and reading, the timed-prompt
+helper, the kernel tools (the MCP tool server) as LangChain tools, and submit_<x> result tools.
+Captioning is the kernel's caption_videos GPU job."""
 from __future__ import annotations
 
 import itertools
 import json
 import os
+import shutil
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from contextlib import contextmanager
+from html.parser import HTMLParser
 from pathlib import Path
+from xml.etree import ElementTree
 from types import SimpleNamespace
 from typing import Any
 
@@ -18,11 +25,17 @@ from pydantic import BaseModel
 
 MAX_READ = 200_000
 MAX_OUTPUT = 8_000
+KEEP_BYTES = 1 << 20               # discarded_changes restores pre-existing files up to this size
 FIRST_ROUND_END = 25 / 24          # the 25 history frames
 ROUND = 32 / 24                    # one rollout round
 
 
 # ---- files and shell (root is /agent for edit_self, /workspace for improve_recipe) ----
+
+def resolve_read(root: str, path: str) -> Path:
+    """Reads may go anywhere in the container: an absolute path as is, a relative one under root."""
+    return Path(path) if Path(path).is_absolute() else Path(root) / path
+
 
 def resolve_inside(root: str, path: str) -> Path:
     base = Path(root).resolve()
@@ -68,16 +81,16 @@ def _keep_output(command: str, status: str, output: str) -> Path:
     return log
 
 
-def make_file_tools(root: str, *, writable: bool = True) -> list:
+def make_file_tools(root: str) -> list:
     @tool
     def read_file(path: str) -> str:
-        """Read a text file (path relative to the tool root)."""
-        return resolve_inside(root, path).read_text(encoding="utf-8", errors="replace")[:MAX_READ]
+        """Read a text file (absolute, or relative to the tool root)."""
+        return resolve_read(root, path).read_text(encoding="utf-8", errors="replace")[:MAX_READ]
 
     @tool
     def list_dir(path: str = ".") -> list[str]:
-        """List a directory (path relative to the tool root); directories end with '/'."""
-        return sorted(p.name + ("/" if p.is_dir() else "") for p in resolve_inside(root, path).iterdir())
+        """List a directory (absolute, or relative to the tool root); directories end with '/'."""
+        return sorted(p.name + ("/" if p.is_dir() else "") for p in resolve_read(root, path).iterdir())
 
     @tool
     def write_file(path: str, content: str) -> str:
@@ -118,9 +131,140 @@ def make_file_tools(root: str, *, writable: bool = True) -> list:
         return f"{status}\n[output cut to its last {MAX_OUTPUT} of {len(output)} chars; full output: {log}]\n" \
                f"{output[-MAX_OUTPUT:]}"
 
-    if not writable:
-        return [read_file, list_dir]
     return [read_file, list_dir, write_file, edit_file, run_command]
+
+
+def _entries(root: str) -> tuple[set[Path], set[Path]]:
+    """(directories, everything else) under root, never following a link."""
+    dirs, others = set(), set()
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in dirnames:
+            path = Path(dirpath) / name
+            (others if path.is_symlink() else dirs).add(path)
+        others.update(Path(dirpath) / name for name in filenames)
+    return dirs, others
+
+
+@contextmanager
+def discarded_changes(*roots: str):
+    """Undo, after the block, what it changed under roots: new files and directories are removed, and
+    changed or deleted files and links come back. A pre-existing file over KEEP_BYTES (a video) is not
+    copied, so it is left as the block left it."""
+    kept: dict[Path, tuple] = {}
+    dirs: set[Path] = set()
+    for root in roots:
+        root_dirs, others = _entries(root)
+        dirs |= root_dirs
+        for path in others:
+            if path.is_symlink():
+                kept[path] = ("link", os.readlink(path))
+            elif path.is_file() and path.stat().st_size <= KEEP_BYTES:
+                kept[path] = ("file", path.read_bytes())
+            else:
+                kept[path] = ("large", None)
+    try:
+        yield
+    finally:
+        for root in roots:
+            root_dirs, others = _entries(root)
+            for path in sorted(others - set(kept)):
+                path.unlink(missing_ok=True)
+            for path in sorted(root_dirs - dirs, reverse=True):         # children before parents
+                shutil.rmtree(path, ignore_errors=True)
+        for path in sorted(dirs):
+            path.mkdir(parents=True, exist_ok=True)
+        for path, (kind, value) in kept.items():
+            if kind == "link" and not (path.is_symlink() and os.readlink(path) == value):
+                path.unlink(missing_ok=True)
+                path.symlink_to(value)
+            elif kind == "file" and (path.is_symlink() or not path.is_file() or path.read_bytes() != value):
+                path.unlink(missing_ok=True)
+                path.write_bytes(value)
+
+
+# ---- arXiv ----
+
+ARXIV_API = "http://export.arxiv.org/api/query"
+ATOM = {"a": "http://www.w3.org/2005/Atom"}
+
+
+def _fetch(url: str) -> str:
+    request = urllib.request.Request(url, headers={"User-Agent": "autoresearcher-agent"})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return response.read().decode("utf-8", errors="replace")
+
+
+@tool
+def arxiv_search(query: str, max_results: int = 10) -> list[dict]:
+    """Search arXiv with the arXiv API query syntax, for example 'all:"world model" AND cat:cs.CV' or
+    'ti:camera AND abs:"video generation"'. Returns id, title, first published date and abstract."""
+    url = ARXIV_API + "?" + urllib.parse.urlencode(
+        {"search_query": query, "max_results": min(int(max_results), 50), "sortBy": "relevance"})
+    feed = ElementTree.fromstring(_fetch(url))
+    return [{"id": entry.findtext("a:id", "", ATOM).rsplit("/abs/", 1)[-1],
+             "title": " ".join(entry.findtext("a:title", "", ATOM).split()),
+             "published": entry.findtext("a:published", "", ATOM)[:10],
+             "abstract": " ".join(entry.findtext("a:summary", "", ATOM).split())}
+            for entry in feed.findall("a:entry", ATOM)]
+
+
+class _PaperText(HTMLParser):
+    """The text of an arXiv HTML paper: math as its LaTeX source, headings collected on the side."""
+    SKIP = {"script", "style", "nav", "header", "footer", "button"}
+    BLOCK = {"p", "div", "section", "li", "tr", "figcaption", "table", "br", "h1", "h2", "h3", "h4", "h5", "h6"}
+    HEADINGS = {"h1", "h2", "h3", "h4"}
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.parts: list[str] = []
+        self.headings: list[str] = []
+        self.skip = 0
+        self.heading: list[str] | None = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.SKIP or tag == "math":
+            if tag == "math" and not self.skip:
+                self.handle_data(f" ${dict(attrs).get('alttext', '')}$ ")
+            self.skip += 1
+        elif tag in self.BLOCK:
+            self.parts.append("\n")
+        if tag in self.HEADINGS and not self.skip:
+            self.heading = []
+
+    def handle_endtag(self, tag):
+        if tag in self.SKIP or tag == "math":
+            self.skip = max(0, self.skip - 1)
+        elif tag in self.HEADINGS and self.heading is not None:
+            self.headings.append(" ".join("".join(self.heading).split()))
+            self.heading = None
+
+    def handle_data(self, data):
+        if self.skip:
+            return
+        self.parts.append(data)
+        if self.heading is not None:
+            self.heading.append(data)
+
+
+@tool
+def arxiv_read(arxiv_id: str) -> dict:
+    """Fetch an arXiv paper's full text (from its HTML version) and save it to /workspace/papers/<id>.txt.
+    Returns the file path, its length and the section headings; read the parts you need from the file."""
+    try:
+        html = _fetch(f"https://arxiv.org/html/{arxiv_id}")
+    except urllib.error.HTTPError as exc:
+        raise ToolException(f"arXiv has no HTML version of {arxiv_id} ({exc.code}); download "
+                            f"https://arxiv.org/pdf/{arxiv_id} with run_command and extract its text") from None
+    parser = _PaperText()
+    parser.feed(html)
+    text = "\n".join(line.strip() for line in "".join(parser.parts).splitlines() if line.strip())
+    path = Path(os.environ.get("AR_WORKSPACE", "/workspace")) / "papers" / f"{arxiv_id.replace('/', '_')}.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return {"path": str(path), "chars": len(text), "sections": [h for h in parser.headings if h]}
+
+
+ARXIV_TOOLS = [arxiv_search, arxiv_read]
 
 
 # ---- timed prompts ----

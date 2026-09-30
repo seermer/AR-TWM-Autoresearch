@@ -86,9 +86,35 @@ def test_run_command_keeps_the_full_output_in_the_workspace(tmp_path, monkeypatc
     assert short == "exit 0\nhi\n" and len(list((workspace / "tool_output").glob("*.log"))) == 2
 
 
-def test_read_only_file_tools_cannot_write(tmp_path):
+def test_read_tools_take_absolute_paths_anywhere(tmp_path):
     from agent.tools import make_file_tools
-    assert {t.name for t in make_file_tools(str(tmp_path), writable=False)} == {"read_file", "list_dir"}
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "elsewhere" / "k.md").write_text("fact")
+    tools = {t.name: t for t in make_file_tools(str(tmp_path / "root"))}
+    assert tools["read_file"].invoke({"path": str(tmp_path / "elsewhere" / "k.md")}) == "fact"
+    assert tools["list_dir"].invoke({"path": str(tmp_path / "elsewhere")}) == ["k.md"]
+
+
+def test_discarded_changes_restores_the_tree(tmp_path):
+    from agent.tools import KEEP_BYTES, discarded_changes
+    (tmp_path / "keep").mkdir()
+    (tmp_path / "keep" / "a.txt").write_text("old")
+    (tmp_path / "gone.txt").write_text("deleted, then back")
+    (tmp_path / "link").symlink_to("keep/a.txt")
+    (tmp_path / "big.bin").write_bytes(b"0" * (KEEP_BYTES + 1))
+    with discarded_changes(str(tmp_path)):
+        (tmp_path / "keep" / "a.txt").write_text("new")
+        (tmp_path / "gone.txt").unlink()
+        (tmp_path / "link").unlink()
+        (tmp_path / "new" / "deep").mkdir(parents=True)
+        (tmp_path / "new" / "deep" / "x.txt").write_text("x")
+        (tmp_path / "keep" / "y.txt").write_text("y")
+        (tmp_path / "big.bin").write_bytes(b"1")
+    assert (tmp_path / "keep" / "a.txt").read_text() == "old"
+    assert (tmp_path / "gone.txt").read_text() == "deleted, then back"
+    assert (tmp_path / "link").is_symlink() and (tmp_path / "link").read_text() == "old"
+    assert not (tmp_path / "new").exists() and not (tmp_path / "keep" / "y.txt").exists()
+    assert (tmp_path / "big.bin").read_bytes() == b"1"          # too large to keep a copy of
 
 
 def test_submit_tool_validates_then_captures():
@@ -166,7 +192,8 @@ def _scripts():
         [message("recipe written")],
     ]
     edit = [
-        [_call("read_file", {"path": "agent/prompts/planner.md"})],
+        [_call("read_file", {"path": "agent/prompts/planner.md"}),       # planning may try things out ...
+         _call("run_command", {"command": "echo junk >> agent/prompts/coder.md && touch agent/stray.py"})],
         [_call("submit_edit_plan", {"component": "everything", "change": "x", "files": [],
                                     "rationale": "r", "expected_effect": "e"})],   # invalid component
         [_call("submit_edit_plan", {"component": "prompts", "change": "ask for posed clips first",
@@ -302,6 +329,9 @@ def test_edit_self_plans_exactly_one_component(kernel, tmp_path):
     assert body["result"]["summary"].startswith("[prompts] ask for posed clips first")
     assert "prefer clips with poses" in body["result"]["summary"]
     assert "Prefer clips with poses." in (agent / "agent" / "prompts" / "planner.md").read_text()
+    # ... but what the planner changed is gone before the coder starts
+    assert (agent / "agent" / "prompts" / "coder.md").read_text() == (SEED / "agent" / "prompts" / "coder.md").read_text()
+    assert not (agent / "agent" / "stray.py").exists()
     assert json.loads((tmp_path / "ws" / "edit_plan.json").read_text())["component"] == "prompts"
     assert any("Error invoking tool 'submit_edit_plan'" in o and "component" in o
                for o in _tool_outputs(rec, "n-edit"))
@@ -339,21 +369,29 @@ def test_edit_file_parallel_calls_do_not_lose_edits(tmp_path):
         assert (tmp_path / "p.md").read_text() == "A B"
 
 
-def test_planner_gets_only_read_only_kernel_tools():
+def test_planner_gets_every_tool_but_the_archive_writes():
     from types import SimpleNamespace as NS
     from agent.orchestration import planner_tools
     ktools = [NS(name=n) for n in ("hf_search", "hf_list_files", "hf_download", "data_query", "data_ingest",
                                    "data_commit", "caption_videos", "job_wait")]
     names = [t.name for t in planner_tools(NS(name="submit_plan"), ktools)]
-    assert names == ["submit_plan", "hf_search", "hf_list_files", "data_query"]
+    assert names[:7] == ["submit_plan", "hf_search", "hf_list_files", "hf_download", "data_query",
+                         "caption_videos", "job_wait"]
+    assert {"run_command", "write_file", "arxiv_search", "arxiv_read"} <= set(names)
+    assert not {"data_ingest", "data_commit"} & set(names)
 
 
-def test_system_prompt_carries_reference_and_memory_in_blocks():
+def test_system_prompt_is_the_role_prompt_then_memory():
     from agent.orchestration import system_prompt
-    text = system_prompt("planner", knowledge=("data_building.md",))
-    assert '<reference name="data_building.md">' in text and "<memory>" in text
-    assert "Lessons and untried ideas" in text
+    text = system_prompt("planner")
+    assert text.startswith("# Role") and "<reference" not in text
+    assert "<memory>" in text and "Lessons and untried ideas" in text
     assert "\n\n\n" not in text and not text.endswith("\n")
+
+
+def test_every_role_prompt_points_to_the_knowledge_files():
+    for name in ("planner", "data_builder", "recipe_writer", "edit_planner", "coder"):
+        assert "Start by listing /agent/knowledge" in (SEED / "agent" / "prompts" / f"{name}.md").read_text()
 
 
 def test_brief_marks_a_cut_and_closes_its_block(monkeypatch):

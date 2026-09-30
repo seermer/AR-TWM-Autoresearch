@@ -1,6 +1,7 @@
 # Example stage2b LoRA fine-tune on a standard-format dataset: Videos with one caption each and per-frame camera poses.
 # Derived from configs/stage2b_arsft_lowcompute.yaml; only run.*, data.*, the
-# validation dataset and runtime.text_embed_cache_dir differ. See docs/TRAINING.md.
+# validation dataset, runtime.text_embed_cache_dir and optimizer lr, warmup_steps and
+# max_steps differ. See docs/TRAINING.md.
 run:
   name: finetune_video_caption_camera
   seed: 42
@@ -212,15 +213,15 @@ optimizer:
   # A partially-filled accumulation window at the end of a run is discarded
   # (no effect at the default of 1).
   grad_accum_steps: 4
-  lr: 5.0e-05
+  lr: 1.0e-04
   weight_decay: 0.001
   epochs: 5000
   max_grad_norm: 5.0
-  warmup_steps: 50
+  warmup_steps: 65
   checkpoint_steps: 100
   max_checkpoints: 5
   log_steps: 1
-  max_steps: 300
+  max_steps: 400
 runtime:
   dtype: bf16
   text_embed_cache_entries: 4096

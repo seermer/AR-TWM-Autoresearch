@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import threading
 import time
@@ -21,12 +22,24 @@ from .archive.commits import CommitStore
 from .archive.nodes import NodeStore, run_rel
 from .contract.verify import verify_contract
 from .guards import alert
-from .run import score_node
+from .run import record_root_counts, root_key, score_node
 from .selection import select_parent, selection_seed, update_values
 from .subproc import file_tail
 from .train.gate import Gate
 from .train.recipe import lora_of
 from .train.runner import TrainOutcome, TrainRunner
+from .transcripts import write_transcripts
+
+
+def save_root(cache: Path, eval_dir: Path, score: float, metrics: dict, expected_n: dict, run_id: str) -> None:
+    """Keep a scored root for later runs with the same root_key (files hard-linked, not copied)."""
+    tmp = cache.with_name(cache.name + ".tmp")
+    shutil.rmtree(tmp, ignore_errors=True)
+    shutil.copytree(eval_dir, tmp / "eval", copy_function=os.link)
+    (tmp / "root.json").write_text(json.dumps({
+        "score": score, "metrics": metrics, "expected_n": expected_n, "run_id": run_id,
+        "aggregates": json.loads((eval_dir / "aggregates.json").read_text())}, indent=1))
+    tmp.rename(cache)
 
 
 class StopRun(Exception):
@@ -69,8 +82,10 @@ class Phases:
 
 
 class Loop:
-    def __init__(self, cfg, ctx, kit, repo, *, max_nodes: int, phases: Phases | None = None) -> None:
+    def __init__(self, cfg, ctx, kit, repo, *, max_nodes: int, phases: Phases | None = None,
+                 root_cache: Path | None = None) -> None:
         self.cfg, self.ctx, self.kit, self.repo, self.max_nodes = cfg, ctx, kit, repo, int(max_nodes)
+        self.root_cache = root_cache            # None: always score the root
         self.phases = phases or Phases()
         self.nodes = NodeStore(ctx.conn)
         self.graceful = threading.Event()
@@ -145,6 +160,10 @@ class Loop:
             self.repo.init(self.cfg.repo_root / "seed_agent")
         self.nodes.set_fields("root", agent_commit=commit)
         self._state("root", "eval")
+        cache = self.root_cache / root_key(self.ctx) if self.root_cache else None
+        if cache is not None and (cache / "root.json").exists():
+            self._reuse_root(cache)
+            return
         try:
             score, detail = self.phases.score(self, "root", None, None)
         except Exception as exc:                # ends the run; the run cannot be resumed
@@ -154,6 +173,20 @@ class Loop:
             alert(self.ctx.recorder, "root_failed", error, node_id="root")
             raise
         self._record_score("root", score, detail)
+        if cache is not None:
+            save_root(cache, self._node_dir("root") / "eval", score, detail["metrics"], self.ctx.expected_n,
+                      Path(self.ctx.run_dir).name)
+
+    def _reuse_root(self, cache: Path) -> None:
+        """The root is the unedited seed agent's model: scoring it again would repeat hours of eval."""
+        saved = json.loads((cache / "root.json").read_text())
+        shutil.copytree(cache / "eval", self._node_dir("root") / "eval", copy_function=os.link,
+                        ignore=shutil.ignore_patterns("aggregates.json"))   # rewritten below, never through a link
+        record_root_counts(self.ctx, saved["expected_n"])
+        self._record_score("root", saved["score"], {"metrics": saved["metrics"],
+                                                     "aggregates": saved["aggregates"]})
+        self.ctx.recorder.event("root.reused", node="root", phase="eval",
+                                payload={"cache": str(cache), "scored_by_run": saved["run_id"]})
 
     def cycle(self) -> None:
         child = self._next_id()
@@ -302,6 +335,7 @@ class Loop:
         # candidate the agent or a GPU job prepared stays, ingested or not (spec 15).
         for raw in (Path(self.ctx.run_dir) / "staging" / node).glob("*/hf"):
             shutil.rmtree(raw, ignore_errors=True)
+        write_transcripts(self.ctx.run_dir, node)
         self.ctx.recorder.event("node.end", payload={"node": node, "status": status, "error": error},
                                 child=node, status=status)
         self._state(None, "idle")

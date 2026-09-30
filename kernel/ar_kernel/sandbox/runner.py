@@ -28,6 +28,9 @@ class Mounts:
     contract: Path
     sockets: Path
     agent_readonly: bool = False
+    # node id -> node dir of each ancestor, mounted read-only at /lineage/<id>. Its eval/ is hidden:
+    # per-case outputs would let an agent fit the proxy cases.
+    lineage: dict[str, Path] = field(default_factory=dict)
 
 
 @dataclass
@@ -124,6 +127,10 @@ def _docker_args(image, name, mounts: Mounts, command, env, cpus, memory_gb, net
             "-v", f"{mounts.store}:/store:ro",
             "-v", f"{mounts.contract}:/ar_contract:ro",
             "-v", f"{mounts.sockets}:/run/ar:ro"]   # connect works; deleting a socket does not
+    for node, path in mounts.lineage.items():
+        args += ["-v", f"{path}:/lineage/{node}:ro"]
+        if (Path(path) / "eval").is_dir():
+            args += ["--tmpfs", f"/lineage/{node}/eval:ro,size=4k"]
     for key, value in {**base_env, **env}.items():
         args += ["-e", f"{key}={value}"]
     return args + [image, *command]

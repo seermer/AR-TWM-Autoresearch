@@ -185,7 +185,9 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 nohup ar run --run-id $RUN --max-nodes 6 --git-remo
 ```
 
 The loop first measures the starting model (the "root", about 2 hours), then improves it node by node
-(about 3 hours per node measured on 4 GPUs). The root score should be close to `0.787`.
+(about 5-6 hours per node measured on 4 GPUs). The root is measured once: it is kept in `root_cache/`
+and reused by every later run with the same cases, metrics, judge and WorldModel/WBench commits. With
+the local judge the root score is close to `0.676`.
 
 Run only one loop at a time on a machine.
 

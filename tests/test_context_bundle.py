@@ -108,8 +108,8 @@ def test_recipe_context_carries_the_guide_and_the_parents_training_summary(world
         log = run / "nodes" / "root" / "attempts" / f"improve_recipe-{attempt}" / "train" / "train.log"
         log.parent.mkdir(parents=True)
         log.write_text("".join(
-            f"[Train] step={i} epoch=0 loss={attempt} grad=0.1 lr=1e-05 time=10.0s\\n" for i in range(1, 9)))
-    assert build_recipe_context(**kwargs).parent_train["loss_last_quarter"] == 2.0
+            f"[Train] step={i} epoch=0 sigma=0.9 loss={attempt} grad=0.1 lr=1e-05 time=10.0s\\n" for i in range(1, 9)))
+    assert build_recipe_context(**kwargs).parent_train["loss_by_sigma"]["sigma>=0.6"]["second_half"] == 2.0
 
 
 def test_lineage_entries_carry_the_process_digest(world):

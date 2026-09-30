@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from .archive.blobs import BlobStore
 from .archive.clips import ClipStore
 from .archive.commits import CommitStore
+from .archive.nodes import NodeStore
 from .context_bundle import build_edit_context, build_recipe_context, write_bundle
 from .liveness import Liveness, tree_mark
 from .sandbox.image import ImageBuildError, ensure_image
@@ -54,6 +55,15 @@ def attempt_dirs(run_dir: Path, node: str, phase: str, attempt: int) -> dict[str
             "context": base / "context", "staging": Path(run_dir) / "staging" / node / f"{phase}-{attempt}"}
 
 
+def lineage_dirs(conn, run_dir: Path, parent_id: str) -> dict[str, Path]:
+    """The node dir of the parent and of each of its ancestors, by node id."""
+    nodes, out, current = NodeStore(conn), {}, parent_id
+    while current:
+        out[current] = Path(run_dir) / "nodes" / current
+        current = nodes.get(current)["parent_id"]
+    return {node: path for node, path in out.items() if path.is_dir()}
+
+
 def _failed_before_start(dirs: dict, started: float, error: str) -> tuple:
     """An attempt that fails before its container starts: a failed attempt recorded like
     any other, never an exception that skips edit_self's commit of the attempt tree."""
@@ -64,7 +74,8 @@ def _failed_before_start(dirs: dict, started: float, error: str) -> tuple:
 
 
 def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str, ctx,
-         mock_script: str | None, agent_readonly: bool, previous_workspace: Path | None) -> tuple:
+         mock_script: str | None, agent_readonly: bool, previous_workspace: Path | None,
+         lineage: dict[str, Path]) -> tuple:
     dirs = attempt_dirs(env.run_dir, node, phase, attempt)
     started = time.monotonic()
     if dirs["attempt"].exists():
@@ -128,7 +139,7 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
             mounts=Mounts(agent=dirs["agent"], workspace=dirs["workspace"], staging=dirs["staging"],
                           context=dirs["context"], store=Path(env.run_dir) / "store",
                           contract=env.cfg.repo_root / "contract", sockets=env.socket_dir,
-                          agent_readonly=agent_readonly),
+                          agent_readonly=agent_readonly, lineage=lineage),
             command=["python", "-m", "ar_contract.run", phase],
             env={"AR_TOKEN": caller.token, "AR_DEFAULT_MODEL": env.default_model, "AR_NODE": node,
                  "AR_PHASE": phase, "AR_ATTEMPT": str(attempt),
@@ -206,7 +217,8 @@ def run_edit_self(env: PhaseEnv, *, conn, node: str, parent_id: str, base_commit
                              nodes_remaining=nodes_remaining, dry_run=dry_run)
     dirs, result, body, diffs, duration = _run(env, phase="edit_self", node=node, attempt=attempt,
                                                code_commit=base_commit, ctx=ctx, mock_script=mock_script,
-                                               agent_readonly=False, previous_workspace=previous_workspace)
+                                               agent_readonly=False, previous_workspace=previous_workspace,
+                                               lineage=lineage_dirs(conn, env.run_dir, parent_id))
     # The edited code is committed to an attempt ref whether or not the attempt succeeded (spec
     # 5.2). No tree, or an uncommittable one, means no commit and a failed attempt.
     commit = None
@@ -234,7 +246,8 @@ def run_improve_recipe(env: PhaseEnv, *, conn, node: str, parent_id: str, agent_
     # improve_recipe mounts /agent read-only: only edit_self changes code.
     dirs, result, body, diffs, duration = _run(env, phase="improve_recipe", node=node, attempt=attempt,
                                                code_commit=agent_commit, ctx=ctx, mock_script=mock_script,
-                                               agent_readonly=True, previous_workspace=previous_workspace)
+                                               agent_readonly=True, previous_workspace=previous_workspace,
+                                               lineage=lineage_dirs(conn, env.run_dir, parent_id))
 
     def check_data_commit(res: dict) -> str | None:           # `res` is already validated
         try:
