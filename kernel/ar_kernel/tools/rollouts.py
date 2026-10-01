@@ -162,7 +162,8 @@ class AlayaWorldBackend(GpuJob):
     file_keys = ("image", "subject_mask")
     max_turns = 9
     description = (
-        "Render WBench-style cases with AlayaWorld exactly as the WBench eval does. A GPU job: returns "
+        "Render WBench-style cases with AlayaWorld exactly as the WBench eval does. The clips come from "
+        "the released model, the same model every node fine-tunes. A GPU job: returns "
         "{job_id} at once; collect with job_wait. Params: `variant` ({variants}; default the first), "
         "`rounds_per_turn` 1..3 (default 3; a round "
         "is 32 frames at 24 fps), `seed` (int, default 42). Item: {'image': first frame under /workspace "

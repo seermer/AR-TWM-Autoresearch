@@ -5,11 +5,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Mapping
 
-from .archive.db import open_db
+from .archive.db import open_db, open_db_readonly
+from .archive.nodes import NodeStore
+from .control import Control
 from .doctor import wbench_weight_problems
 from .config import SNAPSHOT_FILES, KernelConfig, resolve_gpus
 from .eval.judge import Judge, resolve_judge
-from .eval.merge import merge_lora
+from .eval.lora import concat_eval_lora
 from .eval.render import build_render_config, render_proxy
 from .eval.score import DIMENSION_METRICS, UNIVERSAL_METRICS, aggregates, cleanup_eval, score_from_report
 from .eval.wbench import run_wbench_phases
@@ -83,8 +85,12 @@ def bootstrap_run(cfg: KernelConfig, run_id: str | None, env: Mapping[str, str])
     (run_dir / "config" / "versions.json").write_text(json.dumps(versions, indent=2))
     metric_set = preflight_metrics(cfg)
     judge = resolve_judge(cfg, env)
-    case_ids = (run_dir / "config" / "proxy_cases.txt").read_text().strip().split(",")
-    expected_n = initial_expected_n(case_ids)
+    ordered = (run_dir / "config" / "proxy_cases.txt").read_text().strip().split(",")
+    size = int(cfg.get("eval.proxy_size"))
+    if not 0 < size <= len(ordered):
+        raise PreflightError(f"eval.proxy_size must be between 1 and {len(ordered)}, got {size}")
+    case_ids = ordered[:size]
+    expected_n = initial_expected_n(cfg, case_ids)
     # run.json is written last: its presence is what marks the run as created.
     (run_dir / "config" / "run.json").write_text(json.dumps(
         {"run_id": run_id, "metric_set": metric_set, "judge": asdict(judge),
@@ -99,10 +105,18 @@ def bootstrap_run(cfg: KernelConfig, run_id: str | None, env: Mapping[str, str])
                       expected_n=expected_n, judge=judge)
 
 
-def initial_expected_n(case_ids: list[str]) -> dict:
-    """Case counts known up front: the universal metrics cover every proxy case. The root's
-    report adds the rest (score_node), and every later node must match them."""
-    return {m: len(case_ids) for m in UNIVERSAL_METRICS}
+def initial_expected_n(cfg: KernelConfig, case_ids: list[str]) -> dict:
+    """Case counts known up front: the universal metrics cover every proxy case, and the case
+    files say which cases each judged metric applies to (so a judge call that never succeeded
+    fails the root too). The root's report adds the rest (score_node), and every later node
+    must match them."""
+    cases = [json.loads((cfg.wbench / "data" / "cases" / f"case_{i}.json").read_text()) for i in case_ids]
+    expected = {m: len(case_ids) for m in UNIVERSAL_METRICS}
+    for metric in ("scene_adherence", "subject_adherence", "causal_fidelity"):
+        expected[metric] = sum(bool(c.get(metric)) for c in cases)
+    for kind in ("event_edit", "subject_action", "perspective_switch"):
+        expected[f"{kind}_adherence"] = sum(any(i.get("type") == kind for i in c["interactions"]) for c in cases)
+    return expected
 
 
 def record_root_counts(ctx: RunContext, expected_n: dict) -> None:
@@ -125,19 +139,18 @@ def root_key(ctx: RunContext) -> str:
     return hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def attach_run(cfg: KernelConfig, run_id: str, env: Mapping[str, str],
-               check_judge: bool = True) -> RunContext:
+def attach_run(cfg: KernelConfig, run_id: str, env: Mapping[str, str]) -> RunContext:
     """Open an existing run without modifying its snapshot or appending run.start.
 
-    For `ar status`, `ar score-node`, and resuming. A missing run is an error --
-    it used to be created silently, so a typo'd run id made a fresh run.
+    For resuming. A missing run is an error -- it used to be created silently, so a
+    typo'd run id made a fresh run.
     """
     run_dir = cfg.runs_dir / run_id
     meta_path = run_dir / "config" / "run.json"
     if not meta_path.exists():
         raise RunNotFound(f"no run {run_id!r} under {cfg.runs_dir}")
     meta = json.loads(meta_path.read_text())
-    judge = _stored_judge(cfg, env, meta) if check_judge else None
+    judge = _stored_judge(cfg, env, meta)
     return RunContext(run_dir=run_dir, conn=open_db(run_dir), recorder=_recorder(run_dir, env),
                       gpus=resolve_gpus(cfg, env), metric_set=meta["metric_set"],
                       case_ids=meta["case_ids"], versions=meta["versions"],
@@ -157,34 +170,32 @@ def _stored_judge(cfg: KernelConfig, env: Mapping[str, str], meta: dict) -> Judg
 
 
 def score_node(cfg: KernelConfig, ctx: RunContext, node_id: str, checkpoint: Path | None,
-               rank: int, alpha: int) -> tuple[float, dict]:
+               rank: int) -> tuple[float, dict]:
     node_dir = ctx.run_dir / "nodes" / node_id
     work_dir = node_dir / "eval" / "work_dirs"
     model = f"ar_{ctx.run_dir.name}_n{node_id}"
     videos_dir = work_dir / model / "videos"
-    merged = None
+    eval_lora = None
 
     def cleanup() -> None:
         removed = cleanup_eval(work_dir, model)
-        slot = ctx.run_dir / "merge_slot"
-        if slot.exists():
-            shutil.rmtree(slot)
-            removed.append("merge_slot")
+        if eval_lora is not None and eval_lora.exists():
+            shutil.rmtree(eval_lora)
+            removed.append("lora")
         ctx.recorder.event("eval.cleanup", node=node_id, phase="eval", payload={"removed": removed})
 
     try:
         if checkpoint is None:
             history = cfg.worldmodel / "weights/alaya-world-ar/history_encoder.pt"
         else:
-            merged = merge_lora(cfg, checkpoint, rank, alpha, ctx.run_dir, ctx.recorder, node_id)
+            eval_lora = concat_eval_lora(cfg, checkpoint, node_dir, ctx.recorder, node_id)
             history = Path(checkpoint) / "history_encoder.pt"
-        render_config = build_render_config(cfg, merged, history, videos_dir, ctx.case_ids, node_dir)
+        render_config = build_render_config(cfg, eval_lora, rank, history, videos_dir, ctx.case_ids, node_dir)
         render_proxy(cfg, render_config, ctx.gpus, node_id, ctx.recorder, ctx.case_ids)
         report = run_wbench_phases(cfg, work_dir, model, ctx.gpus, ctx.metric_set, ctx.recorder, node_id,
                                    ctx.judge)
-        score, per_metric = score_from_report(report, ctx.metric_set, ctx.expected_n)
-        if node_id == "root":
-            record_root_counts(ctx, {m: int(report["full"][m]["n"]) for m in ctx.metric_set})
+        score, per_metric = score_from_report(report, ctx.metric_set, ctx.expected_n,
+                                              cfg.get("eval.score_weights"))
         agg = aggregates(cfg, report, ctx.case_ids, ctx.metric_set)
         ctx.recorder.event("eval.scored", node=node_id, phase="eval",
                            payload={"score": score, "metrics": per_metric, "aggregates": agg})
@@ -195,4 +206,33 @@ def score_node(cfg: KernelConfig, ctx: RunContext, node_id: str, checkpoint: Pat
         cleanup()
         raise
     cleanup()
-    return score, {"metrics": per_metric, "aggregates": agg, "report": report}
+    return score, {"metrics": per_metric, "aggregates": agg, "report": report,
+                   "counts": {m: int(report["full"][m]["n"]) for m in ctx.metric_set}}
+
+
+def rescore_node(cfg: KernelConfig, run_id: str, node_id: str, env: Mapping[str, str]) -> tuple[float, Path]:
+    """Score a node of an existing run again, with the run's cases, metrics, judge and weights.
+    Reads the run and writes only under scores/<run>-<node>-<time>/; the run is not modified."""
+    run_dir = cfg.runs_dir / run_id
+    meta_path = run_dir / "config" / "run.json"
+    if not meta_path.exists():
+        raise RunNotFound(f"no run {run_id!r} under {cfg.runs_dir}")
+    meta = json.loads(meta_path.read_text())
+    run_cfg = KernelConfig.for_run(run_dir)
+    conn = open_db_readonly(run_dir, writer_alive=Control(run_dir).alive_pid() is not None)
+    try:
+        node = NodeStore(conn).get(node_id)
+    finally:
+        conn.close()
+    if node["checkpoint_path"] is None and node["parent_id"] is not None:
+        raise ValueError(f"node {node_id!r} has no checkpoint to score")
+    checkpoint = run_dir / node["checkpoint_path"] if node["checkpoint_path"] else None
+    out = cfg.scores_dir / f"{run_id}-{node_id}-{dt.datetime.now():%Y%m%d_%H%M%S}"
+    ctx = RunContext(run_dir=out, conn=None, recorder=_recorder(out, env), gpus=resolve_gpus(run_cfg, env),
+                     metric_set=meta["metric_set"], case_ids=meta["case_ids"], versions=meta["versions"],
+                     expected_n=meta["expected_n"], judge=_stored_judge(run_cfg, env, meta))
+    score, detail = score_node(run_cfg, ctx, node_id, checkpoint, node["lora_rank"] or 0)
+    (out / "score.json").write_text(json.dumps(
+        {"run_id": run_id, "node": node_id, "score": score, "metrics": detail["metrics"],
+         "aggregates": detail["aggregates"]}, indent=1))
+    return score, out

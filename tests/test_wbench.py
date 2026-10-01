@@ -85,7 +85,7 @@ def test_local_judge_phase_order_is_server_around_vlm_then_vp_then_report(tmp_pa
     out = run_wbench_phases(cfg, work_dir, model, gpus, ["test_metric"], rec, node_id,
                             Judge("local", "Qwen/x", None))
     assert out == fake_report
-    assert phases == ["precompute", "gpu", "gpu", "server_start", "vlm", "server_stop", "vp", "report"]
+    assert phases == ["precompute", "gpu", "gpu", "server_start", "vlm", "vlm", "server_stop", "vp", "report"]
 
 
 def test_the_judge_server_is_stopped_when_the_vlm_phase_fails(tmp_path, monkeypatch):
@@ -112,4 +112,4 @@ def test_an_api_judge_starts_no_server(tmp_path, monkeypatch):
     monkeypatch.setattr(wbench_mod, "run_in_env",
                         lambda env, args, **kw: Mock(returncode=0) if env == "wbench-vp" else real(env, args, **kw))
     run_wbench_phases(cfg, work_dir, model, gpus, ["test_metric"], rec, node_id, Judge("api", "d", "u"))
-    assert phases == ["precompute", "gpu", "gpu", "vlm", "report"]
+    assert phases == ["precompute", "gpu", "gpu", "vlm", "vlm", "report"]

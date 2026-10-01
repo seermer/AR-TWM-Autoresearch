@@ -1,11 +1,11 @@
 ---
-name: lineage_logs_transcripts_and_workspaces
-description: Use when looking into what earlier nodes did: their transcripts, workspaces, command logs, training logs and configs under /lineage.
+name: earlier_nodes_logs_transcripts_and_workspaces
+description: Use when looking into what earlier nodes did: their transcripts, workspaces, command logs, training logs and configs under /nodes.
 ---
 
-# What earlier nodes left behind: /lineage
+# What earlier nodes left behind: /nodes
 
-`/lineage/<node>/` holds, read-only, everything the parent and each earlier ancestor produced, except its evaluation outputs (its scores are in the context's `lineage`). The root node only has a score, so its directory is empty.
+`/nodes/<node>/` holds, read-only, everything each finished node of the run produced, except its evaluation outputs. The context's `lineage` has the scores of the parent and its ancestors, `siblings` those of the parent's other children, and `archive` one line for every node. The root node only has a score, so its directory is empty.
 
 - `recipe.yaml`: the tunable values the node trained with.
 - `rationale.md`: the recipe rationale, the data plan and the data notes.
@@ -20,7 +20,7 @@ description: Use when looking into what earlier nodes did: their transcripts, wo
 - `contract/attempt-<k>/`: the kernel's checks of the edited code.
 
 Useful ways in:
-- `ls -R /lineage | head -200` for the shape, then read the parent first.
-- `grep -l "Error" /lineage/*/transcripts/*/*.md` finds tool failures; `grep -c "tool call: run_command"` shows how much was done by hand.
+- `ls /nodes`, then `ls -R /nodes/<parent> | head -200` for the shape; read the parent first.
+- `grep -l "Error" /nodes/*/transcripts/*/*.md` finds tool failures; `grep -c "tool call: run_command"` shows how much was done by hand.
 - To follow the loss, extract `sigma` and `loss` from train.log with a short Python script and group by sigma.
 - The same holds for the current attempt: `/context/context.json` is the full, untruncated version of the `<context>` block.

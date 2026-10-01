@@ -109,7 +109,7 @@ ln -s ../AutoResearcher/.env ../WBench/.env
 
 Check: `ls -l ../WorldModel/.env ../WBench/.env` both show `-> ../AutoResearcher/.env`.
 
-Optional model context size: if your model's context window is not 128000 tokens, edit `agents.context_window_tokens` in `configs/kernel.yaml`.
+Optional model context size: `agents.context_window_tokens` in `configs/kernel.yaml` is set to 1000000 tokens, and the agent compacts its conversation at `agents.compact_at` (0.6) of it. Lower it if your model's context window is smaller.
 
 ## 4. Download weights and data (about 460 GB)
 
@@ -186,8 +186,10 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 nohup ar run --run-id $RUN --max-nodes 6 --git-remo
 
 The loop first measures the starting model (the "root", about 2 hours), then improves it node by node
 (about 5-6 hours per node measured on 4 GPUs). The root is measured once: it is kept in `root_cache/`
-and reused by every later run with the same cases, metrics, judge and WorldModel/WBench commits. With
-the local judge the root score is close to `0.676`.
+and reused by every later run with the same cases, metrics, judge and WorldModel/WBench commits. A run
+scores the first `eval.proxy_size` (50) cases of `configs/proxy_cases.txt`, and the score is a weighted
+mean of the 22 metrics (`eval.score_weights` in `configs/kernel.yaml`). With the local judge the root
+scores `0.507` (measured 2026-10-01).
 
 Run only one loop at a time on a machine.
 
@@ -222,6 +224,7 @@ Do not delete files under `runs/$RUN` by hand.
 ## 10. Results
 
 - `ar status --run-id $RUN`: every node with its score and the best one.
+- `ar score-node --run-id $RUN --node <id>`: scores a node of the run again. It reads the run and writes only under `scores/`; besides `ar run` and `ar stop`, no command changes a run.
 - Code of each node: the branches `$RUN/node/<id>` in the GitHub repo from `$REMOTE`.
 - Everything else (logs, conversations, checkpoints, videos): `runs/$RUN/`. Keep this folder; it is the record of the experiment.
 

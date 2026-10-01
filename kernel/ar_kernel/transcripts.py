@@ -1,5 +1,5 @@
 """Readable transcripts of a node's agent conversations, written when the node ends so that later
-agents can read them under /lineage/<node>/transcripts. Built from the gateway's telemetry."""
+agents can read them under /nodes/<node>/transcripts. Built from the gateway's telemetry."""
 from __future__ import annotations
 
 from pathlib import Path

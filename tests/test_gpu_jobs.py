@@ -78,10 +78,10 @@ def test_max_items_and_timeout_come_from_the_backends_config_block(tmp_path):
     reg = TokenRegistry(rec)
 
     class ConfiguredJob(FakeJob):
-        config_key = "annotate"        # configs/kernel.yaml: max_items: 64, timeout_s: 21600
+        config_key = "annotate"        # configs/kernel.yaml: max_items: 100, timeout_s: 21600
 
     backend = ConfiguredJob(KernelConfig.load(), tmp_path / "run", [0, 1, 4, 5], reg, rec)
-    assert backend.max_items == 64
+    assert backend.max_items == 100
     assert backend.timeout_s == 21600
     assert FakeJob(KernelConfig.load(), tmp_path / "run", [0, 1, 4, 5], reg, rec).timeout_s is None
 

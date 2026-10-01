@@ -67,3 +67,30 @@ def test_alert_timestamp_in_format_status(tmp_path):
     # Check that the alert line contains a timestamp in the format YYYY-MM-DD HH:MM:SS
     for alert_line in alert_lines:
         assert any(c.isdigit() for c in alert_line[:19]), f"Timestamp not found in alert line: {alert_line}"
+
+
+def test_status_writes_nothing_into_the_run(tmp_path):
+    """Also with a non-empty -wal, as a killed loop leaves it."""
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "kernel.yaml").write_text(
+        "selection: {decay: 0.5, prior_weight: 1.0, subtree_share: 0.3, size_scale: 4, temperature: 2.0,"
+        " noise_floor: 4.4e-4, epsilon: 0.2}\n")
+    conn = open_db(tmp_path)
+    nodes = NodeStore(conn)
+    nodes.create("root", None, 0), nodes.record_score("root", 0.78, ["m"], {"m": 0.78})
+    killed = {p.name: p.read_bytes() for p in tmp_path.glob("archive.db*")}
+    conn.close()
+    for name, data in killed.items():
+        (tmp_path / name).write_bytes(data)
+    assert (tmp_path / "archive.db-wal").stat().st_size > 0
+
+    def tree():
+        return {str(p.relative_to(tmp_path)): (p.stat().st_size, p.stat().st_mtime_ns)
+                for p in sorted(tmp_path.rglob("*")) if p.is_file()}
+    before = tree()
+    assert run_status(tmp_path)["best"]["node_id"] == "root"
+    assert tree() == before
+    open_db(tmp_path).close()                                       # a cleanly closed archive: no -wal
+    assert not (tmp_path / "archive.db-wal").exists()
+    before = tree()
+    assert run_status(tmp_path)["best"]["node_id"] == "root" and tree() == before

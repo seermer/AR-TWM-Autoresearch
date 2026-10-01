@@ -260,3 +260,28 @@ def test_compaction_falls_back_to_tool_choice_none_when_the_model_calls_a_tool_i
 def test_the_default_compaction_prompt_is_the_seed_prompt_file():
     from agent.harness import COMPACT_PROMPT
     assert COMPACT_PROMPT.is_file() and "Next step" in COMPACT_PROMPT.read_text()
+
+
+def _submit(accept):
+    from langchain_core.tools import StructuredTool, ToolException
+
+    async def submit(answer: str) -> str:
+        if not accept(answer):
+            raise ToolException("rejected")
+        return "submitted"
+    return StructuredTool.from_function(coroutine=submit, name="submit", description="Submit.", return_direct=True)
+
+
+def test_an_accepted_return_direct_tool_ends_the_run_without_another_model_call():
+    script = [_ai("", [("add", {"a": 1, "b": 2}, "c1"), ("submit", {"answer": "x"}, "c2")]), _ai("never asked")]
+    messages, log = asyncio.run(_run(_ours, script, [add, _submit(lambda a: True)], None, [HumanMessage("go")]))
+    assert len(log["prompts"]) == 1                                   # parallel results are in, then the run ends
+    assert [m["type"] for m in messages] == ["human", "ai", "tool", "tool"]
+    assert messages[-1]["content"] == "submitted"
+
+
+def test_a_rejected_return_direct_tool_goes_back_to_the_model():
+    script = [_ai("", [("submit", {"answer": "bad"}, "c1")]), _ai("", [("submit", {"answer": "good"}, "c2")])]
+    messages, log = asyncio.run(_run(_ours, script, [_submit(lambda a: a == "good")], None, [HumanMessage("go")]))
+    assert len(log["prompts"]) == 2
+    assert [m.get("status") for m in messages if m["type"] == "tool"] == ["error", "success"]

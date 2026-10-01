@@ -73,7 +73,7 @@ def test_batch_success_captions_every_clip_then_stops_the_server(make, tmp_path)
     job = submit(q, caller, ["clips/a.mp4", "/workspace/staging/b.mp4"], "Describe the camera motion.")["job_id"]
     out = q.wait(caller, job, 120)
     assert out["state"] == "done", out
-    assert out["args"]["paths"] == ["/workspace/clips/a.mp4", "/workspace/staging/b.mp4"]
+    assert "args" not in out                               # the caller sent them; they are not echoed back
     clips = out["result"]["clips"]
     assert clips == {
         "/workspace/clips/a.mp4": {"caption": "Describe the camera motion. [10 bytes, tp=4, gpus=0,1,4,5]"},

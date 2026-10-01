@@ -9,7 +9,7 @@ from .doctor import report, run_checks
 from .guards import alert, check_visible
 from .loop import Loop
 from .monitor import Monitor
-from .run import PreflightError, RunNotFound, attach_run, bootstrap_run, score_node
+from .run import PreflightError, RunNotFound, attach_run, bootstrap_run, rescore_node
 from .run_kit import build_run_kit
 from .status import format_status, run_status
 from .subproc import cache_env, proc_running, proc_start_time
@@ -22,17 +22,12 @@ def main(argv: list[str] | None = None) -> int:
     os.environ.update(cache_env())
     parser = argparse.ArgumentParser(prog="ar")
     sub = parser.add_subparsers(dest="command", required=True)
-    init = sub.add_parser("init-run", help="create a run directory and record versions")
-    init.add_argument("--run-id", default=None)
     status = sub.add_parser("status", help="show nodes of a run")
     status.add_argument("--run-id", required=True)
     status.add_argument("--json", action="store_true", help="print the raw JSON snapshot")
-    score = sub.add_parser("score-node", help="render and score one node on the proxy")
+    score = sub.add_parser("score-node", help="score a node of a run again; writes under scores/, never the run")
     score.add_argument("--run-id", required=True)
     score.add_argument("--node", required=True)
-    score.add_argument("--checkpoint", default=None, help="node checkpoint dir; omit for the base model")
-    score.add_argument("--lora-rank", type=int, default=64)
-    score.add_argument("--lora-alpha", type=int, default=64)
     runp = sub.add_parser("run", help="start (or --resume) the loop")
     runp.add_argument("--run-id", default=None)
     runp.add_argument("--max-nodes", type=int, default=None)
@@ -54,11 +49,6 @@ def main(argv: list[str] | None = None) -> int:
     # Before bootstrap_run: diagnostics must not create a run dir or rewrite versions.json.
     if args.command == "doctor":
         return report(run_checks(cfg), strict=args.strict)
-
-    if args.command == "init-run":
-        ctx = bootstrap_run(cfg, args.run_id, os.environ)
-        print(ctx.run_dir)
-        return 0
 
     if args.command == "run":
         return _run(cfg, args)
@@ -89,28 +79,22 @@ def main(argv: list[str] | None = None) -> int:
                 print("no loop is running for this run; the stop request was written anyway")
         return 0
 
-    # status / score-node act on an EXISTING run: attach, never create or rewrite it.
+    # status / score-node read an EXISTING run and never write into it.
     try:
-        ctx = attach_run(cfg, args.run_id, os.environ, check_judge=args.command != "status")
+        if args.command == "status":
+            run_dir = cfg.runs_dir / args.run_id
+            if not (run_dir / "config" / "run.json").exists():
+                raise RunNotFound(f"no run {args.run_id!r} under {cfg.runs_dir}")
+            d = run_status(run_dir)
+            print(json.dumps(d, indent=1) if args.json else format_status(d))
+            return 0
+        if args.command == "score-node":
+            score, out = rescore_node(cfg, args.run_id, args.node, os.environ)
+            print(json.dumps({"node": args.node, "score": score, "output": str(out)}, indent=2))
+            return 0
     except (RunNotFound, PreflightError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    if args.command == "status":
-        d = run_status(ctx.run_dir)
-        print(json.dumps(d, indent=1) if args.json else format_status(d))
-        return 0
-
-    if args.command == "score-node":
-        checkpoint = Path(args.checkpoint) if args.checkpoint else None
-        nodes = NodeStore(ctx.conn)
-        try:
-            nodes.get(args.node)
-        except KeyError:
-            nodes.create(args.node, None, 0)
-        score, detail = score_node(cfg, ctx, args.node, checkpoint, args.lora_rank, args.lora_alpha)
-        nodes.record_score(args.node, score, ctx.metric_set, detail["metrics"])
-        print(json.dumps({"node": args.node, "score": score}, indent=2))
-        return 0
     return 1
 
 
@@ -173,17 +157,12 @@ def _run(cfg, args) -> int:
     if args.resume:
         repo.push()                                     # catch up pushes a stopped kernel missed
     killed = kill_recorded_groups(control)              # GPU jobs a killed kernel left running
-    slot = ctx.run_dir / "merge_slot"                   # ~52 GB run-level transient (spec 15), not node data
-    removed_slot = slot.exists()
-    if removed_slot:
-        shutil.rmtree(slot)
     hf_tmp = ctx.run_dir / "hf_tmp"                     # kernel-private partial downloads of a stopped kernel
     partial = sorted(p.name for p in hf_tmp.iterdir()) if hf_tmp.is_dir() else []
     for name in partial:
         shutil.rmtree(hf_tmp / name, ignore_errors=True)
-    if killed or removed_slot or partial:
-        ctx.recorder.event("run.resume_cleanup", payload={"killed_groups": killed, "merge_slot": removed_slot,
-                                                          "hf_tmp": partial})
+    if killed or partial:
+        ctx.recorder.event("run.resume_cleanup", payload={"killed_groups": killed, "hf_tmp": partial})
     mark_interrupted(ctx, "unfinished when the loop stopped (forced stop, kernel death or spent budget)")
     kit = build_run_kit(run_cfg, ctx.run_dir, ctx.gpus, ctx.recorder, os.environ)
     loop = Loop(run_cfg, ctx, kit, repo, max_nodes=max_nodes, root_cache=run_cfg.root_cache)

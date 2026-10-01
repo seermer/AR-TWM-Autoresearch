@@ -107,7 +107,7 @@ def _tolerance(metric: str) -> float:
 
 def test_base_model_reproduces_the_recorded_proxy_score():
     ctx = bootstrap_run(CFG, run_id="manual_root", env=os.environ)
-    score, detail = score_node(CFG, ctx, "root", None, 64, 64)
+    score, detail = score_node(CFG, ctx, "root", None, 0)
     import json
     import statistics
     reference = json.loads(

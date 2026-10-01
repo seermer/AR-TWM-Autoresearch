@@ -14,7 +14,7 @@ from pydantic import ValidationError
 from .archive.blobs import BlobStore
 from .archive.clips import ClipStore
 from .archive.commits import CommitStore
-from .archive.nodes import NodeStore
+from .archive.nodes import UNFINISHED, NodeStore
 from .context_bundle import build_edit_context, build_recipe_context, write_bundle
 from .liveness import Liveness, tree_mark
 from .sandbox.image import ImageBuildError, ensure_image
@@ -55,12 +55,10 @@ def attempt_dirs(run_dir: Path, node: str, phase: str, attempt: int) -> dict[str
             "context": base / "context", "staging": Path(run_dir) / "staging" / node / f"{phase}-{attempt}"}
 
 
-def lineage_dirs(conn, run_dir: Path, parent_id: str) -> dict[str, Path]:
-    """The node dir of the parent and of each of its ancestors, by node id."""
-    nodes, out, current = NodeStore(conn), {}, parent_id
-    while current:
-        out[current] = Path(run_dir) / "nodes" / current
-        current = nodes.get(current)["parent_id"]
+def finished_node_dirs(conn, run_dir: Path) -> dict[str, Path]:
+    """The node dir of every finished node, by node id: not the node being built, nor an interrupted one."""
+    out = {n["node_id"]: Path(run_dir) / "nodes" / n["node_id"] for n in NodeStore(conn).all()
+           if n["status"] not in UNFINISHED}
     return {node: path for node, path in out.items() if path.is_dir()}
 
 
@@ -75,7 +73,7 @@ def _failed_before_start(dirs: dict, started: float, error: str) -> tuple:
 
 def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str, ctx,
          mock_script: str | None, agent_readonly: bool, previous_workspace: Path | None,
-         lineage: dict[str, Path]) -> tuple:
+         nodes: dict[str, Path]) -> tuple:
     dirs = attempt_dirs(env.run_dir, node, phase, attempt)
     started = time.monotonic()
     if dirs["attempt"].exists():
@@ -139,7 +137,7 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
             mounts=Mounts(agent=dirs["agent"], workspace=dirs["workspace"], staging=dirs["staging"],
                           context=dirs["context"], store=Path(env.run_dir) / "store",
                           contract=env.cfg.repo_root / "contract", sockets=env.socket_dir,
-                          agent_readonly=agent_readonly, lineage=lineage),
+                          agent_readonly=agent_readonly, nodes=nodes),
             command=["python", "-m", "ar_contract.run", phase],
             env={"AR_TOKEN": caller.token, "AR_DEFAULT_MODEL": env.default_model, "AR_NODE": node,
                  "AR_PHASE": phase, "AR_ATTEMPT": str(attempt),
@@ -194,7 +192,7 @@ def _outcome(env, phase, node, attempt, dirs, result, body, diffs, duration, com
     if result.timed_out:
         ok, res, error = False, None, "the agent call timed out and was killed"
     elif body is None:
-        ok, res, error = False, None, f"no result.json (exit code {result.exit_code}): {result.stderr[-2000:]}"
+        ok, res, error = False, None, f"no result.json (exit code {result.exit_code}): {result.stderr[-6000:]}"
     else:
         ok, res, error = _validate_result(phase, body)
         if ok and extra_check is not None:
@@ -218,7 +216,7 @@ def run_edit_self(env: PhaseEnv, *, conn, node: str, parent_id: str, base_commit
     dirs, result, body, diffs, duration = _run(env, phase="edit_self", node=node, attempt=attempt,
                                                code_commit=base_commit, ctx=ctx, mock_script=mock_script,
                                                agent_readonly=False, previous_workspace=previous_workspace,
-                                               lineage=lineage_dirs(conn, env.run_dir, parent_id))
+                                               nodes=finished_node_dirs(conn, env.run_dir))
     # The edited code is committed to an attempt ref whether or not the attempt succeeded (spec
     # 5.2). No tree, or an uncommittable one, means no commit and a failed attempt.
     commit = None
@@ -232,22 +230,36 @@ def run_edit_self(env: PhaseEnv, *, conn, node: str, parent_id: str, base_commit
     return _outcome(env, "edit_self", node, attempt, dirs, result, body, diffs, duration, commit)
 
 
+def _recipe_tools(env: PhaseEnv) -> list[str]:
+    return ["video_probe", "data_ingest", "data_query", "data_commit", "recipe_check",
+            "hf_search", "hf_list_files", "hf_download", "job_status", "job_wait", "job_cancel",
+            *sorted(b.tool for b in env.queue.backends.values())]
+
+
+def smoke_contexts(env: PhaseEnv, *, conn, node: str, parent_id: str, nodes_remaining: int) -> dict[str, dict]:
+    """The contexts this node's two phases get, marked dry_run: what the contract check feeds the
+    edited code, so code that cannot digest the node's real context fails there."""
+    common = dict(conn=conn, run_dir=env.run_dir, repo=env.repo, parent_id=parent_id, attempt=1,
+                  max_attempts=1, retry=None, nodes_remaining=nodes_remaining, dry_run=True)
+    recipe = build_recipe_context(cfg=env.cfg, node_id=node, n_gpus=len(env.gpus), tools=_recipe_tools(env),
+                                  **common)
+    return {"edit_self": build_edit_context(**common).model_dump(mode="json"),
+            "improve_recipe": recipe.model_dump(mode="json")}
+
+
 def run_improve_recipe(env: PhaseEnv, *, conn, node: str, parent_id: str, agent_commit: str, attempt: int,
                        max_attempts: int, retry: dict | None, nodes_remaining: int,
                        previous_workspace: Path | None = None, mock_script: str | None = None,
                        dry_run: bool = False) -> PhaseOutcome:
-    tools = ["video_probe", "data_ingest", "data_query", "data_commit", "recipe_check",
-             "hf_search", "hf_list_files", "hf_download", "job_status", "job_wait", "job_cancel",
-             *sorted(b.tool for b in env.queue.backends.values())]
     ctx = build_recipe_context(cfg=env.cfg, conn=conn, run_dir=env.run_dir, repo=env.repo, node_id=node,
                                parent_id=parent_id, attempt=attempt, max_attempts=max_attempts,
                                retry=retry, nodes_remaining=nodes_remaining, n_gpus=len(env.gpus),
-                               tools=tools, dry_run=dry_run)
+                               tools=_recipe_tools(env), dry_run=dry_run)
     # improve_recipe mounts /agent read-only: only edit_self changes code.
     dirs, result, body, diffs, duration = _run(env, phase="improve_recipe", node=node, attempt=attempt,
                                                code_commit=agent_commit, ctx=ctx, mock_script=mock_script,
                                                agent_readonly=True, previous_workspace=previous_workspace,
-                                               lineage=lineage_dirs(conn, env.run_dir, parent_id))
+                                               nodes=finished_node_dirs(conn, env.run_dir))
 
     def check_data_commit(res: dict) -> str | None:           # `res` is already validated
         try:

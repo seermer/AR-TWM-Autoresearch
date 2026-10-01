@@ -3,6 +3,7 @@ paths:
   wbench: ../WBench
   runs_dir: runs
   root_cache: root_cache           # scored roots shared across runs, one dir per run.root_key
+  scores_dir: scores               # `ar score-node` output, one dir per <run>-<node>-<time>; never inside a run
 gpus:
   default: "0,1,2,3"
   min_count: 4
@@ -38,15 +39,20 @@ train:
   resolution_allowlist: [[416, 736], [352, 608]]
   lora_allowlist: [[16, 16], [32, 32], [64, 64]]
 eval:
-  free_ram_before_render_gb: 120
-  ram_wait_alert_min: 10
+  proxy_size: 50                 # the run scores the first N cases of configs/proxy_cases.txt
+  # Weight of each metric in a node's score (a metric not listed weighs 1). These four are the
+  # instruction-following and causal grades; at 4.5 each they are half the score, the other 18 the rest.
+  score_weights:
+    event_edit_adherence: 4.5
+    subject_action_adherence: 4.5
+    perspective_switch_adherence: 4.5
+    causal_fidelity: 4.5
   vp_weights: weights/qwen3vl-a3b-visual-plausibility
   judge:                         # local judge (used when VLM_API_KEY is empty): the captioner's model
     # WBench asks for a 10-token yes/no answer, so the model must not think first.
     extra_body: {chat_template_kwargs: {enable_thinking: false}}
     max_images: 64               # frames per prompt: causal_fidelity sends a whole video as images
 disk:
-  merge_min_free_gb: 30
   alert_below_gb: 50
 telemetry:
   gpu_sample_sec: 5
@@ -107,7 +113,7 @@ annotate:                         # annotate_camera GPU job (spec 10, 16.3 item 
   repo: third_party/ViGeo         # relative to paths.worldmodel
   checkpoint: third_party/ViGeo/checkpoints/ViGeo1.1
   max_frames: 1200                # longer clips are refused per clip (memory)
-  max_items: 64
+  max_items: 100
   timeout_s: 21600
 images:                           # generate_images GPU job (Z-Image-Turbo first frames, Plan 3 Task 5)
   enabled: true                   # verified: 8 prompts on 4 GPUs, gpu_memory_released true (Task 5 report)
@@ -117,7 +123,7 @@ images:                           # generate_images GPU job (Z-Image-Turbo first
   steps: 9
   offload: model                  # from the fit spike: `none` OOMs at 1920x1088 (peaks > 24 GB);
                                    # `model` (enable_model_cpu_offload) fits every allowed size, peak 12.8 GB
-  max_items: 64
+  max_items: 100
   timeout_s: 7200
   license: Apache-2.0
 generators:                       # rollout_* GPU jobs; a variant is enabled only after its smoke (spec 16.3 item 5)
@@ -129,7 +135,7 @@ generators:                       # rollout_* GPU jobs; a variant is enabled onl
     # ingested as per_chunk with its ViGeo pose.
     variants: {dmd4: {enabled: true}, ar30: {enabled: true}}
     max_turns: 9
-    max_items: 16
+    max_items: 100
     timeout_s: 43200
     license: LTX-2 Community License (AlayaWorld is an LTX-2 derivative)
   wan22:
@@ -144,7 +150,7 @@ generators:                       # rollout_* GPU jobs; a variant is enabled onl
     # Task 7 fit spike (1280x704, 121 frames, 50 steps, 24 GB card): no-offload OOMs in the VAE
     # decode; T5 on GPU is no faster (9:41 vs 9:24 wall). Peak 22.9 GiB allocated: the whole card.
     extra_args: {offload_model: true, t5_cpu: true}
-    max_items: 16
+    max_items: 100
     timeout_s: 43200
     license: Apache-2.0
   ltx25:
@@ -167,7 +173,7 @@ generators:                       # rollout_* GPU jobs; a variant is enabled onl
     workers: null                 # checked at job start; fails only below 1. Optional cap on the GPU count.
     frames: [121, 241]            # [default, max]; 8k+1
     resolutions: [[576, 1024]]    # [height, width], each divisible by 64 (two-stage), 16:9
-    max_items: 16
-    timeout_s: 10800              # 3 h, ~3x the worst case measured: 16 cold 241-frame clips on 4 workers =
-                                  # 4 per worker x ~900 s (2x the ~400 s cold 121-frame clip, Task 8) ~ 1 h
+    max_items: 100
+    timeout_s: 28800              # 8 h. Worst case from measurements: 100 cold 241-frame clips on 4 workers =
+                                  # 25 per worker x ~900 s (2x the ~400 s cold 121-frame clip, Task 8) ~ 6.3 h
     license: LTX-2 Community License

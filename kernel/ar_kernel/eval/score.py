@@ -31,9 +31,16 @@ class ScoreError(ValueError):
     """The report cannot yield a score comparable with the rest of the run."""
 
 
-def score_from_report(report: dict, metric_set: list[str],
-                      expected_n: dict[str, int] | None = None) -> tuple[float, dict]:
-    """Mean of the run's fixed metric set. Refuses, rather than scores, a report
+def weighted_score(per_metric: dict[str, float], weights: dict[str, float] | None) -> float:
+    """Weighted mean of the metric means; a metric without a weight weighs 1."""
+    weights = weights or {}
+    total = sum(weights.get(m, 1.0) for m in per_metric)
+    return sum(v * weights.get(m, 1.0) for m, v in per_metric.items()) / total
+
+
+def score_from_report(report: dict, metric_set: list[str], expected_n: dict[str, int] | None = None,
+                      weights: dict[str, float] | None = None) -> tuple[float, dict]:
+    """Weighted mean of the run's fixed metric set. Refuses, rather than scores, a report
     that is incomplete, non-finite, or computed over the wrong cases.
 
     `expected_n` maps metric -> case count. Per-metric counts are fixed by case
@@ -55,7 +62,7 @@ def score_from_report(report: dict, metric_set: list[str],
         if wrong:
             raise ScoreError("metrics computed over the wrong number of cases (got vs expected): "
                              + ", ".join(f"{m} {got} vs {want}" for m, (got, want) in wrong.items()))
-    return sum(per_metric.values()) / len(per_metric), per_metric
+    return weighted_score(per_metric, weights), per_metric
 
 NAV_PARTS = ("navigation_accuracy", "navigation_consistency")
 
@@ -66,45 +73,47 @@ def _mean(values: list[float]) -> float:
 
 def aggregates(cfg: KernelConfig, report: dict, case_ids: list[str], metric_set: list[str]) -> dict:
     """Agent-facing aggregates of one node's WBench report, over the run's metric set:
-    per-metric means, per-dimension means (WBench's grouping) and, per coarse stratum
-    of the case metadata, the mean of each case's metric mean.
+    per-metric means, per-dimension means (WBench's grouping) and, for each group of cases
+    sharing an interaction type, scene category or perspective, the same per-dimension means
+    over that group's cases alone.
 
     navigation_trajectory is the mean of its two components, as in WBench. No case ids
     leave this function.
     """
     wanted = set(metric_set)
-    per_metric: dict[str, list[float]] = {}
-    per_case_mean: dict[str, float] = {}
+    per_case: dict[str, dict[str, float]] = {}
     for case_id, scores in report["per_case"].items():
-        for metric, value in scores.items():
-            per_metric.setdefault(metric, []).append(float(value))
-        case_scores = [float(v) for m, v in scores.items() if m in wanted]
+        case = {m: float(v) for m, v in scores.items() if m in wanted}
         nav = [float(scores[p]) for p in NAV_PARTS if p in scores]
         if "navigation_trajectory" in wanted and nav:
-            case_scores.append(_mean(nav))
-        if case_scores:
-            per_case_mean[case_id] = _mean(case_scores)
-    means = {m: _mean(v) for m, v in per_metric.items()}
-    if all(p in means for p in NAV_PARTS):
-        means["navigation_trajectory"] = _mean([means[p] for p in NAV_PARTS])
-    metrics = {m: means[m] for m in metric_set if m in means}
-    dimensions = {dim: _mean([metrics[m] for m in names if m in metrics])
-                  for dim, names in report["dimensions"].items() if any(m in metrics for m in names)}
+            case["navigation_trajectory"] = _mean(nav)
+        per_case[case_id] = case
 
-    strata: dict[str, dict[str, list[float]]] = {"interaction_type": {}, "category": {}, "perspective": {}}
+    def metric_means(ids) -> dict[str, float]:
+        values: dict[str, list[float]] = {}
+        for case_id in ids:
+            for metric, value in per_case.get(case_id, {}).items():
+                values.setdefault(metric, []).append(value)
+        return {m: _mean(values[m]) for m in metric_set if m in values}
+
+    def dimension_means(metrics: dict[str, float]) -> dict[str, float]:
+        return {dim: _mean([metrics[m] for m in names if m in metrics])
+                for dim, names in report["dimensions"].items() if any(m in metrics for m in names)}
+
+    groups: dict[str, dict[str, list[str]]] = {"interaction_type": {}, "category": {}, "perspective": {}}
     for case_id in case_ids:
-        if case_id not in per_case_mean:
+        if not per_case.get(case_id):
             continue
         case = json.loads((cfg.wbench / "data" / "cases" / f"case_{case_id}.json").read_text())
         settings = case.get("settings") or {}
-        mean = per_case_mean[case_id]
         for t in sorted({i.get("type") for i in case.get("interactions") or []}, key=str):
-            strata["interaction_type"].setdefault(str(t), []).append(mean)
-        strata["category"].setdefault(str((settings.get("scene") or {}).get("category")), []).append(mean)
-        strata["perspective"].setdefault(str(settings.get("perspective")), []).append(mean)
-    return {"metrics": metrics, "dimensions": dimensions,
-            "strata": {axis: {key: _mean(v) for key, v in buckets.items()}
-                       for axis, buckets in strata.items()}}
+            groups["interaction_type"].setdefault(str(t), []).append(case_id)
+        groups["category"].setdefault(str((settings.get("scene") or {}).get("category")), []).append(case_id)
+        groups["perspective"].setdefault(str(settings.get("perspective")), []).append(case_id)
+    metrics = metric_means(per_case)
+    return {"metrics": metrics, "dimensions": dimension_means(metrics),
+            "strata": {axis: {name: dimension_means(metric_means(ids)) for name, ids in buckets.items()}
+                       for axis, buckets in groups.items()}}
 
 def cleanup_eval(work_dir: Path, model: str) -> list[str]:
     removed = []

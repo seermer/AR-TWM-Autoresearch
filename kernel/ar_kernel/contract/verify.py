@@ -8,8 +8,6 @@ import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from ar_contract.models import EditContext, RecipeContext
-
 from ..agent_phase import read_result
 from ..gateway.app import create_gateway_app
 from ..gateway.mock import MockBook
@@ -135,15 +133,11 @@ class ContractHarness:
         self.queue.shutdown()
 
 
-def _smoke_context(kind: str) -> dict:
-    common = {"nodes_remaining": 1, "attempt": 1, "max_attempts": 1, "dry_run": True}
-    model = EditContext if kind == "edit_self" else RecipeContext
-    return model(**common).model_dump()
-
-
 def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harness: ContractHarness,
-                    recorder, node: str, attempt: int, import_timeout_s: float | None = None,
+                    recorder, node: str, attempt: int, contexts: dict[str, dict],
+                    import_timeout_s: float | None = None,
                     smoke_timeout_s: float | None = None, runner=run_container) -> ContractReport:
+    """`contexts`: per entry point, the dry-run context its smoke run receives (agent_phase.smoke_contexts)."""
     import_timeout_s = import_timeout_s or float(cfg.get("timeouts.contract_import_s"))
     smoke_timeout_s = smoke_timeout_s or 4 * float(cfg.get("timeouts.contract_smoke_s"))
     report = ContractReport(ok=False)
@@ -226,14 +220,14 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
              "assert callable(e.edit_self) and callable(e.improve_recipe)")
     result, _ = run("import", ["python", "-c", probe], import_timeout_s, None)
     if result.timed_out or result.exit_code != 0:
-        why = f"timed out after {import_timeout_s:.0f}s" if result.timed_out else result.stderr[-3000:]
+        why = f"timed out after {import_timeout_s:.0f}s" if result.timed_out else result.stderr[-6000:]
         report.steps.append(ContractStep("import", False, why))
         return finish(False)
     report.steps.append(ContractStep("import", True))
 
     for kind in ENTRY_POINTS:
         result, ws = run(f"smoke:{kind}", ["python", "-m", "ar_contract.run", kind], smoke_timeout_s,
-                         _smoke_context(kind), with_liveness=True)
+                         contexts[kind], with_liveness=True)
         name = f"smoke:{kind}"
         if result.timed_out:
             report.steps.append(ContractStep(name, False, f"timed out after {smoke_timeout_s:.0f}s"))
@@ -242,9 +236,9 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
         body = read_result(ws / "result.json") or {"ok": False, "error": "no result.json"}
         if result.exit_code != 0 or not body.get("ok"):
             tb = body.get("traceback")
-            tb_tail = f"\n{tb[-2000:]}" if isinstance(tb, str) and tb else ""
+            tb_tail = f"\n{tb[-6000:]}" if isinstance(tb, str) and tb else ""
             report.steps.append(ContractStep(
-                name, False, f"{body.get('error')}\n{result.stderr[-2000:]}{tb_tail}"))
+                name, False, f"{body.get('error')}\n{result.stderr[-6000:]}{tb_tail}"))
             return finish(False)
         report.steps.append(ContractStep(name, True))
     return finish(True)

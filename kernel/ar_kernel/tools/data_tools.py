@@ -22,7 +22,7 @@ from ..train.gate import Gate
 from .context import PathError, to_host
 from .server import ToolError
 
-QUERY_LIMIT = 500
+QUERY_LIMIT = 100           # clips per page: a clip record is about 1,200 characters
 
 
 class DataTools:
@@ -98,8 +98,9 @@ class DataTools:
             if filter.get("ingested_by") and clip.get("ingested_by") != filter["ingested_by"]:
                 continue
             out.append(clip_record(clip, usage))
-        limit = int(filter.get("limit") or QUERY_LIMIT)
-        return {"total": len(out), "returned": min(limit, len(out)), "clips": out[:limit]}
+        offset, limit = int(filter.get("offset") or 0), int(filter.get("limit") or QUERY_LIMIT)
+        page = out[offset:offset + limit]
+        return {"total": len(out), "returned": len(page), "clips": page}
 
     def commit(self, caller, parent: str | None, datasets: dict, message: str) -> dict:
         conn = open_db(self.run_dir)
@@ -110,10 +111,10 @@ class DataTools:
                                          attempt=caller.attempt)
             except CommitError as exc:
                 raise ToolError(str(exc)) from exc
-            manifest = store.manifest(commit_id)
+            stats = dataset_stats(store.manifest(commit_id), ClipStore(conn).all())
         finally:
             conn.close()
-        return {"commit_id": commit_id, "datasets": dataset_stats(manifest)}
+        return {"commit_id": commit_id, "datasets": stats}
 
     def recipe_check(self, caller, recipe: dict, data_commit: str) -> dict:
         scratch = caller.workspace_host.parent / "recipe_check" / uuid.uuid4().hex
@@ -143,12 +144,33 @@ def _parent_commit(conn, node_id: str) -> str | None:
         return None
 
 
-def dataset_stats(manifest: dict) -> dict[str, dict]:
-    """Per-dataset summary of a commit manifest: format, prompt_mode, weight and
-    clip count (data_commit's result row; Task 13's context bundle reuses this
-    instead of re-deriving it from the manifest)."""
-    return {name: {"format": d["format"], "prompt_mode": d["prompt_mode"], "weight": d["weight"],
-                   "clips": len(d["clips"])} for name, d in manifest["datasets"].items()}
+def clip_source(clip: dict, by_id: dict[str, dict]) -> str:
+    """Where a clip's footage came from: `rollout:<generator>` or `hf:<repo>`. A derived clip takes
+    the source of the clips it names in derived_from; one that names none is just `derived`."""
+    provenance = clip["provenance"]
+    if provenance.get("kind") == "rollout":
+        return f"rollout:{provenance.get('generator')}"
+    if provenance.get("kind") == "hf_dataset":
+        return f"hf:{provenance.get('repo')}"
+    parents = [by_id[i] for i in clip.get("derived_from") or [] if i in by_id]
+    if parents:
+        return "+".join(sorted({clip_source(p, by_id) for p in parents}))
+    return str(provenance.get("kind"))
+
+
+def dataset_stats(manifest: dict, clips: list[dict]) -> dict[str, dict]:
+    """Per-dataset summary of a commit manifest: format, prompt_mode, weight, clip count and
+    clip count per source (data_commit's result row and the context's lineage entries)."""
+    by_id = {c["clip_id"]: c for c in clips}
+    out = {}
+    for name, d in manifest["datasets"].items():
+        sources: dict[str, int] = {}
+        for clip_id in d["clips"]:
+            source = clip_source(by_id[clip_id], by_id)
+            sources[source] = sources.get(source, 0) + 1
+        out[name] = {"format": d["format"], "prompt_mode": d["prompt_mode"], "weight": d["weight"],
+                     "clips": len(d["clips"]), "sources": sources}
+    return out
 
 
 def clip_record(clip: dict, usage: dict[str, list[float]]) -> dict:
@@ -190,7 +212,8 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
                               lambda c: tools.ingest(c, candidates))
 
     @mcp.tool(name="data_query", description="Search the archive-wide clip pool. Filter keys: "
-              "format, camera_motion, clip_ids, ingested_by, limit. Each clip includes provenance, "
+              "format, camera_motion, clip_ids, ingested_by, limit (default 100), offset (for the next page; "
+              "`total` counts all matches). Each clip includes provenance, "
               "metadata, eligible formats and the scores of nodes that trained on it.")
     async def data_query(filter: dict[str, Any], ctx: Context) -> dict:
         return await kit.call(ctx, "data_query", {"filter": filter}, lambda c: tools.query(c, filter))

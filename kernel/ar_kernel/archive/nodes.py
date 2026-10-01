@@ -6,6 +6,7 @@ from pathlib import Path
 # untouched, never resumed, never a parent, not counted toward max_nodes (user decision 2026-09-27).
 STATUSES = {"running", "scored", "invalid_code", "invalid_recipe", "train_failed", "eval_failed",
             "crashed", "interrupted"}
+UNFINISHED = ("running", "interrupted")
 # node_id becomes a directory name and a telemetry file name.
 NODE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 

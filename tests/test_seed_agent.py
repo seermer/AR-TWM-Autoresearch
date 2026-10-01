@@ -175,7 +175,7 @@ def test_check_roles_builds_every_role_and_the_selftest_uses_it(tmp_path, monkey
 def _lineage(depth):
     node = {"status": "scored", "score": 0.7, "component": "prompts", "edit": {"summary": "[prompts] x\n\ncoder text"},
             "data": {"d": {"format": "video_caption_camera", "clips": 8, "weight": 1.0}}, "recipe": {"optimizer.lr": 1e-4},
-            "aggregates": {"dimensions": {"quality": 0.7}, "strata": {"category": {"Urban": 0.7}},
+            "aggregates": {"dimensions": {"quality": 0.7}, "strata": {"category": {"Urban": {"quality": 0.7}}, "perspective": {"first_person": {"quality": 0.7}}},
                            "metrics": {"aesthetic_quality": 0.6}}, "process": {"phases": {"train_s": 600}}}
     return [{"node_id": "root", "score": 0.6, "status": "scored", "aggregates": node["aggregates"]},
             *[{**node, "node_id": f"n{i}"} for i in range(1, depth)]]
@@ -194,6 +194,7 @@ def test_the_digest_describes_the_recent_lineage_and_keeps_the_root_as_baseline(
     assert "```\noom\nline\n```" in text and '"hypothesis": "h"' in text
     assert text.count("\n### n") == LINEAGE_SHOWN and "### n99:" in text and "### n89:" not in text
     assert "|  | root | n90 | n91 |" in text                    # score tables: the root, then the last 10
+    assert "### Dimensions by group of test cases" in text and "| perspective: first_person / quality | 0.7 |" in text
     assert len(text) < 40_000                                   # the same size at any depth
 
 
@@ -281,20 +282,16 @@ def _call(name, args):
 
 
 def _scripts():
-    from ar_kernel.gateway.mock import message
+    """An accepted submit ends the role's run, so no reply follows one."""
     recipe = [
         [_call("submit_plan", {"hypothesis": "more walking clips"})],               # invalid: no actions
         [_call("submit_plan", {"hypothesis": "more walking clips", "actions": ["download walking clips"]})],
-        [message("planned")],
         [_call("data_query", {"filter": {"format": "video_caption_camera"}}), _call("no_such_tool", {}),
          _call("hf_download", {"repo": "x/y", "revision": "main", "patterns": ["*.mp4"]})],
         [_call("request_replan", {"report": "downloads are disabled; the pool has clips"})],
-        [message("asked for a new plan")],
         [_call("submit_plan", {"hypothesis": "pool clips suffice", "actions": ["commit the pool clips"]})],
-        [message("replanned")],
         [_call("submit_data_and_recipe", {"data_commit": C0, "notes": "pool clips", "rationale": "fits the data",
                                           "recipe": {"optimizer.max_steps": 200.4, "optimizer.lr": 1e-5}})],
-        [message("done")],
     ]
     edit = [
         [_call("read_file", {"path": "agent/prompts/planner.md"}),       # planning may try things out ...
@@ -304,7 +301,6 @@ def _scripts():
         [_call("submit_edit_plan", {"component": "prompts", "change": "ask for posed clips first",
                                     "files": ["agent/prompts/planner.md"], "rationale": "static-only clips",
                                     "expected_effect": "more moving clips"})],
-        [message("planned")],
         [_call("edit_file", {"path": "agent/entry.py", "old": "def edit_self(ctx: EditContext)",
                              "new": "def edit_self(ctx: EditContext, extra)"})],       # breaks the self-test
         [_call("submit_edit", {"summary": "too early"})],
@@ -313,7 +309,6 @@ def _scripts():
         [_call("edit_file", {"path": "agent/prompts/planner.md", "old": "Finish by calling submit_plan.",
                              "new": "Prefer clips with poses. Finish by calling submit_plan."})],
         [_call("submit_edit", {"summary": "Changed the planner prompt to prefer clips with poses."})],
-        [message("done")],
     ]
     return {"recipe": recipe, "edit": edit}
 
@@ -495,6 +490,8 @@ def test_edit_self_plans_exactly_one_component(kernel, tmp_path):
 
 @pytest.mark.docker
 def test_seed_agent_passes_contract_verification(tmp_path):
+    """On a context with a lineage and siblings, as a real node gets: the dry run builds the first message."""
+    from ar_contract.models import EditContext, RecipeContext
     from ar_kernel.config import KernelConfig
     from ar_kernel.contract.verify import ContractHarness, verify_contract
     from ar_kernel.telemetry.recorder import Recorder
@@ -504,9 +501,17 @@ def test_seed_agent_passes_contract_verification(tmp_path):
     try:
         repo = AgentsRepo(tmp_path / "agents.git")
         commit = repo.init(SEED)
+        common = dict(nodes_remaining=1, attempt=1, max_attempts=1, dry_run=True, lineage=_lineage(3),
+                      siblings=_lineage(3)[1:])
+        recipe = RecipeContext(**common, n_gpus=4, clip_pool_size=7, format_rules="rules text",
+                               tunable_rules={"optimizer.lr": {"type": "float", "min": 0, "max": None}},
+                               recipe_guide={"optimizer.lr": {"base": 1e-4, "meaning": "peak rate"}},
+                               resolution_allowlist=[[416, 736]], lora_allowlist=[[64, 64]])
         report = verify_contract(cfg=KernelConfig.load(), run_dir=tmp_path / "run", run_id="seed", repo=repo,
                                  commit=commit, harness=harness, recorder=Recorder(tmp_path / "run"),
-                                 node="root", attempt=1)
+                                 node="root", attempt=1,
+                                 contexts={"edit_self": EditContext(**common).model_dump(mode="json"),
+                                           "improve_recipe": recipe.model_dump(mode="json")})
     finally:
         harness.stop()
     assert report.ok, report.to_retry()
@@ -544,7 +549,7 @@ def test_knowledge_files_start_with_their_name_and_when_to_use_them():
 
 def test_every_role_prompt_points_to_the_knowledge_index():
     for name in ("planner", "data_engineer", "edit_planner", "coder"):
-        assert "read the knowledge files whose descriptions match" in (SEED / "agent" / "prompts" / f"{name}.md").read_text()
+        assert "Read a knowledge file only at the moment you are about to do what its description names" in (SEED / "agent" / "prompts" / f"{name}.md").read_text()
 
 
 def test_prompts_and_knowledge_have_no_wrapped_commands_or_dated_notes():
@@ -553,3 +558,75 @@ def test_prompts_and_knowledge_have_no_wrapped_commands_or_dated_notes():
         text = path.read_text()
         assert not any(line.count("`") % 2 for line in text.splitlines()), f"{path.name}: inline code wraps"
         assert "*(20" not in text, f"{path.name}: dated note"
+
+
+def test_the_digest_describes_the_parents_finished_children_before_the_lineage():
+    from ar_contract.models import EditContext
+    from agent.briefing import SIBLINGS_SHOWN, edit_context
+    siblings = [{**n, "node_id": f"s{i}"} for i, n in enumerate(_lineage(15)[1:])]
+    ctx = EditContext(nodes_remaining=1, attempt=1, max_attempts=3, lineage=_lineage(2), siblings=siblings)
+    text = edit_context(ctx, {"prompts": "p.md"}, None)
+    assert text.index("## Siblings") < text.index("## Lineage")
+    assert text.count("\n### s") == SIBLINGS_SHOWN and "### s13:" in text and "### s3:" not in text
+    assert "### s13:" in text and "| s3 | scored | 0.7 | prompts |" in text         # every sibling in one line
+    assert "| root | s13 |" not in text                            # but not a column of the lineage tables
+    assert "## Siblings" not in edit_context(EditContext(nodes_remaining=1, attempt=1, max_attempts=3), {}, None)
+
+
+def test_the_eval_knowledge_states_the_score_weights_of_the_kernel_config():
+    """The knowledge file is fixed text; it must not drift from configs/kernel.yaml."""
+    import re
+    from ar_kernel.config import KernelConfig
+    from ar_kernel.eval.score import DIMENSION_METRICS
+    weights = KernelConfig.load().get("eval.score_weights")
+    text = (SEED / "agent" / "knowledge" / "eval_prompts_and_turns.md").read_text()
+    [line] = [l for l in text.splitlines() if l.startswith("- Score: ")]
+    names, value = re.search(r"means: (.+) weigh ([\d.]+) each, every other metric weighs 1\.", line).groups()
+    assert set(re.findall(r"`(\w+)`", names)) == set(weights)
+    assert set(weights.values()) == {float(value)}
+    assert f"of the {len(DIMENSION_METRICS)} metric means" in line
+    half = sum(weights.values()) == len(DIMENSION_METRICS) - len(weights)
+    assert half and "Those four are half the score." in line
+
+
+def test_an_earlier_node_is_described_by_what_the_phase_acts_on():
+    from agent.briefing import data_node, edit_node
+    node = {"node_id": "n1", "status": "scored", "score": 0.7, "component": "prompts",
+            "edit": {"summary": "[prompts] ask for posed clips\n\ncoder text"},
+            "code_diff_stats": [{"path": "agent/prompts/planner.md", "added": 2, "removed": 1}],
+            "data": {"d": {"format": "video_caption_camera", "clips": 8, "weight": 1.0, "sources": {"hf:org/set": 8}}},
+            "recipe": {"optimizer.lr": 1e-4},
+            "rationale": 'why\n\nPlan: {"hypothesis": "more turning clips", "actions": ["a"]}\nData: notes',
+            "process": {"phases": {"train_s": 600}, "tool_errors": [{"tool": "data_ingest", "count": 3, "example": "long message"}]}}
+    data, edit = data_node(node), edit_node(node)
+    assert "- Hypothesis: more turning clips" in data and "- Recipe: optimizer.lr 0.0001" in data
+    assert "from hf:org/set x8" in data and "from hf:org/set x8" in edit
+    assert not any(word in data for word in ("Edit:", "Code changed", "Process", "min", "edited"))   # no code, no timings
+    assert "- Edit: [prompts] ask for posed clips" in edit and "agent/prompts/planner.md (+2/-1)" in edit
+    assert "tool errors: data_ingest x3" in edit and "long message" not in edit and "Recipe" not in edit
+
+
+def test_the_eval_knowledge_lists_each_dimensions_metrics_as_wbench_groups_them():
+    import ast
+    from ar_kernel.config import KernelConfig
+    source = (KernelConfig.load().wbench / "main.py").read_text()
+    node = next(n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Assign)
+                and any(getattr(t, "id", None) == "DIMENSION_MAP" for t in n.targets))
+    text = (SEED / "agent" / "knowledge" / "eval_prompts_and_turns.md").read_text()
+    for dimension, metrics in ast.literal_eval(node.value).items():
+        [line] = [l for l in text.splitlines() if l.startswith(f"  - `{dimension}`: ")]
+        assert line.split(": ", 1)[1].rstrip(".").split(", ") == metrics
+
+
+def test_the_engineer_gets_what_it_acts_on_and_the_planner_also_the_history():
+    from ar_contract.models import RecipeContext
+    from agent.briefing import engineer_context, recipe_context
+    ctx = RecipeContext(nodes_remaining=1, attempt=2, max_attempts=3, lineage=_lineage(3), siblings=_lineage(3)[1:],
+                        n_gpus=4, format_rules="rules text", retry={"kind": "gate", "failures": ["too few clips"]},
+                        tunable_rules={"optimizer.lr": {"type": "float", "min": 0, "max": None}})
+    engineer, planner = engineer_context(ctx, None), recipe_context(ctx, None)
+    for part in ("## This node", "## Retry", "too few clips", "## Recipe", "## Data formats"):
+        assert part in engineer and part in planner
+    assert planner.startswith(engineer)
+    assert not any(part in engineer for part in ("## Lineage", "## Siblings", "## Archive"))
+    assert "category: Urban" not in planner            # scene-category groups are left to context.json

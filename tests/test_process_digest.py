@@ -12,10 +12,14 @@ def test_missing_events_is_empty_not_an_error(tmp_path):
     assert process_digest(tmp_path, "n9") == {}
 
 
-def test_a_torn_events_file_is_empty_not_an_error(tmp_path):
+def test_a_torn_line_is_skipped_and_the_rest_is_still_digested(tmp_path):
+    """A killed writer leaves one unfinished line; it used to empty the whole digest."""
     rec = _rec(tmp_path)
-    rec.events_path("n1").write_text("{not json\n")
-    assert process_digest(tmp_path, "n1") == {}
+    rec.event("tool.error", node="n1", phase="improve_recipe", tool="hf_download", component="tools",
+              payload={"error": "403 denied"})
+    with rec.events_path("n1").open("a") as f:
+        f.write("{not json\n")
+    assert [row["tool"] for row in process_digest(tmp_path, "n1")["tool_errors"]] == ["hf_download"]
 
 
 def test_tool_errors_are_grouped_and_normalised(tmp_path):
@@ -27,7 +31,7 @@ def test_tool_errors_are_grouped_and_normalised(tmp_path):
     [row] = d["tool_errors"]
     assert row["tool"] == "hf_download" and row["count"] == 2
     assert "<id>" in row["example"] and "<path>" in row["example"] and "Request ID" not in row["example"]
-    assert len(row["example"]) <= 160
+    assert len(row["example"]) <= 1000
 
 
 def _reply(text):

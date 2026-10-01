@@ -543,13 +543,25 @@ def test_agent_phases_get_the_configured_network(env):
     assert runner.calls[0]["network"] == CFG.get("sandbox.network") == "bridge"
 
 
-def test_agents_see_every_ancestor_under_lineage(env, tmp_path):
+def test_agents_see_every_finished_node_under_nodes(env, tmp_path):
     make, conn, root, _, _ = env
+    NodeStore(conn).set_status("root", "scored"), NodeStore(conn).set_status("n1", "train_failed")
     NodeStore(conn).create("n2", "n1", 2)
-    for node in ("root", "n1"):
+    for node in ("root", "n1", "n2"):
         (tmp_path / "run" / "nodes" / node / "eval").mkdir(parents=True)
     runner = FakeRunner({"ok": True, "result": {"summary": "s"}})
     run_edit_self(make(runner), conn=conn, node="n2", parent_id="n1", base_commit=root, attempt=1,
                   max_attempts=3, retry=None, nodes_remaining=5)
-    assert runner.calls[0]["mounts"].lineage == {"n1": tmp_path / "run" / "nodes" / "n1",
-                                                 "root": tmp_path / "run" / "nodes" / "root"}
+    assert runner.calls[0]["mounts"].nodes == {"n1": tmp_path / "run" / "nodes" / "n1",
+                                               "root": tmp_path / "run" / "nodes" / "root"}
+
+
+def test_smoke_contexts_are_the_nodes_real_contexts_marked_dry_run(env):
+    from ar_kernel.agent_phase import smoke_contexts
+    make, conn, _, _, _ = env
+    out = smoke_contexts(make(FakeRunner({})), conn=conn, node="n1", parent_id="root", nodes_remaining=2)
+    assert sorted(out) == ["edit_self", "improve_recipe"]
+    for ctx in out.values():
+        assert ctx["dry_run"] is True and [n["node_id"] for n in ctx["lineage"]] == ["root"]
+        json.dumps(ctx)
+    assert out["improve_recipe"]["tools"] and out["improve_recipe"]["tunable_rules"]

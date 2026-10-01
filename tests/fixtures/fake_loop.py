@@ -90,7 +90,7 @@ class Script:
         s = self._next("score", 0.8)
         if isinstance(s, Exception):
             raise s
-        return s, {"metrics": {"m": s}, "aggregates": {"metrics": {"m": s}}}
+        return s, {"metrics": {"m": s}, "aggregates": {"metrics": {"m": s}}, "counts": {"m": 1}}
 
     def phases(self):
         return Phases(edit_self=self.edit_self, contract=self.contract, improve_recipe=self.improve_recipe,
@@ -104,6 +104,9 @@ SCENARIO = dict(contract=[False, True], gate=[False, True],           # n1: both
 
 
 def build(run: Path, max_nodes: int, script):
+    (run / "config").mkdir(parents=True, exist_ok=True)
+    if not (run / "config" / "run.json").exists():
+        (run / "config" / "run.json").write_text("{}")
     rec = Recorder(run)
     ctx = RunContext(run_dir=run, conn=open_db(run), recorder=rec, gpus=[0, 1, 2, 3],
                      metric_set=["m"], case_ids=["1"], versions={})

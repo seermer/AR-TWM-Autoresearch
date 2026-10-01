@@ -13,7 +13,8 @@ EDIT_COMPONENTS = typing.get_args(EditComponent)
 
 class _Ctx(BaseModel):
     model_config = ConfigDict(extra="allow")     # the kernel may add fields; agents ignore unknowns
-    lineage: list[dict[str, Any]] = Field(default_factory=list)
+    lineage: list[dict[str, Any]] = Field(default_factory=list)        # root .. parent
+    siblings: list[dict[str, Any]] = Field(default_factory=list)       # the parent's finished children
     archive: dict[str, Any] = Field(default_factory=dict)
     nodes_remaining: int
     attempt: int
@@ -28,7 +29,8 @@ class EditContext(_Ctx):
 
 class RecipeContext(_Ctx):
     workspace: str = "/workspace"
-    clip_pool: list[dict[str, Any]] = Field(default_factory=list)
+    clip_pool: list[dict[str, Any]] = Field(default_factory=list)   # the most recent clips
+    clip_pool_size: int = 0                                         # all clips in the archive
     parent_data_commit: str | None = None
     parent_recipe: dict[str, Any] = Field(default_factory=dict)
     base_recipe: dict[str, Any] = Field(default_factory=dict)

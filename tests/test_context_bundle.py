@@ -13,8 +13,8 @@ from ar_kernel.vcs.agents_repo import AgentsRepo
 CFG = KernelConfig.load()
 # The shape score.aggregates() returns and Plan 4 writes to eval/aggregates.json.
 AGGREGATES = {"metrics": {"aesthetic_quality": 0.78}, "dimensions": {"quality": 0.78},
-              "strata": {"interaction_type": {"navigation": 0.8}, "category": {"Nature": 0.8},
-                         "perspective": {"first_person": 0.8}}}
+              "strata": {"interaction_type": {"navigation": {"quality": 0.8}}, "category": {"Nature": {"quality": 0.8}},
+                         "perspective": {"first_person": {"quality": 0.8}}}}
 
 
 @pytest.fixture
@@ -108,3 +108,31 @@ def test_recipe_context_carries_the_guide(world):
 def test_lineage_entries_carry_the_process_digest(world):
     conn, repo, run = world
     assert lineage(conn, run, repo, "n1")[-1]["process"] == {}        # no events: empty, not an error
+
+
+def test_siblings_are_the_parents_finished_children(world):
+    from ar_kernel.context_bundle import siblings
+    conn, repo, run = world
+    nodes = NodeStore(conn)                                    # n1 is the node being built (running)
+    nodes.create("n2", "root", 1), nodes.record_score("n2", 0.8, ["aesthetic_quality"], {"aesthetic_quality": 0.8})
+    nodes.create("n3", "root", 1), nodes.set_status("n3", "train_failed")
+    nodes.create("n4", "root", 1), nodes.set_status("n4", "interrupted")
+    nodes.create("n5", "n2", 2), nodes.set_status("n5", "scored")
+    assert [(s["node_id"], s["status"], s["score"]) for s in siblings(conn, run, repo, "root")] == [
+        ("n2", "scored", 0.8), ("n3", "train_failed", None)]
+    ctx = build_edit_context(conn=conn, run_dir=run, repo=repo, parent_id="root", attempt=1, max_attempts=3,
+                             retry=None, nodes_remaining=3)
+    assert [s["node_id"] for s in ctx.siblings] == ["n2", "n3"]
+    assert sorted(ctx.siblings[0]) == sorted(ctx.lineage[0])
+    assert [n["node_id"] for n in ctx.lineage] == ["root"]
+
+
+def test_every_finished_node_is_mounted_but_not_the_one_being_built(world):
+    from ar_kernel.agent_phase import finished_node_dirs
+    conn, _, run = world
+    nodes = NodeStore(conn)
+    nodes.create("n2", "root", 1), nodes.set_status("n2", "eval_failed")
+    nodes.create("n3", "n2", 2), nodes.set_status("n3", "interrupted")
+    for node in ("n1", "n2", "n3"):
+        (run / "nodes" / node).mkdir(parents=True)
+    assert finished_node_dirs(conn, run) == {"root": run / "nodes" / "root", "n2": run / "nodes" / "n2"}

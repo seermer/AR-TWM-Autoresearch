@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
+from ar_contract.models import EditContext, RecipeContext
 
 from ar_kernel.config import KernelConfig
 from ar_kernel.contract.verify import ContractHarness, static_check, verify_contract
@@ -11,6 +12,9 @@ from ar_kernel.vcs.agents_repo import AgentsRepo
 
 CFG = KernelConfig.load()
 FIXTURES = Path(__file__).parent / "fixtures" / "agents"
+_COMMON = {"nodes_remaining": 1, "attempt": 1, "max_attempts": 1, "dry_run": True}
+SMOKE = {"edit_self": EditContext(**_COMMON).model_dump(mode="json"),
+         "improve_recipe": RecipeContext(**_COMMON).model_dump(mode="json")}
 
 
 # 20,000 nested binary operations exhaust the parser's own AST-construction
@@ -57,7 +61,7 @@ def test_each_container_token_is_revoked_and_its_jobs_cancelled(tmp_path, monkey
     try:
         report = verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo,
                                  commit=repo.init(FIXTURES / "good"), harness=h, recorder=Recorder(run),
-                                 node="n1", attempt=1, runner=runner)
+                                 node="n1", attempt=1, contexts=SMOKE, runner=runner)
     finally:
         h.queue.shutdown()
     assert report.ok, report.steps
@@ -85,7 +89,7 @@ def test_non_utf8_entry_py_fails_static_instead_of_raising(tmp_path, monkeypatch
     try:
         report = verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo,
                                  commit=repo.init(agent_src.parent), harness=h, recorder=Recorder(run),
-                                 node="n1", attempt=1, runner=runner)
+                                 node="n1", attempt=1, contexts=SMOKE, runner=runner)
     finally:
         h.queue.shutdown()
     failed = next(s for s in report.steps if not s.ok)
@@ -119,7 +123,7 @@ def test_malformed_result_json_fails_the_smoke_step_instead_of_raising(
     try:
         report = verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo,
                                  commit=repo.init(FIXTURES / "good"), harness=h, recorder=Recorder(run),
-                                 node="n1", attempt=1, runner=runner)
+                                 node="n1", attempt=1, contexts=SMOKE, runner=runner)
     finally:
         h.queue.shutdown()
     failed = next(s for s in report.steps if not s.ok)
@@ -142,7 +146,7 @@ def _verify_tree(tmp_path, monkeypatch, mutate, runner=None):
     repo = AgentsRepo(tmp_path / "agents.git")
     try:
         return verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo, commit=repo.init(src), harness=h,
-                               recorder=Recorder(run), node="n1", attempt=1, runner=runner or no_runner)
+                               recorder=Recorder(run), node="n1", attempt=1, contexts=SMOKE, runner=runner or no_runner)
     finally:
         h.queue.shutdown()
 
@@ -213,7 +217,7 @@ def test_container_token_printed_by_agent_is_redacted_from_telemetry(tmp_path, m
     try:
         report = verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo,
                                  commit=repo.init(FIXTURES / "good"), harness=h, recorder=recorder,
-                                 node="n1", attempt=1, runner=runner)
+                                 node="n1", attempt=1, contexts=SMOKE, runner=runner)
     finally:
         h.queue.shutdown()
 
@@ -250,7 +254,7 @@ def _verify(harness, tmp_path, fixture, **timeouts):
     repo = AgentsRepo(tmp_path / "agents.git")
     commit = repo.init(FIXTURES / fixture)
     return verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo, commit=commit, harness=h,
-                           recorder=Recorder(run), node="n1", attempt=1, **timeouts)
+                           recorder=Recorder(run), node="n1", attempt=1, contexts=SMOKE, **timeouts)
 
 
 def _failed_step(report):

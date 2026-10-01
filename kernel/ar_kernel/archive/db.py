@@ -1,5 +1,5 @@
 from __future__ import annotations
-import sqlite3
+import shutil, sqlite3, tempfile
 from pathlib import Path
 
 SCHEMA = """
@@ -54,4 +54,28 @@ def open_db(run_dir: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
+    return conn
+
+
+def open_db_readonly(run_dir: Path, writer_alive: bool) -> sqlite3.Connection:
+    """The archive of a run, opened without writing anything into the run folder.
+
+    While the loop is writing, a plain read-only open (SQLite shares the writer's -shm). With no
+    writer and no WAL content, `immutable=1`, which creates no side files. With no writer but a
+    non-empty -wal (a killed writer's committed rows), an in-memory copy made outside the run."""
+    db = Path(run_dir) / "archive.db"
+    wal = db.with_name("archive.db-wal")
+    if writer_alive:
+        conn = sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True, timeout=30.0)
+    elif not wal.exists() or wal.stat().st_size == 0:
+        conn = sqlite3.connect(f"{db.as_uri()}?mode=ro&immutable=1", uri=True)
+    else:
+        conn = sqlite3.connect(":memory:")
+        with tempfile.TemporaryDirectory() as tmp:
+            for path in (db, wal):
+                shutil.copyfile(path, Path(tmp) / path.name)
+            source = sqlite3.connect(Path(tmp) / db.name)
+            source.backup(conn)
+            source.close()
+    conn.row_factory = sqlite3.Row
     return conn

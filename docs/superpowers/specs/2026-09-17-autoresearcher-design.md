@@ -165,7 +165,7 @@ or `AR_CACHE_DIR` to relocate the whole tree; a new machine needs the captioner 
                           │                     ▲                                          │               │
                           │                     │        sandbox(improve_recipe) ─► gate ─┤ (retry ≤ N)    │
                           │                     │                                          ▼               │
-                          │   archive (SQLite, agents.git, blob store)   train ─► merge ─► render ─► eval  │
+                          │   archive (SQLite, agents.git, blob store)   train ─► render ─► eval           │
                           │   telemetry (JSONL + payloads + SQLite index) ◄── every component              │
                           │   gateway (OpenAI proxy)      tools (MCP server)                               │
                           └───────▲──────────────────────────▲─────────────────────────────────────────────┘
@@ -191,7 +191,7 @@ AutoResearcher/
   configs/
     kernel.yaml           # all kernel defaults (§17)
     base_recipe.yaml      # copy of WorldModel/configs/examples/finetune_video_caption_camera.yaml
-    proxy_cases.txt       # the 50 proxy case ids (§11.1)
+    proxy_cases.txt       # all WBench case ids, ordered; a run scores the first N (§11.1)
   tests/
   weights/                # git-ignored
   runs/<run_id>/          # git-ignored: archive.db, agents.git, store/, nodes/, cache/, telemetry/
@@ -210,9 +210,9 @@ AutoResearcher/
 | `tools` | MCP (streamable HTTP) server exposing privileged tools only (§10). |
 | `contract` | Contract verification of child code (§9.4). |
 | `train` | Recipe gate (§8), view materialization (§5.6), prompt precache and training launch through the standard interface (§7.3). |
-| `eval` | Merge, proxy render, WBench phases, scoring, agent-facing aggregates (§11). |
+| `eval` | Eval LoRA concatenation, proxy render, WBench phases, scoring, agent-facing aggregates (§11). |
 | `telemetry` | Event bus and stores (§13). |
-| `control` | CLI `ar run`, `ar run --resume`, `ar status`, `ar stop [--force]`, `ar score-node`. *(2026-09-27, Plan 4 as built: no `--graceful` flag — plain `ar stop` is graceful, §14.4; no `ar full-eval`, §16.4's acceptance run used `ar run` directly.)* |
+| `control` | CLI `ar run`, `ar run --resume`, `ar status`, `ar stop [--force]`, `ar score-node`. *(2026-10-01, user decision: only `ar run` and `ar stop` modify a run. `ar status` opens the archive without writing; `ar score-node --run-id R --node N` re-scores a node of the run from its recorded checkpoint with the run's cases, metrics, judge and weights, and writes only under `scores/<run>-<node>-<time>/`; `ar init-run` is removed.)* *(2026-09-27, Plan 4 as built: no `--graceful` flag — plain `ar stop` is graceful, §14.4; no `ar full-eval`, §16.4's acceptance run used `ar run` directly.)* |
 | `dashboard` | Read-only FastAPI app on localhost (§13.4). *(2026-09-27, Plan 4 as built / user decision: not built, and none is planned — §13.4 amendment.)* |
 
 ---
@@ -437,7 +437,7 @@ One node at a time. GPU phases never overlap.
  5  improve_recipe : run c's code (container); tools; data commits; recipe  ┐ loop
  6  recipe gate    : materialize view, then checks + dry runs (§8)           ┘ ≤ N_recipe (default 3)
  7  precache prompts; train on the GPU list, reusing the gate's view (§7.3)
- 8  merge → render proxy (50 cases) → WBench phases → score (§11)
+ 8  concatenate LoRAs → render proxy (50 cases) → WBench phases → score (§11)
  9  record; update subtree values; delete transient files; store aggregates
 10  stop checks (node count, graceful/force flags)
 ```
@@ -461,7 +461,7 @@ One node at a time. GPU phases never overlap.
   (there is no separate `train-<k>` attempt directory). *(2026-09-27, Plan 4 as built)*
   `nodes_remaining` in the agent's context counts the node currently being built, so the
   agent sees `0` on the last node `max_nodes` allows.
-- **Merge, render and WBench (scoring) failures** *(2026-09-27, Plan 4 as built / user
+- **LoRA concatenation, render and WBench (scoring) failures** *(2026-09-27, Plan 4 as built / user
   decision)* end the node `eval_failed` instead of retrying (§14.2); there is no pause
   anywhere in the loop. The loop records the failure, raises an alert, and starts a fresh
   cycle at step 1.
@@ -565,14 +565,53 @@ agent/
                       #   submit_* result tools. Captioning is the kernel's caption.videos
                       #   GPU job (§10; Follow-up C removed the frame-sending caption_clip)
   knowledge/          # reference material that roles read: data_building.md (formats,
-                      #   conversion recipes)
+                      #   conversion recipes). 2026-10-01: eval_prompts_and_turns.md (how the eval
+                      #   drives a case; the score weights, tied to kernel.yaml by a test) and
+                      #   eval_instruction_grades.md (what the judge asks for the four weighted grades)
   memory/             # agent-owned notes (in the code repo, inherited by children): README.md
 ```
 
 **Roles and results.** Each LLM step is a role run on the harness. A role returns its result
 by calling a `submit_<x>` tool whose arguments are validated against a schema; invalid
 arguments come back to the model as a tool error it can fix. A role that stops without
-submitting gets one reminder, then fails the attempt.
+submitting gets one reminder, then fails the attempt. *(2026-10-01, user decision)* An accepted
+submission ends the role's run at once: the submit tools are `return_direct`, and the harness
+ends the graph after a successful `return_direct` result (node `tools_done`, which runs once on
+the merged parallel tool results); a rejected submission still goes back to the model. Before
+this, the model was called once more after 15 of 16 accepted submissions in the earlier runs.
+
+**Size caps are fail-safes** *(2026-10-01, user decision; each checked by rendering every prompt on
+the two earlier runs and on a scaled-up archive)*. They are set above what real data produces, so
+they are rarely reached:
+
+| Cap | Value | Largest seen on real data |
+|---|---|---|
+| free text quoted per node in the first message (`briefing.TEXT_CHARS`) | 4,000 chars | 1,368 (an edit plan); the old cap of 1,200 cut 2 of 7 |
+| first message as a whole (`entry.BRIEF_CHARS`) | 400,000 chars | 19,000; 66,000 with 10 ancestors and 10 siblings; about 350,000 with every node at every cap |
+| tool-error example in the process digest (`process_digest.EXAMPLE_CHARS`) | 1,000 chars | 469; the old cap of 160 cut 5 of 11, two before the reason |
+| process digest per node (`MAX_BYTES`, `MAX_ERRORS`) | 10,000 bytes, 8 errors, all shown | 1,471 bytes, 5 errors |
+| one tool result (`harness.TOOL_RESULT_LIMIT`) | 200,000 chars | 62,730 (`data_query`); a 100-item GPU job returns 50,000 to 160,000 |
+| `data_query` page | 100 clips (about 1,200 chars each), `offset` for more | - |
+| training log tail in a retry report | 20,000 chars | always a tail by design |
+| traceback and stderr tails in contract and attempt failures | 6,000 chars | - |
+
+GPU job results no longer echo the submitted `args` (15-30% of every `job_wait` poll). Ancestors
+and siblings described in the first message stay at the last 10 each; all siblings are listed in a
+one-line table. A node's `error` after exhausted `improve_recipe` retries names the failure without
+the log tail and the submission, which are in the node's files.
+
+**The first message describes an earlier node by what the phase acts on** *(2026-10-01, user
+decision)*. For `improve_recipe`: its data hypothesis (read from the `Plan:` line the seed records
+in the node's rationale), its data and its recipe. For `edit_self`: its code edit, changed files,
+data, and how its run went (phase times, model turns, compactions, gates, and tool errors as tool
+and count; the messages stay in `/context/context.json` and the transcripts). The role prompts
+tell each role to read a knowledge file only when it is about to do what the file's description
+names, not up front. The group table in the first message has the groups by interaction type and by
+perspective; the scene-category groups stay in `context.json`. The data engineer's first message is
+the plan plus only what it acts on (this node's facts, the recipe keys, the data formats, the retry
+report); the archive, siblings and lineage go to the planner alone. `eval_prompts_and_turns.md`
+also explains how results are aggregated (metric, score, dimension, case group); a test ties its
+dimension lists to WBench's `DIMENSION_MAP`.
 
 **Seed orchestration:**
 - **meta** (`edit_self`): an edit planner reads the code (read-only tools) and the history,
@@ -619,7 +658,7 @@ exactly two ways:
    the context on the merged state (after all parallel tool results are in): the last
    reply's reported `usage.total_tokens` plus about 4 characters per token for the messages
    after it, with each image block counted as a fixed 1,500 tokens. Below
-   `compact_at × context_window` (`agents.compact_at`, default 0.85, and
+   `compact_at × context_window` (`agents.compact_at`, default 0.6, and
    `agents.context_window_tokens`, passed to the container) messages append linearly. At or
    above it, a dedicated summarizer call writes a structured summary, the history is
    replaced by one user message (a continuation preamble plus the summary), and the model
@@ -655,8 +694,8 @@ exactly two ways:
 
 | | Receives | Returns |
 |---|---|---|
-| `EditContext` | `agent_dir=/agent` (rw copy of own code); lineage history (per ancestor: code diff, recipe diff, data manifest stats, score, per-metric and per-stratum aggregates, rationale); archive-wide aggregates (tree shape, scores, subtree values, recipes; no clips); `nodes_remaining`; `attempt`, `max_attempts`, `retry` report; `dry_run` flag | `EditResult{summary, component}` (`component`: the one edit component the plan chose, optional, recorded and never enforced, §9.1.1; the kernel computes the diff) |
-| `RecipeContext` | `workspace=/workspace`; archive-wide clip pool summary (per clip: provenance, license, metadata, eligible formats, ingesting node, scores of nodes that trained on it); parent's data commit and recipe; base recipe; the tunable-key schema and allowlists (§8); the standard-format rules (§6); GPU count; the same aggregates; `nodes_remaining`; attempt/retry info; `dry_run` flag | `RecipeResult{data_commit, recipe (dict of tunable keys), rationale}` |
+| `EditContext` | `agent_dir=/agent` (rw copy of own code); lineage history (per ancestor: code diff, recipe diff, data manifest stats (per dataset, clip counts by source: `rollout:<generator>`, `hf:<repo>`, or `derived` when nothing more is recorded *(2026-10-01)*), score, per-metric and per-stratum aggregates, rationale); archive-wide aggregates (tree shape, scores, subtree values, recipes; no clips); `nodes_remaining`; `attempt`, `max_attempts`, `retry` report; `dry_run` flag; *(2026-10-01)* `siblings`: the parent's other finished children, each with the same fields as a lineage entry | `EditResult{summary, component}` (`component`: the one edit component the plan chose, optional, recorded and never enforced, §9.1.1; the kernel computes the diff) |
+| `RecipeContext` | `workspace=/workspace`; archive-wide clip pool summary (the most recent 2000 clips; `clip_pool_size` is the true count *(2026-10-01)*; `data_query` pages through all of them with `offset`; per clip: provenance, license, metadata, eligible formats, ingesting node, scores of nodes that trained on it); parent's data commit and recipe; base recipe; the tunable-key schema and allowlists (§8); the standard-format rules (§6); GPU count; the same aggregates; `nodes_remaining`; attempt/retry info; `dry_run` flag | `RecipeResult{data_commit, recipe (dict of tunable keys), rationale}` |
 
 ### 9.4 Contract verification (step 4, fresh container from the child commit)
 
@@ -665,7 +704,10 @@ exactly two ways:
    with exactly one positional parameter `ctx`.
 3. **Import:** the runner imports `agent.entry` within 60 s; callables match.
 4. **Smoke run:** both entry points with `ctx.dry_run=True`, gateway in mock mode (scripted
-   responses), mock tool server (canned results); each must return a schema-valid result
+   responses), mock tool server (canned results). *(2026-10-01, user decision)* The context is the
+   node's real one (its lineage, siblings, archive, recipe rules; `agent_phase.smoke_contexts`), and
+   the seed's dry run builds each phase's first message from it, so code that cannot digest the
+   real context fails here, not in the phase; each must return a schema-valid result
    without raising, under the contract smoke-run timeout policy (§14.5).
 5. **Report:** structured pass/fail per step, delivered to the retry.
 
@@ -678,6 +720,7 @@ exactly two ways:
 | `/context` | ro | Context bundle (+ `retry.json`) |
 | `/store` | ro | Blob store (clips resolved via tools) |
 | `/ar_contract` | ro | Contract package |
+| `/nodes/<id>` | ro | *(2026-10-01, user decision; replaces the ancestor-only `/lineage/<id>`)* The node directory of every finished node of the run (not the one being built, nor an `interrupted` one): transcripts, workspaces, logs, configs. Its `eval/` is hidden behind an empty tmpfs, so no per-case output is readable. The first message describes only the direct ancestors and the parent's other finished children; every other node is reachable through these files and the one-line archive list. |
 
 - Not mounted: `WorldModel/`, `WBench/`, `AutoResearcher/kernel`, `.env`, weights.
 - Network: `sandbox.network`, docker's default `bridge` for the `edit_self` and `improve_recipe` containers so pip, curl and wget work *(amended 2026-09-29, user decision; `none` restores the offline behaviour; contract verification containers stay `--network none`)*. The gateway and the tool server are reached over Unix
@@ -744,10 +787,16 @@ tool's description lists only its enabled variants.)*
 
 ### 11.1 Proxy subset
 
-50 of 289 cases: the original 40 (stratified by interaction mix, seed 20260913) plus 10 added by
-`scripts/make_proxy_cases.py` (seed 20260928, greedy toward the full set's interaction mix):
-`2,10,17,25,47,63,65,66,70,72,78,82,84,89,90,91,96,102,109,114,133,136,138,139,142,145,147,164,167,168,172,177,178,180,188,195,200,204,206,214,215,237,242,246,247,248,260,272,284,289`.
-Stored in `configs/proxy_cases.txt`; fixed for the run.
+*(Replaced 2026-10-01, user decision.)* `configs/proxy_cases.txt` lists all 289 case ids in a
+fixed order, written by `scripts/make_proxy_cases.py` (seed 20261001). A run scores the first
+`eval.proxy_size` (default 50) of them; the list and the size are frozen in the run's config
+snapshot. The order keeps the four interaction types (navigation, event_edit, subject_action,
+perspective_switch) roughly equal in every prefix: each next case is of the type the list holds
+fewest of, cases with only that type first, and navigation takes the cases graded on causal
+fidelity first. The first 50 hold 13 / 13 / 12 / 12 cases of the four types, 13 of them graded
+on causal fidelity. perspective_switch has only 31 cases, so prefixes longer than about 120
+cannot stay equal. Scores from runs with a different list or size are not comparable (the root
+cache key includes the case ids, §11.3).
 
 ### 11.2 Eval pipeline per node
 
@@ -758,20 +807,26 @@ Stored in `configs/proxy_cases.txt`; fixed for the run.
    (absolute `--work_dir` overrides WBench's own), so every phase reads the same videos and
    writes beside them. Nothing is written inside `WBench/`. This relies on upstream patch
    U1 (§2.3).
-1. **Merge:** `WorldModel/scripts/tools/merge_lora_for_rollout.py --ckpt_dir <node checkpoint> --base_transformer weights/alaya-world-ar/transformer.pt --output runs/<run>/merge_slot --lora_rank <node rank> --lora_alpha <node alpha>`.
-   Requires ≥ 30 GB free disk. The merge runs as its own subprocess (it holds ~52 GB of
-   host RAM); after it exits the kernel calls `sync` and waits until
-   `/proc/meminfo MemAvailable >= eval.free_ram_before_render_gb` (default 120 GB) before
-   starting the render, alerting if that takes longer than 10 minutes. This avoids the
-   host OOM killer taking down torchrun with exit code -9.
+1. **Eval adapter** *(replaced 2026-10-01, user decision)*:
+   `WorldModel/scripts/tools/concat_loras.py --loras weights/alaya-world-dmd/lora.safetensors <node checkpoint>/lora.safetensors --output runs/<run>/nodes/<n>/eval/lora`.
+   The few-step student LoRA (rank 256) and the node's LoRA (rank r) are concatenated per
+   module (A rows, B columns) into one adapter of rank 256 + r whose delta is exactly the sum
+   of the two; the base weights are not touched. The earlier merge added the node's delta
+   into the bf16 base weights, where most of it was rounded away (measured: 45-68% relative
+   error of the merged delta).
 2. **Render:** `scripts/tools/run_wbench.py` semantics with a kernel copy of
-   `configs/wbench_full.yaml`: `paths.resume_checkpoint` = merge slot,
+   `configs/wbench_full.yaml`: `paths.resume_checkpoint = weights/alaya-world-ar` (always the
+   released base), `paths.dmd_resume` = the concatenated adapter's directory,
+   `lora.rank = lora.alpha = 256 + r`,
    `paths.history_encoder` = **the node checkpoint's `history_encoder.pt`**,
-   `paths.dmd_resume = weights/alaya-world-dmd`, `validation.per_sample_seed: true`, case
-   ids = proxy subset, output `runs/<run>/nodes/<n>/eval/videos/`. The root node uses the
-   released `transformer.pt` and `history_encoder.pt` unmerged.
+   `validation.per_sample_seed: true`, case ids = proxy subset, output
+   `runs/<run>/nodes/<n>/eval/videos/`. The root node uses `weights/alaya-world-dmd` and the
+   released `history_encoder.pt` at rank 256.
 3. **WBench phases** (`wbench-main`, explicit `--gpus`) *(amended 2026-09-29)*: `precompute`, `gpu`,
-   `gpu` (the second pass only redoes cases that failed the first); `vlm`; then
+   `gpu` (the second pass only redoes cases that failed the first); `vlm`, `vlm` *(2026-10-01: a
+   failed judge call leaves its case unscored instead of counting as a wrong answer, and the second
+   pass, inside the same judge-server session, asks again for those cases only; a case still
+   unscored fails the eval on its case count, §11.3)*; then
    `tools/run_visual_plausibility.py` (`wbench-vp`); then `report`. With the local judge a
    `VllmServer` (`captioner` config, served under the model's id, up to `eval.judge.max_images`
    images per prompt, on all the run's GPUs) is started before `vlm` and stopped, with a wait for
@@ -782,10 +837,13 @@ Stored in `configs/proxy_cases.txt`; fixed for the run.
    resume whose environment would select a different judge, because scores from different judges
    are not comparable.
 4. **Score** (§11.3).
-5. **Aggregates for agents:** per-metric and per-dimension means, plus means by stratum
-   (interaction type, scene category, perspective), computed from per-case JSONs. No case
+5. **Aggregates for agents:** per-metric and per-dimension means, plus, for each group of
+   cases (by interaction type, scene category, perspective), the five dimension means over
+   that group's cases alone *(amended 2026-10-01, user decision: a group used to get one
+   number, the mean of each case's mean over all its metrics, which hid a 0.0 instruction grade
+   behind high quality and consistency grades)*, computed from per-case JSONs. No case
    ids, prompts, images or videos.
-6. **Cleanup:** delete the merged `transformer.pt` and, under the node's
+6. **Cleanup:** delete the concatenated adapter (`eval/lora/`) and, under the node's
    `work_dirs/<model>/`, the regenerable intermediates `da3_cache/`, `megasam/`,
    `masks/` and `_navi_videos_tmp/` (symlinks written by `main.py`). Keep `videos/`,
    `evaluation/`, `report.json` and the node checkpoint.
@@ -798,12 +856,20 @@ Stored in `configs/proxy_cases.txt`; fixed for the run.
   `navigation_trajectory` is counted as one metric (the report's composite of accuracy and
   consistency, as listed in `DIMENSION_MAP`); the report's extra component keys
   `navigation_accuracy` and `navigation_consistency` are not counted separately.
-- **Score** = unweighted mean over the metric set of `report["full"][metric]["mean"]`.
+- **Score** *(amended 2026-10-01, user decision)* = weighted mean over the metric set of
+  `report["full"][metric]["mean"]`, with the weights of `eval.score_weights` (a metric not listed
+  weighs 1). `event_edit_adherence`, `subject_action_adherence`, `perspective_switch_adherence`
+  and `causal_fidelity` weigh 4.5 each, so together they are half the score and the other 18
+  metrics the other half. The weights are part of the run's config snapshot. The root cache
+  stores metric means, not a score; a run that reuses a cached root computes the score with its
+  own weights.
 - **Preflight at run start:** the kernel proves every metric is producible before the first node:
   the `qwen3vl-a3b-visual-plausibility` weights present, each GPU metric's weights present. There
   is no exclusion: a failure stops the run from being created.
-- **Case counts** *(2026-09-29)*: the ten metrics computed for every case must have n equal to the
-  proxy size; the root's report then fixes every metric's n (`run.json["expected_n"]`) and every
+- **Case counts** *(2026-09-29; amended 2026-10-01)*: the ten metrics computed for every case must
+  have n equal to the proxy size, and the six judged metrics must have n equal to the number of
+  proxy cases they apply to (read from the case files), so a judge call that never succeeded fails
+  the root as well; the root's report then fixes every metric's n (`run.json["expected_n"]`) and every
   later node must match it (`ScoreError` otherwise).
 - *(Amended 2026-09-27, Plan 4 as built / user decision: no pause, §14.2.)* If a metric in
   the set is still missing from a node's `report.json` (`score_from_report` raises
@@ -816,7 +882,8 @@ Stored in `configs/proxy_cases.txt`; fixed for the run.
 - `ar status` reports the best node by highest own proxy score.
 - `ar full-eval <node>` *(amended 2026-09-27, Plan 4 as built: not implemented — there is no
   full 289-case WBench command)*. `ar score-node --run-id <id> --node <node>` scores a node
-  on the 50-case proxy set (§11.1), the same path the loop itself uses.
+  of the run again on its proxy set (§11.1), the same path the loop itself uses, writing under
+  `scores/` and never into the run *(amended 2026-10-01)*.
 
 ---
 
@@ -917,7 +984,7 @@ recorded.)*
 | Data | HF searches/downloads; rollout jobs (inputs, seeds, GPU time, outputs); ingest decisions with per-format checker reports, aspect ratio and leakage distances; data commits (manifest, parent, message, per-dataset stats); view materialization stats. |
 | Recipe | Agent recipe; resolved config; diffs vs. parent and base; each gate check result with full tool output. |
 | Training | `check_dataset.py`, precache and launcher logs; the full training log; parsed per-step metrics from `[Train]` lines (step, epoch, source, video, fs/fe, K, sigma, loss, grad, lr, time) and `[Mem]` lines; `nvidia-smi` samples every 5 s for all visible GPUs (util, memory, power, temperature) and an alert when a kernel process uses a GPU outside the list; host RAM and disk. |
-| Eval | Merge log; per-case render timing; WBench phase logs; per-case per-metric JSONs; `report.json`; metric set and score; exact agent-facing aggregates. |
+| Eval | LoRA concatenation log; per-case render timing; WBench phase logs; per-case per-metric JSONs; `report.json`; metric set and score; exact agent-facing aggregates. |
 | Selection | §12.6 *(2026-09-27: §12.7 as designed 2026-09-17; renumbered with the softmax replacement)*. |
 | System | Config snapshot, versions, control commands, crashes with tracebacks, recoveries, `interrupted` markings (§14.3), deletions (path, bytes, reason), node counters. |
 
@@ -953,7 +1020,7 @@ built, reads that JSON rather than a new store.)*
 | `invalid_code` | `edit_self`/contract retries exhausted | yes | no |
 | `invalid_recipe` | `improve_recipe`/gate retries exhausted | yes | no |
 | `train_failed` | Training/precache failures exhausted retries (§7.2, amended) | yes | no |
-| `eval_failed` | *(added 2026-09-27, Plan 4 as built / user decision)* merge, render or WBench (scoring) failed | yes | no |
+| `eval_failed` | *(added 2026-09-27, Plan 4 as built / user decision)* LoRA concatenation, render or WBench (scoring) failed | yes | no |
 | `crashed` | Kernel-recoverable crash of the node (§14.2) | yes | no |
 | `interrupted` | *(added 2026-09-27, Plan 4 as built / user decision)* unfinished when the loop stopped (forced stop, kernel death, or a spent budget/outage stop); kept exactly as is, never resumed, never cleaned up (§14.3) | **no** | **no** |
 
@@ -968,7 +1035,7 @@ built, reads that JSON rather than a new store.)*
 | gate | any check fails | retry loop 5↔6 |
 | gateway | upstream 429/5xx | gateway retries with exponential backoff |
 | precache/train | *(amended 2026-09-27, Plan 4 as built / user decision)* any failure — recipe-caused (CUDA OOM, NaN/inf loss, wall-time cap) or infrastructure (host OOM kill, disk full, NCCL/driver error, text-embed cache miss), including a run that writes a checkpoint but still fails | reported to the agent as a failed attempt (§7.2); back to 5↔6, consuming one attempt; exhausted ⇒ `train_failed` |
-| merge, render, WBench (scoring) | *(amended 2026-09-27, Plan 4 as built / user decision)* any failure | node `eval_failed`, alert, loop continues with a new cycle |
+| LoRA concatenation, render, WBench (scoring) | *(amended 2026-09-27, Plan 4 as built / user decision)* any failure | node `eval_failed`, alert, loop continues with a new cycle |
 | gateway (provider outage) | *(amended 2026-09-27, Plan 4 as built / user decision, option A)* upstream unavailable: an agent attempt fails while at least `gateway.outage_error_rate` (0.8) of the last `gateway.outage_window_min` (10) minutes' LLM calls, and at least `gateway.outage_min_calls` (3) of them, failed with 429/5xx or connection errors | the run **stops** (a stop, not a pause); `llm_outage` alert; the node in progress is marked `interrupted` on resume and not charged (§14.3); the operator resumes with `ar run --resume` |
 | budget | *(added 2026-09-27, Plan 4 as built / user decision)* the LLM spend ledger reaches `budget.max_usd` | the run **stops**; the node in progress is marked `interrupted` on resume and not charged (§14.3) |
 | any phase | unexpected kernel exception while the kernel process survives | node marked `crashed`, artifacts kept, loop continues with a new cycle |
@@ -992,9 +1059,6 @@ one that never throws away partial training/eval artifacts a person might want t
   does not count toward `max_nodes`, and counts nowhere in selection (§12) — not even as
   another candidate's descendant. Node ids are never reused (`_next_id` reads the archive,
   whose rows are never deleted).
-- `ar run --resume` also removes the run-level `merge_slot` *(2026-09-27, Plan 4 as built)*:
-  regenerable merged weights (~52 GB, spec 15), not node data, so "an `interrupted` node's
-  files are never deleted" still holds.
 - **A run whose root was never scored cannot be resumed** *(2026-09-27, user decision)*: a
   root scoring failure marks the root `eval_failed`, writes a `root_failed` alert and ends the
   run; a run stopped or killed before its root was scored leaves the root `running`. Either
@@ -1049,18 +1113,14 @@ list.)*
   run start in the run's own config) must all be visible to `nvidia-smi`; checked before a
   new run bootstraps and again before the loop starts on an existing one. Missing GPUs
   refuse the run before any run directory or config snapshot is created.
-- **Merge disk check** (inside `merge_lora`, not a separate guard): requires ≥
-  `disk.merge_min_free_gb` (default 30) GB free; below that the merge phase fails, which
-  ends the node `eval_failed` (§14.2) rather than pausing.
 
 ---
 
 ## 15. Disk policy
 
-- The kernel deletes only its own transient files without asking: merged `transformer.pt`
+- The kernel deletes only its own transient files without asking: the concatenated eval adapter
   after each eval, `da3_cache/`, `megasam/`, `masks/`, `trainer_state.pt`, staging after
-  ingest, and the run-level `merge_slot` on resume (§14.3; an `interrupted` node's own files
-  are never deleted, §14.1). *(2026-09-27, Plan 4 as built: in this WorldModel,
+  ingest (an `interrupted` node's own files are never deleted, §14.1). *(2026-09-27, Plan 4 as built: in this WorldModel,
   `trainer_state.pt` holds only `{step, training_mode}`, so deleting it frees almost no
   disk — it is kept for the spec's own consistency, not because it is large.)*
   *(Amended 2026-09-27, user decision: at node end only each attempt's raw downloads,
@@ -1091,8 +1151,6 @@ list.)*
   `_navi_videos_tmp/` and keeps videos, evaluation and report.
 - GPU list: unset environment resolves to `0,1,2,3`; a set list is used verbatim (any
   indices, GPU 5 included); fewer than 4 GPUs is refused at run start.
-- Memory guard: render waits while `MemAvailable` is below the threshold and alerts after
-  the timeout.
 - GPU job API: `job.wait` returns `running` at the cap instead of blocking; `job.cancel`
   stops a running job.
 - Selection: toy tree and edge cases (single root, two nodes, ties, failed descendants, all
@@ -1129,7 +1187,7 @@ conversation id; every `node_failed`/`llm_outage` alert is raised as expected).
 2. **Training smoke:** a data commit mixing the three example datasets with
    `optimizer.max_steps: 2`, `optimizer.grad_accum_steps: 1` passes the gate, precaches and
    trains through §7.3, writing `lora.safetensors` and `history_encoder.pt`.
-3. **Eval smoke:** merge, render 2 cases with the node's `history_encoder.pt`, WBench,
+3. **Eval smoke:** concatenate the LoRAs, render 2 cases with the node's `history_encoder.pt`, WBench,
    score; then reproduce the root score on the 40-case proxy; GPU metrics match the existing
    `WBench/work_dirs/alayaworld` report within 1e-3 per metric (seeded rendering).
 4. **Sandbox isolation:** from inside a container, internet access, reads of
@@ -1151,9 +1209,9 @@ conversation id; every `node_failed`/`llm_outage` alert is raised as expected).
 7. **Allowlist preflight:** each resolution pair in `train.resolution_allowlist` combined
    with the largest rank in `train.lora_allowlist` completes 10 steps without OOM; pairs
    that fail are removed from the allowlist before the first run.
-8. **Merge-then-render memory:** a merge immediately followed by a proxy render on the
-   full GPU list completes without a host OOM kill, with `MemAvailable` sampled
-   throughout; confirms the `sync` + threshold guard is sufficient on this 251 GB host.
+8. **Eval adapter memory** *(replaced 2026-10-01)*: a proxy render with the largest rank in
+   `train.lora_allowlist` (adapter rank 256 + 64) completes the longest cases on the full GPU
+   list without a CUDA OOM.
 9. **Upstream patch U1:** with the VP weights installed, the patched VP script, given the
    node's absolute `--work_dir` and `--model` from any working directory, scores the
    node's rendered proxy videos and writes `evaluation/visual_plausibility/` inside the
@@ -1183,18 +1241,19 @@ Three real nodes with small recipes before the first long run.
 | `budget.max_usd` / `usd_per_mtok.{input,cached_input,output}` | `null` / `null, null, null` — dollars only, no cap by default *(added 2026-09-27, Plan 4 as built / user decision)*. Covers only the agent's LLM calls through the gateway; WBench's separately paid VLM scoring (`VLM_API_KEY`) is not capped. The ledger is post-paid, so calls already in flight when the cap is reached can push spend past it — set `max_usd` with headroom. Prices and the cap are converted to `float` at `ar run` start; a non-numeric or negative value raises `BudgetError` (`kernel/ar_kernel/budget.py`). |
 | `ingest.aspect_tolerance` | 0.02 |
 | `leakage.phash_max_distance` / `leakage.min_ncc` / `leakage.min_entropy` | 4 / 0.95 / 4.0 bits |
-| `eval.free_ram_before_render_gb` / `eval.ram_wait_alert_min` | 120 / 10 |
+| `eval.proxy_size` | 50 |
+| `eval.score_weights` | 4.5 for `event_edit_adherence`, `subject_action_adherence`, `perspective_switch_adherence`, `causal_fidelity`; 1 otherwise |
 | `tools.job_wait_max_s` | 300 |
 | `captioner` | `env: vllm`, `model: Qwen/Qwen3.8-27B-FP8` (by id, HF cache, offline), `tensor_parallel: null` (= largest power of two <= node GPU count), `max_model_len: 32768`, `gpu_memory_utilization: 0.85`, `max_tokens: 512`, `media_io_kwargs: {video: {num_frames: 64, fps: 2}}`, `startup_timeout_s: 1200`, `clip_timeout_s: 300`, `memory_release_timeout_s: 120`, `extra_args: []` *(added 2026-09-25, Follow-up C)*. *(Amended 2026-09-28, owner's launch, checked on 57 clips: `max_model_len: 81920`, `gpu_memory_utilization: 0.90`, `max_num_seqs: 20`, `max_num_batched_tokens: 32768`, `reasoning_parser: qwen3`, `reasoning_effort: medium` per request, `mm_encoder_tp_mode: data`, `speculative_config: null` (MTP optional); `max_tokens` removed. Clips are sent concurrently, up to `max_num_seqs`. Each clip's reasoning is recorded in its `caption.clip` event; the agent gets only the caption. vLLM's Qwen3-VL loader ignores `num_frames` and samples 2 frames/s. See the verification log.)* |
 | `train.resolution_allowlist` | `[[416,736],[352,608]]` |
 | `train.lora_allowlist` | `[[16,16],[32,32],[64,64]]` |
-| `disk.merge_min_free_gb` / `disk.alert_below_gb` | 30 / 50 |
+| `disk.alert_below_gb` | 50 |
 | `telemetry.gpu_sample_sec` | 5 |
-| `agents.context_window_tokens` / `agents.compact_at` | 128000 (set to the agent model's window) / 0.85 |
+| `agents.context_window_tokens` / `agents.compact_at` | 1000000 (set to the agent model's window) / 0.6 *(as configured; corrected 2026-10-01)* |
 | `alerts.stall_min` / `gateway_error_rate` / `gateway_error_window_min` | 30 / 0.2 / 5 |
 | `generators` | `alayaworld: {dmd4, ar30}`, `ltx25: {dev, distilled}`, `wan22: {ti2v-5b}`, each `enabled` per §16.3 item 5 *(amended 2026-09-26, Plan 3 as built: enabled = dmd4, ar30, ti2v-5b, distilled. Each block has `env` (a name or a repo-relative prefix env), `variants: {<v>: {enabled}}`, `max_items`, `timeout_s`, `license`; alayaworld `max_turns: 9`; wan22/ltx25 `repo` + pinned `commit` (the backend refuses other commits), `weights`, `frames: [default, max]` (wan22 `[121, 121]`, ltx25 `[121, 241]`), `workers`; wan22 `gpus_per_worker: 1`, `extra_args: {offload_model: true, t5_cpu: true}`; ltx25 `quantization: fp8-cast`, `offload: cpu`, per-variant `peak_rss_gib: 40`, `host_reserve_gib: 100`, `resolutions: [[576, 1024]]`)* |
-| `annotate` | *(Added 2026-09-26, Plan 3.)* `enabled: true`, `env: alayaworld`, `repo`/`checkpoint` (ViGeo under `WorldModel/third_party/ViGeo`), `max_frames: 1200`, `max_items: 64`, `timeout_s: 21600` |
-| `images` | *(Added 2026-09-26, Plan 3.)* `enabled: true`, `env: .envs/gen-zimage`, `weights: weights/z-image-turbo` + pinned `revision`, `steps: 9`, `offload: model`, `max_items: 64`, `timeout_s: 7200`, `license: Apache-2.0` |
+| `annotate` | *(Added 2026-09-26, Plan 3.)* `enabled: true`, `env: alayaworld`, `repo`/`checkpoint` (ViGeo under `WorldModel/third_party/ViGeo`), `max_frames: 1200`, `max_items: 100` *(2026-10-01: every GPU job takes at most 100 items)*, `timeout_s: 21600` |
+| `images` | *(Added 2026-09-26, Plan 3.)* `enabled: true`, `env: .envs/gen-zimage`, `weights: weights/z-image-turbo` + pinned `revision`, `steps: 9`, `offload: model`, `max_items: 100`, `timeout_s: 7200`, `license: Apache-2.0` |
 
 All values are snapshotted into `runs/<run>/config/` at run start and logged.
 

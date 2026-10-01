@@ -88,8 +88,33 @@ def test_commit_returns_id_and_per_dataset_stats(env):
                                               "weight": 1.0, "clips": [r["clip_id"] for r in results]}},
                        "four clips")
     assert len(out["commit_id"]) == 64
-    assert out["datasets"]["cam"] == {"format": "video_caption_camera", "prompt_mode": None,
-                                      "weight": 1.0, "clips": 4}
+    stats = out["datasets"]["cam"]
+    assert sum(stats.pop("sources").values()) == 4
+    assert stats == {"format": "video_caption_camera", "prompt_mode": None, "weight": 1.0, "clips": 4}
+
+
+def test_a_clips_source_is_its_generator_or_repo_and_derived_clips_inherit_it():
+    from ar_kernel.tools.data_tools import clip_source, dataset_stats
+    clips = [{"clip_id": "a", "provenance": {"kind": "rollout", "generator": "alayaworld-dmd4"}},
+             {"clip_id": "b", "provenance": {"kind": "hf_dataset", "repo": "org/set"}},
+             {"clip_id": "c", "provenance": {"kind": "derived"}, "derived_from": ["a"]},
+             {"clip_id": "d", "provenance": {"kind": "derived"}, "derived_from": ["c", "b"]},
+             {"clip_id": "e", "provenance": {"kind": "derived"}, "derived_from": []}]
+    by_id = {c["clip_id"]: c for c in clips}
+    assert [clip_source(c, by_id) for c in clips] == [
+        "rollout:alayaworld-dmd4", "hf:org/set", "rollout:alayaworld-dmd4",
+        "hf:org/set+rollout:alayaworld-dmd4", "derived"]
+    manifest = {"datasets": {"x": {"format": "f", "prompt_mode": None, "weight": 1.0, "clips": ["a", "c", "e"]}}}
+    assert dataset_stats(manifest, clips)["x"]["sources"] == {"rollout:alayaworld-dmd4": 2, "derived": 1}
+
+
+def test_query_pages_through_the_pool_with_offset(env):
+    tools, caller, results, _ = env
+    everything = tools.query(caller, {})
+    first = tools.query(caller, {"limit": 3})
+    rest = tools.query(caller, {"limit": 3, "offset": 3})
+    assert first["total"] == rest["total"] == everything["total"] and first["returned"] == 3
+    assert [c["clip_id"] for c in first["clips"] + rest["clips"]] == [c["clip_id"] for c in everything["clips"]][:6]
 
 
 def test_commit_validation_errors_become_tool_errors(env):

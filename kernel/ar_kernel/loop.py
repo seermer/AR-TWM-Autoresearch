@@ -15,13 +15,14 @@ from typing import Callable
 
 import yaml
 
-from .agent_phase import PhaseEnv, run_edit_self, run_improve_recipe
+from .agent_phase import PhaseEnv, run_edit_self, run_improve_recipe, smoke_contexts
 from .archive.blobs import BlobStore
 from .archive.clips import ClipStore
 from .archive.commits import CommitStore
 from .archive.nodes import NodeStore, run_rel
 from .contract.verify import verify_contract
 from .guards import alert
+from .eval.score import weighted_score
 from .run import record_root_counts, root_key, score_node
 from .selection import select_parent, selection_seed, update_values
 from .subproc import file_tail
@@ -31,13 +32,13 @@ from .train.runner import TrainOutcome, TrainRunner
 from .transcripts import write_transcripts
 
 
-def save_root(cache: Path, eval_dir: Path, score: float, metrics: dict, expected_n: dict, run_id: str) -> None:
+def save_root(cache: Path, eval_dir: Path, metrics: dict, expected_n: dict, run_id: str) -> None:
     """Keep a scored root for later runs with the same root_key (files hard-linked, not copied)."""
     tmp = cache.with_name(cache.name + ".tmp")
     shutil.rmtree(tmp, ignore_errors=True)
     shutil.copytree(eval_dir, tmp / "eval", copy_function=os.link)
     (tmp / "root.json").write_text(json.dumps({
-        "score": score, "metrics": metrics, "expected_n": expected_n, "run_id": run_id,
+        "metrics": metrics, "expected_n": expected_n, "run_id": run_id,
         "aggregates": json.loads((eval_dir / "aggregates.json").read_text())}, indent=1))
     tmp.rename(cache)
 
@@ -59,6 +60,14 @@ def _gate(loop, recipe, data_commit, parent_commit, node, attempt_dir):
             recipe, data_commit, parent_commit, node, attempt_dir, loop.ctx.run_dir, loop.ctx.gpus)
 
 
+def _contract(*, loop, node, parent_id, commit, attempt):
+    contexts = smoke_contexts(loop.env, conn=loop.ctx.conn, node=node, parent_id=parent_id,
+                              nodes_remaining=loop.max_nodes - loop._children())
+    return verify_contract(cfg=loop.cfg, run_dir=loop.ctx.run_dir, run_id=Path(loop.ctx.run_dir).name,
+                           repo=loop.repo, commit=commit, harness=loop.kit.harness,
+                           recorder=loop.ctx.recorder, node=node, attempt=attempt, contexts=contexts)
+
+
 def _train(loop, resolved, node, attempt_dir):
     runner = TrainRunner(loop.cfg, loop.ctx.recorder)
     with loop.kit.gpu_lock:
@@ -71,15 +80,15 @@ def _train(loop, resolved, node, attempt_dir):
 
 
 def _score(loop, node, checkpoint, resolved):
-    rank, alpha = lora_of(resolved) if resolved is not None else (0, 0)
+    rank = lora_of(resolved)[0] if resolved is not None else 0
     with loop.kit.gpu_lock:
-        return score_node(loop.cfg, loop.ctx, node, checkpoint, rank, alpha)
+        return score_node(loop.cfg, loop.ctx, node, checkpoint, rank)
 
 
 @dataclass
 class Phases:
     edit_self: Callable = run_edit_self
-    contract: Callable = verify_contract
+    contract: Callable = _contract
     improve_recipe: Callable = run_improve_recipe
     gate: Callable = _gate
     train: Callable = _train
@@ -177,9 +186,10 @@ class Loop:
             self.nodes.set_fields("root", error=error)
             alert(self.ctx.recorder, "root_failed", error, node_id="root")
             raise
+        record_root_counts(self.ctx, detail["counts"])     # every later node must match the root's
         self._record_score("root", score, detail)
         if cache is not None:
-            save_root(cache, self._node_dir("root") / "eval", score, detail["metrics"], self.ctx.expected_n,
+            save_root(cache, self._node_dir("root") / "eval", detail["metrics"], self.ctx.expected_n,
                       Path(self.ctx.run_dir).name)
 
     def _reuse_root(self, cache: Path) -> None:
@@ -188,8 +198,9 @@ class Loop:
         shutil.copytree(cache / "eval", self._node_dir("root") / "eval", copy_function=os.link,
                         ignore=shutil.ignore_patterns("aggregates.json"))   # rewritten below, never through a link
         record_root_counts(self.ctx, saved["expected_n"])
-        self._record_score("root", saved["score"], {"metrics": saved["metrics"],
-                                                     "aggregates": saved["aggregates"]})
+        # The cache holds metric means, not a score: each run weighs them its own way.
+        score = weighted_score(saved["metrics"], self.cfg.get("eval.score_weights"))
+        self._record_score("root", score, {"metrics": saved["metrics"], "aggregates": saved["aggregates"]})
         self.ctx.recorder.event("root.reused", node="root", phase="eval",
                                 payload={"cache": str(cache), "scored_by_run": saved["run_id"]})
 
@@ -214,7 +225,7 @@ class Loop:
             self._state(child, "eval")
             try:
                 score, detail = self.phases.score(self, child, checkpoint, resolved)
-            except Exception as exc:                              # noqa: BLE001 -- merge/render/WBench
+            except Exception as exc:                              # noqa: BLE001 -- LoRA concat/render/WBench
                 status, error = "eval_failed", f"{type(exc).__name__}: {exc}"
                 return
             self._record_score(child, score, detail)
@@ -249,10 +260,8 @@ class Loop:
                 self.nodes.add_attempt(child, "edit_self", k, "failed", retry)
                 continue
             self._state(child, "contract", k)
-            report = self.phases.contract(cfg=self.cfg, run_dir=self.ctx.run_dir,
-                                          run_id=Path(self.ctx.run_dir).name, repo=self.repo,
-                                          commit=out.commit, harness=self.kit.harness,
-                                          recorder=self.ctx.recorder, node=child, attempt=k)
+            report = self.phases.contract(loop=self, node=child, parent_id=parent["node_id"],
+                                          commit=out.commit, attempt=k)
             if not report.ok:
                 retry = report.to_retry()
                 self.nodes.add_attempt(child, "edit_self", k, "contract_failed", retry)
@@ -296,7 +305,7 @@ class Loop:
             trained = self.phases.train(self, gate.resolved_path, child, adir)
             if trained.checkpoint is None or trained.failure != "none":   # e.g. nan loss after a checkpoint
                 retry = {"kind": "train", "failure": trained.failure, "detail": trained.detail,
-                         "log_tail": file_tail(trained.log_path, 4000), **_submitted(res)}
+                         "log_tail": file_tail(trained.log_path, 20_000), **_submitted(res)}
                 status = "train_failed"
                 self.nodes.add_attempt(child, "improve_recipe", k, "train_failed", retry)
                 alert(self.ctx.recorder, "train_failed", f"{child} attempt {k}: {trained.failure} "
@@ -306,7 +315,9 @@ class Loop:
                                    {"checkpoint": run_rel(self.ctx.run_dir, trained.checkpoint)})
             self.nodes.set_fields(child, checkpoint_path=run_rel(self.ctx.run_dir, trained.checkpoint))
             return (trained.checkpoint, gate.resolved_path), "scored", None
-        return None, status, f"improve_recipe retries exhausted; last failure: {json.dumps(retry)[:2000]}"
+        # The node's error line: what failed, without the log tail and the submission (both are in its files).
+        cause = {k: v for k, v in retry.items() if k not in ("log_tail", "data_commit", "recipe", "rationale")}
+        return None, status, f"improve_recipe retries exhausted; last failure: {json.dumps(cause)[:2000]}"
 
     def _record_recipe(self, child: str, res: dict, resolved: Path) -> None:
         d = self._node_dir(child)

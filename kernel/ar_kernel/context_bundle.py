@@ -8,7 +8,7 @@ import yaml
 from ar_contract.models import EditContext, RecipeContext
 
 from .archive.clips import ClipStore
-from .archive.nodes import NodeStore
+from .archive.nodes import UNFINISHED, NodeStore
 from .config import run_config_path
 from .process_digest import process_digest
 from .tools.data_tools import clip_record, dataset_stats, scores_by_clip
@@ -16,7 +16,7 @@ from .train.recipe import RECIPE_RULES, TUNABLE_KEYS
 from .train.recipe_guide import recipe_guide
 
 FORMAT_RULES = """\
-Standard data formats (the only ones accepted), from WorldModel docs/TRAINING.md:
+Standard data formats (the only ones accepted):
 - Layout per dataset root: videos/<id>.mp4, captions/<id>.json, poses/<id>.npz (camera formats only).
 - video_caption_camera: video + caption + per-frame camera poses.
 - video_timed_prompts_camera: as above + caption "segments": [{"time_range_s": [start, end), "prompt"}].
@@ -48,7 +48,25 @@ def _data_stats(conn, commit_id: str | None) -> dict:
     row = conn.execute("SELECT manifest FROM data_commits WHERE commit_id=?", (commit_id,)).fetchone()
     if row is None:
         return {}
-    return dataset_stats(json.loads(row["manifest"]))
+    return dataset_stats(json.loads(row["manifest"]), ClipStore(conn).all())
+
+
+def _entry(conn, run_dir: Path, repo, node: dict, parent_commit: str | None) -> dict:
+    recipe_path = _node_file(run_dir, node["node_id"], "recipe.yaml")
+    rationale = _node_file(run_dir, node["node_id"], "rationale.md")
+    return {
+        "node_id": node["node_id"], "status": node["status"],
+        "component": node["edit_component"], "error": node["error"],
+        "score": node["score"],
+        "metrics": node["metrics"], "data": _data_stats(conn, node["data_commit"]),
+        "recipe": yaml.safe_load(recipe_path.read_text()) if recipe_path.exists() else None,
+        "rationale": rationale.read_text() if rationale.exists() else None,
+        "edit": _read_json(_node_file(run_dir, node["node_id"], "edit.json")),
+        "aggregates": _read_json(_node_file(run_dir, node["node_id"], "eval/aggregates.json")),
+        "process": process_digest(run_dir, node["node_id"]),
+        "code_diff_stats": (repo.diff_stats(parent_commit, node["agent_commit"])
+                            if parent_commit and node["agent_commit"] else []),
+    }
 
 
 def lineage(conn, run_dir: Path, repo, node_id: str) -> list[dict]:
@@ -59,25 +77,15 @@ def lineage(conn, run_dir: Path, repo, node_id: str) -> list[dict]:
         chain.append(nodes.get(current))
         current = chain[-1]["parent_id"]
     chain.reverse()
-    out = []
-    for i, node in enumerate(chain):
-        recipe_path = _node_file(run_dir, node["node_id"], "recipe.yaml")
-        rationale = _node_file(run_dir, node["node_id"], "rationale.md")
-        parent_commit = chain[i - 1]["agent_commit"] if i else None
-        out.append({
-            "node_id": node["node_id"], "status": node["status"],
-            "component": node["edit_component"], "error": node["error"],
-            "score": node["score"],
-            "metrics": node["metrics"], "data": _data_stats(conn, node["data_commit"]),
-            "recipe": yaml.safe_load(recipe_path.read_text()) if recipe_path.exists() else None,
-            "rationale": rationale.read_text() if rationale.exists() else None,
-            "edit": _read_json(_node_file(run_dir, node["node_id"], "edit.json")),
-            "aggregates": _read_json(_node_file(run_dir, node["node_id"], "eval/aggregates.json")),
-            "process": process_digest(run_dir, node["node_id"]),
-            "code_diff_stats": (repo.diff_stats(parent_commit, node["agent_commit"])
-                                if parent_commit and node["agent_commit"] else []),
-        })
-    return out
+    return [_entry(conn, run_dir, repo, node, chain[i - 1]["agent_commit"] if i else None)
+            for i, node in enumerate(chain)]
+
+
+def siblings(conn, run_dir: Path, repo, parent_id: str) -> list[dict]:
+    """The finished children of the parent: what was already tried from the same starting point."""
+    parent_commit = NodeStore(conn).get(parent_id)["agent_commit"]
+    return [_entry(conn, run_dir, repo, node, parent_commit) for node in NodeStore(conn).all()
+            if node["parent_id"] == parent_id and node["status"] not in UNFINISHED]
 
 
 def archive_summary(conn) -> dict:
@@ -100,7 +108,8 @@ def clip_pool_summary(conn, cap: int = 2000) -> list[dict]:
 
 def build_edit_context(*, conn, run_dir: Path, repo, parent_id: str, attempt: int, max_attempts: int,
                        retry: dict | None, nodes_remaining: int, dry_run: bool = False) -> EditContext:
-    return EditContext(lineage=lineage(conn, run_dir, repo, parent_id), archive=archive_summary(conn),
+    return EditContext(lineage=lineage(conn, run_dir, repo, parent_id),
+                       siblings=siblings(conn, run_dir, repo, parent_id), archive=archive_summary(conn),
                        nodes_remaining=nodes_remaining, attempt=attempt, max_attempts=max_attempts,
                        retry=retry, dry_run=dry_run)
 
@@ -112,9 +121,11 @@ def build_recipe_context(*, cfg, conn, run_dir: Path, repo, node_id: str, parent
     recipe_path = _node_file(run_dir, parent_id, "recipe.yaml")
     base = yaml.safe_load(run_config_path(cfg, run_dir, "base_recipe.yaml").read_text())
     return RecipeContext(
-        lineage=lineage(conn, run_dir, repo, parent_id), archive=archive_summary(conn),
+        lineage=lineage(conn, run_dir, repo, parent_id),
+        siblings=siblings(conn, run_dir, repo, parent_id), archive=archive_summary(conn),
         nodes_remaining=nodes_remaining, attempt=attempt, max_attempts=max_attempts, retry=retry,
         dry_run=dry_run, clip_pool=clip_pool_summary(conn),
+        clip_pool_size=conn.execute("SELECT COUNT(*) FROM clips").fetchone()[0],
         parent_data_commit=parent["data_commit"],
         parent_recipe=yaml.safe_load(recipe_path.read_text()) if recipe_path.exists() else {},
         base_recipe=base, recipe_guide=recipe_guide(base),

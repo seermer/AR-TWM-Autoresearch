@@ -13,3 +13,4 @@ third_party/
 .*.swp
 .gradio/
 root_cache/
+scores/

@@ -64,6 +64,10 @@ class KernelConfig:
     def root_cache(self) -> Path:
         return self._path("paths.root_cache")
 
+    @property
+    def scores_dir(self) -> Path:
+        return self._path("paths.scores_dir")
+
 SNAPSHOT_FILES = ("kernel.yaml", "base_recipe.yaml", "proxy_cases.txt")
 
 

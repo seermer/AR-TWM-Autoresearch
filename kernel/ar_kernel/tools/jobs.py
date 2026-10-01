@@ -91,6 +91,7 @@ class JobQueue:
     def _view(self, job: Job) -> dict:
         view = asdict(job)
         view.pop("token")
+        view.pop("args")        # the caller sent them; echoing every item on each poll only fills its context
         return view
 
     def submit(self, caller, backend_name: str, args: dict) -> str:

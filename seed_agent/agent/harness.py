@@ -6,7 +6,7 @@ with no middleware, no response_format and async tools:
   else one Send("tools", [call]) per tool call (parallel); tools -> model.
 Tool execution follows langgraph.prebuilt.ToolNode's default messages.
 
-Three deliberate differences from create_agent's default:
+Four deliberate differences from create_agent's default:
   1. A tool that raises is reported to the model as an error ToolMessage
      (create_agent re-raises and ends the run).
   2. Auto-compact: call_model estimates the context size before every model call
@@ -23,6 +23,10 @@ Three deliberate differences from create_agent's default:
      summary -- before the real model call runs on it. An empty summary raises.
   3. A text result longer than TOOL_RESULT_LIMIT is saved to /workspace/tool_output and the model gets
      its head and tail with the file's path.
+  4. A `return_direct` tool ends the run only when it succeeds: after all parallel tool results are in
+     (node "tools_done"), the run ends if one of them is a successful return_direct result, and goes back
+     to the model otherwise. So a rejected submission returns to the model to be corrected, and an
+     accepted one is not followed by another model call.
 """
 from __future__ import annotations
 
@@ -52,7 +56,8 @@ TOOL_ERROR = "Error: {error}\n Please fix your mistakes."   # ToolNode's handle_
 TOOL_BLOCK_TYPES = {"text", "image_url", "image", "json", "search_result", "custom_tool_call_output",
                     "document", "file"}
 
-TOOL_RESULT_LIMIT, TOOL_RESULT_SHOWN = 100_000, 20_000     # chars
+# chars. A safety cap: the result of a 100-item GPU job is 50,000 to 160,000.
+TOOL_RESULT_LIMIT, TOOL_RESULT_SHOWN = 200_000, 20_000
 CHARS_PER_TOKEN = 4          # no tokenizer offline (tiktoken downloads its encodings)
 # An image costs a bounded number of vision tokens however long its base64 is, so it is
 # counted as a fixed, generous estimate instead of by characters.
@@ -185,13 +190,25 @@ def build_react_agent(model: BaseChatModel, tools: list[BaseTool], system_prompt
             return END
         return [Send("tools", [call]) for call in last.tool_calls]
 
+    direct = {t.name for t in tools if t.return_direct}
+
+    def after_tools(state: ReactState):
+        for message in reversed(state["messages"]):
+            if not isinstance(message, ToolMessage):
+                break
+            if message.name in direct and message.status != "error":
+                return END
+        return "model"
+
     graph = StateGraph(ReactState)
     graph.add_node("model", call_model)
     graph.add_edge(START, "model")
     if tools:
         graph.add_node("tools", call_tool)
+        graph.add_node("tools_done", lambda state: {})         # runs once, on the merged tool results
         graph.add_conditional_edges("model", after_model, ["tools", END])
-        graph.add_edge("tools", "model")
+        graph.add_edge("tools", "tools_done")
+        graph.add_conditional_edges("tools_done", after_tools, ["model", END])
     else:
         graph.add_edge("model", END)
     return graph.compile().with_config({"recursion_limit": RECURSION_LIMIT})

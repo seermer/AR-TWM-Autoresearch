@@ -99,7 +99,13 @@ class Recorder:
         path = self.events_path(node)
         if not path.exists():
             return []
-        return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        events = []
+        for line in path.read_text().splitlines():
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:        # a line a killed writer left unfinished
+                continue
+        return events
 
     @contextmanager
     def span(self, type: str, *, node: str = "run", phase: str = "-", attempt: int = 0,

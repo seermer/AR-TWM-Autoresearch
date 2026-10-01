@@ -17,6 +17,23 @@ def test_score_is_the_mean_over_the_metric_set():
     assert score == pytest.approx(expected)
     assert per_metric["aesthetic_quality"] == pytest.approx(REPORT["full"]["aesthetic_quality"]["mean"])
 
+def test_weights_shift_the_score_toward_the_weighted_metrics():
+    report = _report(event_edit_adherence=(0.2, 12), aesthetic_quality=(0.8, 50), imaging_quality=(0.8, 50))
+    metric_set = ["event_edit_adherence", "aesthetic_quality", "imaging_quality"]
+    score, per_metric = score_from_report(report, metric_set, weights={"event_edit_adherence": 2})
+    assert score == pytest.approx((2 * 0.2 + 0.8 + 0.8) / 4)
+    assert per_metric["event_edit_adherence"] == 0.2
+
+
+def test_the_four_weighted_grades_are_half_the_score():
+    weights = CFG.get("eval.score_weights")
+    assert sorted(weights) == ["causal_fidelity", "event_edit_adherence", "perspective_switch_adherence",
+                               "subject_action_adherence"]
+    assert sum(weights.values()) == len(DIMENSION_METRICS) - len(weights)
+    report = _report(**{m: ((1.0 if m in weights else 0.0), 1) for m in DIMENSION_METRICS})
+    assert score_from_report(report, DIMENSION_METRICS, weights=weights)[0] == pytest.approx(0.5)
+
+
 def test_missing_metric_raises(tmp_path):
     with pytest.raises(KeyError, match="visual_plausibility"):
         score_from_report(REPORT, ["aesthetic_quality", "visual_plausibility"])
@@ -124,14 +141,19 @@ def test_aggregates_group_metric_means_by_wbench_dimension():
     assert agg["dimensions"]["interaction"] == agg["metrics"]["navigation_trajectory"]
 
 
-def test_aggregates_strata_use_non_top_level_metrics_and_leak_no_case_ids():
+def test_aggregates_strata_give_each_dimension_per_group_and_leak_no_case_ids():
     from ar_kernel.eval.score import aggregates
     per_case = FIXTURE_REPORT["per_case"]
     agg = aggregates(CFG, FIXTURE_REPORT, FIXTURE_CASES, ["spatial_consistency"])
     # Only cases 136 (Indoor) and 84 (Urban) have the ungated spatial score (ret_sim).
-    assert agg["strata"]["category"] == {"Indoor": per_case["136"]["spatial_consistency"],
-                                         "Urban": per_case["84"]["spatial_consistency"]}
+    assert agg["strata"]["category"] == {"Indoor": {"consistency": per_case["136"]["spatial_consistency"]},
+                                         "Urban": {"consistency": per_case["84"]["spatial_consistency"]}}
     full = aggregates(CFG, FIXTURE_REPORT, FIXTURE_CASES, FIXTURE_METRICS)
+    # A group's dimension is the mean of that dimension's metric means over the group's cases alone.
+    quality = FIXTURE_REPORT["dimensions"]["quality"]
+    indoor = full["strata"]["category"]["Indoor"]
+    assert sorted(indoor) == ["consistency", "interaction", "quality"]
+    assert indoor["quality"] == pytest.approx(sum(per_case["136"][m] for m in quality) / len(quality))
     assert sorted(full["strata"]["interaction_type"]) == ["navigation", "subject_action"]
     assert sorted(full["strata"]["perspective"]) == ["first_person", "third_person"]
     assert not set(_keys(full)) & set(per_case)

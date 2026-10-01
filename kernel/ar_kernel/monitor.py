@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
 import time
 from pathlib import Path
 
-from .eval.merge import free_disk_gb
 from .guards import alert, smi
 from .liveness import tree_mark
 
@@ -92,7 +92,7 @@ class Monitor:
                     self._once(("stall", node, state.get("phase"), state.get("attempt")), "stall",
                                f"no events from {node} {state.get('phase')} for "
                                f"{(now - last) / 60:.0f} min", level="warning")
-        free = free_disk_gb(self.run_dir)
+        free = shutil.disk_usage(self.run_dir).free / (1024 ** 3)
         if free < float(self.cfg.get("disk.alert_below_gb")):
             self._once(("disk", int(now // 3600)), "disk_low", f"{free:.0f} GB free under {self.run_dir}")
         rate, calls = self.budget.error_rate(60 * float(self.cfg.get("alerts.gateway_error_window_min")))

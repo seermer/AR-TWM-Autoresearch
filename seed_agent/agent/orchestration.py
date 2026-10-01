@@ -26,7 +26,7 @@ from langchain_core.tools import ToolException
 from pydantic import BaseModel, Field
 
 from .entry import AGENT_ROOT, BRIEF_CHARS, COMPACT_AT, CONTEXT_WINDOW, MAX_ROUNDS, MODEL, WORKSPACE
-from .briefing import edit_context, recipe_context
+from .briefing import edit_context, engineer_context, recipe_context
 from .harness import build_react_agent
 from .tools import (ARXIV_TOOLS, discarded_changes, kernel_tools, make_file_tools, result_text, snap_timed_prompts,
                     submit_tool)
@@ -208,15 +208,16 @@ async def run_task(ctx: RecipeContext) -> RecipeResult:
     async with mcp_session() as session:
         ktools = await kernel_tools(session)
         team = recipe_team(ctx, session, ktools)
-        if ctx.dry_run:
-            return RecipeResult(data_commit=ctx.parent_data_commit or "dry-run", recipe={},
-                                rationale=f"dry run: roles built, {len(ktools)} kernel tools, "
-                                          f"model said {await ping()!r}")
         record = Path(WORKSPACE) / "plans.json"             # carried to a retry with the workspace
         previous = json.loads(record.read_text()) if ctx.retry and record.exists() else None
-        context = brief(recipe_context(ctx, previous))
+        # Both built in a dry run too: it gets the real context.
+        context, for_engineer = brief(recipe_context(ctx, previous)), brief(engineer_context(ctx, previous))
+        if ctx.dry_run:
+            return RecipeResult(data_commit=ctx.parent_data_commit or "dry-run", recipe={},
+                                rationale=f"dry run: roles and the first message built, {len(ktools)} kernel "
+                                          f"tools, model said {await ping()!r}")
         await plan_and_engineer(team, task=context, show=lambda p: block("plan", p.model_dump_json(indent=2)),
-                                engineer_context=context, record=record)
+                                engineer_context=for_engineer, record=record)
     r = team.done.value
     return RecipeResult(data_commit=r.data_commit, recipe=typed(r.recipe, ctx.tunable_rules),
                         rationale=f"{r.rationale}\n\nPlan: {json.dumps(team.rounds[-1]['plan'])}\nData: {r.notes}")
@@ -253,7 +254,7 @@ def selftest(root: str) -> list[str]:
     r = subprocess.run([sys.executable, "-c", "import agent.entry, agent.orchestration as o; o.check_roles()"],
                        cwd=root, capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
-        errors.append(r.stderr[-3000:])
+        errors.append(r.stderr[-6000:])
     return errors
 
 
@@ -276,13 +277,13 @@ def edit_team() -> Team:
 
 async def run_meta(ctx: EditContext) -> EditResult:
     team = edit_team()
-    if ctx.dry_run:
-        return EditResult(summary=f"dry run: roles built, model said {await ping()!r}")
     record = Path(WORKSPACE) / "plans.json"                 # carried to a retry with the workspace
     previous = json.loads(record.read_text()) if ctx.retry and record.exists() else None
+    task = brief(edit_context(ctx, COMPONENTS, previous))   # built in a dry run too: it gets the real context
+    if ctx.dry_run:
+        return EditResult(summary=f"dry run: roles and the first message built, model said {await ping()!r}")
     await plan_and_engineer(
-        team, record=record, engineer_context=None,
-        task=brief(edit_context(ctx, COMPONENTS, previous)),
+        team, record=record, engineer_context=None, task=task,
         show=lambda p: block("edit_plan", p.model_dump_json(indent=2), component=p.component))
     p = team.plan.value
     return EditResult(summary=f"[{p.component}] {p.change}\n\n{team.done.value.summary}", component=p.component)

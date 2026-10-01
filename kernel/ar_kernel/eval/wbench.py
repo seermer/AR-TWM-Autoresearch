@@ -11,7 +11,7 @@ from .judge import Judge, judge_env, judge_server
 
 def run_wbench_phases(cfg: KernelConfig, work_dir: Path, model: str, gpus: list[int],
                       metric_set: list[str], recorder, node_id: str, judge: Judge | None = None) -> dict:
-    """precompute, gpu (twice), vlm (behind a local judge server when `judge` is local),
+    """precompute, gpu (twice), vlm (twice, behind a local judge server when `judge` is local),
     visual plausibility, report. The metric set is always all 22, so no phase is optional."""
     gpu_arg = ",".join(str(g) for g in gpus)
 
@@ -29,15 +29,21 @@ def run_wbench_phases(cfg: KernelConfig, work_dir: Path, model: str, gpus: list[
         wbench("wbench-main", ["python", "main.py", "--model", model, "--work_dir", str(work_dir),
                                "--phase", phase, "--gpus", gpu_arg], phase, extra_env, timeout)
 
+    def vlm(extra_env: dict | None = None) -> None:
+        main_phase("vlm", extra_env)
+        # A failed judge call leaves its case unscored; the second pass asks again for those only.
+        # A case still unscored after it fails the eval on its case count (score_from_report).
+        main_phase("vlm", extra_env)
+
     main_phase("precompute")
     main_phase("gpu")
     # The second pass recomputes only cases whose first attempt failed (e.g. a transient CUDA OOM),
     # and costs seconds when nothing failed.
     main_phase("gpu")
     if judge is not None and judge.kind == "local":
-        _vlm_with_local_judge(cfg, judge, gpus, Path(work_dir), recorder, node_id, main_phase)
+        _vlm_with_local_judge(cfg, judge, gpus, Path(work_dir), recorder, node_id, vlm)
     else:
-        main_phase("vlm")
+        vlm()
     wbench("wbench-vp", ["python", "tools/run_visual_plausibility.py", "--model", model,
                          "--work_dir", str(work_dir),
                          "--model_path", str(cfg.wbench / cfg.get("eval.vp_weights"))],
@@ -47,7 +53,7 @@ def run_wbench_phases(cfg: KernelConfig, work_dir: Path, model: str, gpus: list[
     return json.loads(report_path.read_text())
 
 
-def _vlm_with_local_judge(cfg, judge, gpus, work_dir, recorder, node_id, main_phase) -> None:
+def _vlm_with_local_judge(cfg, judge, gpus, work_dir, recorder, node_id, vlm) -> None:
     """Serve the judge on all the GPUs for the vlm phase only, then free them for what follows."""
     server = judge_server(cfg, judge, gpus, work_dir.parent / "judge", recorder, node_id)
     before = gpu_memory_mib(gpus)
@@ -56,7 +62,7 @@ def _vlm_with_local_judge(cfg, judge, gpus, work_dir, recorder, node_id, main_ph
             load_s = server.start(float(cfg.get("captioner.startup_timeout_s")))
         recorder.event("judge.server_ready", node=node_id, component="eval", load_s=load_s,
                        payload={"gpus": gpus, "model": judge.model})
-        main_phase("vlm", extra_env=judge_env(cfg, judge, server.base_url))
+        vlm(judge_env(cfg, judge, server.base_url))
     finally:
         server.stop()
         _, released = wait_gpu_release(gpu_memory_mib, gpus, before, float(cfg.get("captioner.memory_release_timeout_s")))

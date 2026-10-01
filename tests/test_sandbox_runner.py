@@ -42,16 +42,16 @@ def test_kill_run_containers_removes_only_the_prefix(monkeypatch):
     assert ["docker", "rm", "-f", "ar-r1-n2-edit_self-1-abc"] in calls
 
 
-def test_lineage_is_mounted_read_only_with_eval_hidden(tmp_path):
+def test_finished_nodes_are_mounted_read_only_with_eval_hidden(tmp_path):
     from ar_kernel.sandbox.runner import _docker_args
     n1, root = tmp_path / "n1", tmp_path / "root"
     (n1 / "eval").mkdir(parents=True)
     root.mkdir()
     m = Mounts(agent=tmp_path, workspace=tmp_path, staging=tmp_path, context=tmp_path, store=tmp_path,
-               contract=tmp_path, sockets=tmp_path, lineage={"n1": n1, "root": root})
+               contract=tmp_path, sockets=tmp_path, nodes={"n1": n1, "root": root})
     args = _docker_args("img", "c", m, ["true"], {}, 1, 1)
-    assert f"{n1}:/lineage/n1:ro" in args and f"{root}:/lineage/root:ro" in args
-    assert "/lineage/n1/eval:ro,size=4k" in args and not any(a.startswith("/lineage/root/eval") for a in args)
+    assert f"{n1}:/nodes/n1:ro" in args and f"{root}:/nodes/root:ro" in args
+    assert "/nodes/n1/eval:ro,size=4k" in args and not any(a.startswith("/nodes/root/eval") for a in args)
 
 
 def test_snapshot_diff_reports_changes(tmp_path):
@@ -134,7 +134,8 @@ def test_failed_launch_is_still_removed_and_only_the_recorded_argv_is_redacted(t
 
 @pytest.mark.docker
 def test_isolation_holds_from_inside(tmp_path, mounts):
-    """Spec 16.3 item 4: no internet, no host services, no kernel/WorldModel/WBench/.env,
+    """Spec 16.3 item 4, with network `none` (contract containers; agent phases use `sandbox.network`,
+    bridge by default): no internet, no host services, no kernel/WorldModel/WBench/.env,
     no writes to /store or /context; files written are owned by the host user. The socket dir is
     mounted read-only: the gateway socket cannot be deleted, but connecting to it still works.
 
@@ -177,7 +178,7 @@ print(json.dumps(out))
                         mounts=mounts, command=["python", "-c", script, json.dumps(host_paths)],
                         env={}, cpus=2, memory_gb=2, timeout_s=120,
                         recorder=Recorder(tmp_path / "run"), node="n1", phase="test", attempt=1,
-                        stats_every_s=1)
+                        stats_every_s=1, network="none")
     assert res.exit_code == 0, res.stderr
     out = json.loads(res.stdout.strip().splitlines()[-1])
     assert out["internet"] == "blocked"
@@ -334,7 +335,7 @@ def test_a_ctrl_c_to_the_process_group_does_not_end_the_container(tmp_path, moun
     process group; `docker wait` and `docker stats` must not be in it."""
     name = container_name("sigint", "n1", "test", 1)
     arg = json.dumps({"name": name, "run": str(tmp_path / "run"),
-                      "mounts": {k: str(v) for k, v in vars(mounts).items() if k != "agent_readonly"}})
+                      "mounts": {k: str(v) for k, v in vars(mounts).items() if k not in ("agent_readonly", "nodes")}})
     child = subprocess.Popen([os.sys.executable, "-c", _SIGINT_CHILD, arg], stdout=subprocess.PIPE, text=True,
                              cwd=CFG.repo_root, start_new_session=True,
                              env={**os.environ, "PYTHONPATH": str(CFG.repo_root / "kernel")})

@@ -5,7 +5,7 @@ import json
 import time
 from pathlib import Path
 
-from .archive.db import open_db
+from .archive.db import open_db_readonly
 from .archive.nodes import NodeStore
 from .budget import Budget
 from .config import KernelConfig
@@ -27,7 +27,8 @@ def _events(path: Path, kind: str) -> list[dict]:
 
 def run_status(run_dir: Path) -> dict:
     run_dir = Path(run_dir)
-    conn = open_db(run_dir)
+    control = Control(run_dir)
+    conn = open_db_readonly(run_dir, writer_alive=control.alive_pid() is not None)
     try:
         nodes = NodeStore(conn).all()
     finally:
@@ -37,7 +38,6 @@ def run_status(run_dir: Path) -> dict:
         probs = {c["node_id"]: c["P"] for c in candidates(nodes, cfg)}
     except ValueError:                                         # no scored node yet
         probs = {}
-    control = Control(run_dir)
     state_file = control.dir / "state.json"
     budget = Budget.from_config(cfg)
     budget.load(run_dir)

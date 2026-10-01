@@ -9,7 +9,8 @@ from pathlib import Path
 
 from .telemetry.recorder import Recorder
 
-MAX_ERRORS, EXAMPLE_CHARS, MAX_BYTES = 8, 160, 2000
+# Safety caps: the longest real error message so far is 469 characters.
+MAX_ERRORS, EXAMPLE_CHARS, MAX_BYTES = 8, 1000, 10_000
 _HEX = re.compile(r"\b[0-9a-f]{16,}\b")
 _PATH = re.compile(r"/(?:mnt|home|tmp|workspace)/[^\s'\"]*")
 _REQUEST_ID = re.compile(r"\(Request ID: [^)]*\)")

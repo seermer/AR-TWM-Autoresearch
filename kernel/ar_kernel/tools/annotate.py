@@ -23,7 +23,7 @@ class AnnotateBackend(GpuJob):
                    "`pose`: an npz in /workspace/staging/annotations/<job_id>/ holding cam_c2w [N,4,4] "
                    "(N = the clip's frame count, OpenCV camera-to-world, first frame identity) and pixel "
                    "`intrinsics`; pass it as `pose` to data_ingest with camera_motion 'moving'. Batch many clips "
-                   "per call: at most 64 items (`annotate.max_items`) per job, so split larger batches.")
+                   "per call: at most 100 items (`annotate.max_items`) per job, so split larger batches.")
 
     def check_args(self, args):
         for item in args["items"]:

@@ -359,4 +359,6 @@ def submit_tool(name: str, description: str, schema: type[BaseModel],
         box.value = value
         return "submitted"
 
-    return StructuredTool(name=name, description=description, args_schema=schema, coroutine=submit), box
+    # return_direct: an accepted submission ends the role's run (harness difference 4).
+    return StructuredTool(name=name, description=description, args_schema=schema, coroutine=submit,
+                          return_direct=True), box

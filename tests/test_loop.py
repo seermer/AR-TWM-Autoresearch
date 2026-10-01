@@ -25,6 +25,8 @@ def make_loop(tmp_path):
     run = tmp_path / "run"
 
     def make(script, max_nodes=1, budget=None):
+        (run / "config").mkdir(parents=True, exist_ok=True)
+        (run / "config" / "run.json").write_text("{}")
         rec = Recorder(run)
         ctx = RunContext(run_dir=run, conn=open_db(run), recorder=rec, gpus=[0, 1, 2, 3],
                          metric_set=["m"], case_ids=["1"], versions={})
@@ -77,7 +79,9 @@ def test_training_failure_goes_back_to_the_agent_then_train_failed(make_loop):
     assert [r[3]["kind"] if r[3] else None for r in recipes] == [None, "train", "train"]
     assert "CUDA out of memory" in recipes[1][3]["log_tail"]
     assert recipes[1][3]["data_commit"] == "c" * 64 and recipes[1][3]["recipe"] == {"optimizer.max_steps": 2}
-    assert NodeStore(loop.ctx.conn).get("n1")["status"] == "train_failed"
+    n1 = NodeStore(loop.ctx.conn).get("n1")
+    assert n1["status"] == "train_failed" and '"detail": "CUDA OOM"' in n1["error"]
+    assert "log_tail" not in n1["error"] and "rationale" not in n1["error"]   # the node's error names the failure
 
 
 def test_failed_training_that_left_a_checkpoint_is_not_scored(make_loop):

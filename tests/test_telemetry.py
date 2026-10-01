@@ -139,3 +139,11 @@ def test_redaction_added_after_construction_applies(tmp_path):
     rec.add_redaction("tok-LATE-ISSUED")
     digest = rec.store_payload({"auth": "Bearer tok-LATE-ISSUED"})
     assert b"tok-LATE-ISSUED" not in _raw_payload(tmp_path, digest)
+
+
+def test_read_events_skips_a_line_a_killed_writer_left_unfinished(tmp_path):
+    rec = Recorder(tmp_path)
+    rec.event("a", node="n1")
+    with rec.events_path("n1").open("a") as f:
+        f.write('{"type": "b", "pay')
+    assert [e["type"] for e in rec.read_events("n1")] == ["a"]
