@@ -202,3 +202,37 @@ def test_every_ingest_event_names_its_candidate(tmp_path):
     assert len(named) == 4
     first = ing.recorder.load_payload(events[0]["payload"])["candidate"]
     assert first == {"video": str(good.video), "caption": str(good.caption), "pose": str(good.pose)}
+
+
+def _path(n=120, step=0.02):
+    import numpy as np
+    c2w = np.tile(np.eye(4), (n, 1, 1))
+    c2w[:, 2, 3] = np.arange(n) * step
+    return c2w
+
+
+def test_pose_jump_names_a_translation_or_rotation_jump_and_nothing_else():
+    import numpy as np
+    from ar_kernel.data.ingest import pose_jump
+    assert pose_jump(_path()) is None
+    assert pose_jump(np.tile(np.eye(4), (120, 1, 1))) is None            # a camera that never moves
+    moved = _path()
+    moved[57:, 2, 3] += 1.0                                              # two renders joined at frame 57
+    assert pose_jump(moved).startswith("camera pose jumps between frames 56 and 57: the step is 51.0x")
+    turned = _path()
+    c, s = np.cos(np.radians(40)), np.sin(np.radians(40))
+    turned[30:, :3, :3] = [[c, 0, s], [0, 1, 0], [-s, 0, c]]
+    assert "frames 29 and 30" in pose_jump(turned) and "turns 40.0 degrees" in pose_jump(turned)
+
+
+def test_a_clip_whose_pose_jumps_is_accepted_with_a_warning(tmp_path):
+    import numpy as np
+    ing = _ingestor(tmp_path)
+    candidate = _candidate(tmp_path)
+    poses = _path()
+    poses[57:, 2, 3] += 1.0
+    np.savez(candidate.pose, cam_c2w=poses.astype(np.float32))
+    [result] = ing.ingest([candidate], node_id="n1")
+    assert result.accepted
+    assert any("camera pose jumps between frames 56 and 57" in w for w in result.warnings)
+    assert result.warnings == ing.clips.get(result.clip_id)["warnings"]

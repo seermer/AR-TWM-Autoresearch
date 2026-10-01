@@ -297,6 +297,9 @@ provenance). For each candidate the kernel:
      caption has `segments`.
    - `camera_motion: static` → format `video_caption_static`.
    A format is eligible iff the report has zero errors. Errors and warnings are stored.
+   *(2026-10-01)* A clip whose pose jumps between two frames (a step ≥ 15× the clip's median step, or a
+   turn ≥ 20°) gets a warning naming the frames; it is not rejected. Thresholds from two runs' clips:
+   single-shot clips stay under 5× and 1°, clips joined from two renders jump 16–155× or 40–110°.
    A candidate eligible for no format is rejected with the checker's messages.
 4. **Leakage check** (two signals must agree, to avoid false rejections on flat frames):
    for the candidate's first frame and frames at 25/50/75%, compare against the first

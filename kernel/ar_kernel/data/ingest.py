@@ -12,6 +12,29 @@ from .checker import CheckerError, check_clip_formats
 from .leakage import LeakageChecker
 from .probe import aspect_ok, probe_video
 
+# A camera step this many times the clip's median step, or a turn of this many degrees between two
+# frames, is reported. Measured on two runs' clips: single-shot clips stay under 5x and 1 degree;
+# clips made by joining two renders jump 16x to 155x or 40 to 110 degrees at the join.
+JUMP_STEP_RATIO, JUMP_ROTATION_DEG = 15.0, 20.0
+
+
+def pose_jump(cam_c2w: np.ndarray) -> str | None:
+    """A warning naming the largest frame-to-frame camera jump, or None when the path has none."""
+    poses = np.asarray(cam_c2w, dtype=np.float64)
+    if len(poses) < 3:
+        return None
+    steps = np.linalg.norm(np.diff(poses[:, :3, 3], axis=0), axis=1)
+    relative = np.einsum("nij,nik->njk", poses[:-1, :3, :3], poses[1:, :3, :3])
+    turns = np.degrees(np.arccos(np.clip((np.trace(relative, axis1=1, axis2=2) - 1) / 2, -1, 1)))
+    median = float(np.median(steps))
+    ratio = steps / median if median > 0 else np.zeros_like(steps)
+    at = int(np.argmax(np.maximum(ratio / JUMP_STEP_RATIO, turns / JUMP_ROTATION_DEG)))
+    if ratio[at] < JUMP_STEP_RATIO and turns[at] < JUMP_ROTATION_DEG:
+        return None
+    return (f"camera pose jumps between frames {at} and {at + 1}: the step is {ratio[at]:.1f}x the clip's "
+            f"median step and the camera turns {turns[at]:.1f} degrees")
+
+
 @dataclass
 class Candidate:
     video: Path
@@ -150,6 +173,9 @@ class Ingestor:
         if pose is not None:
             with np.load(pose) as arrays:
                 has_intrinsics = "intrinsics" in arrays.files
+                jump = pose_jump(arrays["cam_c2w"])
+            if jump:
+                warnings.append(jump)
         video_digest = self.blobs.put(video, "video")
         caption_digest = self.blobs.put(caption, "caption")
         pose_digest = self.blobs.put(pose, "pose") if pose else None
