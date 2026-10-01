@@ -59,6 +59,10 @@ telemetry:
 tools:
   job_wait_max_s: 300
   hf_download_max_bytes: 21474836480   # 20 GiB per hf.download call
+ask:                             # the ask tool: one stateless question to the agent's model
+  max_images_per_phase: 50       # per phase attempt; a question without images is not limited
+  max_images_per_call: 8
+  max_image_side: 1024           # px; larger images are downscaled before they are sent
 captioner:                       # caption_videos GPU job: a local vLLM server, never the paid agent model
   env: vllm             # conda env with vLLM (0.29.0), lives in .envs/vllm
   model: Qwen/Qwen3.8-27B-FP8    # resolved by id through the HF cache (HF_HUB_OFFLINE=1: never downloads)

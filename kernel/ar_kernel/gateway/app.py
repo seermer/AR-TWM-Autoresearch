@@ -23,8 +23,11 @@ DEFAULT_BASE_URL = "https://api.openai.com/v1"
 # no visible mime, so it is let through).
 VIDEO_PART_TYPES = {"video_url", "video", "input_video"}
 FILE_PART_TYPES = {"file", "input_file"}
+IMAGE_PART_TYPES = {"image_url", "image", "input_image"}
 NO_VIDEO_MESSAGE = ("video content is not accepted by the gateway; caption clips with the caption_videos "
                     "kernel tool (a GPU job) instead of sending video directly")
+NO_IMAGE_MESSAGE = ("image content is not accepted by the gateway; ask about images with the ask kernel "
+                    "tool instead of sending them directly")
 
 
 def _is_video_part(part) -> bool:
@@ -36,22 +39,29 @@ def _is_video_part(part) -> bool:
     return kind in FILE_PART_TYPES and "video/" in json.dumps(part)
 
 
-def _has_video(parts) -> bool:
+def _is_image_part(part) -> bool:
+    if not isinstance(part, dict):
+        return False
+    kind = part.get("type")
+    return kind in IMAGE_PART_TYPES or (kind in FILE_PART_TYPES and "image/" in json.dumps(part))
+
+
+def _has(parts, is_part) -> bool:
     if isinstance(parts, dict):
         parts = [parts]
-    return isinstance(parts, list) and any(_is_video_part(p) for p in parts)
+    return isinstance(parts, list) and any(is_part(p) for p in parts)
 
 
-def rejects_video(body: dict) -> bool:
+def carries(body: dict, is_part) -> bool:
     """True if a chat `messages` content part, or a Responses `input` item (directly or
-    inside its `content`), carries video. Images stay allowed."""
+    inside its `content`), is such a part."""
     for message in body.get("messages") or []:
-        if isinstance(message, dict) and _has_video(message.get("content")):
+        if isinstance(message, dict) and _has(message.get("content"), is_part):
             return True
     input_ = body.get("input")
     if isinstance(input_, list):
         for item in input_:
-            if isinstance(item, dict) and (_is_video_part(item) or _has_video(item.get("content"))):
+            if isinstance(item, dict) and (is_part(item) or _has(item.get("content"), is_part)):
                 return True
     return False
 
@@ -134,8 +144,11 @@ def create_gateway_app(*, registry, store: CallStore, allowed_models: set[str],
             return JSONResponse({"error": {"message": "streaming is not supported by the gateway; "
                                                       "use non-streaming calls"}},
                                 status_code=400)
-        if rejects_video(body):        # rejected like the checks above: not recorded, never forwarded
-            return JSONResponse({"error": {"message": NO_VIDEO_MESSAGE}}, status_code=400)
+        # Rejected like the checks above: not recorded, never forwarded. Images reach the model only
+        # through the ask tool, which caps their number and size.
+        for is_part, message in ((_is_video_part, NO_VIDEO_MESSAGE), (_is_image_part, NO_IMAGE_MESSAGE)):
+            if carries(body, is_part):
+                return JSONResponse({"error": {"message": message}}, status_code=400)
         if body.get("model") not in allowed_models:
             return JSONResponse({"error": {"message": f"model {body.get('model')!r} is not in the "
                                                       f"allowlist {sorted(allowed_models)}"}},

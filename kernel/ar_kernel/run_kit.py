@@ -12,6 +12,7 @@ from .gateway.mock import MockBook
 from .gateway.store import CallStore
 from .guards import alert
 from .services import RunServices, socket_dir_for
+from .tools.ask import Ask, register_ask_tool
 from .tools.captioner import register_caption_tool
 from .tools.context import TokenRegistry
 from .tools.data_tools import DataTools, register_data_tools
@@ -66,12 +67,14 @@ def build_run_kit(cfg, run_dir: Path, gpus: list[int], recorder, environ) -> Run
     register_gpu_tools(mcp, kit, queue)
     register_caption_tool(mcp, kit, queue)
     model = environ["OPENAI_MODEL"]
+    store = CallStore(recorder)
+    upstream = Upstream.from_env(environ, timeout_s=float(cfg.get("gateway.upstream_timeout_s")),
+                                 retries=int(cfg.get("gateway.upstream_retries")))
+    register_ask_tool(mcp, kit, Ask(cfg, upstream, store, budget, model))
     gateway = create_gateway_app(
-        registry=registry, store=CallStore(recorder),
+        registry=registry, store=store,
         allowed_models=set(cfg.get("gateway.model_allowlist") or []) | {model},
-        upstream=Upstream.from_env(environ, timeout_s=float(cfg.get("gateway.upstream_timeout_s")),
-                                   retries=int(cfg.get("gateway.upstream_retries"))),
-        mocks=MockBook.default(), budget=budget)
+        upstream=upstream, mocks=MockBook.default(), budget=budget)
     socket_dir = socket_dir_for(run_dir)
     return RunKit(registry=registry, queue=queue, gpu_lock=gpu_lock, budget=budget,
                   services=RunServices(socket_dir), harness=ContractHarness(cfg, run_dir, recorder),

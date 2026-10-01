@@ -5,7 +5,7 @@ description: Use when checking clips for defects before ingesting them: frozen, 
 
 # Checking clip quality
 
-You cannot view images, so measure. Install what helps with `pip install --user` (for example `scenedetect`, or a small CLIP or aesthetic model).
+Install what helps with `pip install --user` (for example `scenedetect`, or a small CLIP or aesthetic model).
 
 - Frozen video: `ffmpeg -i in.mp4 -vf freezedetect=n=-60dB:d=1 -f null -` lists frozen spans. Or compare the mean absolute difference of consecutive downscaled frames with clips you already trust.
 - Black or flat frames: `ffmpeg -i in.mp4 -vf blackdetect=d=0.2 -f null -`

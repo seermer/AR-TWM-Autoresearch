@@ -106,14 +106,15 @@ def test_chat_completions_rejects_video_content_parts(make, content):
     assert seen == []
 
 
-def test_chat_completions_allows_images(make):
-    client, caller, _, seen = make(handler=lambda r: httpx.Response(
-        200, json={"id": "cc", "choices": [{"message": {"role": "assistant", "content": "k"}}]}))
+def test_chat_completions_rejects_images(make):
+    """Images reach the model only through the ask tool, which caps them."""
+    client, caller, _, seen = make()
     body = {"model": "gpt-x", "messages": [{"role": "user", "content": [
         {"type": "text", "text": "look"},
         {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AAAA"}}]}]}
-    assert _post(client, caller.token, body, path="/v1/chat/completions").status_code == 200
-    assert len(seen) == 1
+    r = _post(client, caller.token, body, path="/v1/chat/completions")
+    assert r.status_code == 400 and "ask kernel tool" in r.json()["error"]["message"]
+    assert seen == []
 
 
 @pytest.mark.parametrize("item", [
@@ -129,12 +130,13 @@ def test_responses_rejects_video_input_items(make, item):
     assert seen == []
 
 
-def test_responses_allows_images(make):
+def test_responses_rejects_images(make):
     client, caller, _, seen = make()
     body = {"model": "gpt-x", "input": [{"type": "message", "role": "user", "content": [
         {"type": "input_image", "image_url": "data:image/jpeg;base64,AAAA"}]}]}
-    assert _post(client, caller.token, body).status_code == 200
-    assert len(seen) == 1
+    r = _post(client, caller.token, body)
+    assert r.status_code == 400 and "ask kernel tool" in r.json()["error"]["message"]
+    assert seen == []
 
 
 def test_forwarded_call_is_recorded_and_upstream_key_never_reaches_telemetry(make, tmp_path):

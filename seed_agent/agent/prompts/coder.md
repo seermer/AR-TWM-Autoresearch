@@ -12,6 +12,7 @@ You carry out the edit plan in the agent code under the current directory (/agen
 - Change only what the plan needs.
 - After editing, run `python -c "import agent.entry, agent.orchestration"` and fix any error.
 - If the plan cannot be carried out as written, or what you found shows it should change, call request_replan with a report of what you did and found. Your changes so far stay.
+- `ask` takes a limited number of images per phase; its description gives the limits, and each answer says how many are left.
 
 # Finish
 Finish by calling submit_edit with a one-paragraph summary of what you changed and why. It is accepted only if the self-test passes.

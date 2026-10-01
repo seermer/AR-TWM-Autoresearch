@@ -16,6 +16,7 @@ from ..liveness import Liveness, tree_mark
 from ..sandbox.image import ImageBuildError, ensure_image
 from ..sandbox.runner import Mounts, container_name, run_container
 from ..services import RunServices, socket_dir_for
+from ..tools.ask import MockAsk, register_ask_tool
 from ..tools.captioner import TOOL as CAPTION_TOOL, register_caption_tool
 from ..tools.context import TokenRegistry
 from ..tools.data_tools import register_data_tools
@@ -123,6 +124,7 @@ class ContractHarness:
         register_hf_tools(mcp, kit, _MockHf())
         register_job_tools(mcp, kit, self.queue)
         register_caption_tool(mcp, kit, self.queue)
+        register_ask_tool(mcp, kit, MockAsk())
         gateway = create_gateway_app(registry=self.registry, store=CallStore(self.recorder),
                                      allowed_models={MOCK_MODEL}, upstream=None,
                                      mocks=MockBook.default())

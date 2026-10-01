@@ -312,6 +312,7 @@ def _scripts():
 @pytest.fixture(scope="module")
 def kernel(tmp_path_factory):
     from ar_kernel.contract.verify import _MockCaption, _MockData, _MockHf
+    from ar_kernel.tools.ask import MockAsk, register_ask_tool
     from ar_kernel.gateway.app import create_gateway_app
     from ar_kernel.gateway.mock import MockBook
     from ar_kernel.gateway.store import CallStore
@@ -332,6 +333,7 @@ def kernel(tmp_path_factory):
     register_job_tools(mcp, kit, queue)
     queue.register(_MockCaption())
     register_caption_tool(mcp, kit, queue)
+    register_ask_tool(mcp, kit, MockAsk())
     book = MockBook.default()
     for name, script in _scripts().items():
         book.add(name, script)
@@ -451,7 +453,7 @@ def test_improve_recipe_full_flow(kernel, tmp_path):
     assert rounds[0]["report"].startswith("downloads are disabled") and "report" not in rounds[1]
     assert "pool clips suffice" in body["result"]["rationale"]                  # the final plan
     planner_tools = _tools_of(rec, "n-recipe", "# Role\nYou plan the training-data work")
-    assert {"hf_search", "data_query", "read_file", "run_command", "arxiv_search"} <= planner_tools
+    assert {"hf_search", "data_query", "ask", "read_file", "run_command", "arxiv_search"} <= planner_tools
     assert not {"hf_download", "data_ingest", "data_commit", "caption_videos"} & planner_tools
     # The panel shows one conversation per role, each holding all of its rounds.
     chats = _panel_chats(rec, "n-recipe", "improve_recipe")
@@ -480,7 +482,10 @@ def test_edit_self_plans_then_edits(kernel, tmp_path):
     assert any("The self-test failed" in o and "exactly one parameter" in o for o in outputs)   # submit refused
     assert [role for role, _ in _panel_chats(rec, "n-edit", "edit_self")] == ["edit_planner", "coder"]
     planner_tools = _tools_of(rec, "n-edit", "# Role\nYou plan an improvement")
-    assert {"read_file", "list_dir", "run_command", "arxiv_search", "arxiv_read"} <= planner_tools
+    assert {"read_file", "list_dir", "run_command", "arxiv_search", "arxiv_read", "ask"} <= planner_tools
+    assert not {"data_ingest", "hf_download", "caption_videos"} & planner_tools      # ask is its only kernel tool
+    coder_tools = _tools_of(rec, "n-edit", "# Role\nYou carry out the edit plan")
+    assert "ask" in coder_tools and "data_ingest" not in coder_tools
 
 
 @pytest.mark.docker

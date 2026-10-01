@@ -6,6 +6,7 @@ Both phases are a planner/engineer loop: the planner submits a plan, the enginee
 finishes the phase or reports back for a new plan, up to MAX_ROUNDS plans. Each role keeps its conversation
 across rounds. The last plan is the final one; every plan is recorded. A planner has the same local tools as
 an engineer, but what it changes on disk is undone after each of its turns, and its kernel tools are read-only.
+The roles of edit_self have one kernel tool, ask.
 - improve_recipe: planner -> data engineer, who builds the data commit and writes the recipe
   (recipe_check must pass before the submission is accepted).
 - edit_self: edit planner -> coder (the self-test must pass before the submission is accepted).
@@ -155,7 +156,7 @@ async def plan_and_engineer(team: Team, *, task: str, show, engineer_context: st
 def check_roles() -> None:
     """Build every role of both phases (prompts, knowledge index, tool schemas) without calling a model."""
     recipe_team(None, None, [])
-    edit_team()
+    edit_team([])
 
 
 # ---- improve_recipe ----
@@ -172,7 +173,7 @@ class DataAndRecipe(BaseModel):
     rationale: str = Field(min_length=1, description="why each changed key has its value")
 
 
-PLANNING_KERNEL_TOOLS = {"hf_search", "hf_list_files", "data_query"}       # read-only: planning changes nothing
+PLANNING_KERNEL_TOOLS = {"hf_search", "hf_list_files", "data_query", "ask"}       # read-only: planning changes nothing
 
 
 def typed(recipe: dict, rules: dict) -> dict:
@@ -252,7 +253,7 @@ def selftest(root: str) -> list[str]:
     return errors
 
 
-def edit_team() -> Team:
+def edit_team(ktools: list) -> Team:
     async def selftest_passes(_) -> None:
         errors = selftest(AGENT_ROOT)
         if errors:
@@ -264,19 +265,22 @@ def edit_team() -> Team:
                                   "only if the self-test passes.", EditSummary, selftest_passes)
     rounds: list[dict] = []
     replan_t, replan = replan_tool(rounds)
-    planner = Role("edit_planner", [plan_tool, *local_tools(AGENT_ROOT)], [plan], discard=(AGENT_ROOT, WORKSPACE))
-    engineer = Role("coder", [*local_tools(AGENT_ROOT), done_tool, replan_t], [done, replan])
+    ask = [t for t in ktools if t.name == "ask"]
+    planner = Role("edit_planner", [plan_tool, *ask, *local_tools(AGENT_ROOT)], [plan],
+                   discard=(AGENT_ROOT, WORKSPACE))
+    engineer = Role("coder", [*ask, *local_tools(AGENT_ROOT), done_tool, replan_t], [done, replan])
     return Team(planner, plan, engineer, done, replan, rounds)
 
 
 async def run_meta(ctx: EditContext) -> EditResult:
-    team = edit_team()
-    record = Path(WORKSPACE) / "plans.json"                 # carried to a retry with the workspace
-    previous = json.loads(record.read_text()) if ctx.retry and record.exists() else None
-    task = brief(edit_context(ctx, COMPONENTS, previous))   # built in a dry run too: it gets the real context
-    if ctx.dry_run:
-        return EditResult(summary=f"dry run: roles and the first message built, model said {await ping()!r}")
-    await plan_and_engineer(
-        team, record=record, engineer_context=None, task=task,
-        show=lambda p: block("edit_plan", p.model_dump_json(indent=2)))
+    async with mcp_session() as session:
+        team = edit_team(await kernel_tools(session))
+        record = Path(WORKSPACE) / "plans.json"             # carried to a retry with the workspace
+        previous = json.loads(record.read_text()) if ctx.retry and record.exists() else None
+        task = brief(edit_context(ctx, COMPONENTS, previous))   # built in a dry run too: it gets the real context
+        if ctx.dry_run:
+            return EditResult(summary=f"dry run: roles and the first message built, model said {await ping()!r}")
+        await plan_and_engineer(
+            team, record=record, engineer_context=None, task=task,
+            show=lambda p: block("edit_plan", p.model_dump_json(indent=2)))
     return EditResult(summary=f"{team.plan.value.change}\n\n{team.done.value.summary}")
