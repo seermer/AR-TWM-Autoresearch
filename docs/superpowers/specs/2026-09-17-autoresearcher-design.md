@@ -421,8 +421,9 @@ One node at a time. GPU phases never overlap.
 
 ### 7.1 Bootstrap (run start)
 
-1. Create `runs/<run_id>/`, snapshot `configs/`, record versions (kernel git SHA, WorldModel
-   and WBench git SHAs and dirty flags, `pip freeze` of each env), resolve the GPU list (§2)
+1. Create `runs/<run_id>/`, snapshot `configs/`, record versions (kernel, WorldModel
+   and WBench git SHAs; *(2026-10-01)* a run refuses to start while any of the three repos has
+   uncommitted changes, so the SHAs fully name the code), resolve the GPU list (§2)
    and the **metric set** (§11.3).
 2. Root node: code = `seed_agent/`, data commit = empty, recipe = none. Its score is the
    released checkpoint rendered and scored on the proxy without training.
@@ -442,7 +443,10 @@ One node at a time. GPU phases never overlap.
 10  stop checks (node count, graceful/force flags)
 ```
 
-- **Retry semantics (3↔4, 5↔6):** a retry continues from the failed attempt's code or
+- **Retry semantics (3↔4, 5↔6):** *(2026-10-01)* every `edit_self` attempt is run by the
+  parent's code (mounted read-only at `/code`); `/agent` holds the tree being edited, which on a
+  retry is the failed attempt's. An edit that broke the agent can therefore still be repaired.
+  A retry continues from the failed attempt's code or
   workspace; the failure report (verifier or gate output) is provided at
   `/context/retry.json`. The agent may fix or reset. Clips ingested during a failed recipe
   attempt remain in the archive-wide clip pool. *(Plan 2 as built: both phases take the
@@ -462,7 +466,8 @@ One node at a time. GPU phases never overlap.
   `nodes_remaining` in the agent's context counts the node currently being built, so the
   agent sees `0` on the last node `max_nodes` allows.
 - **LoRA concatenation, render and WBench (scoring) failures** *(2026-09-27, Plan 4 as built / user
-  decision)* end the node `eval_failed` instead of retrying (§14.2); there is no pause
+  decision)* end the node `eval_failed` (§14.2) *(2026-10-01: after the whole eval was run once
+  more; the root's eval likewise)*; there is no pause
   anywhere in the loop. The loop records the failure, raises an alert, and starts a fresh
   cycle at step 1.
 
@@ -1035,7 +1040,7 @@ built, reads that JSON rather than a new store.)*
 | gate | any check fails | retry loop 5↔6 |
 | gateway | upstream 429/5xx | gateway retries with exponential backoff |
 | precache/train | *(amended 2026-09-27, Plan 4 as built / user decision)* any failure — recipe-caused (CUDA OOM, NaN/inf loss, wall-time cap) or infrastructure (host OOM kill, disk full, NCCL/driver error, text-embed cache miss), including a run that writes a checkpoint but still fails | reported to the agent as a failed attempt (§7.2); back to 5↔6, consuming one attempt; exhausted ⇒ `train_failed` |
-| LoRA concatenation, render, WBench (scoring) | *(amended 2026-09-27, Plan 4 as built / user decision)* any failure | node `eval_failed`, alert, loop continues with a new cycle |
+| LoRA concatenation, render, WBench (scoring) | *(amended 2026-09-27, Plan 4 as built / user decision)* any failure | the eval is run once more (`eval_retry` alert); a second failure: node `eval_failed`, alert, loop continues with a new cycle |
 | gateway (provider outage) | *(amended 2026-09-27, Plan 4 as built / user decision, option A)* upstream unavailable: an agent attempt fails while at least `gateway.outage_error_rate` (0.8) of the last `gateway.outage_window_min` (10) minutes' LLM calls, and at least `gateway.outage_min_calls` (3) of them, failed with 429/5xx or connection errors | the run **stops** (a stop, not a pause); `llm_outage` alert; the node in progress is marked `interrupted` on resume and not charged (§14.3); the operator resumes with `ar run --resume` |
 | budget | *(added 2026-09-27, Plan 4 as built / user decision)* the LLM spend ledger reaches `budget.max_usd` | the run **stops**; the node in progress is marked `interrupted` on resume and not charged (§14.3) |
 | any phase | unexpected kernel exception while the kernel process survives | node marked `crashed`, artifacts kept, loop continues with a new cycle |

@@ -1,4 +1,4 @@
-"""Run control (spec 14.4): the loop's pid file, graceful stop requests, and signal handling."""
+"""Run control: the loop's pid file, graceful stop requests, and signal handling."""
 from __future__ import annotations
 
 import json
@@ -65,7 +65,7 @@ class Control:
 def exit_process(code: int, recorder) -> None:
     """End the kernel process now. A tool call still running in a worker thread (an hf_download
     waiting out HF rate limits, say) would otherwise keep it alive after the stop: Python's exit
-    joins those threads, and the pid file is already gone (acceptance_20260928). Every record is
+    joins those threads, and the pid file is already gone. Every record is
     already on disk: events are fsync'd as written and archive transactions are committed."""
     stuck = [t.name for t in threading.enumerate()
              if t is not threading.main_thread() and t.is_alive() and not t.daemon]
@@ -79,7 +79,7 @@ def exit_process(code: int, recorder) -> None:
 
 def kill_recorded_groups(control: Control) -> list[int]:
     """Kill every process group the kernel started and never saw end (the subproc registry).
-    A group whose leader is gone is still killed (its workers can outlive `conda run`, finding 6);
+    A group whose leader is gone is still killed (its workers can outlive `conda run`);
     only a live process with pid == pgid and another start time -- a recycled pid -- is left alone."""
     folder = control.dir / "pgids"
     killed = []

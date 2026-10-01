@@ -1,4 +1,4 @@
-"""Agent images: a pinned base plus a per-requirements layer (spec 9.4.1)."""
+"""Agent images: a pinned base plus a per-requirements layer."""
 from __future__ import annotations
 
 import hashlib

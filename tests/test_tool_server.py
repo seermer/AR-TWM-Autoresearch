@@ -98,7 +98,7 @@ def test_unknown_token_is_refused(live):
 def test_sockets_are_owner_only(live):
     _, _, services, _ = live
     assert oct(os.stat(services.socket_dir).st_mode & 0o777) == "0o700"
-    # Controller ruling: both sockets must also be owner-only, not just the directory.
+    # Both sockets must also be owner-only, not just the directory.
     for name in ("gateway.sock", "tools.sock"):
         assert oct(os.stat(services.socket_dir / name).st_mode & 0o777) == "0o600"
 

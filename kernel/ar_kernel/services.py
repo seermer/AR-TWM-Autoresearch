@@ -13,7 +13,7 @@ import uvicorn
 
 def socket_dir_for(run_dir: Path) -> Path:
     """A short, private, per-run directory. AF_UNIX paths are capped at 107 bytes
-    and a socket under runs/<run_id>/ is ~125 (verified fact 12)."""
+    and a socket under runs/<run_id>/ is ~125."""
     digest = hashlib.sha1(str(Path(run_dir).resolve()).encode()).hexdigest()[:12]
     return Path(tempfile.gettempdir()) / f"ar-{digest}"
 

@@ -1,4 +1,4 @@
-"""Training data, eval and file views (spec section 5, tabs 6, 8 and 11)."""
+"""Training data, eval and file views (tabs 6, 8 and 11)."""
 from __future__ import annotations
 
 import json

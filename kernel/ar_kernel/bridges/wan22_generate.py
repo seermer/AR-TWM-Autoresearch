@@ -6,7 +6,7 @@ python wan22_generate.py --items items.json --out DIR --rank R --world W \
     --repo <Wan2.2 checkout> --ckpt-dir <wan2.2-ti2v-5b dir> --frames N \
     [--offload-model/--no-offload-model] [--t5-cpu/--no-t5-cpu]
 
-Bridge protocol (Plan 3): handles items with index % world == rank, in index order; per item
+Bridge protocol: handles items with index % world == rank, in index order; per item
 writes <out>/<index>.mp4 then <out>/<index>.json ({"ok": true, "seconds": t} or
 {"ok": false, "error": "..."}). The model loads once, before the first item.
 
@@ -85,7 +85,7 @@ def main() -> int:
         except Exception as exc:          # noqa: BLE001 -- a per-item error; move on (protocol)
             status = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         # the 24 GB card has no headroom at 1280x704x121 (peak ~22.9 GiB): the previous clip
-        # (1.3 GB fp32 on the GPU) must not survive into the next item (Task 7 smoke OOM'd there)
+        # (1.3 GB fp32 on the GPU) must not survive into the next item (the smoke run ran out of memory there)
         del video
         gc.collect()
         torch.cuda.empty_cache()

@@ -157,7 +157,7 @@ def test_the_encoder_cache_fits_every_clip_the_video_budget_allows(tmp_path):
     """vLLM's encoder cache is max(--max-num-batched-tokens, its own estimate of one video's tokens),
     and its estimate (12288 for Qwen3.8's 25165824-pixel video budget) is exceeded by clips whose
     sampled frame count is odd: a 1080p clip of 13 frames (~6.5 s at 2 fps) takes 14280 tokens.
-    Such a clip was rejected with HTTP 400 in loopcheck_20260927 n1 (verification log, 2026-09-28)."""
+    Such a clip was rejected with HTTP 400 in loopcheck_20260927 n1 (2026-09-28)."""
     cmd = CaptionBackend(REAL, tmp_path, [0, 1, 2, 3], None, None).server_command(8000, tmp_path)
     assert int(cmd[cmd.index("--max-num-batched-tokens") + 1]) >= 14280
 

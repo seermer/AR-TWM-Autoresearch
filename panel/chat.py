@@ -1,4 +1,4 @@
-"""Agent conversations from the gateway's llm.request / llm.response events (spec section 6).
+"""Agent conversations from the gateway's llm.request / llm.response events.
 
 The gateway links a request to an earlier call when it resends that call's history, so a
 conversation id holds one uninterrupted history. Compaction replaces the history, so the

@@ -34,7 +34,7 @@ def test_unknown_kind_is_rejected(tmp_path):
 
 
 def test_putting_the_stored_blob_itself_is_refused_and_the_blob_survives(tmp_path):
-    """Review I1: put(target) used to see target.exists() and unlink the source --
+    """Put(target) used to see target.exists() and unlink the source --
     which WAS the blob. The DB kept saying it existed; every commit using it broke."""
     store = BlobStore(tmp_path, open_db(tmp_path))
     digest = store.put(_clip(tmp_path, "v.mp4", b"clip bytes"), "video")
@@ -54,7 +54,7 @@ def test_any_path_inside_the_blob_store_is_refused(tmp_path):
 
 
 def test_truncated_existing_blob_is_repaired_not_trusted(tmp_path):
-    """Review I3: a crash mid-copy used to leave a truncated file under the right
+    """A crash mid-copy used to leave a truncated file under the right
     hash name, and every later put of that content kept the corrupt copy forever."""
     store = BlobStore(tmp_path, open_db(tmp_path))
     good = b"x" * 4096

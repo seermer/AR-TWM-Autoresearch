@@ -1,4 +1,4 @@
-"""The loop (spec 7.1-7.2): one node at a time. Nothing pauses (user decision 2026-09-27): a
+"""The loop: one node at a time. Nothing pauses (user decision 2026-09-27): a
 failure the agent can act on goes back to it as the next attempt's retry report; any other
 failure ends the node with a status and an error that later agents see in the lineage."""
 from __future__ import annotations
@@ -179,7 +179,7 @@ class Loop:
             self._reuse_root(cache)
             return
         try:
-            score, detail = self.phases.score(self, "root", None, None)
+            score, detail = self._eval("root", None, None)
         except Exception as exc:                # ends the run; the run cannot be resumed
             error = f"{type(exc).__name__}: {exc}"
             self.nodes.set_status("root", "eval_failed")
@@ -224,7 +224,7 @@ class Loop:
             checkpoint, resolved = trained
             self._state(child, "eval")
             try:
-                score, detail = self.phases.score(self, child, checkpoint, resolved)
+                score, detail = self._eval(child, checkpoint, resolved)
             except Exception as exc:                              # noqa: BLE001 -- LoRA concat/render/WBench
                 status, error = "eval_failed", f"{type(exc).__name__}: {exc}"
                 return
@@ -232,7 +232,7 @@ class Loop:
         except StopRun:
             status = None                                         # left running: interrupted on resume
             raise
-        except Exception as exc:                                  # noqa: BLE001 -- spec 14.2 last row
+        except Exception as exc:                                  # noqa: BLE001
             status, error = "crashed", f"{type(exc).__name__}: {exc}"
         except BaseException:                                     # ForceStop / KeyboardInterrupt
             status = None                                         # left running: interrupted on resume
@@ -240,6 +240,16 @@ class Loop:
         finally:
             if status is not None:
                 self._finish(child, status, error, started)
+
+    def _eval(self, node: str, checkpoint, resolved):
+        """Score a node; a failed eval is run once more before it counts (a judge or GPU hiccup
+        must not cost a trained node)."""
+        try:
+            return self.phases.score(self, node, checkpoint, resolved)
+        except Exception as exc:                                  # noqa: BLE001 -- LoRA concat/render/WBench
+            alert(self.ctx.recorder, "eval_retry", f"{node}: {type(exc).__name__}: {exc}; evaluating once more",
+                  level="warning", node_id=node)
+        return self.phases.score(self, node, checkpoint, resolved)
 
     # -- steps 3-4 ---------------------------------------------------------------------------
     def _edit(self, child: str, parent: dict) -> tuple[str | None, str | None]:
@@ -249,7 +259,8 @@ class Loop:
             self._check_budget()
             self._state(child, "edit_self", k)
             out = self.phases.edit_self(self.env, conn=self.ctx.conn, node=child, parent_id=parent["node_id"],
-                                        base_commit=base, attempt=k, max_attempts=n, retry=retry,
+                                        base_commit=base, runner_commit=parent["agent_commit"], attempt=k,
+                                        max_attempts=n, retry=retry,
                                         nodes_remaining=self.max_nodes - self._children(),
                                         previous_workspace=prev_ws)
             base = out.commit or base
@@ -348,7 +359,7 @@ class Loop:
         self.nodes.set_fields(node, error=error, attempt_counts=json.dumps(counts),
                               phase_timings=json.dumps({"total_s": time.time() - started}))
         # Only raw downloads go (their source and files are in the hf_download events); every
-        # candidate the agent or a GPU job prepared stays, ingested or not (spec 15).
+        # candidate the agent or a GPU job prepared stays, ingested or not.
         for raw in (Path(self.ctx.run_dir) / "staging" / node).glob("*/hf"):
             shutil.rmtree(raw, ignore_errors=True)
         write_transcripts(self.ctx.run_dir, node)

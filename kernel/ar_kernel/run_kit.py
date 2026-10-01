@@ -1,4 +1,4 @@
-"""Everything a run serves to its agents, built from the run's config (Plan 2 contract items 8-9)."""
+"""Everything a run serves to its agents, built from the run's config."""
 from __future__ import annotations
 
 import threading

@@ -27,8 +27,8 @@ def test_gpu_list_rejects_non_integer_entries():
 
 
 def test_dotenv_fills_missing_keys_without_overriding_the_shell(tmp_path):
-    """Review I9: nothing loaded .env, so filling it in did not enable VLM metrics
-    even though the docs said it would. Shell variables must still win (spec 2.1)."""
+    """Nothing loaded .env, so filling it in did not enable VLM metrics
+    even though the docs said it would. Shell variables must still win."""
     from ar_kernel.config import load_dotenv
     env_file = tmp_path / ".env"
     env_file.write_text("# comment\nVLM_API_KEY=from-file\nOPENAI_MODEL='gpt-x'\n"

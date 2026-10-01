@@ -64,7 +64,7 @@ def test_static_candidate_with_poses_is_rejected(tmp_path):
 
 def test_candidate_outside_run_dir_is_rejected(tmp_path, tmp_path_factory):
     # BlobStore.put() moves/consumes its source file; ingest must refuse anything it does not
-    # own rather than silently deleting it (Task 14: this is what consumed WorldModel's real
+    # own rather than silently deleting it (this is what consumed WorldModel's real
     # example clips before the guard existed).
     ing = _ingestor(tmp_path)
     outside = tmp_path_factory.mktemp("outside")
@@ -80,7 +80,7 @@ def test_candidate_outside_run_dir_is_rejected(tmp_path, tmp_path_factory):
 
 
 def test_candidate_inside_run_dir_but_outside_staging_is_rejected(tmp_path):
-    """Review I1: the guard used to accept anything under run_dir, including a
+    """The guard used to accept anything under run_dir, including a
     blob in store/ or a hardlink in another node's view. Only staging/ is fair game."""
     ing = _ingestor(tmp_path)
     elsewhere = tmp_path / "nodes" / "n7" / "view" / "cam"
@@ -95,7 +95,7 @@ def test_candidate_inside_run_dir_but_outside_staging_is_rejected(tmp_path):
 
 
 def test_swapping_the_staged_file_mid_check_cannot_change_what_is_stored(tmp_path):
-    """Review I2: checks read candidate.video, then blobs.put re-read it later.
+    """Checks read candidate.video, then blobs.put re-read it later.
     An agent process could swap the staged file after the leakage check and land
     unchecked bytes in the store. Files are now quarantined before any check."""
     ing = _ingestor(tmp_path)
@@ -117,7 +117,7 @@ def test_swapping_the_staged_file_mid_check_cannot_change_what_is_stored(tmp_pat
 
 
 def test_corrupt_video_is_rejected_and_the_batch_continues(tmp_path):
-    """Review I4: a non-video file raised out of ffprobe and aborted the batch,
+    """A non-video file raised out of ffprobe and aborted the batch,
     with no ingest.rejected event and later candidates never processed."""
     ing = _ingestor(tmp_path)
     bad = _candidate(tmp_path, "bad")
@@ -175,7 +175,7 @@ def test_rotated_clip_is_rejected_with_a_fix_hint(tmp_path):
 
 
 def test_clip_metadata_records_segments_and_intrinsics(tmp_path):
-    """Spec 5.4: probed metadata includes has_segments and has_intrinsics."""
+    """Probed metadata includes has_segments and has_intrinsics."""
     from conftest import write_caption, write_poses
     ing = _ingestor(tmp_path)
     plain = _candidate(tmp_path, "plain")

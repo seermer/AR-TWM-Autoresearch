@@ -1,4 +1,4 @@
-"""agents.git: one bare repo per run holding every agent version and attempt (spec 5.2)."""
+"""agents.git: one bare repo per run holding every agent version and attempt."""
 from __future__ import annotations
 
 import io

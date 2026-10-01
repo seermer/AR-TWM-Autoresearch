@@ -1,4 +1,4 @@
-"""Contract verification of a child's code (spec 9.4)."""
+"""Contract verification of a child's code."""
 from __future__ import annotations
 
 import ast
@@ -194,7 +194,7 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
                                         workspace_host=ws, staging_host=staging, mock_script="smoke")
         # issue() redacted the token only on harness.recorder, which is not `recorder`.
         recorder.add_redaction(caller.token)
-        # The two smoke runs get a liveness (spec 14.5); the import probe does not.
+        # The two smoke runs get a liveness; the import probe does not.
         liveness = Liveness.from_config(cfg, float(cfg.get("timeouts.contract_smoke_s")),
                                         signals=[lambda: tree_mark(ws),
                                                  lambda: tree_mark(recorder.events_path(node))]) \
@@ -212,7 +212,7 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
                             network="none")         # verification stays offline and deterministic
         finally:
             harness.registry.revoke(caller.token)
-            harness.queue.cancel_for_token(caller.token)   # as in the phase runner (Task 15)
+            harness.queue.cancel_for_token(caller.token)   # as in the phase runner
         return result, ws
 
     (Path(run_dir) / "store").mkdir(exist_ok=True)

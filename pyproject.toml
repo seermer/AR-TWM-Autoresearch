@@ -32,6 +32,6 @@ markers = [
     "docker: starts real containers; run with -m docker",
     "real_preflight: uses the real eval prerequisite check instead of the test stub",
 ]
-# Spec 16.1: the default unit suite uses no GPU. A GPU test running alongside a
+# The default unit suite uses no GPU. A GPU test running alongside a
 # real job has already produced a spurious gate failure through contention.
 addopts = "-q -m 'not manual and not gpu and not docker'"

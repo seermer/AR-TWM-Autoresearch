@@ -6,7 +6,7 @@ python ltx25_generate.py --items items.json --out DIR --rank R --world W \
     --weights <weights/ltx-2.5> --variant distilled|dev --frames N --height H --width W \
     [--quantization fp8-cast] [--offload cpu]
 
-Bridge protocol (Plan 3): handles items with index % world == rank, in index order; per item
+Bridge protocol: handles items with index % world == rank, in index order; per item
 writes <out>/<index>.mp4 (24 fps, video only) then <out>/<index>.json ({"ok": true, ...} or
 {"ok": false, "error": "..."}). The pipeline is built once, before the first item.
 

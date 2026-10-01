@@ -1,4 +1,4 @@
-"""annotate_camera (spec 10, 16.3 item 6): per-frame camera poses for agent clips, via ViGeo."""
+"""annotate_camera: per-frame camera poses for agent clips, via ViGeo."""
 from __future__ import annotations
 
 import json

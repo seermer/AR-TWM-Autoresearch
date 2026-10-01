@@ -1,4 +1,4 @@
-"""Run one agent call in one container (spec 9.5)."""
+"""Run one agent call in one container."""
 from __future__ import annotations
 
 import hashlib
@@ -31,6 +31,9 @@ class Mounts:
     # node id -> node dir of each finished node, mounted read-only at /nodes/<id>. Its eval/ is hidden:
     # per-case outputs would let an agent fit the proxy cases.
     nodes: dict[str, Path] = field(default_factory=dict)
+    # The agent code that runs, mounted read-only at /code, when it is not the tree at /agent
+    # (edit_self: the parent's code edits the tree).
+    code: Path | None = None
 
 
 @dataclass
@@ -56,7 +59,7 @@ def container_prefix(run_id: str, node: str | None = None) -> str:
 
 def kill_run_containers(run_id: str, node: str | None = None) -> list[str]:
     """Force-remove this run's (or node's) containers: on force stop, and on resume for what a
-    killed kernel left running (spec 14.4). Files are never touched."""
+    killed kernel left running. Files are never touched."""
     prefix = container_prefix(run_id, node)
     listed = subprocess.run(["docker", "ps", "-a", "--filter", f"name={prefix}", "--format", "{{.Names}}"],
                             capture_output=True, text=True).stdout
@@ -127,6 +130,9 @@ def _docker_args(image, name, mounts: Mounts, command, env, cpus, memory_gb, net
             "-v", f"{mounts.store}:/store:ro",
             "-v", f"{mounts.contract}:/ar_contract:ro",
             "-v", f"{mounts.sockets}:/run/ar:ro"]   # connect works; deleting a socket does not
+    if mounts.code is not None:
+        args += ["-v", f"{mounts.code}:/code:ro"]
+        base_env["AR_CODE_DIR"] = "/code"
     for node, path in mounts.nodes.items():
         args += ["-v", f"{path}:/nodes/{node}:ro"]
         if (Path(path) / "eval").is_dir():
@@ -182,7 +188,7 @@ def run_container(*, image: str, name: str, mounts: Mounts, command: list[str], 
 
     def wait():
         # Its own session: a Ctrl-C reaches the terminal's whole foreground process group, and the
-        # first one is graceful (spec 14.4) -- it must not end the wait and so the container.
+        # first one is graceful -- it must not end the wait and so the container.
         return subprocess.Popen(["docker", "wait", name], stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True, start_new_session=True)
     try:
@@ -197,7 +203,7 @@ def run_container(*, image: str, name: str, mounts: Mounts, command: list[str], 
         sampler = threading.Thread(target=sample, daemon=True)
         sampler.start()
         if liveness is not None:
-            # Container CPU is a liveness signal (spec 14.5): count samples above 1%.
+            # Container CPU is a liveness signal: count samples above 1%.
             liveness.add_signal(lambda: sum(1 for s in stats if _cpu(s) > 1.0))
         waiter = wait()
         hard = time.monotonic() + timeout_s

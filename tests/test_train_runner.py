@@ -41,8 +41,8 @@ def test_real_successful_run_log_is_not_classified_as_failure():
     """Regression: a healthy 4-GPU run prints the NCCL version banner and several
     ProcessGroupNCCL.cpp warnings. A bare "NCCL" infra signature classified every
     such run as an infra failure, which would have made the loop discard every
-    node it ever trained. Fixture is the verbatim log of the real 2-step run from
-    Task 14 (checkpoint-2 written, loss 0.431 -> 0.252)."""
+    node it ever trained. Fixture is the verbatim log of the real 2-step run
+    (checkpoint-2 written, loss 0.431 -> 0.252)."""
     log = (Path(__file__).parent / "fixtures" / "real_successful_train.log").read_text()
     assert "NCCL version" in log, "fixture must retain the benign NCCL banner"
     assert "ProcessGroupNCCL.cpp" in log, "fixture must retain the benign NCCL warnings"

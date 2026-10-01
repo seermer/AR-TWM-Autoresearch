@@ -31,7 +31,7 @@ def main(argv: list[str] | None = None) -> int:
         context_dir = os.environ.get("AR_CONTEXT_DIR", "/context")
         with open(os.path.join(context_dir, "context.json"), encoding="utf-8") as handle:
             ctx = CONTEXT_MODELS[kind].model_validate(json.load(handle))
-        sys.path.insert(0, os.environ.get("AR_AGENT_DIR", "/agent"))
+        sys.path.insert(0, os.environ.get("AR_CODE_DIR") or os.environ.get("AR_AGENT_DIR", "/agent"))
         entry = importlib.import_module("agent.entry")
         value = getattr(entry, kind)(ctx)
         if inspect.isawaitable(value):

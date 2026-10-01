@@ -25,11 +25,30 @@ def test_bootstrap_creates_run_layout_and_records_versions(tmp_path, monkeypatch
     assert (ctx.run_dir / "archive.db").exists()
     assert (ctx.run_dir / "config" / "kernel.yaml").exists()
     versions = json.loads((ctx.run_dir / "config" / "versions.json").read_text())
-    assert "worldmodel_sha" in versions and "wbench_sha" in versions
-    assert versions["worldmodel_dirty"] in (True, False)
+    assert set(versions) == {"worldmodel_sha", "wbench_sha", "kernel_sha"}
     assert ctx.gpus == [0, 1, 2, 3]
     assert len(ctx.case_ids) == 50
     assert ctx.metric_set
+
+@pytest.mark.real_preflight
+def test_bootstrap_refuses_uncommitted_changes_and_creates_nothing(tmp_path, monkeypatch):
+    import ar_kernel.run as run
+    monkeypatch.setattr(KernelConfig, "runs_dir", property(lambda self: tmp_path))
+    monkeypatch.setattr(run, "_uncommitted", lambda repo: repo == CFG.wbench)
+    with pytest.raises(run.PreflightError, match=f"uncommitted changes in {CFG.wbench}; commit"):
+        bootstrap_run(CFG, run_id="dirty", env={"CUDA_VISIBLE_DEVICES": "0,1,2,3"})
+    assert not (tmp_path / "dirty").exists()
+
+
+@pytest.mark.real_preflight
+def test_uncommitted_sees_modified_and_untracked_files(tmp_path):
+    import subprocess
+    from ar_kernel.run import _uncommitted
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    assert not _uncommitted(tmp_path)
+    (tmp_path / "new.txt").write_text("x")
+    assert _uncommitted(tmp_path)
+
 
 def test_bootstrap_refuses_too_few_gpus(tmp_path, monkeypatch):
     monkeypatch.setattr(KernelConfig, "runs_dir", property(lambda self: tmp_path))
@@ -49,7 +68,7 @@ ENV4 = {"CUDA_VISIBLE_DEVICES": "0,1,2,3"}
 
 
 def test_attaching_to_a_missing_run_is_an_error_not_a_new_run(tmp_path, monkeypatch):
-    """Review I7: `ar status --run-id <typo>` used to silently create a run."""
+    """`ar status --run-id <typo>` used to silently create a run."""
     import pytest
     from ar_kernel.run import RunNotFound, attach_run
     _runs(tmp_path, monkeypatch)
@@ -59,7 +78,7 @@ def test_attaching_to_a_missing_run_is_an_error_not_a_new_run(tmp_path, monkeypa
 
 
 def test_attach_does_not_rewrite_the_run_snapshot(tmp_path, monkeypatch):
-    """Review I7: every `ar status` re-copied configs over the snapshot and
+    """Every `ar status` re-copied configs over the snapshot and
     rewrote versions.json, erasing the record of what the run started on."""
     from ar_kernel.run import attach_run
     _runs(tmp_path, monkeypatch)
@@ -94,7 +113,7 @@ def test_run_uses_its_own_config_snapshot(tmp_path, monkeypatch):
 
 
 def test_bootstrap_refuses_to_start_when_wbench_weights_are_broken(tmp_path, monkeypatch):
-    """Review I8: a run must not start when it cannot produce a complete score."""
+    """A run must not start when it cannot produce a complete score."""
     import pytest
     import ar_kernel.run as run_mod
     _runs(tmp_path, monkeypatch)

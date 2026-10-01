@@ -1,6 +1,5 @@
 """Scripted LLM outputs. A script is a list of Responses API output lists; `response`
-renders one as a Responses envelope (the minimum ChatOpenAI accepts, verified fact 6 in the
-Plan 2 document) and `chat_response` as a Chat Completions one (Task 19)."""
+renders one as a Responses envelope (the minimum ChatOpenAI accepts) and `chat_response` as a Chat Completions one."""
 from __future__ import annotations
 
 import json

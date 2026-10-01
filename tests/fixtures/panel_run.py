@@ -142,7 +142,7 @@ def make_run(base: Path, name: str = "r1") -> Path:
            "$ seq 3\nexit 0\n1\n2\n3\n")
     _write(run / "staging" / "n1" / "improve_recipe-1" / "work" / "v2.mp4", b"\x00rejected")
     for node, score in (("root", 0.6), ("n1", 0.7)):
-        work = run / "nodes" / node / "eval" / "work_dirs" / f"ar_{name}_n{node}"
+        work = run / "nodes" / node / "eval" / "work_dirs" / f"ar_{name}_{node}"
         _write(work / "videos" / "case_7_combined.mp4", b"\x00video")
         _write(work / "videos" / "case_7_combined.json",
                {"case_id": "7", "perspective": "first_person", "actions": ["W"],

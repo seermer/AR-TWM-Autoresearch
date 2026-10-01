@@ -1,4 +1,4 @@
-"""A short digest of how a node's run went, for the edit planner (spec 9.3): phase times, LLM
+"""A short digest of how a node's run went, for the edit planner: phase times, LLM
 turns and compactions, repeated tool errors, gate results. Built from telemetry; never raises."""
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""caption_videos (spec 10): caption clips with a local video model, as a GPU job.
+"""caption_videos: caption clips with a local video model, as a GPU job.
 
 Each job starts `vllm serve` (the `captioner` config) on the node's GPUs, sends every clip
 file to it through the OpenAI-compatible endpoint, and always stops it again. The kernel
@@ -153,7 +153,7 @@ class CaptionBackend:
                                 reason="cancelled" if cancel.is_set() else outcome,
                                 exit_code=exit_code)
         # A cancelled job may be part of JobQueue.shutdown, whose join deadline a full wait would
-        # overrun; Plan 4's check that GPU memory is free before each phase is the real guard.
+        # overrun.
         timeout = float(c["memory_release_timeout_s"])
         after, released = wait_gpu_release(self.gpu_memory, self.gpus, before,
                                            min(timeout, 5.0) if cancel.is_set() else timeout)

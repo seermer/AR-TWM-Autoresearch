@@ -54,6 +54,16 @@ def test_finished_nodes_are_mounted_read_only_with_eval_hidden(tmp_path):
     assert "/nodes/n1/eval:ro,size=4k" in args and not any(a.startswith("/nodes/root/eval") for a in args)
 
 
+def test_separate_running_code_is_mounted_read_only_and_named_in_the_env(tmp_path):
+    from ar_kernel.sandbox.runner import _docker_args
+    m = Mounts(agent=tmp_path, workspace=tmp_path, staging=tmp_path, context=tmp_path, store=tmp_path,
+               contract=tmp_path, sockets=tmp_path, code=tmp_path / "code")
+    args = _docker_args("img", "c", m, ["true"], {}, 1, 1)
+    assert f"{tmp_path / 'code'}:/code:ro" in args and "AR_CODE_DIR=/code" in args
+    m.code = None
+    assert not any("AR_CODE_DIR" in a for a in _docker_args("img", "c", m, ["true"], {}, 1, 1))
+
+
 def test_snapshot_diff_reports_changes(tmp_path):
     (tmp_path / "a.txt").write_text("1")
     (tmp_path / "b.txt").write_text("2")
@@ -86,13 +96,13 @@ def _run(tmp_path, mounts, script, timeout_s=120, env=None, liveness=None, poll_
 
 
 def test_failed_launch_is_still_removed_and_only_the_recorded_argv_is_redacted(tmp_path, mounts, monkeypatch):
-    """Controller ruling (fix round 1): `docker run -d` can fail *after* creating
+    """`docker run -d` can fail *after* creating
     the container (OCI runtime error, bad bind source, missing executable),
     leaving a `Created` container behind. The removal must still run on that
     path -- "the container is removed on every exit path" wins over the code
     that skipped it via an early return outside the `finally`.
 
-    Also (controller ruling, original): the runner must not record the
+    Also: the runner must not record the
     AR_TOKEN value in telemetry, regardless of which Recorder is used (no
     add_redaction call here) -- but that redaction must only touch the
     recorded copy, never the real argv handed to the actual `docker run`
@@ -134,7 +144,7 @@ def test_failed_launch_is_still_removed_and_only_the_recorded_argv_is_redacted(t
 
 @pytest.mark.docker
 def test_isolation_holds_from_inside(tmp_path, mounts):
-    """Spec 16.3 item 4, with network `none` (contract containers; agent phases use `sandbox.network`,
+    """With network `none` (contract containers; agent phases use `sandbox.network`,
     bridge by default): no internet, no host services, no kernel/WorldModel/WBench/.env,
     no writes to /store or /context; files written are owned by the host user. The socket dir is
     mounted read-only: the gateway socket cannot be deleted, but connecting to it still works.
@@ -331,7 +341,7 @@ print(json.dumps({"exit_code": res.exit_code, "stdout": res.stdout}))
 
 @pytest.mark.docker
 def test_a_ctrl_c_to_the_process_group_does_not_end_the_container(tmp_path, mounts):
-    """Spec 14.4: the first Ctrl-C is graceful. The terminal sends SIGINT to the whole foreground
+    """The first Ctrl-C is graceful. The terminal sends SIGINT to the whole foreground
     process group; `docker wait` and `docker stats` must not be in it."""
     name = container_name("sigint", "n1", "test", 1)
     arg = json.dumps({"name": name, "run": str(tmp_path / "run"),

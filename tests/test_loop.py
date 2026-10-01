@@ -62,6 +62,14 @@ def test_contract_failure_retries_with_the_report(make_loop):
     assert [a for _, _, a, _ in edits] == [1, 2] and edits[1][3]["kind"] == "contract"
 
 
+def test_every_edit_attempt_runs_on_the_parents_code(make_loop):
+    run, make = make_loop
+    script = Script(run, contract=[False, True])
+    loop = make(script)
+    loop.run()
+    assert script.runners == [NodeStore(loop.ctx.conn).get("root")["agent_commit"]] * 2
+
+
 def test_edit_exhaustion_is_invalid_code(make_loop):
     run, make = make_loop
     loop = make(Script(run, edit=[False, False, False]))
@@ -114,9 +122,19 @@ def test_gate_failure_then_success(make_loop):
     assert NodeStore(loop.ctx.conn).get("n1")["status"] == "scored"
 
 
-def test_eval_failure_is_eval_failed_and_the_loop_continues(make_loop):
+def test_a_failed_eval_is_run_once_more(make_loop):
     run, make = make_loop
-    loop = make(Script(run, score=[0.7, RuntimeError("wbench gpu failed")]), max_nodes=2)
+    loop = make(Script(run, score=[0.7, RuntimeError("judge down"), 0.9]))
+    loop.run()
+    assert NodeStore(loop.ctx.conn).get("n1")["score"] == 0.9
+    alerts = [e["kind"] for e in loop.ctx.recorder.read_events() if e["type"] == "alert"]
+    assert alerts == ["eval_retry"]
+
+
+def test_eval_failing_twice_is_eval_failed_and_the_loop_continues(make_loop):
+    run, make = make_loop
+    loop = make(Script(run, score=[0.7, RuntimeError("wbench gpu failed"), RuntimeError("wbench gpu failed")]),
+                max_nodes=2)
     loop.run()
     nodes = {n["node_id"]: n for n in NodeStore(loop.ctx.conn).all()}
     assert nodes["n1"]["status"] == "eval_failed" and "wbench gpu failed" in nodes["n1"]["error"]
@@ -228,7 +246,7 @@ def test_interrupted_nodes_do_not_count_and_ids_are_never_reused(make_loop):
 
 def test_root_score_failure_ends_the_run_with_the_root_eval_failed(make_loop):
     run, make = make_loop
-    loop = make(Script(run, score=[RuntimeError("wbench down")]))
+    loop = make(Script(run, score=[RuntimeError("wbench down")] * 2))
     with pytest.raises(RuntimeError):
         loop.run()
     root = NodeStore(loop.ctx.conn).get("root")

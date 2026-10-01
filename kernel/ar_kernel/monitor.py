@@ -1,4 +1,4 @@
-"""Run monitoring (spec 13.3 GPU samples, 13.4 alerts). Alerts never stop anything."""
+"""Run monitoring: GPU samples and alerts. Alerts never stop anything."""
 from __future__ import annotations
 
 import json

@@ -1,5 +1,5 @@
 """MCP tool server core: caller resolution, telemetry and error containment for
-every kernel tool (spec 10, 13.3 row "Tool calls")."""
+every kernel tool."""
 from __future__ import annotations
 
 import asyncio
@@ -34,10 +34,10 @@ def new_mcp() -> MCPServer:
 def build_tool_app(mcp: MCPServer):
     return mcp.streamable_http_app(
         # Over a Unix socket the Host header carries no port; without this the
-        # rebinding guard answers 421 (verified fact 3).
+        # rebinding guard answers 421.
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True, allowed_hosts=["localhost"], allowed_origins=[]),
-        # improve_recipe can go a long time between tool calls (fact 4).
+        # improve_recipe can go a long time between tool calls.
         session_idle_timeout=None,
     )
 

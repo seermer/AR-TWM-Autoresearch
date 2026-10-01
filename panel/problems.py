@@ -72,7 +72,7 @@ def recorded(run: Run) -> list[dict]:
         elif kind == "contract.report":
             p = load(e.get("payload")) or {}
             if p.get("ok") is False:
-                add("contract_failed", "; ".join(map(str, p.get("failures") or [])) or "contract check failed")
+                add("contract_failed", f"{p.get('failed_step')}: {p.get('detail') or ''}")
         elif kind in ("subproc.end", "subproc.error") and (kind == "subproc.error" or e.get("returncode") != 0):
             p = load(e.get("payload")) or {}
             add("subprocess", f"{e.get('phase')}: rc={e.get('returncode')} " + (p.get("stderr") or p.get("error") or "")[-200:])

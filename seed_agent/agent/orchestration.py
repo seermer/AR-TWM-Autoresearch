@@ -36,7 +36,7 @@ REMIND = ("You stopped without calling {tools}. Finish the task, then call {tool
           "The work is only recorded through {tools}.")
 REPLAN = "Revise the plan. The engineer carries out the plan you submit next."
 
-# Where each component lives in this agent (spec 9.1.1). An edit plan names one of them.
+# Where each component lives in this agent. An edit plan names one of them.
 COMPONENTS = {
     "prompts": "agent/prompts/*.md -- the system prompt of each role",
     "tools": "agent/tools.py -- agent-local tools and the kernel-tool adapter (not the kernel tools themselves)",

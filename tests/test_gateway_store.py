@@ -55,7 +55,7 @@ def test_previous_response_id_links_the_conversation(env):
 
 
 def test_resent_history_links_by_prefix(env):
-    """How a Responses client continues a run (verified for ChatOpenAI, fact 6): it resends
+    """How a Responses client continues a run (verified for ChatOpenAI): it resends
     the prior input and output items, plus the tool output."""
     _, store, caller = env
     m1 = store.begin(caller, "/v1/responses", {"model": "m", "input": FIRST_INPUT})
@@ -97,7 +97,7 @@ def test_prefix_matching_never_crosses_containers(tmp_path):
     assert m2["conversation_id"] != m1["conversation_id"]
 
 
-# --- Controller ruling: memory bound for CallStore (forget()/on_revoke wiring) ---
+# --- Memory bound for CallStore (forget()/on_revoke wiring) ---
 
 def test_forget_starts_a_new_conversation_for_a_later_request(env):
     """After forget(), a later request from the same token must not link to the
@@ -148,7 +148,7 @@ def test_end_after_forget_records_response_without_error(env):
 
 def test_on_revoke_wired_to_forget_via_registry(tmp_path):
     """Sanity check that TokenRegistry.on_revoke + CallStore.forget compose the way
-    Task 5's gateway app factory will wire them: registry.on_revoke(store.forget)."""
+    the gateway app factory wires them: registry.on_revoke(store.forget)."""
     rec = Recorder(tmp_path)
     reg = TokenRegistry(rec)
     store = CallStore(rec)
@@ -166,7 +166,7 @@ def test_on_revoke_wired_to_forget_via_registry(tmp_path):
 @pytest.mark.parametrize("reasoning", [{"reasoning": "plan", "reasoning_details": [{"type": "reasoning.text", "text": "plan"}]},
                                        {"reasoning_content": "plan"}, {"reasoning": "", "reasoning_content": "plan"}])
 def test_chat_model_resent_history_links_to_a_real_style_chat_response(env, reasoning):
-    """Task 19: the agent's ChatOpenAI (Chat Completions) resends the prior request plus the
+    """The agent's ChatOpenAI (Chat Completions) resends the prior request plus the
     assistant message. Upstream messages carry fields the client never sends back (OpenAI's
     `refusal`/`annotations`, a tool-call `index`, empty content next to tool calls)
     and may space the arguments JSON differently; linking must survive all of that."""

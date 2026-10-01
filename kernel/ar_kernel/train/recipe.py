@@ -15,7 +15,7 @@ TUNABLE_KEYS = frozenset({
 # Validity only -- type, sign, finiteness, range of a probability. These are NOT
 # tuning limits: how long to train and at what learning rate is the agent's
 # decision. They exist so that a malformed value is a gate failure the agent can
-# retry, rather than an exception that crashes the node (spec 14.2).
+# retry, rather than an exception that crashes the node.
 _INT, _FLOAT = "int", "float"
 RECIPE_RULES = {
     "optimizer.max_steps": (_INT, 1, None),

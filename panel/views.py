@@ -1,4 +1,4 @@
-"""Per-tab data for the run panel (spec section 5): plain dicts and lists, no Gradio."""
+"""Per-tab data for the run panel: plain dicts and lists, no Gradio."""
 from __future__ import annotations
 
 import difflib

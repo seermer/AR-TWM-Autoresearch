@@ -1,7 +1,7 @@
-"""Soft timeouts with a probe window (spec 14.5). At the soft deadline the kernel watches the
+"""Soft timeouts with a probe window. At the soft deadline the kernel watches the
 phase's progress signals for one probe window: any change extends the deadline by
 extension_frac x soft; none ends the phase. A hard cap, when set, ends it regardless.
-GPU utilization is never a signal (verification-log finding 2)."""
+GPU utilization is never a signal."""
 from __future__ import annotations
 
 import time

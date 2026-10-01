@@ -1,5 +1,5 @@
 """A stand-in GPU-job worker for the GpuJob tests (no GPU, no model): implements the bridge
-protocol only (see Plan 3's global constraints).
+protocol only.
 
 python fake_gen_worker.py --items items.json --out DIR --rank R --world W
 
@@ -47,7 +47,7 @@ from pathlib import Path
 def wbench():
     """The precache (--precache: records its argv and env next to the config, exits 0) and
     run_wbench.py (--cases) without a model. For each case it writes what the eval writes, in the
-    layout measured in Plan 3 Task 6 Step 2: case_<id>_combined.mp4 of rounds x 32 - 7 frames
+    measured layout: case_<id>_combined.mp4 of rounds x 32 - 7 frames
     (960x544, 24 fps, round r = frames [32r - 7, 32r + 25)), the sidecar JSON (actions, nominal
     turn_segments as WorldModel writes them, prompt_schedule) and the camera npz. A case prompt containing PRECACHE_HANG makes the
     precache hang (the timeout test) (one pose per frame, frame 0 identity). A case whose

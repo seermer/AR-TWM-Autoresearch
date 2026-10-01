@@ -72,7 +72,7 @@ def test_each_container_token_is_revoked_and_its_jobs_cancelled(tmp_path, monkey
 
 def test_non_utf8_entry_py_fails_static_instead_of_raising(tmp_path, monkeypatch):
     """entry.read_text() defaults to UTF-8; a non-UTF-8 agent/entry.py is an agent
-    fault (spec 10/14.2) and must fail the `static` step, not raise out of
+    fault and must fail the `static` step, not raise out of
     verify_contract. No Docker: the runner would never even be called."""
     run = tmp_path / "run"
     h = ContractHarness(CFG, run, Recorder(run))

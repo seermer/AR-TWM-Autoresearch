@@ -1,4 +1,4 @@
-"""rollout_alayaworld (spec 10, Plan 3 Task 6): WBench-style cases rendered by AlayaWorld through
+"""rollout_alayaworld: WBench-style cases rendered by AlayaWorld through
 the WBench eval's own render path (WorldModel scripts/tools/run_wbench.py, configs/wbench_full.yaml).
 
 The agent writes cases (first frame, perspective, prompts, per-turn actions). The kernel stages
@@ -7,7 +7,7 @@ renders them, and publishes each clip with its round boundaries on the per_chunk
 frames) and one caption segment per round from the prompts the render used.
 
 No pose is published (user decision 2026-09-26): the renders follow the commanded translation
-but only weakly the commanded turns and orbits (Task 6 smoke), so the commanded camera path is
+but only weakly the commanded turns and orbits, so the commanded camera path is
 not a pose label. It is published as metadata (`commanded_camera`); the agent runs
 annotate_camera (ViGeo) on the clip for the pose it ingests with.
 """
@@ -55,7 +55,7 @@ VARIANT_TEXT = {"dmd4": "the eval's 4-step student", "ar30": "the 30-step AR tea
 AR30 = {("paths", "dmd_resume"): None, ("validation", "sampling_steps"): 30,
         ("validation", "scheduler"): "shift", ("validation", "cfg_scale"): 3.0}
 ROUND_FRAMES = 32           # one rollout round: 4 latents x temporal stride 8
-GRID = 25                   # per_chunk round boundaries sit at 25 + 32k frames (spec 6.2)
+GRID = 25                   # per_chunk round boundaries sit at 25 + 32k frames
 FPS = 24
 FFMPEG_TIMEOUT_S = 600      # a wedged/oversize ffmpeg must fail its item, not hang the job
 
@@ -111,7 +111,7 @@ def checked_repo(cfg, key: str, label: str) -> Path:
     git = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True)
     if git.returncode != 0:
         raise RuntimeError(f"no {label} checkout at {repo} (git: {git.stderr.strip()}); clone it at "
-                           f"commit {pinned} as described in docs/PORTABILITY.md")
+                           f"commit {pinned} into that folder")
     head = git.stdout.strip()
     if head != pinned:
         raise RuntimeError(f"{repo} is at commit {head}, but {key}.commit pins {pinned}; re-clone the "
@@ -326,7 +326,7 @@ class AlayaWorldBackend(GpuJob):
             raise ValueError(f"camera path has {len(saved)} frames, the video {frames}")
         # Round r occupies mp4 frames [first + 32r, first + 32r + 32). The first latent of the
         # rollout decodes to one frame, so the mp4 starts 7 frames into round 0 (first = -7,
-        # measured in Task 6 Step 2); turn_segments' frame ranges are nominal and ignore this.
+        # measured); turn_segments' frame ranges are nominal and ignore this.
         first = frames - ROUND_FRAMES * int(sidecar["output_rounds"])
         if not -ROUND_FRAMES < first <= 0:
             raise ValueError(f"{frames} frames for {sidecar['output_rounds']} rounds of {ROUND_FRAMES}")
@@ -354,8 +354,8 @@ class AlayaWorldBackend(GpuJob):
 
 
 class Wan22Backend(GpuJob):
-    """rollout_wan22 (spec 10, Plan 3 Task 7): training clips from Wan2.2 TI2V-5B, the official
-    code in its own env (docs/PORTABILITY.md). Text-to-video, or image-to-video when the item
+    """rollout_wan22: training clips from Wan2.2 TI2V-5B, the official
+    code in its own env. Text-to-video, or image-to-video when the item
     carries a first frame (the bridge fits it to 1280x704). Every render is 1280x704; the published
     clip is center-cropped to 1248x704 and carries no pose/camera_motion: the agent adds one
     (annotate_camera then 'moving', or 'static'), like a clip it shot itself."""
@@ -400,7 +400,7 @@ class Wan22Backend(GpuJob):
             "--frames", str(job.args["frames"]), offload, t5_cpu], groups,
             job=job, work=work, out=out, total=len(items), cancel=cancel, report=report,
             cwd=self.cfg.repo_root,
-            # the fit spike (Task 7) OOM'd at VAE decode with the default caching allocator even
+            # the fit spike OOM'd at VAE decode with the default caching allocator even
             # though sampling itself stayed under budget (fragmentation, not a real shortage --
             # PyTorch's own OOM message suggests exactly this flag).
             extra_env={"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
@@ -421,8 +421,8 @@ class Wan22Backend(GpuJob):
 
 
 class Ltx25Backend(GpuJob):
-    """rollout_ltx25 (spec 10, Plan 3 Task 8): training clips from LTX-2.5 (Lightricks'
-    ltx-pipelines in its own env, docs/PORTABILITY.md): `distilled` (DistilledPipeline) or `dev`
+    """rollout_ltx25: training clips from LTX-2.5 (Lightricks'
+    ltx-pipelines in its own env): `distilled` (DistilledPipeline) or `dev`
     (TI2VidTwoStagesPipeline + the distilled LoRA). On 24 GB cards each worker runs one GPU with
     fp8-cast weights and CPU offload, so each worker also holds the model in host RAM: the worker
     count shrinks to what MemAvailable holds (`worker_groups`), and a job that cannot fit one

@@ -31,7 +31,7 @@ class KernelConfig:
 
     @classmethod
     def for_run(cls, run_dir: Path) -> "KernelConfig":
-        """The run's frozen kernel.yaml (spec 17: snapshotted at run start), with THIS checkout as
+        """The run's frozen kernel.yaml (snapshotted at run start), with THIS checkout as
         the repo root. load(path) would take runs/<id> as the root and break every sibling path."""
         raw = yaml.safe_load((Path(run_dir) / "config" / "kernel.yaml").read_text(encoding="utf-8"))
         return cls(raw=raw, repo_root=REPO_ROOT)
@@ -82,7 +82,7 @@ def run_config_path(cfg: "KernelConfig", run_dir: Path, name: str) -> Path:
 def load_dotenv(path: Path, env: "dict | os._Environ") -> list[str]:
     """Copy KEY=VALUE pairs from `path` into `env` where `env` lacks them.
 
-    Shell variables always win (spec 2.1) and empty values are skipped, so the
+    Shell variables always win and empty values are skipped, so the
     placeholder .env shipped in the repo enables nothing. Returns the keys set.
     """
     path = Path(path)

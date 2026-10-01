@@ -1,6 +1,6 @@
 """The seed agent: pure helpers in-process, then both entry points run the way a
 container runs them (python -m ar_contract.run in a subprocess) against the kernel's
-real gateway (scripted mock mode) and the Task 14 mock tool server, over Unix sockets."""
+real gateway (scripted mock mode) and the mock tool server, over Unix sockets."""
 import asyncio
 import json
 import os
@@ -264,7 +264,7 @@ def test_selftest_passes_on_the_seed_and_catches_a_broken_entry(tmp_path, monkey
     (copy / "agent" / "entry.py").write_text("def edit_self(ctx, extra):\n    pass\n")
     errors = selftest(str(copy))
     assert any("edit_self" in e for e in errors) and any("improve_recipe" in e for e in errors)
-    # keyword-only parameters are rejected too, as in the contract's static check (Task 14)
+    # keyword-only parameters are rejected too, as in the contract's static check
     (copy / "agent" / "entry.py").write_text("def edit_self(ctx, *, extra=1):\n    pass\n"
                                              "def improve_recipe(ctx):\n    pass\n")
     assert [e for e in selftest(str(copy)) if "exactly one parameter" in e] == [
@@ -273,7 +273,7 @@ def test_selftest_passes_on_the_seed_and_catches_a_broken_entry(tmp_path, monkey
 
 # ---- both entry points against the kernel services -------------------------------------------
 
-C0 = "0" * 64                                        # the Task 14 mock data_commit id
+C0 = "0" * 64                                        # the mock data_commit id
 
 
 def _call(name, args):
@@ -443,7 +443,7 @@ def test_improve_recipe_full_flow(kernel, tmp_path):
     kinds = [e["type"] for e in rec.read_events("n-recipe")]
     assert "tool.call" in kinds and "tool.error" in kinds                        # kernel-side records
     turns = [e["turn_index"] for e in rec.read_events("n-recipe") if e["type"] == "llm.request"]
-    assert max(turns) >= 2                     # the harness's resent chat history links (Task 19)
+    assert max(turns) >= 2                     # the harness's resent chat history links
     tasks = {str(m["content"]) for e in rec.read_events("n-recipe") if e["type"] == "llm.request"
              for m in rec.load_payload(e["payload"])["body"]["messages"] if m.get("role") == "user"}
     first = [t for t in tasks if t.startswith("<plan>")]
@@ -630,3 +630,9 @@ def test_the_engineer_gets_what_it_acts_on_and_the_planner_also_the_history():
     assert planner.startswith(engineer)
     assert not any(part in engineer for part in ("## Lineage", "## Siblings", "## Archive"))
     assert "category: Urban" not in planner            # scene-category groups are left to context.json
+
+
+def test_a_rationale_line_that_only_looks_like_the_plan_is_ignored():
+    from agent.briefing import _hypothesis
+    assert _hypothesis('why\n\nPlan: {"hypothesis": "more turns", "actions": ["a"]}\nData: x') == "more turns"
+    assert _hypothesis("why\n\nPlan: {not json}\nData: x") is None

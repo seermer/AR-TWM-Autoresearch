@@ -1,4 +1,4 @@
-"""What an agent sees (spec 9.3): built from the archive, written to /context."""
+"""What an agent sees: built from the archive, written to /context."""
 from __future__ import annotations
 
 import json

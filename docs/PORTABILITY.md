@@ -110,18 +110,16 @@ of Wan and LTX set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (the 24 GB
 3. **Weights are not in git.** Re-download or copy:
    `WorldModel/weights/` (LTX-2.3 transformer, `alaya-world-ar`, VAE, Gemma),
    `WBench/weights/` (SAM2, DA3, MegaSAM, HPSv3, DINOv2 torch hub).
-4. **Fill `AutoResearcher/.env`** if API-based metrics are wanted. The `ar`
+4. **Fill `AutoResearcher/.env`.** The `ar`
    CLI loads it at startup into its own environment, so the keys also reach the
    WBench subprocesses. Variables already set in the shell win, and empty values
-   are ignored, so the shipped placeholder enables nothing. Without
-   `VLM_API_KEY` the six VLM metrics are excluded by design; the run records the
-   exclusion and uses that fixed metric set for every node, so scores stay
-   comparable. GPU-metric weights are different: if any is missing, a run
-   refuses to start rather than silently scoring on fewer metrics. *(2026-09-27, Plan 4 as
-   built)* `ar run` for a **new** run additionally requires `OPENAI_API_KEY` and
-   `OPENAI_MODEL` to be non-empty, checked before the run directory is created; `ar
-   init-run`, `ar run --resume` and `ar status` do not need them until an agent phase
-   actually runs. With `--git-remote URL`, the shell that runs `ar run` needs git access to
+   are ignored, so the shipped placeholder enables nothing. With `VLM_API_KEY` the
+   judged metrics are answered by that API; without it by the local judge (the
+   captioner's model). Every run scores all 22 metrics: if a GPU-metric weight is
+   missing, a run refuses to start. `ar run` (new or `--resume`) requires
+   `OPENAI_API_KEY` and `OPENAI_MODEL` to be non-empty, checked before anything is
+   created; `ar status` and `ar doctor` do not. A new run also refuses to start while
+   any of the three repos has uncommitted changes. With `--git-remote URL`, the shell that runs `ar run` needs git access to
    URL without a prompt (e.g. an SSH key loaded in `ssh-agent`); pushes never prompt.
 5. **Run `ar doctor`,** then the unit suites.
 

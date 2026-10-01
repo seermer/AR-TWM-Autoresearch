@@ -1,4 +1,4 @@
-"""Scripted loop phases (Task 9) and a runnable fake loop for the integration tests: the real
+"""Scripted loop phases and a runnable fake loop for the integration tests: the real
 `drive` in a subprocess, with no GPU, LLM or Docker.
 Usage: python tests/fixtures/fake_loop.py RUN_DIR MAX_NODES none|pace|<phase>"""
 import sys
@@ -32,7 +32,7 @@ class Script:
     def __init__(self, tmp, edit=(), contract=(), recipe=(), gate=(), train=(), score=(), slow=None):
         self.tmp, self.q = tmp, {k: list(v) for k, v in dict(edit=edit, contract=contract, recipe=recipe,
                                                                gate=gate, train=train, score=score).items()}
-        self.retries, self.slow = [], slow
+        self.retries, self.runners, self.slow = [], [], slow
 
     def _next(self, key, default):
         return self.q[key].pop(0) if self.q[key] else default
@@ -44,8 +44,9 @@ class Script:
             for _ in range(1200):                    # short steps: a signal is handled within 0.5 s
                 time.sleep(0.5)
 
-    def edit_self(self, env, *, node, base_commit, attempt, retry, **kw):
+    def edit_self(self, env, *, node, base_commit, runner_commit, attempt, retry, **kw):
         self.retries.append(("edit_self", node, attempt, retry))
+        self.runners.append(runner_commit)
         d = self.tmp / "nodes" / node / "attempts" / f"edit_self-{attempt}"
         (d / "workspace").mkdir(parents=True, exist_ok=True)
         self._wait("edit_self")
@@ -100,7 +101,7 @@ class Script:
 SCENARIO = dict(contract=[False, True], gate=[False, True],           # n1: both retry loops, then scored
                 edit=[True, True, False, False, False],               # n2: invalid_code (after n1's 2 edits)
                 train=[True, False, False, False],                    # n3: train_failed
-                score=[0.78, 0.80, RuntimeError("wbench gpu failed")])  # root, n1, n4 -> eval_failed
+                score=[0.78, 0.80] + [RuntimeError("wbench gpu failed")] * 2)  # root, n1, n4 -> eval_failed (twice)
 
 
 def build(run: Path, max_nodes: int, script):

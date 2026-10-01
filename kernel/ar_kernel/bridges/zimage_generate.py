@@ -4,13 +4,13 @@ image via Z-Image-Turbo (Tongyi-MAI/Z-Image-Turbo, Apache-2.0, diffusers ZImageP
 python zimage_generate.py --items items.json --out DIR --rank R --world W \
     --weights <z-image-turbo dir> --width W --height H --steps N --offload none|model
 
-Bridge protocol (Plan 3): handles items with index % world == rank, in index order; per item
+Bridge protocol: handles items with index % world == rank, in index order; per item
 writes <out>/<index>.png then <out>/<index>.json ({"ok": true, "seconds": t} or
 {"ok": false, "error": "..."}). The model loads once, before the first item. Turbo runs
 `num_inference_steps` DiT steps with `guidance_scale=0.0` (model card, pinned revision).
 
 `--offload model` (the kernel default) calls `enable_model_cpu_offload()`: every allowed size fits
-(peak 12.8 GB). `--offload none` keeps the pipeline on the GPU and OOMs at 1920x1088 (Task 5 spike).
+(peak 12.8 GB). `--offload none` keeps the pipeline on the GPU and OOMs at 1920x1088.
 """
 from __future__ import annotations
 

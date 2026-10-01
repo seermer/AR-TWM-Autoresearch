@@ -1,4 +1,4 @@
-"""Asynchronous GPU jobs (spec 10). One job at a time, under the run's GPU lock."""
+"""Asynchronous GPU jobs. One job at a time, under the run's GPU lock."""
 from __future__ import annotations
 
 import math
@@ -56,7 +56,7 @@ class JobQueue:
 
     A caller only ever sees or cancels jobs its own token submitted (`_own`);
     `cancel_for_token` is how a phase's container exit sweeps its orphaned jobs
-    (Task 15) so an agent that disappears never keeps holding the GPUs.
+    so an agent that disappears never keeps holding the GPUs.
     """
 
     def __init__(self, recorder, gpu_lock: threading.Lock, wait_cap_s: float) -> None:
@@ -134,7 +134,7 @@ class JobQueue:
 
     def active_for_token(self, token: str) -> int:
         """Jobs queued or running for `token` (a liveness signal: a phase whose
-        own GPU job is still working is not stalled, spec 14.5)."""
+        own GPU job is still working is not stalled)."""
         with self._cond:
             return sum(1 for j in self._jobs.values() if j.token == token and j.state not in _TERMINAL)
 

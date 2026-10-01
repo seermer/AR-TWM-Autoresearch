@@ -1,4 +1,4 @@
-"""Fixed entry points (spec 1.1.4): the kernel imports exactly edit_self and improve_recipe.
+"""Fixed entry points: the kernel imports exactly edit_self and improve_recipe.
 Also this agent's settings; the kernel sets the environment variables."""
 import os
 

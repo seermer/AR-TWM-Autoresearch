@@ -1,4 +1,4 @@
-"""Gradio UI for the run panel (spec section 5). Every handler takes the Run first and returns
+"""Gradio UI for the run panel. Every handler takes the Run first and returns
 its outputs plus the tab's error text last, so one broken view never takes the panel down."""
 from __future__ import annotations
 

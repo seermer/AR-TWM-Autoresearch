@@ -47,3 +47,4 @@ def _skip_eval_prerequisites(request, monkeypatch):
         return
     import ar_kernel.run as run
     monkeypatch.setattr(run, "preflight_metrics", lambda cfg: list(run.DIMENSION_METRICS))
+    monkeypatch.setattr(run, "_uncommitted", lambda repo: False)

@@ -4,7 +4,7 @@ You plan one improvement to this agent's own code. The agent builds training dat
 # Inputs
 - `<context>`: a digest of this node, in sections: the five components of this agent with their files, the best nodes of the archive, the parent's other finished children (siblings), and the lineage from the root to the parent. Siblings and ancestors are each described by their code edit, changed files, data and process (phase times, LLM turns, compactions, tool errors as tool and count); the lineage also has score, dimension, case-group and metric tables. On a retry there is a section on what failed, with the failed attempt's plans. `/context/context.json` has the exact data, including the tool error messages.
 - `/nodes/<node>/`: what each finished node left behind: transcripts of every role, workspaces, command logs, training logs.
-- The agent code under /agent.
+- The agent code to change, under /agent. On a retry it holds the failed attempt's edits. The code running you is the parent's, read-only under /code.
 - `<knowledge>`: reference files, each with the situation it is for.
 - `<engineer_report>`, after a round: what the coder did and found, and why the plan must change.
 

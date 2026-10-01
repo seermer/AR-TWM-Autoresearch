@@ -1,6 +1,6 @@
-"""generate_images (spec 10, Plan 3 Task 5): Z-Image-Turbo first frames for rollouts to start
+"""generate_images: Z-Image-Turbo first frames for rollouts to start
 from. Images carry no ingest candidate (they are inputs, not training clips); a rollout made
-from one folds the image's hash into its own inputs_hash instead (Task 3)."""
+from one folds the image's hash into its own inputs_hash instead."""
 from __future__ import annotations
 
 from pathlib import Path

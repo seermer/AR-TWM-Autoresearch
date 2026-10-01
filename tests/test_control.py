@@ -94,7 +94,7 @@ def test_resume_marks_unfinished_nodes_interrupted_and_keeps_their_files(tmp_pat
 
 
 def test_workers_of_a_dead_leader_are_still_killed(tmp_path):
-    """Verification-log finding 6: `conda run` (the leader) exits, its workers keep the GPU."""
+    """`conda run` (the leader) exits, its workers keep the GPU."""
     c = Control(tmp_path)
     (c.dir / "pgids").mkdir(parents=True)
     code = ("import subprocess, sys\n"
@@ -166,7 +166,7 @@ def test_a_crash_is_recorded_and_reraised(tmp_path):
     assert _stopped(rec) == ["crashed: ValueError: boom"] and c.alive_pid() is None
 
 
-# ---- the process really exits (acceptance_20260928: a force stop left the kernel alive) ----
+# ---- the process really exits ----
 
 def test_exit_process_ends_the_process_despite_a_stuck_worker_thread(tmp_path):
     """A tool call ran in an asyncio.to_thread worker (hf_download under HF rate limiting). Python's

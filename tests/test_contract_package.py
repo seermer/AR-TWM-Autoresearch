@@ -61,6 +61,16 @@ def test_good_edit_self_writes_ok_result(env):
     assert json.loads(out.read_text()) == {"ok": True, "result": {"summary": "attempt 1", "component": None}}
 
 
+def test_the_running_code_comes_from_the_code_dir_when_one_is_set(env, tmp_path, monkeypatch):
+    out = env("raise RuntimeError('the tree being edited is broken')\n", _edit_ctx())
+    code = tmp_path / "code"
+    (code / "agent").mkdir(parents=True)
+    (code / "agent" / "__init__.py").write_text("")
+    (code / "agent" / "entry.py").write_text(GOOD)
+    monkeypatch.setenv("AR_CODE_DIR", str(code))
+    assert main(["edit_self"]) == 0 and json.loads(out.read_text())["ok"] is True
+
+
 def test_async_entry_points_are_supported(env):
     out = env("""
 from ar_contract.models import EditResult
@@ -128,9 +138,8 @@ def test_edit_result_component_is_optional_and_checked():
 
 
 def test_clients_speak_over_the_socket_directory(monkeypatch, tmp_path):
-    """Facts 2-6: the chat model talks to the gateway socket (Chat Completions since Task 19,
-    no client-side retries); the MCP session is an async context manager. Built without connecting; Task 6
-    and Task 17 exercise both over real sockets."""
+    """The chat model talks to the gateway socket (Chat Completions, no client-side retries); the MCP
+    session is an async context manager. Built without connecting."""
     monkeypatch.setenv("AR_SOCKET_DIR", str(tmp_path))
     monkeypatch.setenv("AR_TOKEN", "tok-abc")
     monkeypatch.setenv("AR_DEFAULT_MODEL", "gpt-x")
@@ -148,7 +157,7 @@ def test_clients_speak_over_the_socket_directory(monkeypatch, tmp_path):
 
 
 def _stub_model(replies, seen):
-    """The Task 19 client class on a stub transport: records request bodies, returns `replies`."""
+    """The client class on a stub transport: records request bodies, returns `replies`."""
     import httpx
     from ar_contract.client import ReasoningChatOpenAI
     def handler(request):

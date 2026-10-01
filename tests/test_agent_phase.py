@@ -74,7 +74,7 @@ def test_edit_self_commits_the_edited_code_to_an_attempt_ref(env):
     runner = FakeRunner({"ok": True, "result": {"summary": "tightened prompts"}},
                         edit="# v2\ndef edit_self(ctx): ...\ndef improve_recipe(ctx): ...\n")
     penv = make(runner)
-    out = run_edit_self(penv, conn=conn, node="n1", parent_id="root", base_commit=root, attempt=1,
+    out = run_edit_self(penv, conn=conn, node="n1", parent_id="root", base_commit=root, runner_commit=root, attempt=1,
                         max_attempts=3, retry=None, nodes_remaining=5)
     assert out.ok and out.result == {"summary": "tightened prompts", "component": None}
     assert penv.repo.resolve("refs/attempts/n1/edit_self-1") == out.commit
@@ -82,11 +82,24 @@ def test_edit_self_commits_the_edited_code_to_an_attempt_ref(env):
     assert runner.calls[0]["mounts"].agent_readonly is False
 
 
+def test_an_edit_retry_runs_the_parents_code_on_the_failed_tree(env):
+    make, conn, root, _, _ = env
+    broken = FakeRunner({"ok": False, "error": "x"}, edit="raise RuntimeError('broken edit')\n")
+    out1 = run_edit_self(make(broken), conn=conn, node="n1", parent_id="root", base_commit=root, runner_commit=root,
+                         attempt=1, max_attempts=3, retry=None, nodes_remaining=5)
+    runner = FakeRunner({"ok": True, "result": {"summary": "repaired"}})
+    run_edit_self(make(runner), conn=conn, node="n1", parent_id="root", base_commit=out1.commit, runner_commit=root,
+                  attempt=2, max_attempts=3, retry={"kind": "edit_self"}, nodes_remaining=5)
+    mounts = runner.calls[0]["mounts"]
+    assert "broken edit" in (mounts.agent / "agent" / "entry.py").read_text()
+    assert "broken edit" not in (mounts.code / "agent" / "entry.py").read_text()
+
+
 def test_failed_edit_attempt_is_still_committed(env):
     make, conn, root, _, _ = env
     runner = FakeRunner({"ok": False, "error": "RuntimeError: boom"}, edit="broken(\n", exit_code=1)
     penv = make(runner)
-    out = run_edit_self(penv, conn=conn, node="n1", parent_id="root", base_commit=root, attempt=1,
+    out = run_edit_self(penv, conn=conn, node="n1", parent_id="root", base_commit=root, runner_commit=root, attempt=1,
                         max_attempts=3, retry=None, nodes_remaining=5)
     assert not out.ok and "boom" in out.error
     assert penv.repo.resolve("refs/attempts/n1/edit_self-1") == out.commit
@@ -98,7 +111,7 @@ def test_token_is_revoked_and_jobs_cancelled_after_the_phase(env, monkeypatch):
     monkeypatch.setattr(queue, "cancel_for_token", lambda t: cancelled.append(t) or 0)
     runner = FakeRunner({"ok": True, "result": {"summary": "x"}})
     penv = make(runner)
-    run_edit_self(penv, conn=conn, node="n1", parent_id="root", base_commit=root, attempt=1,
+    run_edit_self(penv, conn=conn, node="n1", parent_id="root", base_commit=root, runner_commit=root, attempt=1,
                   max_attempts=3, retry=None, nodes_remaining=5)
     token = runner.calls[0]["env"]["AR_TOKEN"]
     assert penv.registry.lookup(token) is None and cancelled == [token]
@@ -109,7 +122,7 @@ def test_staged_files_appear_in_the_recorded_diff(env):
     workspace snapshot alone would miss every staged download."""
     make, conn, root, rec, _ = env
     runner = FakeRunner({"ok": True, "result": {"summary": "x"}}, staged="hf/clip.mp4")
-    run_edit_self(make(runner), conn=conn, node="n1", parent_id="root", base_commit=root, attempt=1,
+    run_edit_self(make(runner), conn=conn, node="n1", parent_id="root", base_commit=root, runner_commit=root, attempt=1,
                   max_attempts=3, retry=None, nodes_remaining=5)
     end = [e for e in rec.read_events("n1") if e["type"] == "phase.end"][0]
     assert rec.load_payload(end["payload"])["diffs"]["staging"]["added"] == ["hf/clip.mp4"]
@@ -118,7 +131,7 @@ def test_staged_files_appear_in_the_recorded_diff(env):
 def test_timeout_is_a_failed_attempt(env):
     make, conn, root, _, _ = env
     out = run_edit_self(make(FakeRunner(None, timed_out=True, exit_code=None)), conn=conn, node="n1",
-                        parent_id="root", base_commit=root, attempt=1, max_attempts=3, retry=None,
+                        parent_id="root", base_commit=root, runner_commit=root, attempt=1, max_attempts=3, retry=None,
                         nodes_remaining=5)
     assert not out.ok and out.timed_out and "timed out" in out.error
 
@@ -126,7 +139,7 @@ def test_timeout_is_a_failed_attempt(env):
 def test_runner_gets_a_liveness_with_the_phase_soft_timeout(env):
     make, conn, root, rec, _ = env
     runner = FakeRunner({"ok": True, "result": {"summary": "s"}})
-    run_edit_self(make(runner), conn=conn, node="n1", parent_id="root", base_commit=root, attempt=1,
+    run_edit_self(make(runner), conn=conn, node="n1", parent_id="root", base_commit=root, runner_commit=root, attempt=1,
                   max_attempts=3, retry=None, nodes_remaining=5)
     lv = runner.calls[0]["liveness"]
     assert lv.soft_s == float(CFG.get("timeouts.edit_self_s")) and runner.calls[0]["timeout_s"] == 4 * lv.soft_s
@@ -166,7 +179,7 @@ def test_retry_continues_from_the_previous_workspace(env):
     assert json.loads((runner.calls[0]["mounts"].context / "retry.json").read_text()) == {"failures": ["x"]}
 
 
-# --- Controller rulings (each gets its own test) ---------------------------
+# --- Edge cases (each gets its own test) ---------------------------
 
 
 def test_invalid_edit_result_is_a_failed_attempt_not_a_crash(env):
@@ -174,7 +187,7 @@ def test_invalid_edit_result_is_a_failed_attempt_not_a_crash(env):
     phase's pydantic model; a missing required field is a clean failure."""
     make, conn, root, _, _ = env
     runner = FakeRunner({"ok": True, "result": {}})   # missing required 'summary'
-    out = run_edit_self(make(runner), conn=conn, node="n1", parent_id="root", base_commit=root, attempt=1,
+    out = run_edit_self(make(runner), conn=conn, node="n1", parent_id="root", base_commit=root, runner_commit=root, attempt=1,
                         max_attempts=3, retry=None, nodes_remaining=5)
     assert not out.ok and out.result is None and out.error
 
@@ -210,11 +223,11 @@ def test_edit_self_passes_previous_workspace_through_on_retry(env):
     _run, so edit_self retries keep /workspace/edit_plan.json."""
     make, conn, root, _, _ = env
     out1 = run_edit_self(make(FakeRunner({"ok": False, "error": "x"}, exit_code=1)), conn=conn, node="n1",
-                         parent_id="root", base_commit=root, attempt=1, max_attempts=3, retry=None,
+                         parent_id="root", base_commit=root, runner_commit=root, attempt=1, max_attempts=3, retry=None,
                          nodes_remaining=5)
     (out1.attempt_dir / "workspace" / "edit_plan.json").write_text('{"component": "prompts"}')
     runner2 = FakeRunner({"ok": True, "result": {"summary": "continued"}})
-    run_edit_self(make(runner2), conn=conn, node="n1", parent_id="root", base_commit=root, attempt=2,
+    run_edit_self(make(runner2), conn=conn, node="n1", parent_id="root", base_commit=root, runner_commit=root, attempt=2,
                   max_attempts=3, retry={"failures": ["x"]}, nodes_remaining=5,
                   previous_workspace=out1.attempt_dir / "workspace")
     kept = runner2.calls[0]["mounts"].workspace / "edit_plan.json"
@@ -249,7 +262,7 @@ def test_token_redaction_falls_back_to_env_recorder_when_registry_uses_a_differe
     penv = make(FakeRunner({"ok": True, "result": {"summary": "x"}}))
     assert penv.registry is not None
     # Normal wiring: registry and env share one recorder, so issue() already redacts it.
-    out = run_edit_self(penv, conn=conn, node="n1", parent_id="root", base_commit=root, attempt=1,
+    out = run_edit_self(penv, conn=conn, node="n1", parent_id="root", base_commit=root, runner_commit=root, attempt=1,
                         max_attempts=3, retry=None, nodes_remaining=5)
     token1 = penv.runner.calls[0]["env"]["AR_TOKEN"]
     assert token1 in rec.redact
@@ -260,17 +273,17 @@ def test_token_redaction_falls_back_to_env_recorder_when_registry_uses_a_differe
     penv.registry = TokenRegistry(other_recorder)
     runner2 = FakeRunner({"ok": True, "result": {"summary": "y"}})
     penv.runner = runner2
-    run_edit_self(penv, conn=conn, node="n1", parent_id="root", base_commit=root, attempt=2,
+    run_edit_self(penv, conn=conn, node="n1", parent_id="root", base_commit=root, runner_commit=root, attempt=2,
                   max_attempts=3, retry=None, nodes_remaining=5)
     token2 = runner2.calls[0]["env"]["AR_TOKEN"]
     assert token2 in rec.redact and token2 in other_recorder.redact
 
 
-# --- Review fix round 1 -----------------------------------------------------
+# --- Hostile or broken agent output -----------------------------------------------------
 
 
 def test_malformed_json_result_is_a_failed_attempt_and_still_committed(env):
-    """Finding 1: bad JSON in result.json must not raise a JSONDecodeError out
+    """Bad JSON in result.json must not raise a JSONDecodeError out
     of the kernel, and edit_self must still commit the attempt."""
     make, conn, root, _, _ = env
 
@@ -279,14 +292,14 @@ def test_malformed_json_result_is_a_failed_attempt_and_still_committed(env):
         return RunResult(0, False, "", "", 1.0, [], "c")
 
     penv = make(bad_json)
-    out = run_edit_self(penv, conn=conn, node="n1", parent_id="root", base_commit=root, attempt=1,
+    out = run_edit_self(penv, conn=conn, node="n1", parent_id="root", base_commit=root, runner_commit=root, attempt=1,
                         max_attempts=3, retry=None, nodes_remaining=5)
     assert not out.ok and out.result is None and out.error
     assert penv.repo.resolve("refs/attempts/n1/edit_self-1") == out.commit
 
 
 def test_non_utf8_result_is_a_failed_attempt_not_a_crash(env):
-    """Finding 1: non-UTF-8 bytes in result.json must not raise a
+    """Non-UTF-8 bytes in result.json must not raise a
     UnicodeDecodeError out of the kernel."""
     make, conn, root, _, _ = env
 
@@ -294,13 +307,13 @@ def test_non_utf8_result_is_a_failed_attempt_not_a_crash(env):
         (mounts.workspace / "result.json").write_bytes(b"\xff\xfe\x00\x01")
         return RunResult(0, False, "", "", 1.0, [], "c")
 
-    out = run_edit_self(make(bad_bytes), conn=conn, node="n1", parent_id="root", base_commit=root,
+    out = run_edit_self(make(bad_bytes), conn=conn, node="n1", parent_id="root", base_commit=root, runner_commit=root,
                         attempt=1, max_attempts=3, retry=None, nodes_remaining=5)
     assert not out.ok and out.result is None and out.error
 
 
 def test_non_object_json_result_is_a_failed_attempt_not_a_crash(env):
-    """Finding 1: a JSON value that isn't an object (e.g. a list) must not
+    """A JSON value that isn't an object (e.g. a list) must not
     raise an AttributeError out of the kernel on body.get(...)."""
     make, conn, root, _, _ = env
 
@@ -314,7 +327,7 @@ def test_non_object_json_result_is_a_failed_attempt_not_a_crash(env):
 
 
 def test_symlinked_result_json_is_not_followed_onto_the_host(env, tmp_path):
-    """Finding 1: a symlinked result.json must be treated as "no result", not
+    """A symlinked result.json must be treated as "no result", not
     resolved and read -- the target could be any host path the container's
     user can reach."""
     make, conn, root, _, _ = env
@@ -326,14 +339,14 @@ def test_symlinked_result_json_is_not_followed_onto_the_host(env, tmp_path):
         return RunResult(0, False, "", "", 1.0, [], "c")
 
     penv = make(symlink_result)
-    out = run_edit_self(penv, conn=conn, node="n1", parent_id="root", base_commit=root, attempt=1,
+    out = run_edit_self(penv, conn=conn, node="n1", parent_id="root", base_commit=root, runner_commit=root, attempt=1,
                         max_attempts=3, retry=None, nodes_remaining=5)
     assert not out.ok and "no result.json" in out.error
     assert penv.repo.resolve("refs/attempts/n1/edit_self-1") == out.commit
 
 
 def test_image_build_failure_is_a_failed_attempt_and_edit_self_still_commits(env, monkeypatch):
-    """Finding 2: an agent-authored requirements.txt that fails to build must
+    """An agent-authored requirements.txt that fails to build must
     become a failed PhaseOutcome (with phase.end recorded), not an exception
     that skips edit_self's commit -- a retry needs that commit as its
     base_commit."""
@@ -347,7 +360,7 @@ def test_image_build_failure_is_a_failed_attempt_and_edit_self_still_commits(env
     monkeypatch.setattr("ar_kernel.agent_phase.ensure_image", boom)
     runner = FakeRunner({"ok": True, "result": {"summary": "unused"}})
     penv = make(runner)
-    out = run_edit_self(penv, conn=conn, node="n1", parent_id="root", base_commit=root, attempt=1,
+    out = run_edit_self(penv, conn=conn, node="n1", parent_id="root", base_commit=root, runner_commit=root, attempt=1,
                         max_attempts=3, retry=None, nodes_remaining=5)
     assert not out.ok and "pip install exploded" in out.error
     assert penv.repo.resolve("refs/attempts/n1/edit_self-1") == out.commit
@@ -357,7 +370,7 @@ def test_image_build_failure_is_a_failed_attempt_and_edit_self_still_commits(env
 
 
 def test_rerunning_the_same_attempt_number_clears_stale_staging(env, tmp_path):
-    """Finding 3: staging lives outside the attempt dir, so re-running the same
+    """Staging lives outside the attempt dir, so re-running the same
     attempt number must clear it too, or stale files pollute the new run."""
     make, conn, root, _, _ = env
     run_dir = tmp_path / "run"
@@ -374,7 +387,7 @@ def test_rerunning_the_same_attempt_number_clears_stale_staging(env, tmp_path):
 
 
 def test_runner_exception_still_revokes_token_and_cancels_jobs(env, monkeypatch):
-    """Finding 4: an exception raised by the container call (or anything after
+    """An exception raised by the container call (or anything after
     the token is issued) must still revoke the token and cancel its jobs."""
     make, conn, root, _, queue = env
     cancelled = []
@@ -382,7 +395,7 @@ def test_runner_exception_still_revokes_token_and_cancels_jobs(env, monkeypatch)
     runner = FakeRunner(None, raises=RuntimeError("docker exploded"))
     penv = make(runner)
     with pytest.raises(RuntimeError, match="docker exploded"):
-        run_edit_self(penv, conn=conn, node="n1", parent_id="root", base_commit=root, attempt=1,
+        run_edit_self(penv, conn=conn, node="n1", parent_id="root", base_commit=root, runner_commit=root, attempt=1,
                       max_attempts=3, retry=None, nodes_remaining=5)
     token = runner.calls[0]["env"]["AR_TOKEN"]
     assert penv.registry.lookup(token) is None
@@ -393,7 +406,7 @@ def test_ok_must_be_the_literal_true_not_merely_truthy(env):
     """Cheap fix: `{"ok": 1}` (truthy but not True) must not be treated as success."""
     make, conn, root, _, _ = env
     out = run_edit_self(make(FakeRunner({"ok": 1, "result": {"summary": "x"}})), conn=conn, node="n1",
-                        parent_id="root", base_commit=root, attempt=1, max_attempts=3, retry=None,
+                        parent_id="root", base_commit=root, runner_commit=root, attempt=1, max_attempts=3, retry=None,
                         nodes_remaining=5)
     assert not out.ok and out.result is None
 
@@ -403,11 +416,11 @@ def test_error_field_is_coerced_to_a_string_with_a_fallback(env):
     or PhaseOutcome; a missing error gets a clear fallback message."""
     make, conn, root, _, _ = env
     out1 = run_edit_self(make(FakeRunner({"ok": False})), conn=conn, node="n1", parent_id="root",
-                         base_commit=root, attempt=1, max_attempts=3, retry=None, nodes_remaining=5)
+                         base_commit=root, runner_commit=root, attempt=1, max_attempts=3, retry=None, nodes_remaining=5)
     assert out1.error == "agent reported failure without an error"
 
     out2 = run_edit_self(make(FakeRunner({"ok": False, "error": 42})), conn=conn, node="n1",
-                         parent_id="root", base_commit=root, attempt=2, max_attempts=3, retry=None,
+                         parent_id="root", base_commit=root, runner_commit=root, attempt=2, max_attempts=3, retry=None,
                          nodes_remaining=5)
     assert out2.error == "42"
 
@@ -422,10 +435,10 @@ def _edit_then_retry(make, conn, root, mutate):
         (mounts.workspace / "result.json").write_text(json.dumps({"ok": True, "result": {"summary": "x"}}))
         return RunResult(0, False, "", "", 1.0, [], "c")
 
-    out1 = run_edit_self(make(runner), conn=conn, node="n1", parent_id="root", base_commit=root, attempt=1,
+    out1 = run_edit_self(make(runner), conn=conn, node="n1", parent_id="root", base_commit=root, runner_commit=root, attempt=1,
                          max_attempts=3, retry=None, nodes_remaining=5)
     retry_runner = FakeRunner({"ok": True, "result": {"summary": "unused"}})
-    out2 = run_edit_self(make(retry_runner), conn=conn, node="n1", parent_id="root", base_commit=out1.commit,
+    out2 = run_edit_self(make(retry_runner), conn=conn, node="n1", parent_id="root", base_commit=out1.commit, runner_commit=root,
                          attempt=2, max_attempts=3, retry={"failures": []}, nodes_remaining=5)
     return out1, out2, retry_runner
 
@@ -443,11 +456,12 @@ def test_committed_symlink_leaving_the_tree_fails_the_retry_instead_of_raising(e
     lambda agent: ((agent / "requirements.txt").mkdir(), (agent / "requirements.txt" / "x").write_text("")),
     lambda agent: (agent / "requirements.txt").write_bytes(b"\xff\xfe not utf-8"),
 ], ids=["directory", "non_utf8"])
-def test_unreadable_requirements_txt_is_a_failed_attempt(env, mutate):
+def test_unreadable_requirements_txt_in_the_edited_tree_does_not_stop_the_retry(env, mutate):
+    """The retry runs the parent's code, so its image comes from the parent's requirements and the
+    agent can repair the file. (The contract check refuses the unreadable file itself.)"""
     make, conn, root, _, _ = env
     _, out2, retry_runner = _edit_then_retry(make, conn, root, mutate)
-    assert not out2.ok and "requirements.txt" in out2.error and retry_runner.calls == []
-    assert out2.commit                                   # the (unchanged) attempt tree is still committed
+    assert out2.ok and len(retry_runner.calls) == 1
 
 
 def test_uncommittable_agent_tree_is_a_failed_attempt(env):
@@ -463,7 +477,7 @@ def test_uncommittable_agent_tree_is_a_failed_attempt(env):
         (mounts.workspace / "result.json").write_text(json.dumps({"ok": True, "result": {"summary": "x"}}))
         return RunResult(0, False, "", "", 1.0, [], "c")
 
-    out = run_edit_self(make(runner), conn=conn, node="n1", parent_id="root", base_commit=root, attempt=1,
+    out = run_edit_self(make(runner), conn=conn, node="n1", parent_id="root", base_commit=root, runner_commit=root, attempt=1,
                         max_attempts=3, retry=None, nodes_remaining=5)
     (out.attempt_dir / "agent" / "agent" / "locked.py").chmod(0o644)
     assert not out.ok and "commit" in out.error and out.commit is None
@@ -538,7 +552,7 @@ def test_container_commits_data_through_the_real_tool_server(tmp_path):
 def test_agent_phases_get_the_configured_network(env):
     make, conn, root, rec, _ = env
     runner = FakeRunner({"ok": True, "result": {"summary": "s"}})
-    run_edit_self(make(runner), conn=conn, node="n1", parent_id="root", base_commit=root, attempt=1,
+    run_edit_self(make(runner), conn=conn, node="n1", parent_id="root", base_commit=root, runner_commit=root, attempt=1,
                   max_attempts=3, retry=None, nodes_remaining=5)
     assert runner.calls[0]["network"] == CFG.get("sandbox.network") == "bridge"
 
@@ -550,7 +564,7 @@ def test_agents_see_every_finished_node_under_nodes(env, tmp_path):
     for node in ("root", "n1", "n2"):
         (tmp_path / "run" / "nodes" / node / "eval").mkdir(parents=True)
     runner = FakeRunner({"ok": True, "result": {"summary": "s"}})
-    run_edit_self(make(runner), conn=conn, node="n2", parent_id="n1", base_commit=root, attempt=1,
+    run_edit_self(make(runner), conn=conn, node="n2", parent_id="n1", base_commit=root, runner_commit=root, attempt=1,
                   max_attempts=3, retry=None, nodes_remaining=5)
     assert runner.calls[0]["mounts"].nodes == {"n1": tmp_path / "run" / "nodes" / "n1",
                                                "root": tmp_path / "run" / "nodes" / "root"}

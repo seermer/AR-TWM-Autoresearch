@@ -1,4 +1,4 @@
-"""Data tools (spec 10): video_probe, data_ingest, data_query, data_commit, recipe_check."""
+"""Data tools: video_probe, data_ingest, data_query, data_commit, recipe_check."""
 from __future__ import annotations
 
 import json
@@ -56,7 +56,7 @@ class DataTools:
         built = []
         for i, c in enumerate(candidates):
             if not c.get("provenance"):
-                raise ToolError(f"candidate {i}: provenance is required (spec 5.4)")
+                raise ToolError(f"candidate {i}: provenance is required")
             for key in ("video", "caption", "camera_motion"):
                 if not c.get(key):
                     raise ToolError(f"candidate {i}: {key} is required")
@@ -126,7 +126,7 @@ class DataTools:
             except Exception as exc:
                 raise ToolError(f"unknown data commit {data_commit!r}") from exc
             parent_commit = _parent_commit(conn, caller.node)
-            with self.gpu_lock:          # the describe step is a GPU job (verification finding 1)
+            with self.gpu_lock:          # the describe step is a GPU job
                 result = Gate(self.cfg, store, self.recorder).check(
                     recipe, data_commit, parent_commit, caller.node, scratch, self.run_dir, self.gpus)
         finally:
@@ -174,7 +174,7 @@ def dataset_stats(manifest: dict, clips: list[dict]) -> dict[str, dict]:
 
 
 def clip_record(clip: dict, usage: dict[str, list[float]]) -> dict:
-    """Shape one archive clip row for data_query's result (Task 13's context
+    """Shape one archive clip row for data_query's result (the context
     bundle reuses this instead of re-deriving it from ClipStore rows)."""
     return {"clip_id": clip["clip_id"], "formats": clip["formats"],
             "camera_motion": clip["camera_motion"], "metadata": clip["metadata"],
@@ -202,7 +202,7 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
     async def video_probe(path: str, ctx: Context) -> dict:
         return await kit.call(ctx, "video_probe", {"path": path}, lambda c: tools.probe(c, path))
 
-    @mcp.tool(name="data_ingest", description="Ingest staged candidates (spec 5.5). Each: video, "
+    @mcp.tool(name="data_ingest", description="Ingest staged candidates. Each: video, "
               "caption, optional pose (container paths under /workspace/staging), camera_motion "
               "'moving'|'static', provenance, optional license and derived_from. Ingest MOVES each "
               "staged file into the archive: copy it first if you still need it. Returns accepted + "
@@ -218,7 +218,7 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
     async def data_query(filter: dict[str, Any], ctx: Context) -> dict:
         return await kit.call(ctx, "data_query", {"filter": filter}, lambda c: tools.query(c, filter))
 
-    @mcp.tool(name="data_commit", description="Create an immutable data commit (spec 5.6). "
+    @mcp.tool(name="data_commit", description="Create an immutable data commit. "
               "datasets: {name: {format, prompt_mode, weight, clips: [clip_id]}}. Set prompt_mode only for "
               "format video_timed_prompts_camera; omit it for every other format.")
     async def data_commit(parent: str | None, datasets: dict[str, Any], message: str,
@@ -227,7 +227,7 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
                               {"parent": parent, "datasets": datasets, "message": message},
                               lambda c: tools.commit(c, parent, datasets, message))
 
-    @mcp.tool(name="recipe_check", description="Run every recipe-gate check (spec 8) on a recipe "
+    @mcp.tool(name="recipe_check", description="Run every recipe-gate check on a recipe "
               "and data commit without consuming an attempt. `recipe` is a flat {tunable key: value} map, "
               "e.g. {\"optimizer.lr\": 1e-4}, with no wrapper key. Returns ok and the failures.")
     async def recipe_check(recipe: dict[str, Any], data_commit: str, ctx: Context) -> dict:

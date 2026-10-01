@@ -1,8 +1,8 @@
 """run_in_env must be safe to use from an unattended multi-day loop.
 
-Review I6: subprocess.run(timeout=) killed only the `conda run` process, so
+subprocess.run(timeout=) killed only the `conda run` process, so
 torchrun ranks and WBench multiprocessing workers were orphaned and kept holding
-GPUs -- the exact failure the Task 14 verification hit, where two orphaned spawn
+GPUs -- the failure a real run hit, where two orphaned spawn
 workers held ~19 GB for 35 minutes and made the next job OOM. A timeout also
 wrote no event and dropped the output captured so far.
 """

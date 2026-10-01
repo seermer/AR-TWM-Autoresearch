@@ -125,7 +125,7 @@ def test_commit_validation_errors_become_tool_errors(env):
 
 
 def test_recipe_check_reports_gate_failures_without_leaving_a_view(env, monkeypatch):
-    """Controller ruling: the brief's version of this test is vacuous -- its recipe
+    """An earlier version of this test was vacuous -- its recipe
     fails the "not tunable" check before Gate.check ever reaches materialize(), so
     the "no leftover view" assertion passed even with cleanup code deleted.
 

@@ -1,4 +1,4 @@
-"""Run one agent phase attempt end to end (spec 7.2 steps 3 and 5)."""
+"""Run one agent phase attempt end to end."""
 from __future__ import annotations
 
 import json
@@ -51,7 +51,7 @@ class PhaseOutcome:
 
 def attempt_dirs(run_dir: Path, node: str, phase: str, attempt: int) -> dict[str, Path]:
     base = Path(run_dir) / "nodes" / node / "attempts" / f"{phase}-{attempt}"
-    return {"attempt": base, "agent": base / "agent", "workspace": base / "workspace",
+    return {"attempt": base, "agent": base / "agent", "code": base / "code", "workspace": base / "workspace",
             "context": base / "context", "staging": Path(run_dir) / "staging" / node / f"{phase}-{attempt}"}
 
 
@@ -73,7 +73,9 @@ def _failed_before_start(dirs: dict, started: float, error: str) -> tuple:
 
 def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str, ctx,
          mock_script: str | None, agent_readonly: bool, previous_workspace: Path | None,
-         nodes: dict[str, Path]) -> tuple:
+         nodes: dict[str, Path], runner_commit: str | None = None) -> tuple:
+    """`code_commit` is checked out at /agent. `runner_commit`, when given, is the code that runs
+    instead, checked out at /code."""
     dirs = attempt_dirs(env.run_dir, node, phase, attempt)
     started = time.monotonic()
     if dirs["attempt"].exists():
@@ -85,6 +87,10 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
     except CheckoutError as exc:            # e.g. a committed symlink out of the tree
         shutil.rmtree(dirs["agent"])        # no tree: edit_self commits nothing
         return _failed_before_start(dirs, started, f"cannot check out the agent code: {exc}")
+    running = dirs["agent"]
+    if runner_commit is not None:
+        running = dirs["code"]
+        env.repo.checkout(runner_commit, running)       # a commit that already passed the contract check
     if previous_workspace is not None and Path(previous_workspace).exists():
         prev_ws = Path(previous_workspace)
         try:
@@ -106,7 +112,7 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
         shutil.rmtree(result_file)
     (Path(env.run_dir) / "store").mkdir(exist_ok=True)
     write_bundle(ctx, dirs["context"])
-    reqs = dirs["agent"] / "agent" / "requirements.txt"
+    reqs = running / "agent" / "requirements.txt"
     try:
         reqs_text = reqs.read_text(encoding="utf-8") if reqs.exists() else ""
     except (OSError, UnicodeDecodeError) as exc:     # e.g. a directory, or not UTF-8
@@ -137,7 +143,8 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
             mounts=Mounts(agent=dirs["agent"], workspace=dirs["workspace"], staging=dirs["staging"],
                           context=dirs["context"], store=Path(env.run_dir) / "store",
                           contract=env.cfg.repo_root / "contract", sockets=env.socket_dir,
-                          agent_readonly=agent_readonly, nodes=nodes),
+                          agent_readonly=agent_readonly, nodes=nodes,
+                          code=running if runner_commit is not None else None),
             command=["python", "-m", "ar_contract.run", phase],
             env={"AR_TOKEN": caller.token, "AR_DEFAULT_MODEL": env.default_model, "AR_NODE": node,
                  "AR_PHASE": phase, "AR_ATTEMPT": str(attempt),
@@ -145,7 +152,7 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
                  "AR_COMPACT_AT": str(env.cfg.get("agents.compact_at"))},
             cpus=env.cfg.get("sandbox.cpus"), memory_gb=env.cfg.get("sandbox.memory_gb"),
             network=env.cfg.get("sandbox.network"),
-            timeout_s=4 * soft,                 # hard cap (spec 14.5)
+            timeout_s=4 * soft,                 # hard cap
             liveness=liveness,
             recorder=env.recorder, node=node, phase=phase, attempt=attempt)
     finally:
@@ -206,19 +213,23 @@ def _outcome(env, phase, node, attempt, dirs, result, body, diffs, duration, com
     return outcome
 
 
-def run_edit_self(env: PhaseEnv, *, conn, node: str, parent_id: str, base_commit: str, attempt: int,
-                  max_attempts: int, retry: dict | None, nodes_remaining: int,
+def run_edit_self(env: PhaseEnv, *, conn, node: str, parent_id: str, base_commit: str, runner_commit: str,
+                  attempt: int, max_attempts: int, retry: dict | None, nodes_remaining: int,
                   previous_workspace: Path | None = None, mock_script: str | None = None,
                   dry_run: bool = False) -> PhaseOutcome:
+    """`base_commit`: the tree to edit (the parent's, or a failed attempt's on a retry).
+    `runner_commit`: the parent's code, which runs the phase, so an edit that broke the agent can
+    still be repaired on a retry."""
     ctx = build_edit_context(conn=conn, run_dir=env.run_dir, repo=env.repo, parent_id=parent_id,
                              attempt=attempt, max_attempts=max_attempts, retry=retry,
                              nodes_remaining=nodes_remaining, dry_run=dry_run)
     dirs, result, body, diffs, duration = _run(env, phase="edit_self", node=node, attempt=attempt,
                                                code_commit=base_commit, ctx=ctx, mock_script=mock_script,
                                                agent_readonly=False, previous_workspace=previous_workspace,
-                                               nodes=finished_node_dirs(conn, env.run_dir))
-    # The edited code is committed to an attempt ref whether or not the attempt succeeded (spec
-    # 5.2). No tree, or an uncommittable one, means no commit and a failed attempt.
+                                               nodes=finished_node_dirs(conn, env.run_dir),
+                                               runner_commit=runner_commit)
+    # The edited code is committed to an attempt ref whether or not the attempt succeeded.
+    # No tree, or an uncommittable one, means no commit and a failed attempt.
     commit = None
     if dirs["agent"].exists():
         try:

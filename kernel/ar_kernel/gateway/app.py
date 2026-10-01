@@ -1,4 +1,4 @@
-"""The only route from a container to an LLM (spec 4.2, 13.1, 13.3)."""
+"""The only route from a container to an LLM."""
 from __future__ import annotations
 
 import asyncio
@@ -97,7 +97,7 @@ class Upstream:
                     try:
                         payload = r.json() if r.content else {}
                     except ValueError:        # e.g. an HTML error page from a proxy in front of the API
-                        # No truncation of telemetry (spec 13.1.3): the full body is recorded,
+                        # No truncation of telemetry: the full body is recorded,
                         # even though it never reaches the agent JSON-encoded verbatim either way.
                         payload = {"error": {"message": f"upstream returned HTTP {status} with a "
                                                         f"non-JSON body", "body": r.text}}
@@ -114,7 +114,7 @@ class Upstream:
 def create_gateway_app(*, registry, store: CallStore, allowed_models: set[str],
                        upstream: Upstream | None, mocks: MockBook,
                        budget: Budget | None = None) -> FastAPI:
-    # Bounds CallStore's memory to live containers (Task 4 ruling): once a token is
+    # Bounds CallStore's memory to live containers: once a token is
     # revoked, its linking state is dropped along with it.
     registry.on_revoke(store.forget)
 

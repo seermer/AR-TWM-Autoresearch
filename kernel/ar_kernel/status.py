@@ -1,4 +1,4 @@
-"""`ar status` (spec 13.4): one plain-JSON snapshot of a run. Any future UI reads this."""
+"""`ar status`: one plain-JSON snapshot of a run. Any future UI reads this."""
 from __future__ import annotations
 
 import json

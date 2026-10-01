@@ -129,7 +129,7 @@ def _envs(cfg: KernelConfig) -> list[Finding]:
             out.append(Finding("ok", f"env.{e}", str(local)))
         elif e in names:
             out.append(Finding("warn", f"env.{e}", "a named conda env outside the project; "
-                                                   "move it to .envs/ (docs/PORTABILITY.md)"))
+                                                   "move it to .envs/"))
         elif listing_error:
             out.append(Finding("warn", f"env.{e}", f"not in .envs/ and conda could not list environments: {listing_error}"))
         else:
@@ -160,7 +160,7 @@ def _dotenv(cfg: KernelConfig) -> list[Finding]:
 
 
 def _prefix_envs(cfg: KernelConfig) -> list[Finding]:
-    """Enabled tools whose `env` is a conda-prefix path inside the repo (Plan 3 disk ruling)."""
+    """Enabled tools whose `env` is a conda-prefix path inside the repo."""
     blocks = {"annotate": cfg.get("annotate") or {}, "images": cfg.get("images") or {},
               **{f"generators.{k}": v for k, v in (cfg.get("generators") or {}).items()}}
     out = []
@@ -175,7 +175,7 @@ def _prefix_envs(cfg: KernelConfig) -> list[Finding]:
         out.append(Finding("ok", f"env.{name.split('.')[-1]}", str(path))
                    if (path / "conda-meta").is_dir()
                    else Finding("fail", f"env.{name.split('.')[-1]}",
-                                f"prefix env missing at {path}; see docs/PORTABILITY.md"))
+                                f"prefix env missing at {path}"))
     return out
 
 

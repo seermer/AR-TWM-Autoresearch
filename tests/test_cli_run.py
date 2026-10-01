@@ -189,7 +189,7 @@ def test_resume_refuses_when_the_runs_git_remote_is_unreachable(tmp_path, monkey
     assert Control(run).alive_pid() is None
 
 
-# ---- stop and resume around a kernel that will not exit (acceptance_20260928) ----
+# ---- stop and resume around a kernel that will not exit ----
 
 def _patch_until_drive(monkeypatch, drive):
     monkeypatch.setattr(cli, "check_visible", lambda gpus: None)

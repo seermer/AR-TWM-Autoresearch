@@ -75,8 +75,7 @@ def test_two_step_training_writes_a_checkpoint(tmp_path):
     assert (outcome.checkpoint / "history_encoder.pt").exists()
 
 # Two WBench metric inputs are stochastic, so a single tolerance cannot cover all
-# metrics. Measured by re-running the 2026-09-13 reference generation end to end
-# (see docs/superpowers/plans/verification-log.md):
+# metrics. Measured by re-running the 2026-09-13 reference generation end to end:
 #
 #   deterministic metrics   max |delta| 0.0007   GPU float noise only
 #   POSE_DERIVED            max |delta| 0.0084   MegaSAM's pose solver is not

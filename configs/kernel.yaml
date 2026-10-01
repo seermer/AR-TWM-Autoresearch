@@ -13,21 +13,21 @@ retries:
 budget:                          # run-wide LLM spend cap in dollars, enforced by the gateway (user decision 2026-09-27)
   max_usd: null                  # null = no cap (the default)
   usd_per_mtok: {input: null, cached_input: null, output: null}   # needed for max_usd and for cost in `ar status`
-liveness:                        # spec 14.5
+liveness:
   probe_window_min: 10
   extension_frac: 0.25
   probe_every_s: 30              # during a probe window, read the progress signals at most this often
-alerts:                          # spec 13.4
+alerts:
   stall_min: 30
   gateway_error_rate: 0.2
   gateway_error_window_min: 5
-selection:                       # continuous softmax parent selection (Task 3; user decision 2026-09-27)
+selection:                       # continuous softmax parent selection (user decision 2026-09-27)
   decay: 0.5                     # weight per generation below a node: child 1x decay, grandchild decay^2 ...
   prior_weight: 1.0               # the node's own score as one virtual child: pulls the subtree mean toward it
   subtree_share: 0.3              # value = (1 - share) * own score + share * subtree mean
   size_scale: 4                   # size penalty 1 / (1 + size / scale); size = descendants, decayed per generation
   temperature: 2.0                # softmax temperature, in units of the spread of values across candidates
-  noise_floor: 4.4e-4              # the spread never counts as smaller than proxy noise (verification-log finding 5)
+  noise_floor: 4.4e-4              # the spread never counts as smaller than proxy noise
   epsilon: 0.2                    # this share of probability is spread uniformly over all candidates
 ingest:
   aspect_tolerance: 0.02
@@ -63,7 +63,7 @@ captioner:                       # caption_videos GPU job: a local vLLM server, 
   env: vllm             # conda env with vLLM (0.29.0), lives in .envs/vllm
   model: Qwen/Qwen3.8-27B-FP8    # resolved by id through the HF cache (HF_HUB_OFFLINE=1: never downloads)
   tensor_parallel: null          # null = the largest power of two <= the number of node GPUs
-  # The owner's launch on 4 x 24 GB, checked on 57 clips (verification log, 2026-09-28). vLLM test-runs the
+  # The owner's launch on 4 x 24 GB, checked on 57 clips (2026-09-28). vLLM test-runs the
   # vision encoder at startup on min(max_num_batched_tokens / 12288, max_num_seqs) max-size videos, so
   # 262144 / 32 ran out of memory at startup; at 0.95 the engine ran out of memory while serving.
   max_model_len: 81920
@@ -71,7 +71,7 @@ captioner:                       # caption_videos GPU job: a local vLLM server, 
   max_num_seqs: 20               # clips are sent concurrently, up to this many at a time
   # vLLM sizes the encoder cache as max(max_num_batched_tokens, its estimate of one video's tokens); the
   # estimate (12288) is exceeded by clips with an odd sampled frame count (1080p, 13 frames: 14280 tokens),
-  # which vLLM rejects with HTTP 400 (verification log, 2026-09-28).
+  # which vLLM rejects with HTTP 400 (2026-09-28).
   max_num_batched_tokens: 32768
   reasoning_parser: qwen3        # the model reasons; its reasoning is recorded per clip, not returned
   reasoning_effort: medium       # sent with each request (the chat template takes low / medium / xhigh)
@@ -100,24 +100,24 @@ sandbox:
   network: bridge                # default: docker's bridge, outbound internet for pip, curl, wget in the
                                  # edit_self and improve_recipe containers; `none` = offline. Contract
                                  # verification containers are always offline.
-timeouts:                        # soft timeouts (spec 14.5); Plan 2 enforces the hard cap = 4x soft
+timeouts:                        # soft timeouts; the hard cap is 4x soft
   edit_self_s: 7200
   improve_recipe_s: 86400
   contract_import_s: 60
   contract_smoke_s: 900
-  train_s: 172800                # 48 h soft; liveness = train.log growth (spec 14.5)
+  train_s: 172800                # 48 h soft; liveness = train.log growth
   eval_s: 43200                  # 12 h soft per render / WBench phase; liveness = output files
-annotate:                         # annotate_camera GPU job (spec 10, 16.3 item 6)
-  enabled: true                   # ViGeo verified on the example clips (Plan 3 Task 4)
+annotate:                         # annotate_camera GPU job
+  enabled: true                   # ViGeo verified on the example clips
   env: alayaworld
   repo: third_party/ViGeo         # relative to paths.worldmodel
   checkpoint: third_party/ViGeo/checkpoints/ViGeo1.1
   max_frames: 1200                # longer clips are refused per clip (memory)
   max_items: 100
   timeout_s: 21600
-images:                           # generate_images GPU job (Z-Image-Turbo first frames, Plan 3 Task 5)
-  enabled: true                   # verified: 8 prompts on 4 GPUs, gpu_memory_released true (Task 5 report)
-  env: .envs/gen-zimage           # a conda-prefix env inside the repo (disk budget; see docs/PORTABILITY.md)
+images:                           # generate_images GPU job (Z-Image-Turbo first frames)
+  enabled: true                   # verified: 8 prompts on 4 GPUs, gpu_memory_released true
+  env: .envs/gen-zimage           # a conda-prefix env inside the repo
   weights: weights/z-image-turbo
   revision: f332072aa78be7aecdf3ee76d5c247082da564a6
   steps: 9
@@ -126,12 +126,12 @@ images:                           # generate_images GPU job (Z-Image-Turbo first
   max_items: 100
   timeout_s: 7200
   license: Apache-2.0
-generators:                       # rollout_* GPU jobs; a variant is enabled only after its smoke (spec 16.3 item 5)
+generators:                       # rollout_* GPU jobs; a variant is enabled only after its smoke
   alayaworld:
     env: alayaworld
     # dmd4 = configs/wbench_full.yaml as the eval renders; ar30 = the same without the DMD LoRA, 30 steps.
     # Clips carry no pose (user decision 2026-09-26: the renders follow commanded turns/orbits only
-    # weakly); agents run annotate_camera for it. Enabled after the Task 6 fix-1 smoke: every clip
+    # weakly); agents run annotate_camera for it. Enabled after its smoke run: every clip
     # ingested as per_chunk with its ViGeo pose.
     variants: {dmd4: {enabled: true}, ar30: {enabled: true}}
     max_turns: 9
@@ -139,33 +139,33 @@ generators:                       # rollout_* GPU jobs; a variant is enabled onl
     timeout_s: 43200
     license: LTX-2 Community License (AlayaWorld is an LTX-2 derivative)
   wan22:
-    env: .envs/gen-wan22           # a conda-prefix env inside the repo (disk budget; see docs/PORTABILITY.md)
-    repo: third_party/Wan2.2      # relative to the AutoResearcher repo; gitignored, cloned per docs/PORTABILITY.md
+    env: .envs/gen-wan22           # a conda-prefix env inside the repo
+    repo: third_party/Wan2.2      # relative to the AutoResearcher repo; gitignored
     commit: 1ea34ff48f87168174e12956e200b1d908b1c5ff   # pinned; the backend refuses to run off this commit
     weights: weights/wan2.2-ti2v-5b
-    variants: {ti2v-5b: {enabled: true}}   # Task 7 smoke: 2 T2V + 2 I2V pass ingest (verification-log)
+    variants: {ti2v-5b: {enabled: true}}   # smoke run: 2 T2V + 2 I2V pass ingest
     gpus_per_worker: 1
     workers: null                 # null = as many as the GPU list allows
     frames: [121, 121]            # [default, max]; 4k+1
-    # Task 7 fit spike (1280x704, 121 frames, 50 steps, 24 GB card): no-offload OOMs in the VAE
+    # Fit test (1280x704, 121 frames, 50 steps, 24 GB card): no-offload OOMs in the VAE
     # decode; T5 on GPU is no faster (9:41 vs 9:24 wall). Peak 22.9 GiB allocated: the whole card.
     extra_args: {offload_model: true, t5_cpu: true}
     max_items: 100
     timeout_s: 43200
     license: Apache-2.0
   ltx25:
-    env: .envs/gen-ltx25           # a conda-prefix env inside the repo (disk budget; see docs/PORTABILITY.md)
-    repo: third_party/LTX-2       # relative to the AutoResearcher repo; gitignored, cloned per docs/PORTABILITY.md
+    env: .envs/gen-ltx25           # a conda-prefix env inside the repo
+    repo: third_party/LTX-2       # relative to the AutoResearcher repo; gitignored
     commit: a95ab856bf29407b6b066ede0abe1846050db56c   # pinned; the backend refuses to run off this commit
     weights: weights/ltx-2.5
-    # peak_rss_gib: one worker's private host RAM (Task 8 spike, 1024x576x121): peak RSS is ~72 GiB,
+    # peak_rss_gib: one worker's private host RAM (1024x576x121): peak RSS is ~72 GiB,
     # but half of it is the mmapped weight files (page cache, shared by every worker); the private
     # (RssAnon) peak is 35.4 GiB distilled / 36.8 GiB dev, and 4 concurrent distilled workers took
     # 147 GiB of MemAvailable (36.7 each). distilled: 59 s/clip alone, 4 workers ~100 s/clip each
     # (26 s/clip throughput); smoke on GPUs 0-3 passed. dev: 342 s/clip warm = 5.8x distilled
-    # (> 4x), so it stays disabled (brief rule); it fits (same 10 GiB GPU peak).
+    # (> 4x), so it stays disabled; it fits (same 10 GiB GPU peak).
     variants: {distilled: {enabled: true, peak_rss_gib: 40}, dev: {enabled: false, peak_rss_gib: 40}}
-    quantization: fp8-cast        # 24 GB cards: fp8-cast + CPU offload, one GPU per worker (Plan 3 fact 7)
+    quantization: fp8-cast        # 24 GB cards: fp8-cast + CPU offload, one GPU per worker
     offload: cpu
     # host_reserve_gib also holds the ~36 GiB of shared mmapped weights, which MemAvailable counts as
     # free: at 60, 4 workers thrashed page cache and systemd-oomd killed the loop (2026-09-30).
@@ -175,5 +175,5 @@ generators:                       # rollout_* GPU jobs; a variant is enabled onl
     resolutions: [[576, 1024]]    # [height, width], each divisible by 64 (two-stage), 16:9
     max_items: 100
     timeout_s: 28800              # 8 h. Worst case from measurements: 100 cold 241-frame clips on 4 workers =
-                                  # 25 per worker x ~900 s (2x the ~400 s cold 121-frame clip, Task 8) ~ 6.3 h
+                                  # 25 per worker x ~900 s (2x the ~400 s cold 121-frame clip) ~ 6.3 h
     license: LTX-2 Community License

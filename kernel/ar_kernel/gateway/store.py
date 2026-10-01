@@ -1,8 +1,8 @@
-"""Fail-closed LLM call records with conversation linking (spec 13.3, row "LLM calls").
+"""Fail-closed LLM call records with conversation linking.
 
 Linking, in order: an explicit previous_response_id; a Responses API conversation
 id; otherwise the request's history begins with a prior call's request + response
-(how ChatOpenAI continues a run, fact 6). Prefix matching only looks at calls from the
+(how ChatOpenAI continues a run). Prefix matching only looks at calls from the
 same container token. A Chat Completions assistant message is compared by what a client
 sends back (content, tool call ids/names/parsed arguments, reasoning), because
 upstream replies carry extra fields (`refusal`, `annotations`, tool-call `index`) and may

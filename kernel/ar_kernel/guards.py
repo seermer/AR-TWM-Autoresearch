@@ -1,4 +1,4 @@
-"""Run alerts (spec 13.4) and the start-time GPU visibility check (14.6). There is deliberately no
+"""Run alerts and the start-time GPU visibility check. There is deliberately no
 wait for idle GPUs (user decision 2026-09-27)."""
 from __future__ import annotations
 

@@ -86,7 +86,7 @@ def _cam(ids):
 
 
 def test_rematerializing_a_smaller_commit_removes_stale_clips(store):
-    """Review C1: a gate retry reuses node_dir/view. A clip dropped between
+    """A gate retry reuses node_dir/view. A clip dropped between
     attempts must not survive in the view, or the node trains on data its
     recorded commit does not contain -- the loader lists videos/ directly."""
     cs, ids, tmp = store
@@ -143,7 +143,7 @@ def test_duplicate_clip_in_a_dataset_is_rejected(store):
 
 @pytest.mark.parametrize("weight", [float("inf"), float("nan"), "heavy"])
 def test_non_finite_or_non_numeric_weight_is_rejected(store, weight):
-    """Review I4: weight inf passed validation, then steps_per_epoch raised
+    """Weight inf passed validation, then steps_per_epoch raised
     'cannot convert float NaN to integer' inside the gate."""
     cs, ids, _ = store
     with pytest.raises(CommitError, match="weight"):

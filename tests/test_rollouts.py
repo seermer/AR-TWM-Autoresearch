@@ -240,7 +240,7 @@ def test_limits_come_from_the_generator_config_block(tmp_path):
 # ---- finish: trim to the per_chunk grid, poses, segments ----
 
 def _render_output(out, i, *, rounds, cpt, prompts, first=-7):
-    """What produce leaves in out/ for one case. Measured layout (Step 2): round r = mp4 frames
+    """What produce leaves in out/ for one case. Measured layout: round r = mp4 frames
     [first + 32r, first + 32r + 32) with first = -7, and nominal turn_segments (as WorldModel
     writes them, ignoring `first`)."""
     frames = first + rounds * 32
@@ -458,7 +458,7 @@ def test_build_gpu_backends_includes_alayaworld_only_with_an_enabled_variant(tmp
         assert ("rollout_alayaworld" in names) is present
 
 
-# ---- real AlayaWorld gpu smoke, per variant (spec 16.3 item 5) ----
+# ---- real AlayaWorld gpu smoke, per variant ----
 
 HIKER = ("Photorealistic wide shot, a hiker in a bright red jacket and grey backpack walking away from the camera "
          "along a narrow dirt trail on a green mountain ridge, seen from behind, full body in the center of the "
@@ -466,7 +466,7 @@ HIKER = ("Photorealistic wide shot, a hiker in a bright red jacket and grey back
 
 
 def _hiker_mask(path):
-    """Hand-drawn around the hiker of generate_images(HIKER, seed 3) at 1280x720 (Task 6 report)."""
+    """Hand-drawn around the hiker of generate_images(HIKER, seed 3) at 1280x720."""
     from PIL import ImageDraw
     m = Image.new("L", (1280, 720), 0)
     d = ImageDraw.Draw(m)
@@ -623,7 +623,7 @@ def test_real_alayaworld_rollout(tmp_path, variant):
     assert not failures, failures
 
 
-# ---- Wan22Backend (rollout_wan22, Plan 3 Task 7) ----
+# ---- Wan22Backend (rollout_wan22) ----
 
 def small_wan_cfg(env="autoresearcher", enabled=True, **over):
     raw = copy.deepcopy(REAL.raw)
@@ -796,7 +796,7 @@ def test_wan_missing_clone_fails_the_job_with_a_clear_message(tmp_path, monkeypa
     finally:
         q.shutdown()
     assert out["state"] == "failed"
-    assert str(missing) in out["error"] and "PORTABILITY.md" in out["error"]
+    assert str(missing) in out["error"] and "into that folder" in out["error"]
     assert "CalledProcessError" not in out["error"]
 
 
@@ -835,7 +835,7 @@ def test_finish_crops_to_1248x704_and_writes_the_prompt_caption(tmp_path):
     assert json.loads(Path(res["caption"]).read_text()) == {"caption": "hello there"}
 
 
-# ---- real Wan 2.2 TI2V-5B gpu smoke (spec 16.3 item 5) ----
+# ---- real Wan 2.2 TI2V-5B gpu smoke ----
 
 @pytest.mark.gpu
 def test_real_wan22_rollout(tmp_path):
@@ -938,7 +938,7 @@ def test_wan_bridge_fits_any_first_frame_to_1280x704(size):
     assert fitted.getpixel((640, 352))[1] > 150       # centered: the center marker stays at the center
 
 
-# ---- Ltx25Backend (rollout_ltx25, Plan 3 Task 8) ----
+# ---- Ltx25Backend (rollout_ltx25) ----
 
 def _head():
     import subprocess
@@ -1078,7 +1078,7 @@ def test_ltx_worker_count_follows_host_ram(ltx_env, gpus, rss, cap, workers):
 
 def test_ltx_ram_shortfall_fails_the_job_before_any_worker(ltx_env, monkeypatch):
     """Not even one worker fits in MemAvailable - host_reserve_gib: the job fails with a clear
-    message instead of letting the host OOM killer pick a victim (verification-log finding)."""
+    message instead of letting the host OOM killer pick a victim."""
     make, caller, _ = ltx_env
     monkeypatch.setattr(rollouts, "meminfo_gib", lambda: {"MemTotal": 251.0, "MemAvailable": 90.0})
     q = make(variants={"distilled": {"enabled": True, "peak_rss_gib": 40}, "dev": {"enabled": False}})
@@ -1119,7 +1119,7 @@ def test_ltx_missing_clone_fails_the_job_with_a_clear_message(ltx_env, tmp_path)
     out = q.wait(caller, q.backends["rollout_ltx25"].submit(
         q, caller, {"items": [{"prompt": "p", "seed": 1}]})["job_id"], 60)
     assert out["state"] == "failed"
-    assert str(missing) in out["error"] and "PORTABILITY.md" in out["error"]
+    assert str(missing) in out["error"] and "into that folder" in out["error"]
 
 
 def test_ltx_refuses_to_run_off_the_pinned_commit(ltx_env):
@@ -1190,7 +1190,7 @@ def test_ltx_finished_candidate_passes_the_real_ingestor_as_static(tmp_path):
     assert "video_caption_static" in r.formats
 
 
-# ---- real LTX-2.5 gpu smoke (spec 16.3 item 5) ----
+# ---- real LTX-2.5 gpu smoke ----
 
 @pytest.mark.gpu
 @pytest.mark.parametrize("variant", ["distilled", "dev"])
@@ -1208,7 +1208,7 @@ def test_real_ltx25_rollout(tmp_path, variant):
     from ar_kernel.tools.images import ImageBackend
 
     if not REAL.get(f"generators.ltx25.variants.{variant}.enabled"):
-        pytest.skip(f"ltx25 {variant} is disabled in configs/kernel.yaml (see the Task 8 verification-log entry)")
+        pytest.skip(f"ltx25 {variant} is disabled in configs/kernel.yaml")
     gpus = [int(g) for g in os.environ.get("AR_TEST_GPUS", "0,1,2,3").split(",")]
     run_dir, ws = tmp_path / "run", tmp_path / "ws"
     staging = run_dir / "staging"

@@ -70,7 +70,7 @@ def test_submit_returns_immediately_and_wait_collects_the_result(env):
 
 
 def test_wait_is_capped_and_returns_running(env):
-    """Spec 10: job.wait never blocks past tools.job_wait_max_s (1 s here)."""
+    """Job.wait never blocks past tools.job_wait_max_s (1 s here)."""
     q, a, _, _ = env
     job_id = q.submit(a, "sleepy", {"steps": 200, "dt": 0.05})
     started = time.monotonic()
@@ -166,7 +166,7 @@ def test_shutdown_raises_if_the_worker_outlives_the_join_timeout(tmp_path, monke
 
 
 def test_run_cancellable_kills_the_whole_group(tmp_path):
-    """Plan 3 backends launch torch jobs through this; a cancel must not orphan ranks."""
+    """The GPU backends launch torch jobs through this; a cancel must not orphan ranks."""
     pidfile = tmp_path / "child.pid"
     cancel = threading.Event()
     _cancel_once_child_appears(pidfile, cancel)

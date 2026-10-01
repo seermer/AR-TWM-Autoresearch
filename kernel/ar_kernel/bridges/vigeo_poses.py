@@ -3,18 +3,18 @@
 python vigeo_poses.py --items items.json --out DIR --rank R --world W \
     --repo <ViGeo dir> --checkpoint <ViGeo1.1 dir> --max-frames N
 
-Bridge protocol (Plan 3): handles items with index % world == rank; per item writes
+Bridge protocol: handles items with index % world == rank; per item writes
 <out>/<index>.npz (cam_c2w [N,4,4] float32, OpenCV camera-to-world, frame 0 = identity;
 intrinsics [3,3] in mp4 pixels) and then <out>/<index>.json.
 
 ViGeo facts used (third_party/ViGeo): frames are resized to a patch-14 grid of ~1369 tokens
-(vigeo.py `_resolve_model_size`); `pose_pred` is [T,3,4] camera-to-world (README); the focal
+(vigeo.py `_resolve_model_size`); `pose_pred` is [T,3,4] camera-to-world; the focal
 is normalized so that fx = fy = f * sqrt(w^2 + h^2) / 2 at the model resolution
 (vigeo/utils.py `normalized_uv`); long clips run in chunk mode, 16 frames per call, carrying
-`kv_caches` (README "Inference Modes"); `total_budget` bounds that cache (layers/attention.py
+`kv_caches`; `total_budget` bounds that cache (layers/attention.py
 `eviction`), otherwise it grows ~170 MB per frame.
 
-Two choices measured on WorldModel's example clips (Plan 3 Task 4 report): the cache budget is
+Two choices measured on WorldModel's example clips: the cache budget is
 3x WorldModel's 262144 (still fits a 24 GB card, peak ~18.3 GB; the smaller budget drifted to
 27% ATE on one clip), and the focal comes from the first chunk only, which ViGeo sees with full
 attention: in chunk mode the per-frame focal drifts as the cache is evicted (881 -> 1140 px
@@ -33,7 +33,7 @@ import cv2
 import numpy as np
 import torch
 
-CHUNK = 16            # ViGeo README default chunk size; clips of <= CHUNK frames run offline
+CHUNK = 16            # ViGeo's default chunk size; clips of <= CHUNK frames run offline
 NUM_TOKENS = 1369     # ViGeo infer() default
 CACHE_BUDGET = 786432  # KV-cache tokens kept across chunks (see the module docstring)
 

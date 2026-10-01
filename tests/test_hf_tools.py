@@ -208,7 +208,7 @@ def test_links_planted_inside_an_earlier_download_are_not_written_through(env, t
     assert list((tmp_path / "hf_tmp").iterdir()) == []          # the private dir is cleaned on failure
 
 
-# ---- hf_list_files, and refusals that say what the repo holds (acceptance_20260928 n1/n2) ----
+# ---- hf_list_files, and refusals that say what the repo holds ----
 
 class ManyFilesApi(FakeApi):
     """A repo like the ones n1/n2 probed: thousands of files across folders."""

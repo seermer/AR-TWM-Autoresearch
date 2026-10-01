@@ -1,9 +1,8 @@
-"""Shared plumbing for the GPU data-source jobs (spec 10): rollout_*, annotate_camera and
+"""Shared plumbing for the GPU data-source jobs: rollout_*, annotate_camera and
 generate_images.
 
 A backend stages the agent's input files into a kernel-private job dir (never trusting the
-path between check and use), runs one worker per GPU group in the generator's own conda env
-(bridge protocol: see the Plan 3 file structure), and publishes each finished item into the
+path between check and use), runs one worker per GPU group in the generator's own conda env, and publishes each finished item into the
 caller's staging dir with O_NOFOLLOW moves, so a link the agent plants cannot redirect a
 kernel write. A per-item failure is an item error, not a failed job.
 """
@@ -292,7 +291,7 @@ class GpuJob:
 
 def register_gpu_tools(mcp, kit, q) -> None:
     """Registers each GPU data tool whose backend is on the queue. Disabled tools/variants are
-    simply absent (spec 10: disabled variants are omitted from tool schemas)."""
+    simply absent (disabled variants are omitted from tool schemas)."""
     b = q.backends
 
     def submit(ctx: Context, name: str, **args):
@@ -334,7 +333,7 @@ def register_gpu_tools(mcp, kit, q) -> None:
 
 
 def build_gpu_backends(cfg, run_dir: Path, gpus: list[int], registry, recorder) -> list:
-    """Every GPU data backend a run gets (spec 10): the captioner always, the others only when
+    """Every GPU data backend a run gets: the captioner always, the others only when
     their `annotate`/`images`/`generators` config enables them (a generator needs an enabled
     variant). The caller registers each on the run's JobQueue, then calls `register_gpu_tools`
     and `register_caption_tool`."""

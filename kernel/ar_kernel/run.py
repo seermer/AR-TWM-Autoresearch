@@ -37,12 +37,15 @@ def preflight_metrics(cfg: KernelConfig) -> list[str]:
                              f"visual_plausibility needs the VP weights at {vp_weights}")
     return list(DIMENSION_METRICS)
 
-def _git_state(repo: Path) -> tuple[str, bool]:
-    sha = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
-                         capture_output=True, text=True).stdout.strip()
-    dirty = bool(subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
-                                capture_output=True, text=True).stdout.strip())
-    return sha, dirty
+def _head(repo: Path) -> str:
+    return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+
+
+def _uncommitted(repo: Path) -> bool:
+    """Modified or untracked (not ignored) files in the repo."""
+    return bool(subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
+                               capture_output=True, text=True).stdout.strip())
 
 class RunNotFound(FileNotFoundError):
     """No run with this id exists."""
@@ -67,6 +70,12 @@ def bootstrap_run(cfg: KernelConfig, run_id: str | None, env: Mapping[str, str])
     if (run_dir / "config" / "run.json").exists():
         return attach_run(cfg, run_id, env)
     gpus = resolve_gpus(cfg, env)          # before creating anything
+    # A run is identified by the three commits it ran on (its scores, and a reused root, are only
+    # comparable for the same code), so nothing may be uncommitted.
+    repos = {"worldmodel": cfg.worldmodel, "wbench": cfg.wbench, "kernel": cfg.repo_root}
+    dirty = [str(path) for path in repos.values() if _uncommitted(path)]
+    if dirty:
+        raise PreflightError("uncommitted changes in " + ", ".join(dirty) + "; commit them before starting a run")
     problems = wbench_weight_problems(cfg)
     if problems:
         raise PreflightError("WBench is not runnable; fix before starting a run "
@@ -76,12 +85,7 @@ def bootstrap_run(cfg: KernelConfig, run_id: str | None, env: Mapping[str, str])
     recorder = _recorder(run_dir, env)
     for name in SNAPSHOT_FILES:
         shutil.copy2(cfg.repo_root / "configs" / name, run_dir / "config" / name)
-    wm_sha, wm_dirty = _git_state(cfg.worldmodel)
-    wb_sha, wb_dirty = _git_state(cfg.wbench)
-    kernel_sha, kernel_dirty = _git_state(cfg.repo_root)
-    versions = {"worldmodel_sha": wm_sha, "worldmodel_dirty": wm_dirty,
-                "wbench_sha": wb_sha, "wbench_dirty": wb_dirty,
-                "kernel_sha": kernel_sha, "kernel_dirty": kernel_dirty}
+    versions = {f"{name}_sha": _head(path) for name, path in repos.items()}
     (run_dir / "config" / "versions.json").write_text(json.dumps(versions, indent=2))
     metric_set = preflight_metrics(cfg)
     judge = resolve_judge(cfg, env)
@@ -97,9 +101,6 @@ def bootstrap_run(cfg: KernelConfig, run_id: str | None, env: Mapping[str, str])
          "case_ids": case_ids, "versions": versions, "expected_n": expected_n}, indent=2))
     recorder.event("run.start", payload={"gpus": gpus, "metric_set": metric_set, "judge": asdict(judge), "versions": versions,
                                          "case_ids": case_ids})
-    if wm_dirty or wb_dirty:
-        recorder.event("run.warning", payload={"message": "sibling repo has uncommitted changes",
-                                               "worldmodel_dirty": wm_dirty, "wbench_dirty": wb_dirty})
     return RunContext(run_dir=run_dir, conn=open_db(run_dir), recorder=recorder, gpus=gpus,
                       metric_set=metric_set, case_ids=case_ids, versions=versions,
                       expected_n=expected_n, judge=judge)
@@ -134,8 +135,7 @@ def root_key(ctx: RunContext) -> str:
     and judge, so a root scored by any earlier run can be reused."""
     fields = {"metric_set": ctx.metric_set, "case_ids": ctx.case_ids,
               "judge": [ctx.judge.kind, ctx.judge.model] if ctx.judge else None,
-              "versions": {k: ctx.versions.get(k) for k in ("worldmodel_sha", "worldmodel_dirty",
-                                                           "wbench_sha", "wbench_dirty")}}
+              "versions": {k: ctx.versions.get(k) for k in ("worldmodel_sha", "wbench_sha")}}
     return hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()[:16]
 
 
@@ -173,7 +173,7 @@ def score_node(cfg: KernelConfig, ctx: RunContext, node_id: str, checkpoint: Pat
                rank: int) -> tuple[float, dict]:
     node_dir = ctx.run_dir / "nodes" / node_id
     work_dir = node_dir / "eval" / "work_dirs"
-    model = f"ar_{ctx.run_dir.name}_n{node_id}"
+    model = f"ar_{ctx.run_dir.name}_{node_id}"
     videos_dir = work_dir / model / "videos"
     eval_lora = None
 

@@ -45,7 +45,7 @@ def _post(client, token, body, path="/v1/responses"):
 
 
 def _telemetry_contains(tmp_path, rec: Recorder, needle: str) -> bool:
-    """Scan telemetry for `needle`, decompressing payloads (Controller ruling: payloads are
+    """Scan telemetry for `needle`, decompressing payloads (Payloads are
     zstd-compressed as `payloads/<sha256>.json.zst`, so a raw-byte scan can never find a leak
     that redaction failed to catch -- it would pass whether or not the leak was actually
     redacted)."""
@@ -148,7 +148,7 @@ def test_forwarded_call_is_recorded_and_upstream_key_never_reaches_telemetry(mak
 
 
 def test_request_is_persisted_before_forwarding(make, monkeypatch):
-    """Fail-closed (spec 13.1.2): if the request cannot be recorded, nothing is sent."""
+    """Fail-closed: if the request cannot be recorded, nothing is sent."""
     client, caller, rec, seen = make()
     def broken(*a, **k):
         raise TelemetryError("disk full")
@@ -185,7 +185,7 @@ def test_non_json_upstream_error_is_retried_recorded_and_returned(make):
 
 
 def test_non_json_upstream_error_body_is_recorded_without_truncation(make):
-    """No truncation or sampling of telemetry (spec 13.1.3): a long non-JSON error body
+    """No truncation or sampling of telemetry: a long non-JSON error body
     (e.g. a verbose HTML error page from a proxy) must be recorded in full, not clipped."""
     long_body = "<html>" + ("x" * 3000) + "</html>"
     client, caller, rec, seen = make(handler=lambda r: httpx.Response(502, text=long_body))
@@ -260,7 +260,7 @@ def test_chat_completions_is_forwarded_to_the_matching_path(make):
 
 
 def test_revoking_a_token_drops_its_linking_state_in_the_store(tmp_path):
-    """Controller ruling: create_gateway_app must wire registry.on_revoke(store.forget) so the
+    """Create_gateway_app must wire registry.on_revoke(store.forget) so the
     store's memory is bound to live containers -- once a container's token is revoked, its
     linking state (requests, response ids, conversation tails) is dropped."""
     rec = Recorder(tmp_path)

@@ -1,4 +1,4 @@
-"""Schemas the kernel validates every agent call against (spec 9.3)."""
+"""Schemas the kernel validates every agent call against."""
 from __future__ import annotations
 
 import typing
@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-# The five parts of an agent version an edit_self plan picks from (spec 9.1.1).
+# The five parts of an agent version an edit_self plan picks from.
 EditComponent = Literal["prompts", "tools", "harness", "orchestration", "knowledge"]
 EDIT_COMPONENTS = typing.get_args(EditComponent)
 

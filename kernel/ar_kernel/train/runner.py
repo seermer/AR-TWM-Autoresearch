@@ -111,5 +111,5 @@ class TrainRunner:
         if failure == "recipe" and proc.returncode == 0 and checkpoint is None:
             detail = "training exited cleanly but wrote no checkpoint"
         if checkpoint is not None and failure == "none":
-            (checkpoint / "trainer_state.pt").unlink(missing_ok=True)     # spec 7.3.5 / 15
+            (checkpoint / "trainer_state.pt").unlink(missing_ok=True)
         return TrainOutcome(checkpoint=checkpoint, failure=failure, log_path=log_path, detail=detail)

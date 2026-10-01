@@ -215,7 +215,7 @@ def test_commanded_camera_is_published_under_its_own_name_not_as_pose(env):
     assert "pose" not in c and c["video"] == f"/workspace/staging/rollouts/{job}/0.mp4"
 
 
-# ---- build_gpu_backends: the services a run gets (Plan 4 contract) ----
+# ---- build_gpu_backends: the services a run gets ----
 
 def toggled_cfg(annotate=True, images=True, alaya=("dmd4", "ar30"), wan=True, ltx=("distilled",)):
     import copy
@@ -268,7 +268,7 @@ def test_listed_tools_show_only_enabled_tools_and_enabled_variants(tmp_path):
     assert "'distilled'" in ltx and "'dev'" not in ltx
 
 
-# ---- item schemas: the listed tools say each item field's type (acceptance_20260928 n1) ----
+# ---- item schemas: the listed tools say each item field's type ----
 
 def _listed_tools(tmp_path):
     from ar_kernel.tools.gpu_jobs import build_gpu_backends
@@ -287,7 +287,7 @@ def _listed_tools(tmp_path):
 
 
 def test_listed_item_schemas_type_every_field(tmp_path):
-    """n1 of acceptance_20260928 sent every value inside an untyped item as a string ("seed": "1")
+    """A real agent sent every value inside an untyped item as a string ("seed": "1")
     while every schema-typed value came as an int: the schema must type the item fields."""
     tools, _ = _listed_tools(tmp_path)
     for name in ("generate_images", "rollout_wan22", "rollout_ltx25"):

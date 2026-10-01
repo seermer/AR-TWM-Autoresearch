@@ -11,7 +11,7 @@ from ar_kernel.context_bundle import (FORMAT_RULES, archive_summary, build_edit_
 from ar_kernel.vcs.agents_repo import AgentsRepo
 
 CFG = KernelConfig.load()
-# The shape score.aggregates() returns and Plan 4 writes to eval/aggregates.json.
+# The shape score.aggregates() returns and the loop writes to eval/aggregates.json.
 AGGREGATES = {"metrics": {"aesthetic_quality": 0.78}, "dimensions": {"quality": 0.78},
               "strata": {"interaction_type": {"navigation": {"quality": 0.8}}, "category": {"Nature": {"quality": 0.8}},
                          "perspective": {"first_person": {"quality": 0.8}}}}

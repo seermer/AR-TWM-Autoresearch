@@ -52,7 +52,7 @@ def _report(**metrics):
 
 
 def test_metric_computed_on_fewer_cases_than_expected_is_refused():
-    """Review I5: if DA3 failed on 10 of 40 cases, geometric consistency was
+    """If DA3 failed on 10 of 40 cases, geometric consistency was
     averaged over 30 and the node scored normally on a different case set --
     a wrong result that looks clean."""
     import pytest

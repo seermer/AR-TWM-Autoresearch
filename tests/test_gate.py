@@ -125,8 +125,8 @@ def test_fewer_clips_than_gpus_is_rejected(tmp_path):
     ("optimizer.warmup_steps", -1, "warmup_steps"),
 ])
 def test_invalid_recipe_values_fail_the_gate_instead_of_crashing(gate_env, key, value, fragment):
-    """Review I4: agent-supplied values used to raise out of the gate, which under
-    spec 14.2 crashes the node instead of giving the agent a retry."""
+    """Agent-supplied values used to raise out of the gate, which
+    crashes the node instead of giving the agent a retry."""
     gate, commit, tmp_path = gate_env
     result = gate.check({key: value}, commit, None, "n1", tmp_path / "n1", tmp_path, [0, 1, 2, 3])
     assert not result.ok

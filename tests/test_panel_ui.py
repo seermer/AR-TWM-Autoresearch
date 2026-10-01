@@ -156,7 +156,7 @@ def test_row_selection_uses_the_selected_row_values(run):
 
 def test_run_files_are_served_in_place_not_copied(run):
     ui.build_app(run.files.root)
-    video = str(run.files.path("nodes/n1/eval/work_dirs/ar_r1_nn1/videos/case_7_combined.mp4"))
+    video = str(run.files.path("nodes/n1/eval/work_dirs/ar_r1_n1/videos/case_7_combined.mp4"))
     from gradio import processing_utils
     block = gr.Video()
     served = processing_utils.move_files_to_cache(block.postprocess(video), block, postprocess=True)

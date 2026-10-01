@@ -117,7 +117,7 @@ def test_build_gpu_backends_includes_annotate_only_when_enabled(tmp_path):
         assert ("annotate_camera" in names(KernelConfig(raw=raw, repo_root=REAL.repo_root))) is enabled
 
 
-# ---- real ViGeo against the example poses (spec 16.3 item 6) ----
+# ---- real ViGeo against the example poses ----
 
 def _rel0(c2w):
     c2w = np.asarray(c2w, dtype=np.float64)

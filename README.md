@@ -174,7 +174,7 @@ pytest tests -q                 # optional: unit tests, no GPU needed, about 12 
 
 ## 7. Start the experiment
 
-1. Choose a run name you have not used before (`ar` refuses to overwrite one), and the number of new nodes to try.
+1. Choose a run name you have not used before (`ar` refuses to overwrite one), and the number of new nodes to try. Commit any changes in the three repos first: a new run refuses to start with uncommitted changes, so that its recorded commits fully name the code it ran.
 2. Start it in the background, so it survives closing the terminal:
 
 ```bash

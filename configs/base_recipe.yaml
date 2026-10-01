@@ -1,7 +1,7 @@
 # Example stage2b LoRA fine-tune on a standard-format dataset: Videos with one caption each and per-frame camera poses.
 # Derived from configs/stage2b_arsft_lowcompute.yaml; only run.*, data.*, the
 # validation dataset, runtime.text_embed_cache_dir and optimizer lr, warmup_steps and
-# max_steps differ. See docs/TRAINING.md.
+# max_steps differ.
 run:
   name: finetune_video_caption_camera
   seed: 42
@@ -230,7 +230,7 @@ runtime:
   text_embed_cache_dir: cache/text_embed_finetune_video_caption_camera
   precache_text_embeds: false
   # Null, not the 544x960 dir: the cache is resolution-keyed, and at K=4 a window
-  # has no sliceable tail anyway (docs/vigeo/README.md section 7).
+  # has no sliceable tail anyway.
   vae_latent_cache_dir: null
   # Falls back to FA2 under ALAYA_USE_FA3=0, which the ViGeo path requires.
   attention_type: flash_attention_3
