@@ -1,14 +1,9 @@
 """Schemas the kernel validates every agent call against."""
 from __future__ import annotations
 
-import typing
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
-
-# The five parts of an agent version an edit_self plan picks from.
-EditComponent = Literal["prompts", "tools", "harness", "orchestration", "knowledge"]
-EDIT_COMPONENTS = typing.get_args(EditComponent)
 
 
 class _Ctx(BaseModel):
@@ -45,8 +40,6 @@ class RecipeContext(_Ctx):
 
 class EditResult(BaseModel):
     summary: str = Field(min_length=1)
-    # The component the edit plan chose. Recorded with the node, never enforced.
-    component: EditComponent | None = None
 
 
 class RecipeResult(BaseModel):

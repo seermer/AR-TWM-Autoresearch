@@ -76,7 +76,7 @@ def test_edit_self_commits_the_edited_code_to_an_attempt_ref(env):
     penv = make(runner)
     out = run_edit_self(penv, conn=conn, node="n1", parent_id="root", base_commit=root, runner_commit=root, attempt=1,
                         max_attempts=3, retry=None, nodes_remaining=5)
-    assert out.ok and out.result == {"summary": "tightened prompts", "component": None}
+    assert out.ok and out.result == {"summary": "tightened prompts"}
     assert penv.repo.resolve("refs/attempts/n1/edit_self-1") == out.commit
     assert "# v2" in penv.repo.read_file(out.commit, "agent/entry.py")
     assert runner.calls[0]["mounts"].agent_readonly is False

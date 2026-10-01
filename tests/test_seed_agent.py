@@ -8,7 +8,6 @@ import shutil
 import subprocess
 import sys
 import threading
-import typing
 import uuid
 from pathlib import Path
 
@@ -173,7 +172,7 @@ def test_check_roles_builds_every_role_and_the_selftest_uses_it(tmp_path, monkey
 
 
 def _lineage(depth):
-    node = {"status": "scored", "score": 0.7, "component": "prompts", "edit": {"summary": "[prompts] x\n\ncoder text"},
+    node = {"status": "scored", "score": 0.7, "edit": {"summary": "x\n\ncoder text"},
             "data": {"d": {"format": "video_caption_camera", "clips": 8, "weight": 1.0}}, "recipe": {"optimizer.lr": 1e-4},
             "aggregates": {"dimensions": {"quality": 0.7}, "strata": {"category": {"Urban": {"quality": 0.7}}, "perspective": {"first_person": {"quality": 0.7}}},
                            "metrics": {"aesthetic_quality": 0.6}}, "process": {"phases": {"train_s": 600}}}
@@ -225,12 +224,12 @@ def test_submit_tool_validates_then_captures():
     from agent.orchestration import EditPlan
     from agent.tools import submit_tool
     tool, box = submit_tool("submit_edit_plan", "d", EditPlan)
-    plan = {"component": "everything", "change": "x", "files": [], "rationale": "r", "expected_effect": "e"}
+    plan = {"change": "", "files": [], "rationale": "r", "expected_effect": "e"}
     with pytest.raises(ValidationError):
         asyncio.run(tool.ainvoke(plan))
     assert box.value is None
-    asyncio.run(tool.ainvoke({**plan, "component": "tools"}))
-    assert box.value.component == "tools"
+    asyncio.run(tool.ainvoke({**plan, "change": "x"}))
+    assert box.value.change == "x"
 
 
 def test_kernel_results_prefer_structured_content():
@@ -246,11 +245,8 @@ def test_kernel_results_prefer_structured_content():
         result_text(NS(is_error=True, structured_content=None, content=text))
 
 
-def test_edit_components_match_the_contract():
-    from ar_contract.models import EDIT_COMPONENTS
-    from agent.orchestration import COMPONENTS, EditPlan
-    assert tuple(COMPONENTS) == EDIT_COMPONENTS
-    assert set(typing.get_args(EditPlan.model_fields["component"].annotation)) == set(EDIT_COMPONENTS)
+def test_every_listed_component_exists_in_the_seed():
+    from agent.orchestration import COMPONENTS
     for component, where in COMPONENTS.items():
         assert (SEED / where.split(" ")[0].split("*")[0]).exists(), f"{component} -> {where}"
 
@@ -296,9 +292,9 @@ def _scripts():
     edit = [
         [_call("read_file", {"path": "agent/prompts/planner.md"}),       # planning may try things out ...
          _call("run_command", {"command": "echo junk >> agent/prompts/coder.md && touch agent/stray.py"})],
-        [_call("submit_edit_plan", {"component": "everything", "change": "x", "files": [],
-                                    "rationale": "r", "expected_effect": "e"})],   # invalid component
-        [_call("submit_edit_plan", {"component": "prompts", "change": "ask for posed clips first",
+        [_call("submit_edit_plan", {"change": "", "files": [],
+                                    "rationale": "r", "expected_effect": "e"})],   # invalid: no change
+        [_call("submit_edit_plan", {"change": "ask for posed clips first",
                                     "files": ["agent/prompts/planner.md"], "rationale": "static-only clips",
                                     "expected_effect": "more moving clips"})],
         [_call("edit_file", {"path": "agent/entry.py", "old": "def edit_self(ctx: EditContext)",
@@ -466,12 +462,11 @@ def test_improve_recipe_full_flow(kernel, tmp_path):
     assert engineer_users[0].startswith("<plan>") and engineer_users[-1].startswith("The planner revised the plan.")
 
 
-def test_edit_self_plans_exactly_one_component(kernel, tmp_path):
+def test_edit_self_plans_then_edits(kernel, tmp_path):
     rec = kernel[0]
     proc, body, agent = _run(kernel, tmp_path, "edit_self", "edit", "n-edit", BASE)
     assert proc.returncode == 0 and body["ok"], (body, proc.stderr[-2000:])
-    assert body["result"]["component"] == "prompts"
-    assert body["result"]["summary"].startswith("[prompts] ask for posed clips first")
+    assert body["result"]["summary"].startswith("ask for posed clips first")
     assert "prefer clips with poses" in body["result"]["summary"]
     assert "Prefer clips with poses." in (agent / "agent" / "prompts" / "planner.md").read_text()
     # ... but what the planner changed is undone before the coder starts; its command log stays
@@ -479,12 +474,12 @@ def test_edit_self_plans_exactly_one_component(kernel, tmp_path):
     assert not (agent / "agent" / "stray.py").exists()
     assert list((tmp_path / "ws" / "tool_output").glob("run_command-*.log"))
     [round_] = json.loads((tmp_path / "ws" / "plans.json").read_text())
-    assert round_["plan"]["component"] == "prompts" and "report" not in round_
+    assert round_["plan"]["change"] == "ask for posed clips first" and "report" not in round_
     outputs = _tool_outputs(rec, "n-edit")
-    assert any("Error invoking tool 'submit_edit_plan'" in o and "component" in o for o in outputs)
+    assert any("Error invoking tool 'submit_edit_plan'" in o and "change" in o for o in outputs)
     assert any("The self-test failed" in o and "exactly one parameter" in o for o in outputs)   # submit refused
     assert [role for role, _ in _panel_chats(rec, "n-edit", "edit_self")] == ["edit_planner", "coder"]
-    planner_tools = _tools_of(rec, "n-edit", "# Role\nYou plan one improvement")
+    planner_tools = _tools_of(rec, "n-edit", "# Role\nYou plan an improvement")
     assert {"read_file", "list_dir", "run_command", "arxiv_search", "arxiv_read"} <= planner_tools
 
 
@@ -568,7 +563,7 @@ def test_the_digest_describes_the_parents_finished_children_before_the_lineage()
     text = edit_context(ctx, {"prompts": "p.md"}, None)
     assert text.index("## Siblings") < text.index("## Lineage")
     assert text.count("\n### s") == SIBLINGS_SHOWN and "### s13:" in text and "### s3:" not in text
-    assert "### s13:" in text and "| s3 | scored | 0.7 | prompts |" in text         # every sibling in one line
+    assert "### s13:" in text and "| s3 | scored | 0.7 |" in text         # every sibling in one line
     assert "| root | s13 |" not in text                            # but not a column of the lineage tables
     assert "## Siblings" not in edit_context(EditContext(nodes_remaining=1, attempt=1, max_attempts=3), {}, None)
 
@@ -591,8 +586,8 @@ def test_the_eval_knowledge_states_the_score_weights_of_the_kernel_config():
 
 def test_an_earlier_node_is_described_by_what_the_phase_acts_on():
     from agent.briefing import data_node, edit_node
-    node = {"node_id": "n1", "status": "scored", "score": 0.7, "component": "prompts",
-            "edit": {"summary": "[prompts] ask for posed clips\n\ncoder text"},
+    node = {"node_id": "n1", "status": "scored", "score": 0.7,
+            "edit": {"summary": "ask for posed clips\n\ncoder text"},
             "code_diff_stats": [{"path": "agent/prompts/planner.md", "added": 2, "removed": 1}],
             "data": {"d": {"format": "video_caption_camera", "clips": 8, "weight": 1.0, "sources": {"hf:org/set": 8}}},
             "recipe": {"optimizer.lr": 1e-4},
@@ -601,8 +596,8 @@ def test_an_earlier_node_is_described_by_what_the_phase_acts_on():
     data, edit = data_node(node), edit_node(node)
     assert "- Hypothesis: more turning clips" in data and "- Recipe: optimizer.lr 0.0001" in data
     assert "from hf:org/set x8" in data and "from hf:org/set x8" in edit
-    assert not any(word in data for word in ("Edit:", "Code changed", "Process", "min", "edited"))   # no code, no timings
-    assert "- Edit: [prompts] ask for posed clips" in edit and "agent/prompts/planner.md (+2/-1)" in edit
+    assert not any(word in data for word in ("Edit:", "Code changed", "Process", "min"))   # no code, no timings
+    assert "- Edit: ask for posed clips" in edit and "agent/prompts/planner.md (+2/-1)" in edit
     assert "tool errors: data_ingest x3" in edit and "long message" not in edit and "Recipe" not in edit
 
 

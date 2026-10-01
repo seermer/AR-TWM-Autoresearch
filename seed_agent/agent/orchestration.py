@@ -8,7 +8,7 @@ across rounds. The last plan is the final one; every plan is recorded. A planner
 an engineer, but what it changes on disk is undone after each of its turns, and its kernel tools are read-only.
 - improve_recipe: planner -> data engineer, who builds the data commit and writes the recipe
   (recipe_check must pass before the submission is accepted).
-- edit_self: edit planner (ONE component) -> coder (the self-test must pass before the submission is accepted).
+- edit_self: edit planner -> coder (the self-test must pass before the submission is accepted).
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ar_contract.client import chat_model, mcp_session
-from ar_contract.models import EditComponent, EditContext, EditResult, RecipeContext, RecipeResult
+from ar_contract.models import EditContext, EditResult, RecipeContext, RecipeResult
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import ToolException
 from pydantic import BaseModel, Field
@@ -28,15 +28,14 @@ from pydantic import BaseModel, Field
 from .entry import AGENT_ROOT, BRIEF_CHARS, COMPACT_AT, CONTEXT_WINDOW, MAX_ROUNDS, MODEL, WORKSPACE
 from .briefing import edit_context, engineer_context, recipe_context
 from .harness import build_react_agent
-from .tools import (ARXIV_TOOLS, discarded_changes, kernel_tools, make_file_tools, result_text, snap_timed_prompts,
-                    submit_tool)
+from .tools import discarded_changes, kernel_tools, local_tools, result_text, snap_timed_prompts, submit_tool
 
 AGENT_PKG = Path(__file__).resolve().parent
 REMIND = ("You stopped without calling {tools}. Finish the task, then call {tools} with the result. "
           "The work is only recorded through {tools}.")
 REPLAN = "Revise the plan. The engineer carries out the plan you submit next."
 
-# Where each component lives in this agent. An edit plan names one of them.
+# Where each component lives in this agent.
 COMPONENTS = {
     "prompts": "agent/prompts/*.md -- the system prompt of each role",
     "tools": "agent/tools.py -- agent-local tools and the kernel-tool adapter (not the kernel tools themselves)",
@@ -66,10 +65,6 @@ def system_prompt(name: str) -> str:
     index = "\n".join(f"- {path}: {description(path.read_text())}"
                       for path in sorted((AGENT_PKG / "knowledge").glob("*.md")))
     return f"{prompt.strip()}\n\n{block('knowledge', index)}"
-
-
-def local_tools(root: str) -> list:
-    return [*make_file_tools(root), *ARXIV_TOOLS]
 
 
 def brief(text: str) -> str:
@@ -230,8 +225,7 @@ class EditSummary(BaseModel):
 
 
 class EditPlan(BaseModel):
-    component: EditComponent = Field(description="the ONE component this edit changes")
-    change: str = Field(min_length=1, description="the concrete change")
+    change: str = Field(min_length=1, description="what to change")
     files: list[str] = Field(description="files you expect to change, relative to /agent")
     rationale: str = Field(min_length=1, description="evidence from the lineage for this change")
     expected_effect: str = Field(min_length=1, description="what should improve, and how you will know")
@@ -265,7 +259,7 @@ def edit_team() -> Team:
             raise ToolException("The self-test failed. Fix these first:\n" + "\n".join(errors))
 
     plan_tool, plan = submit_tool("submit_edit_plan",
-                                  "Submit the edit plan: exactly one component and one focused change.", EditPlan)
+                                  "Submit the edit plan.", EditPlan)
     done_tool, done = submit_tool("submit_edit", "Submit the summary of the change you made. It is accepted "
                                   "only if the self-test passes.", EditSummary, selftest_passes)
     rounds: list[dict] = []
@@ -284,6 +278,5 @@ async def run_meta(ctx: EditContext) -> EditResult:
         return EditResult(summary=f"dry run: roles and the first message built, model said {await ping()!r}")
     await plan_and_engineer(
         team, record=record, engineer_context=None, task=task,
-        show=lambda p: block("edit_plan", p.model_dump_json(indent=2), component=p.component))
-    p = team.plan.value
-    return EditResult(summary=f"[{p.component}] {p.change}\n\n{team.done.value.summary}", component=p.component)
+        show=lambda p: block("edit_plan", p.model_dump_json(indent=2)))
+    return EditResult(summary=f"{team.plan.value.change}\n\n{team.done.value.summary}")

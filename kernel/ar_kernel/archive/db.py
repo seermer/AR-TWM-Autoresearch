@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   lora_rank INTEGER, lora_alpha INTEGER,
   score REAL, metric_set TEXT, metrics TEXT, subtree_value REAL,
   phase_timings TEXT, rationale_path TEXT,
-  edit_component TEXT, recipe_path TEXT, attempt_counts TEXT, error TEXT
+  recipe_path TEXT, attempt_counts TEXT, error TEXT
 );
 CREATE TABLE IF NOT EXISTS attempts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

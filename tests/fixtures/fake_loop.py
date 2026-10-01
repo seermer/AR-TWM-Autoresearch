@@ -51,7 +51,7 @@ class Script:
         (d / "workspace").mkdir(parents=True, exist_ok=True)
         self._wait("edit_self")
         ok = self._next("edit", True)
-        return outcome(ok, d, {"summary": "s", "component": "prompts"} if ok else None,
+        return outcome(ok, d, {"summary": "s"} if ok else None,
                        None if ok else "agent failed", commit=base_commit)
 
     def contract(self, *, node, attempt, **kw):

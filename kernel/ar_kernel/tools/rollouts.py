@@ -24,7 +24,10 @@ import numpy as np
 import yaml
 from PIL import Image
 
+from ..archive.db import open_db
+from ..archive.nodes import NodeStore
 from ..data.probe import aspect_ok, probe_video
+from ..eval.lora import concat_eval_lora
 from ..subproc import file_tail, free_port, meminfo_gib
 from .gpu_jobs import GpuJob, check_item_seed, enabled_variants, is_int, split_gpus
 from .jobs import run_cancellable
@@ -81,9 +84,12 @@ def case_json(index: int, item: dict, image_rel: str, mask_rel: str | None) -> d
 
 
 def render_config(cfg, *, variant: str, rounds_per_turn: int, seed: int, indices: list[int], work: Path,
-                  text_cache: Path) -> dict:
+                  text_cache: Path, node_lora: Path | None = None, node_rank: int = 0,
+                  history_encoder: Path | None = None) -> dict:
     """configs/wbench_full.yaml as eval/render.py:build_render_config adapts it, pointed at this
-    job's cases. The prompt cache is the run's (the eval's own holds only WBench's prompts)."""
+    job's cases. The prompt cache is the run's (the eval's own holds only WBench's prompts).
+    `node_lora`: a node's fine-tune (rank `node_rank`) with its `history_encoder`: for dmd4 the
+    directory of the student LoRA concatenated with the node's, for ar30 the node's checkpoint."""
     wm = cfg.worldmodel
     c = yaml.safe_load((wm / "configs" / "wbench_full.yaml").read_text(encoding="utf-8"))
     for key, value in c["paths"].items():
@@ -99,6 +105,10 @@ def render_config(cfg, *, variant: str, rounds_per_turn: int, seed: int, indices
     if variant == "ar30":
         for (section, key), value in AR30.items():
             c[section][key] = value
+    if node_lora is not None:
+        c["paths"].update(dmd_resume=str(node_lora), history_encoder=str(history_encoder))
+        c["lora"]["rank"] = node_rank + (0 if variant == "ar30" else c["lora"]["rank"])
+        c["lora"]["alpha"] = c["lora"]["rank"]
     return c
 
 
@@ -163,8 +173,10 @@ class AlayaWorldBackend(GpuJob):
     max_turns = 9
     description = (
         "Render WBench-style cases with AlayaWorld exactly as the WBench eval does. The clips come from "
-        "the released model, the same model every node fine-tunes. A GPU job: returns "
+        "the released model, the same model every node fine-tunes, or with `node` from that scored node's "
+        "fine-tune. A GPU job: returns "
         "{job_id} at once; collect with job_wait. Params: `variant` ({variants}; default the first), "
+        "`node` (the id of a scored node other than the root; default the released model), "
         "`rounds_per_turn` 1..3 (default 3; a round "
         "is 32 frames at 24 fps), `seed` (int, default 42). Item: {'image': first frame under /workspace "
         "(.jpg/.png/..., any size), 'perspective': 'first_person'|'third_person', 'environment_prompt', "
@@ -201,6 +213,8 @@ class AlayaWorldBackend(GpuJob):
             raise ToolError(f"rounds_per_turn must be an int in 1..3: got {rpt!r}")
         if not is_int(args["seed"]):
             raise ToolError(f"seed must be an int: got {args['seed']!r}")
+        if "node" in args:
+            self._node(args["node"])
         for n, item in enumerate(args["items"]):
             self._check_item(n, item)
 
@@ -234,8 +248,23 @@ class AlayaWorldBackend(GpuJob):
                 if key != "action" and (key not in TURN_TYPES or not isinstance(value, str)):
                     bad(f"turn {t}: {key!r} is not one of {TURN_TYPES} with a text value")
 
+    def _node(self, node_id) -> dict:
+        """The archive row of a node whose fine-tune can be rendered."""
+        conn = open_db(self.run_dir)
+        try:
+            node = NodeStore(conn).get(node_id)
+        except KeyError:
+            raise ToolError(f"node {node_id!r} is not a node of this run") from None
+        finally:
+            conn.close()
+        if node["status"] != "scored" or not node["checkpoint_path"]:
+            raise ToolError(f"node {node_id!r} has no fine-tune to render (status {node['status']}); give a "
+                            f"scored node other than the root, or omit `node` for the released model")
+        return node
+
     def generator_name(self, job) -> str:
-        return f"alayaworld-{job.args['variant']}"
+        node = job.args.get("node")
+        return f"alayaworld-{job.args['variant']}" + (f"@{node}" if node else "")
 
     def produce(self, job, items, work, out, cancel, report):
         data = work / "data"
@@ -265,17 +294,26 @@ class AlayaWorldBackend(GpuJob):
             indices.append(i)
         if not indices:
             return None
-        config = work / "render_config.yaml"
-        config.write_text(yaml.safe_dump(render_config(
-            self.cfg, variant=job.args["variant"], rounds_per_turn=job.args["rounds_per_turn"],
-            seed=job.args["seed"], indices=indices, work=work, text_cache=self.run_dir / "cache" / "text_embed"),
-            sort_keys=True), encoding="utf-8")
         env, wm = self.block["env"], self.cfg.worldmodel
         # One timeout_s budget for precache + render: the precache is killed at the deadline like a
         # cancel, and the render gets what is left.
         deadline = time.monotonic() + self.timeout_s if self.timeout_s else None
         late = SimpleNamespace(is_set=lambda: deadline is not None and time.monotonic() > deadline)
         try:
+            fine_tune = {}
+            if job.args.get("node"):
+                node = self._node(job.args["node"])
+                checkpoint = self.run_dir / node["checkpoint_path"]
+                # dmd4 renders as the eval does: the student LoRA and the node's as one adapter.
+                lora = checkpoint if job.args["variant"] == "ar30" else concat_eval_lora(
+                    self.cfg, checkpoint, work, self.recorder, job.node)
+                fine_tune = dict(node_lora=lora, node_rank=node["lora_rank"],
+                                 history_encoder=checkpoint / "history_encoder.pt")
+            config = work / "render_config.yaml"
+            config.write_text(yaml.safe_dump(render_config(
+                self.cfg, variant=job.args["variant"], rounds_per_turn=job.args["rounds_per_turn"],
+                seed=job.args["seed"], indices=indices, work=work,
+                text_cache=self.run_dir / "cache" / "text_embed", **fine_tune), sort_keys=True), encoding="utf-8")
             # The eval renders with the text encoder off (a 24 GB card cannot hold Gemma next to the
             # DiT), so every prompt of these cases is encoded first, into the run's prompt cache.
             code = run_cancellable(
@@ -314,6 +352,7 @@ class AlayaWorldBackend(GpuJob):
         finally:
             shutil.rmtree(data, ignore_errors=True)
             shutil.rmtree(work / "videos", ignore_errors=True)
+            shutil.rmtree(work / "eval", ignore_errors=True)        # the concatenated LoRA
 
     def finish(self, job, item, out):
         i = item["index"]

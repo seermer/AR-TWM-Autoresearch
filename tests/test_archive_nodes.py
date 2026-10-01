@@ -68,11 +68,11 @@ def test_node_id_that_is_unsafe_as_a_path_is_rejected(tmp_path):
 def test_new_fields_and_eval_failed(tmp_path):
     nodes = NodeStore(open_db(tmp_path))
     nodes.create("n1", None, 0)
-    nodes.set_fields("n1", edit_component="prompts", recipe_path="nodes/n1/recipe.yaml",
+    nodes.set_fields("n1", recipe_path="nodes/n1/recipe.yaml",
                      attempt_counts='{"edit_self": 2}', error="render failed")
     nodes.set_status("n1", "eval_failed")
     got = nodes.get("n1")
-    assert (got["edit_component"], got["error"], got["status"]) == ("prompts", "render failed", "eval_failed")
+    assert (got["recipe_path"], got["error"], got["status"]) == ("nodes/n1/recipe.yaml", "render failed", "eval_failed")
 
 
 def test_interrupted_is_a_status(tmp_path):

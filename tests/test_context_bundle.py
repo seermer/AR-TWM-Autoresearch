@@ -34,7 +34,7 @@ def world(tmp_path):
     (tmp_path / "nodes" / "root" / "eval" / "aggregates.json").write_text(
         json.dumps(AGGREGATES))
     (tmp_path / "nodes" / "root" / "rationale.md").write_text("released checkpoint")
-    (tmp_path / "nodes" / "root" / "edit.json").write_text(json.dumps({"summary": "s", "component": "tools"}))
+    (tmp_path / "nodes" / "root" / "edit.json").write_text(json.dumps({"summary": "s"}))
     return conn, repo, tmp_path
 
 
@@ -44,7 +44,7 @@ def test_lineage_is_root_first_and_carries_artifacts(world):
     assert [e["node_id"] for e in lin] == ["root"]
     assert lin[0]["score"] == 0.78 and lin[0]["aggregates"] == AGGREGATES
     assert lin[0]["rationale"] == "released checkpoint"
-    assert lin[0]["edit"] == {"summary": "s", "component": "tools"}
+    assert lin[0]["edit"] == {"summary": "s"}
 
 
 def test_archive_summary_names_the_best_node(world):
@@ -81,9 +81,9 @@ def test_lineage_and_archive_summary_carry_component_and_error(world):
     conn, repo, run = world
     nodes = NodeStore(conn)
     nodes.set_status("n1", "invalid_code")
-    nodes.set_fields("n1", edit_component="tools", error="contract import failed")
+    nodes.set_fields("n1", error="contract import failed")
     lin = lineage(conn, run, repo, "n1")
-    assert lin[-1]["component"] == "tools" and lin[-1]["error"] == "contract import failed"
+    assert lin[-1]["error"] == "contract import failed"
     summary_nodes = {n["node_id"]: n for n in archive_summary(conn)["nodes"]}
     assert summary_nodes["n1"]["error"] == "contract import failed"
     assert summary_nodes["root"]["error"] is None

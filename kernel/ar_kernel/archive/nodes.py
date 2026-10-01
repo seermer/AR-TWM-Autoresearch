@@ -41,7 +41,7 @@ class NodeStore:
     def set_fields(self, node_id: str, **fields: object) -> None:
         allowed = {"agent_commit", "data_commit", "recipe_hash", "resolved_config_path",
                    "checkpoint_path", "lora_rank", "lora_alpha", "subtree_value",
-                   "phase_timings", "rationale_path", "edit_component", "recipe_path",
+                   "phase_timings", "rationale_path", "recipe_path",
                    "attempt_counts", "error"}
         unknown = set(fields) - allowed
         if unknown:

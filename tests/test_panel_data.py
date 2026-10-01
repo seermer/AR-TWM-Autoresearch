@@ -299,7 +299,7 @@ def test_trace_filters_pages_and_detail(run):
 
 def test_node_detail(run):
     d = views.node_detail(run, "n1")
-    assert d["lineage"] == "root → n1" and d["edit"]["component"] == "prompts"
+    assert d["lineage"] == "root → n1" and d["edit"]["summary"] == "tighter planner"
     assert "+optimizer.lr" in d["recipe_diff"] and d["data_commit"]["datasets"] == {"ds1": 1}
     m1 = next(r for r in d["metrics"] if r["metric"] == "m1")
     assert (m1["node"], m1["parent"], m1["root"]) == (0.7, 0.6, 0.6)

@@ -70,7 +70,7 @@ def overview(run: Run) -> dict:
                  and parent["score"] is not None else None)
         total = (loads(n["phase_timings"], {}) or {}).get("total_s")
         rows.append({"node": n["node_id"], "parent": n["parent_id"] or "", "status": n["status"],
-                     "score": n["score"], "vs parent": delta, "component": n["edit_component"] or "",
+                     "score": n["score"], "vs parent": delta,
                      "attempts": n["attempt_counts"] or "",
                      "duration_min": round(total / 60, 1) if total else None, "error": n["error"] or ""})
     pid = run.files.loop_pid()

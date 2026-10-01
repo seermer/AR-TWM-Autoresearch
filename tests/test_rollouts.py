@@ -14,6 +14,8 @@ import pytest
 import yaml
 from PIL import Image
 
+from ar_kernel.archive.db import open_db
+from ar_kernel.archive.nodes import NodeStore
 from ar_kernel.config import KernelConfig
 from ar_kernel.data.probe import probe_video
 from ar_kernel.subproc import run_in_env
@@ -447,6 +449,63 @@ def test_ar30_job_is_named_after_its_variant(env):
     assert by[0]["candidate"]["provenance"]["generator"] == "alayaworld-ar30"
     cfg = yaml.safe_load((run_dir / "jobs" / job / "render_config.yaml").read_text())
     assert cfg["validation"]["sampling_steps"] == 30 and cfg["paths"]["dmd_resume"] is None
+
+
+# ---- a node's fine-tune ----
+
+def test_render_config_with_a_node_adds_its_lora_and_history_encoder(tmp_path):
+    kw = dict(rounds_per_turn=3, seed=1, indices=[0], work=tmp_path, text_cache=tmp_path / "te")
+    node = dict(node_lora=tmp_path / "lora", node_rank=32, history_encoder=tmp_path / "ckpt" / "history_encoder.pt")
+    for variant, rank in (("dmd4", 256 + 32), ("ar30", 32)):      # ar30 has no student LoRA to add to
+        plain, tuned = (_flat(render_config(REAL, variant=variant, **kw, **extra)) for extra in ({}, node))
+        assert {k: tuned[k] for k in plain if plain[k] != tuned[k]} == {
+            ("paths", "dmd_resume"): str(tmp_path / "lora"),
+            ("paths", "history_encoder"): str(tmp_path / "ckpt" / "history_encoder.pt"),
+            ("lora", "rank"): rank, ("lora", "alpha"): rank}
+
+
+def _scored_node(run_dir, node_id="n2", rank=32):
+    """A scored node with a checkpoint in the run's archive; returns the checkpoint dir."""
+    checkpoint = run_dir / "nodes" / node_id / "checkpoint-300"
+    checkpoint.mkdir(parents=True)
+    conn = open_db(run_dir)
+    nodes = NodeStore(conn)
+    nodes.create("root", None, 0)
+    nodes.record_score("root", 0.5, [], {})
+    nodes.create("failed", "root", 1)
+    nodes.create(node_id, "root", 1)
+    nodes.set_fields(node_id, checkpoint_path=f"nodes/{node_id}/checkpoint-300", lora_rank=rank)
+    nodes.record_score(node_id, 0.6, [], {})
+    conn.close()
+    return checkpoint
+
+
+@pytest.mark.parametrize("node", ["n9", "root", "failed"])
+def test_submit_refuses_a_node_without_a_fine_tune(env, node):
+    q, caller, _, run_dir = env
+    _scored_node(run_dir)
+    with pytest.raises(ToolError, match="node"):
+        submit(q, caller, [first_person()], node=node)
+
+
+@pytest.mark.parametrize("variant", ["dmd4", "ar30"])
+def test_a_node_job_renders_with_the_nodes_fine_tune(env, monkeypatch, variant):
+    q, caller, _, run_dir = env
+    checkpoint = _scored_node(run_dir)
+
+    def fake_concat(cfg, ckpt, node_dir, recorder, node_id):
+        assert ckpt == checkpoint
+        (Path(node_dir) / "eval" / "lora").mkdir(parents=True)
+        return Path(node_dir) / "eval" / "lora"
+    monkeypatch.setattr(rollouts, "concat_eval_lora", fake_concat)
+    job, by = run_job(q, caller, [first_person(turns=[{"action": "W"}])], node="n2", variant=variant)
+    assert by[0]["candidate"]["provenance"]["generator"] == f"alayaworld-{variant}@n2"
+    work = run_dir / "jobs" / job
+    cfg = yaml.safe_load((work / "render_config.yaml").read_text())
+    lora, rank = (work / "eval" / "lora", 256 + 32) if variant == "dmd4" else (checkpoint, 32)
+    assert cfg["paths"]["dmd_resume"] == str(lora) and cfg["lora"]["rank"] == rank
+    assert cfg["paths"]["history_encoder"] == str(checkpoint / "history_encoder.pt")
+    assert not (work / "eval").exists()
 
 
 def test_build_gpu_backends_includes_alayaworld_only_with_an_enabled_variant(tmp_path):

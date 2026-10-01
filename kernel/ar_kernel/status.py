@@ -52,7 +52,7 @@ def run_status(run_dir: Path) -> dict:
         "max_nodes": control.args().get("max_nodes"),
         "nodes": [{"node_id": n["node_id"], "parent_id": n["parent_id"], "depth": n["depth"],
                    "status": n["status"], "score": n["score"], "value": n["subtree_value"],
-                   "P": probs.get(n["node_id"]), "component": n["edit_component"], "error": n["error"]}
+                   "P": probs.get(n["node_id"]), "error": n["error"]}
                   for n in nodes],
         "best": {"node_id": best["node_id"], "score": best["score"]} if best else None,
         "spend": budget.snapshot(),
@@ -77,9 +77,8 @@ def format_status(d: dict) -> str:
     for n in d["nodes"]:
         score = "-" if n["score"] is None else f"{n['score']:.4f}"
         p = "" if n["P"] is None else f" P={n['P']:.2f}"
-        extra = f" [{n['component']}]" if n["component"] else ""
         err = f"  ! {n['error'][:120]}" if n["error"] else ""
-        lines.append(f"  {'  ' * n['depth']}{n['node_id']:<6} {n['status']:<14} {score}{p}{extra}{err}")
+        lines.append(f"  {'  ' * n['depth']}{n['node_id']:<6} {n['status']:<14} {score}{p}{err}")
     if d["alerts"]:
         lines.append("alerts (latest last):")
         lines += [f"  {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(a['ts']))} [{a['level']}] {a['kind']}: {a['message']}" for a in d["alerts"]]

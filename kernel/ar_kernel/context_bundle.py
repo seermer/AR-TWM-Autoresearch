@@ -56,7 +56,7 @@ def _entry(conn, run_dir: Path, repo, node: dict, parent_commit: str | None) -> 
     rationale = _node_file(run_dir, node["node_id"], "rationale.md")
     return {
         "node_id": node["node_id"], "status": node["status"],
-        "component": node["edit_component"], "error": node["error"],
+        "error": node["error"],
         "score": node["score"],
         "metrics": node["metrics"], "data": _data_stats(conn, node["data_commit"]),
         "recipe": yaml.safe_load(recipe_path.read_text()) if recipe_path.exists() else None,
@@ -94,7 +94,7 @@ def archive_summary(conn) -> dict:
     best = max(scored, key=lambda n: n["score"], default=None)
     return {"nodes": [{"node_id": n["node_id"], "parent_id": n["parent_id"], "status": n["status"],
                        "score": n["score"], "subtree_value": n["subtree_value"], "depth": n["depth"],
-                       "error": n["error"], "component": n["edit_component"]}
+                       "error": n["error"]}
                       for n in nodes],
             "n_scored": len(scored),
             "best": {"node_id": best["node_id"], "score": best["score"]} if best else None}

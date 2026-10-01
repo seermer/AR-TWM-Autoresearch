@@ -281,7 +281,7 @@ class Loop:
             self.repo.set_ref(self.repo.branch_ref(child), out.commit)
             self._node_dir(child).mkdir(parents=True, exist_ok=True)
             (self._node_dir(child) / "edit.json").write_text(json.dumps(out.result, indent=1))
-            self.nodes.set_fields(child, agent_commit=out.commit, edit_component=out.result.get("component"))
+            self.nodes.set_fields(child, agent_commit=out.commit)
             return out.commit, None
         return None, f"edit_self retries exhausted; last failure: {json.dumps(retry)[:2000]}"
 

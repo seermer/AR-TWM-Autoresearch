@@ -45,7 +45,7 @@ def test_root_then_one_scored_child(make_loop):
     assert loop.run() == "max_nodes reached"
     nodes = {n["node_id"]: n for n in NodeStore(loop.ctx.conn).all()}
     assert nodes["root"]["status"] == "scored" and nodes["n1"]["status"] == "scored"
-    assert nodes["n1"]["edit_component"] == "prompts" and nodes["n1"]["checkpoint_path"].startswith("nodes/n1/")
+    assert nodes["n1"]["checkpoint_path"].startswith("nodes/n1/")
     assert json.loads((run / "nodes" / "n1" / "edit.json").read_text())["summary"] == "s"
     assert (run / "nodes" / "n1" / "recipe.yaml").exists() and (run / "nodes" / "n1" / "rationale.md").exists()
     assert json.loads((run / "nodes" / "n1" / "eval" / "aggregates.json").read_text())["metrics"]["m"] == 0.9

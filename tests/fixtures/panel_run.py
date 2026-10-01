@@ -95,7 +95,7 @@ def make_run(base: Path, name: str = "r1") -> Path:
     nodes.set_fields("root", agent_commit=root_commit)
     nodes.record_score("root", 0.70, ["m1", "m2"], {"m1": 0.6, "m2": 0.8})
     nodes.create("n1", "root", 1)
-    nodes.set_fields("n1", agent_commit=edit2, data_commit="dc1", edit_component="prompts",
+    nodes.set_fields("n1", agent_commit=edit2, data_commit="dc1",
                      recipe_path="nodes/n1/recipe.yaml", rationale_path="nodes/n1/rationale.md",
                      phase_timings=json.dumps({"total_s": 600.0}),
                      attempt_counts=json.dumps({"edit_self": 2, "improve_recipe": 1}))
@@ -129,7 +129,7 @@ def make_run(base: Path, name: str = "r1") -> Path:
     np.savez(run / "store" / "blobs" / "pose" / "pd1.npz", cam_c2w=c2w)
 
     # node files
-    _write(run / "nodes" / "n1" / "edit.json", {"summary": "tighter planner", "component": "prompts"})
+    _write(run / "nodes" / "n1" / "edit.json", {"summary": "tighter planner"})
     _write(run / "nodes" / "n1" / "rationale.md", "Why this recipe.\n")
     _write(run / "nodes" / "n1" / "recipe.yaml", "optimizer.lr: 1.0e-05\n")
     attempt = run / "nodes" / "n1" / "attempts" / "improve_recipe-1"

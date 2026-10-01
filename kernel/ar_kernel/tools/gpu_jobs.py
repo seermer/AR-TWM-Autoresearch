@@ -308,9 +308,10 @@ def register_gpu_tools(mcp, kit, q) -> None:
     if "rollout_alayaworld" in b:
         @mcp.tool(name="rollout_alayaworld", description=b["rollout_alayaworld"].description)
         async def rollout_alayaworld(items: CaseItems, ctx: Context, variant: str | None = None,
-                                     rounds_per_turn: int | None = None, seed: int | None = None) -> dict[str, Any]:
+                                     rounds_per_turn: int | None = None, seed: int | None = None,
+                                     node: str | None = None) -> dict[str, Any]:
             return await submit(ctx, "rollout_alayaworld", items=items, variant=variant,
-                                rounds_per_turn=rounds_per_turn, seed=seed)
+                                rounds_per_turn=rounds_per_turn, seed=seed, node=node)
 
     if "generate_images" in b:
         @mcp.tool(name="generate_images", description=b["generate_images"].description)

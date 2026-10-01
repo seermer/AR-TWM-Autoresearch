@@ -34,7 +34,7 @@ def guarded(n: int):
 
 # Every table has named columns, also when empty (Gradio 6 shows "1 2 3" for a table without any).
 COLUMNS = {
-    "nodes": ["node", "parent", "status", "score", "vs parent", "component", "attempts", "duration_min", "error"],
+    "nodes": ["node", "parent", "status", "score", "vs parent", "attempts", "duration_min", "error"],
     "alerts": ["time", "level", "kind", "message"],
     "events": ["seq", "time", "node", "phase", "attempt", "type", "component", "summary"],
     "metrics": ["metric", "node", "parent", "root"],

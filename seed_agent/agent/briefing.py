@@ -62,8 +62,8 @@ def archive_section(archive: dict) -> str:
     return "\n\n".join([
         "## Archive",
         f"{len(nodes)} nodes, {archive.get('n_scored', len(best))} scored. The best {len(best)}:",
-        table(["node", "parent", "depth", "score", "edited component", "status"],
-              [[n["node_id"], n.get("parent_id"), n.get("depth"), n.get("score"), n.get("component"), n.get("status")]
+        table(["node", "parent", "depth", "score", "status"],
+              [[n["node_id"], n.get("parent_id"), n.get("depth"), n.get("score"), n.get("status")]
                for n in best])])
 
 
@@ -127,14 +127,11 @@ def data_node(n: dict) -> str:
 
 def edit_node(n: dict) -> str:
     """An earlier node as the edit planner needs it: how the agent code changed, what data came out, how the run went."""
-    head = f"### {n['node_id']}: {n.get('status')}, score {_cell(n.get('score'))}"
-    if n.get("component"):
-        head += f", edited {n['component']}"
-    lines = [head]
+    lines = [f"### {n['node_id']}: {n.get('status')}, score {_cell(n.get('score'))}"]
     if n.get("error"):
         lines.append(f"- Error: {clip(n['error'])}")
     if n.get("edit"):
-        change = str(n["edit"].get("summary", "")).split("\n\n")[0]       # "[component] change"; the rest is the coder's
+        change = str(n["edit"].get("summary", "")).split("\n\n")[0]       # the plan's change; the rest is the coder's
         lines.append(f"- Edit: {clip(change)}")
     if n.get("code_diff_stats"):
         lines.append("- Code changed: " + ", ".join(f"{d['path']} (+{d['added']}/-{d['removed']})"
@@ -175,8 +172,7 @@ def siblings_section(siblings: list[dict], describe) -> str:
     return "\n\n".join([
         "## Siblings",
         f"The parent's other children that have finished: {len(siblings)}, oldest first.{older}",
-        table(["node", "status", "score", "edited component"],
-              [[n["node_id"], n.get("status"), n.get("score"), n.get("component")] for n in siblings]),
+        table(["node", "status", "score"], [[n["node_id"], n.get("status"), n.get("score")] for n in siblings]),
         *[describe(n) for n in shown]])
 
 

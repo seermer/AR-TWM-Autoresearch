@@ -58,7 +58,7 @@ def improve_recipe(ctx):
 def test_good_edit_self_writes_ok_result(env):
     out = env(GOOD, _edit_ctx())
     assert main(["edit_self"]) == 0
-    assert json.loads(out.read_text()) == {"ok": True, "result": {"summary": "attempt 1", "component": None}}
+    assert json.loads(out.read_text()) == {"ok": True, "result": {"summary": "attempt 1"}}
 
 
 def test_the_running_code_comes_from_the_code_dir_when_one_is_set(env, tmp_path, monkeypatch):
@@ -129,12 +129,6 @@ def test_recipe_result_requires_commit_recipe_and_rationale():
     assert ok.recipe["optimizer.lr"] == 1e-5
 
 
-def test_edit_result_component_is_optional_and_checked():
-    assert models.EDIT_COMPONENTS == ("prompts", "tools", "harness", "orchestration", "knowledge")
-    assert models.EditResult(summary="s").component is None
-    assert models.EditResult(summary="s", component="harness").component == "harness"
-    with pytest.raises(Exception):
-        models.EditResult(summary="s", component="everything")
 
 
 def test_clients_speak_over_the_socket_directory(monkeypatch, tmp_path):
