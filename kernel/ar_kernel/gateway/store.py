@@ -94,17 +94,18 @@ class CallStore:
                 return call["conversation_id"], call["turn_index"] + 1, call["call_id"]
         return uuid.uuid4().hex, 0, None
 
-    def begin(self, caller, endpoint: str, body: dict) -> dict:
+    def begin(self, caller, endpoint: str, body: dict, tool: str | None = None) -> dict:
+        """`tool`: the kernel tool that makes this call (ask), None for a call of the agent's own
+        conversation. It marks both events, so the call is not read as a conversation of a role."""
         with self._lock:
             conv, turn, parent = self._link(caller, endpoint, body)
             meta = {"call_id": uuid.uuid4().hex, "conversation_id": conv,
-                    "turn_index": turn, "parent_call_id": parent}
+                    "turn_index": turn, "parent_call_id": parent, **({"tool": tool} if tool else {})}
             # Persist BEFORE the caller forwards anything; a TelemetryError propagates.
             self._rec.event("llm.request", node=caller.node, phase=caller.phase,
                             attempt=caller.attempt, component="gateway",
                             payload={"endpoint": endpoint, "body": body, **meta},
-                            call_id=meta["call_id"], conversation_id=conv,
-                            turn_index=turn, parent_call_id=parent, model=body.get("model"))
+                            model=body.get("model"), **meta)
             self._calls[meta["call_id"]] = {**meta, "token": caller.token, "endpoint": endpoint,
                                             "request": [_norm(i) for i in _items(endpoint, body)],
                                             "prefix": None, "done": False}
@@ -119,7 +120,7 @@ class CallStore:
                             payload={"status": status, "body": body, "latency_s": latency_s,
                                      "attempts": attempts, **meta},
                             call_id=meta["call_id"], conversation_id=meta["conversation_id"],
-                            status=status, latency_s=latency_s, attempts=attempts,
+                            **({"tool": meta["tool"]} if "tool" in meta else {}), status=status, latency_s=latency_s, attempts=attempts,
                             usage=body.get("usage") if isinstance(body, dict) else None,
                             cost_usd=cost_usd, mock=mock)
             call = self._calls.get(meta["call_id"])

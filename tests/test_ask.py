@@ -97,6 +97,7 @@ def test_the_call_is_recorded_and_charged_like_a_gateway_call(make):
     ask.ask(caller, "q", ["big.png"])
     request, response = rec.read_events("n1")
     assert (request["type"], response["type"]) == ("llm.request", "llm.response")
+    assert request["tool"] == response["tool"] == "ask"       # not a conversation of a role
     assert request["phase"] == "edit_self" and response["status"] == 200 and response["cost_usd"] == 12 / 1e6
     assert budget.calls == 1 and budget.tokens == 12
     body = rec.load_payload(request["payload"])["body"]

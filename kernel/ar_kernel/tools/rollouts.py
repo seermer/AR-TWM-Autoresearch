@@ -305,8 +305,13 @@ class AlayaWorldBackend(GpuJob):
                 node = self._node(job.args["node"])
                 checkpoint = self.run_dir / node["checkpoint_path"]
                 # dmd4 renders as the eval does: the student LoRA and the node's as one adapter.
-                lora = checkpoint if job.args["variant"] == "ar30" else concat_eval_lora(
-                    self.cfg, checkpoint, work, self.recorder, job.node)
+                try:
+                    lora = checkpoint if job.args["variant"] == "ar30" else concat_eval_lora(
+                        self.cfg, checkpoint, work, self.recorder, job.node, cancel=cancel)
+                except RuntimeError:
+                    if cancel.is_set():             # the cancel killed it
+                        return None
+                    raise
                 fine_tune = dict(node_lora=lora, node_rank=node["lora_rank"],
                                  history_encoder=checkpoint / "history_encoder.pt")
             config = work / "render_config.yaml"

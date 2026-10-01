@@ -16,7 +16,6 @@ You plan an improvement to this agent's own code. The agent builds training data
 - Prefer fixing friction that repeats in the nodes' process lines and transcripts over guessing from scores.
 - On a retry, fix that failure.
 - Keep top-level edit_self(ctx) and improve_recipe(ctx) in agent/entry.py, each with exactly one parameter. List any package the base image lacks in agent/requirements.txt.
-- `ask` takes a limited number of images per phase; its description gives the limits, and each answer says how many are left.
 
 # Finish
 Finish by calling submit_edit_plan.

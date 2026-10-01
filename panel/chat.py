@@ -88,8 +88,8 @@ def _pretty(arguments) -> str:
 def segments(events: list[dict], node: str, phase: str, attempt: int) -> list[Segment]:
     calls: dict[str, Call] = {}
     for e in events:
-        if (e.get("node"), e.get("phase"), e.get("attempt")) != (node, phase, attempt):
-            continue
+        if (e.get("node"), e.get("phase"), e.get("attempt")) != (node, phase, attempt) or e.get("tool"):
+            continue                              # a kernel tool's own model call (ask) is no conversation
         if e.get("type") == "llm.request" and e.get("call_id"):
             calls[e["call_id"]] = Call(e["call_id"], e.get("conversation_id") or e["call_id"],
                                        e.get("turn_index") or 0, e.get("ts_wall", 0.0), e.get("payload"))

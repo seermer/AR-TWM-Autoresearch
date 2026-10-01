@@ -493,7 +493,7 @@ def test_a_node_job_renders_with_the_nodes_fine_tune(env, monkeypatch, variant):
     q, caller, _, run_dir = env
     checkpoint = _scored_node(run_dir)
 
-    def fake_concat(cfg, ckpt, node_dir, recorder, node_id):
+    def fake_concat(cfg, ckpt, node_dir, recorder, node_id, cancel=None):
         assert ckpt == checkpoint
         (Path(node_dir) / "eval" / "lora").mkdir(parents=True)
         return Path(node_dir) / "eval" / "lora"

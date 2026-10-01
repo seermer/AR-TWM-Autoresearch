@@ -72,7 +72,7 @@ class Ask:
             self._used[caller.token] = used + len(images)
         body = self.upstream.enforce("/chat/completions", {
             "model": self.model, "messages": [{"role": "user", "content": parts}]})
-        meta = self.store.begin(caller, ENDPOINT, body)
+        meta = self.store.begin(caller, ENDPOINT, body, tool="ask")
         started = time.monotonic()
         status, payload, attempts = asyncio.run(self.upstream.post("/chat/completions", body))
         usage = payload.get("usage") if isinstance(payload, dict) else None

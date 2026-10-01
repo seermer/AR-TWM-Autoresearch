@@ -43,7 +43,7 @@ def write_transcripts(run_dir: Path, node_id: str) -> None:
         rec = Recorder(run_dir)
         convs: dict[str, dict] = {}
         for e in rec.read_events(node_id):
-            if e.get("phase") not in AGENT_PHASES:
+            if e.get("phase") not in AGENT_PHASES or e.get("tool"):      # ask calls: in the caller's transcript
                 continue
             if e["type"] == "llm.request":
                 convs.setdefault(e.get("conversation_id"), {"dir": f"{e['phase']}-{e.get('attempt')}"})["request"] = e

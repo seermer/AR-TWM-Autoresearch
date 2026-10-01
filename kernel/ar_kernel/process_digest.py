@@ -93,6 +93,8 @@ def _digest(run_dir: Path, node_id: str) -> dict:
             started[(phase, e.get("attempt"))] = e["ts_wall"]
         elif kind == "phase.end" and (phase, e.get("attempt")) in started:
             phases[phase] = phases.get(phase, 0) + round(e["ts_wall"] - started[(phase, e.get("attempt"))])
+        elif kind in ("llm.request", "llm.response") and e.get("tool"):
+            pass                                  # a kernel tool's own model call (ask), not a role's conversation
         elif kind == "llm.request":
             requests[(phase, e.get("conversation_id"))].append(e)
         elif kind == "llm.response":

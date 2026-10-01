@@ -75,3 +75,27 @@ def test_the_digest_stays_under_two_kilobytes(tmp_path):
         rec.event("tool.error", node="n1", phase="p", tool=f"tool{i}", component="tools",
                   payload={"error": "e" * 400 + str(i)})
     assert len(json.dumps(process_digest(tmp_path, "n1"))) <= 2000
+
+
+def test_ask_calls_are_not_conversations_turns_or_compactions(tmp_path):
+    """An ask is recorded like a gateway call under the same phase. A short answer ("42") also occurs
+    in a role's first message, which would read as a compacted conversation continuing."""
+    from ar_kernel.gateway.store import CallStore
+    from ar_kernel.tools.context import TokenRegistry
+    from ar_kernel.transcripts import write_transcripts
+    rec = Recorder(tmp_path)
+    store = CallStore(rec)
+    caller = TokenRegistry(rec).issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=tmp_path,
+                                      staging_host=tmp_path)
+
+    def call(messages, answer, tool=None):
+        meta = store.begin(caller, "/v1/chat/completions", {"model": "m", "messages": messages}, tool=tool)
+        store.end(meta, caller, status=200, latency_s=1, attempts=1,
+                  body={"id": "x", "choices": [{"message": {"role": "assistant", "content": answer}}]})
+
+    call([{"role": "system", "content": "planner"}, {"role": "user", "content": "42 clips in the pool"}], "ok")
+    call([{"role": "user", "content": [{"type": "text", "text": "how many cars?"}]}], "42", tool="ask")
+    assert process_digest(tmp_path, "n1")["llm"] == {
+        "improve_recipe": {"conversations": 1, "turns": 1, "compactions": 0}}
+    write_transcripts(tmp_path, "n1")
+    assert len(list((tmp_path / "nodes" / "n1" / "transcripts").rglob("*.md"))) == 1
