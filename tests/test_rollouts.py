@@ -682,6 +682,63 @@ def test_real_alayaworld_rollout(tmp_path, variant):
     assert not failures, failures
 
 
+@pytest.mark.gpu
+@pytest.mark.parametrize("variant", ["dmd4", "ar30"])
+def test_real_alayaworld_rollout_of_a_node(tmp_path, variant):
+    """AR_TEST_CHECKPOINT=<a trained node's checkpoint dir> AR_TEST_RANK=<its LoRA rank> AR_TEST_GPUS=0,1,2,3
+    pytest tests/test_rollouts.py -m gpu -s -k of_a_node --basetemp=.cache/pytest/gpu
+
+    The same case and seed rendered by the released model and by the node: both publish a candidate,
+    and the node's clip differs from the released model's (its fine-tune is applied)."""
+    import os
+    import subprocess
+    from ar_kernel.config import resolve_gpus
+
+    if not os.environ.get("AR_TEST_CHECKPOINT"):
+        pytest.skip("set AR_TEST_CHECKPOINT and AR_TEST_RANK")
+    gpus = resolve_gpus(REAL, {"CUDA_VISIBLE_DEVICES": os.environ.get("AR_TEST_GPUS", "0,1,2,3")})
+    raw = copy.deepcopy(REAL.raw)
+    raw["generators"]["alayaworld"]["variants"][variant] = {"enabled": True}
+    cfg = KernelConfig(raw=raw, repo_root=REAL.repo_root)
+    run_dir, ws = tmp_path / "run", tmp_path / "ws"
+    staging = run_dir / "staging"
+    ws.mkdir(parents=True); staging.mkdir(parents=True)
+    _scored_node(run_dir, rank=int(os.environ["AR_TEST_RANK"])).rmdir()
+    (run_dir / "nodes" / "n2" / "checkpoint-300").symlink_to(Path(os.environ["AR_TEST_CHECKPOINT"]).resolve())
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i",
+                    str(REAL.worldmodel / "data/examples/video_caption_camera/videos/clip_0001.mp4"),
+                    "-frames:v", "1", str(ws / "street.png")], check=True)
+    rec = Recorder(run_dir)
+    reg = TokenRegistry(rec)
+    q = JobQueue(rec, threading.Lock(), wait_cap_s=3600)
+    q.register(AlayaWorldBackend(cfg, run_dir, gpus, reg, rec))
+    caller = reg.issue(node="gpu", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
+    item = {"image": "street.png", "perspective": "first_person",
+            "environment_prompt": "A rainy city street lined with parked cars and trees.",
+            "turns": [{"action": "W"}]}
+    frames = {}
+    try:
+        for node in (None, "n2"):
+            args = {"items": [dict(item)], "variant": variant, "seed": 42, "rounds_per_turn": 1}
+            out = _wait(q, caller, q.backends["rollout_alayaworld"].submit(
+                q, caller, args if node is None else {**args, "node": node})["job_id"])
+            assert out["state"] == "done", out.get("error")
+            [got] = out["result"]["items"]
+            assert "candidate" in got, got
+            assert got["candidate"]["provenance"]["generator"] == f"alayaworld-{variant}" + (f"@{node}" if node else "")
+            assert out["result"]["gpu_memory_released"] is True
+            assert not (run_dir / "jobs" / out["id"] / "eval").exists()
+            video = staging / Path(got["candidate"]["video"]).relative_to("/workspace/staging")
+            frames[node] = np.frombuffer(subprocess.run(
+                ["ffmpeg", "-loglevel", "error", "-i", str(video), "-vf", "scale=160:90", "-f", "rawvideo",
+                 "-pix_fmt", "gray", "-"], check=True, capture_output=True).stdout, np.uint8).astype(np.float32)
+    finally:
+        q.shutdown()
+    assert frames[None].shape == frames["n2"].shape
+    diff = float(np.abs(frames[None] - frames["n2"]).mean())
+    print(json.dumps({"variant": variant, "mean_abs_diff": round(diff, 3)}))
+    assert diff > 0.5
+
 # ---- Wan22Backend (rollout_wan22) ----
 
 def small_wan_cfg(env="autoresearcher", enabled=True, **over):

@@ -9,7 +9,7 @@ description: Use when looking into what earlier nodes did: their transcripts, wo
 
 - `recipe.yaml`: the tunable values the node trained with.
 - `rationale.md`: the recipe rationale, the data plan and the data notes.
-- `edit.json`: the node's self-edit: component and summary.
+- `edit.json`: the summary of the node's self-edit.
 - `transcripts/<phase>-<attempt>/NN-<role>.md`: every conversation of every role, in order, with reasoning, tool calls and tool results. A file is named after the role's submit tool (edit_plan and edit in edit_self, plan and data_and_recipe in improve_recipe). A compacted conversation continues in the next file.
 - `attempts/edit_self-<k>/agent/`: the agent code as that attempt left it. `workspace/plans.json` holds every plan of the attempt, with the coder's report when it asked for a new one.
 - `attempts/improve_recipe-<k>/workspace/`: the data engineer's files: scripts, `tool_output/run_command-*.log` (full output of every command), `plans.json` (every plan, with the engineer's report when it asked for a new one), `result.json`.
