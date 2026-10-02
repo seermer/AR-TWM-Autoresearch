@@ -236,3 +236,38 @@ def test_a_clip_whose_pose_jumps_is_accepted_with_a_warning(tmp_path):
     assert result.accepted
     assert any("camera pose jumps between frames 56 and 57" in w for w in result.warnings)
     assert result.warnings == ing.clips.get(result.clip_id)["warnings"]
+
+
+import json
+
+from ar_kernel.isolation import EXCLUDED_CLIP
+
+COPIED = "Torch sconces on both walls cast flickering orange light."     # from an evaluation prompt
+
+
+def _rejected_events(tmp_path):
+    rec = Recorder(tmp_path)
+    return [rec.load_payload(e["payload"]) for e in rec.read_events("n1") if e["type"] == "ingest.rejected"]
+
+
+@pytest.mark.parametrize("caption,provenance,why", [
+    ({"caption": f"A corridor. {COPIED}"}, PROV, "text"),
+    ({"caption": "A corridor.", "segments": [{"time_range_s": [0, 4], "prompt": COPIED}]}, PROV, "text"),
+    ({"caption": "A corridor."}, {"kind": "hf_dataset", "repo": "x/WBench-mirror", "revision": "a"}, "source"),
+])
+def test_excluded_candidates_get_one_neutral_reason(tmp_path, caption, provenance, why):
+    ing = _ingestor(tmp_path)
+    c = _candidate(tmp_path)
+    c.caption.write_text(json.dumps(caption))
+    c = Candidate(video=c.video, caption=c.caption, pose=c.pose, camera_motion="moving", provenance=provenance)
+    [result] = ing.ingest([c], node_id="n1")
+    assert result.accepted is False and result.reasons == [EXCLUDED_CLIP]
+    assert _rejected_events(tmp_path)[-1]["excluded"] == why
+
+
+def test_a_caption_with_odd_segments_does_not_break_the_text_check(tmp_path):
+    ing = _ingestor(tmp_path)
+    c = _candidate(tmp_path)
+    c.caption.write_text(json.dumps({"caption": "A bright room.", "segments": ["not an object", None]}))
+    [result] = ing.ingest([c], node_id="n1")          # the format checker's verdict stands, whatever it is
+    assert result.reasons != [EXCLUDED_CLIP]

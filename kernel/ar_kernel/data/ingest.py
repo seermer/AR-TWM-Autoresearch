@@ -8,6 +8,7 @@ import numpy as np
 from ..archive.blobs import BlobStore
 from ..archive.clips import ClipStore
 from ..config import KernelConfig, run_config_path
+from ..isolation import EXCLUDED_CLIP, blocked, copies_held_out
 from .checker import CheckerError, check_clip_formats
 from .leakage import LeakageChecker
 from .probe import aspect_ok, probe_video
@@ -161,14 +162,19 @@ class Ingestor:
             return self._reject(candidate, node_id, sorted({e for report in reports.values() for e in report["errors"]}),
                                 reports=reports)
 
+        caption_json = json.loads(caption.read_text(encoding="utf-8"))
+        texts = [caption_json.get("caption"),
+                 *[s.get("prompt") for s in caption_json.get("segments") or [] if isinstance(s, dict)]]
         verdict = self.leakage.check(video)
-        self._event(candidate, "ingest.leakage", node_id, {"matches": verdict.matches, "near": verdict.near_matches})
-        if verdict.rejected:
-            return self._reject(candidate, node_id, [f"matches WBench case {m['case_id']} "
-                                                     f"(phash {m['phash_distance']}, ncc {m['ncc']:.3f})"
-                                                     for m in verdict.matches])
+        excluded = ("image" if verdict.rejected else
+                    "source" if blocked(self.cfg, json.dumps(candidate.provenance)) else
+                    "text" if copies_held_out(self.cfg, *texts) else None)
+        self._event(candidate, "ingest.leakage", node_id,
+                    {"matches": verdict.matches, "near": verdict.near_matches, "excluded": excluded})
+        if excluded:                    # the agent gets one sentence; telemetry keeps the reason
+            return self._reject(candidate, node_id, [EXCLUDED_CLIP], excluded=excluded)
 
-        has_segments = bool(json.loads(caption.read_text(encoding="utf-8")).get("segments"))
+        has_segments = bool(caption_json.get("segments"))
         has_intrinsics = False
         if pose is not None:
             with np.load(pose) as arrays:
