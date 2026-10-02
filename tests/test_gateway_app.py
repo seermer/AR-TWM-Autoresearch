@@ -389,3 +389,16 @@ def test_budget_cap_blocks_further_real_calls_but_not_mock_calls(tmp_path):
     assert r3.status_code == 200
     responses = [e for e in rec.read_events("n1") if e["type"] == "llm.response"]
     assert responses[-1]["mock"] is True
+
+
+def test_the_gateway_censors_tool_results_before_forwarding_and_recording(tmp_path):
+    rec = Recorder(tmp_path)
+    reg, store, seen = TokenRegistry(rec), CallStore(rec), []
+    caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=tmp_path, staging_host=tmp_path)
+    app = create_gateway_app(registry=reg, store=store, allowed_models={"gpt-x"}, censor=["wbench"],
+                             upstream=_upstream_that(_ok, seen), mocks=MockBook.default())
+    body = {"model": "gpt-x", "messages": [{"role": "user", "content": "hi"},
+                                           {"role": "tool", "tool_call_id": "c", "content": "ranked on WBench"}]}
+    assert _post(TestClient(app), caller.token, body, "/v1/chat/completions").status_code == 200
+    assert seen[0]["messages"][1]["content"] == "ranked on render"
+    assert not _telemetry_contains(tmp_path, rec, "WBench")

@@ -7,6 +7,8 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
+from .process_digest import _payload
+
 RUN_WORDS = 8               # this many consecutive words shared with an evaluation prompt is a copy
 SCRUBBED = "render"         # what a blocked name is replaced with: run_<name> reads run_render
 EXCLUDED_CLIP = ("this clip is on the kernel's exclusion list and cannot be used as training data. "
@@ -61,3 +63,44 @@ def scrub(value, names: list[str]):
     if isinstance(value, list):
         return [scrub(item, names) for item in value]
     return value
+
+
+def censor_names(cfg) -> list[str]:
+    """Every name the gateway replaces in what a tool returned to the model."""
+    return list(dict.fromkeys([*(cfg.get("isolation.blocked_names") or []), *(cfg.get("isolation.audit_patterns") or [])]))
+
+
+def censor_tool_results(body: dict, names: list[str]) -> dict:
+    """An LLM request body with `names` replaced in every tool result (Chat Completions `tool` messages,
+    Responses `function_call_output` items). What the model itself wrote is left as it is: the audit
+    reads that. So a mention the agent only came across never reaches the model or a transcript."""
+    out = dict(body)
+    if isinstance(body.get("messages"), list):
+        out["messages"] = [{**m, "content": scrub(m.get("content"), names)}
+                           if isinstance(m, dict) and m.get("role") == "tool" else m for m in body["messages"]]
+    if isinstance(body.get("input"), list):
+        out["input"] = [{**item, "output": scrub(item.get("output"), names)}
+                        if isinstance(item, dict) and item.get("type") == "function_call_output" else item
+                        for item in body["input"]]
+    return out
+
+
+def audit(cfg, recorder, node: str, phase: str, attempt: int) -> list[str]:
+    """What the model wrote in one attempt that names an audit pattern: its reasoning, its replies and
+    every tool-call argument (commands, files written through tools, queries, plans). One line per
+    place and pattern; empty when clean. Tool results are not read here: the gateway censors them."""
+    patterns = [p.lower() for p in cfg.get("isolation.audit_patterns") or []]
+    hits = set()
+    for e in recorder.read_events(node):
+        if e.get("type") != "llm.response" or e.get("phase") != phase or e.get("attempt") != attempt or e.get("tool"):
+            continue
+        for choice in (_payload(recorder, e).get("body") or {}).get("choices") or []:
+            message = choice.get("message") or {}
+            written = [("reply", message.get("content")),
+                       ("reasoning", message.get("reasoning") or message.get("reasoning_content")),
+                       *[((call.get("function") or {}).get("name"), (call.get("function") or {}).get("arguments"))
+                         for call in message.get("tool_calls") or []]]
+            for where, text in written:
+                text = json.dumps(text).lower() if not isinstance(text, str) else text.lower()
+                hits |= {f"{where} names {p}" for p in patterns if p in text}
+    return sorted(hits)

@@ -295,3 +295,23 @@ def test_a_scored_root_is_reused_by_the_next_run(tmp_path):
     assert (second / "nodes" / "root" / "eval" / "video.mp4").read_text() == "v"
     assert json.loads((second / "nodes" / "root" / "eval" / "aggregates.json").read_text())["metrics"]["m"] == 0.7
     assert [e["type"] for e in loop.ctx.recorder.read_events("root")].count("root.reused") == 1
+
+
+def test_a_phase_that_reaches_for_the_evaluation_set_quarantines_the_node(make_loop):
+    run, make = make_loop
+    script = Script(run, score=[0.7, 0.9])
+    loop = make(script)
+    real_edit = script.edit_self
+
+    def reaching_edit(env, *, node, attempt, **kw):
+        call = {"id": "c1", "type": "function",
+                "function": {"name": "run_command", "arguments": '{"command": "curl hf.co/datasets/x/WBench"}'}}
+        loop.ctx.recorder.event("llm.response", node=node, phase="edit_self", attempt=attempt, conversation_id="c",
+                                payload={"body": {"choices": [{"message": {"role": "assistant", "tool_calls": [call]}}]}})
+        return real_edit(env, node=node, attempt=attempt, **kw)
+    loop.phases.edit_self = reaching_edit
+    loop.run()
+    n1 = NodeStore(loop.ctx.conn).get("n1")
+    assert n1["status"] == "quarantined" and n1["error"] == "quarantined: run_command names wbench"
+    assert [r[0] for r in script.retries] == ["edit_self"]              # one attempt, no retry, no data phase
+    assert any(e["type"] == "isolation.audit" for e in loop.ctx.recorder.read_events("n1"))

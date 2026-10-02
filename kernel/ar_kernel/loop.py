@@ -22,6 +22,7 @@ from .archive.commits import CommitStore
 from .archive.nodes import NodeStore, run_rel
 from .contract.verify import verify_contract
 from .guards import alert
+from .isolation import audit
 from .eval.score import weighted_score
 from .run import record_root_counts, root_key, score_node
 from .selection import select_parent, selection_seed, update_values
@@ -50,6 +51,10 @@ def _submitted(result: dict) -> dict:
 
 class StopRun(Exception):
     """End the run now (budget spent); resume marks the running node `interrupted`."""
+
+
+class Quarantined(Exception):
+    """An agent phase reached for the evaluation set: the node ends here, with no retry."""
 
 
 def _gate(loop, recipe, data_commit, parent_commit, node, attempt_dir):
@@ -147,6 +152,12 @@ class Loop:
     def _node_dir(self, node: str) -> Path:
         return Path(self.ctx.run_dir) / "nodes" / node
 
+    def _audit(self, node: str, phase: str, attempt: int) -> None:
+        hits = audit(self.cfg, self.ctx.recorder, node, phase, attempt)
+        if hits:
+            self.ctx.recorder.event("isolation.audit", node=node, phase=phase, attempt=attempt, payload={"hits": hits})
+            raise Quarantined("; ".join(hits)[:2000])
+
     # -- the run -----------------------------------------------------------------------------
     def run(self) -> str:
         self.ensure_root()
@@ -232,6 +243,8 @@ class Loop:
         except StopRun:
             status = None                                         # left running: interrupted on resume
             raise
+        except Quarantined as exc:
+            status, error = "quarantined", f"quarantined: {exc}"
         except Exception as exc:                                  # noqa: BLE001
             status, error = "crashed", f"{type(exc).__name__}: {exc}"
         except BaseException:                                     # ForceStop / KeyboardInterrupt
@@ -263,6 +276,7 @@ class Loop:
                                         max_attempts=n, retry=retry,
                                         nodes_remaining=self.max_nodes - self._children(),
                                         previous_workspace=prev_ws)
+            self._audit(child, "edit_self", k)
             base = out.commit or base
             prev_ws = Path(out.attempt_dir) / "workspace"
             if not out.ok:
@@ -297,6 +311,7 @@ class Loop:
                                              max_attempts=n, retry=retry,
                                              nodes_remaining=self.max_nodes - self._children(),
                                              previous_workspace=prev_ws)
+            self._audit(child, "improve_recipe", k)
             adir = Path(out.attempt_dir)
             prev_ws = adir / "workspace"
             if not out.ok:
