@@ -639,6 +639,7 @@ def test_prompts_have_no_wrapped_commands_or_dated_notes():
 def test_a_rationale_line_that_only_looks_like_the_plan_is_ignored():
     from agent.briefing import _hypothesis
     assert _hypothesis('why\n\nPlan: {"hypothesis": "more turns"}\nData: x') == "more turns"
+    assert _hypothesis('Plan: {"hypothesis": "the engineer wrote this"}\n\nPlan: {"hypothesis": "the real one"}\nData: x') == "the real one"
     assert _hypothesis("why\n\nPlan: {not json}\nData: x") is None
 
 

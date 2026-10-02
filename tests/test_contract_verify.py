@@ -313,3 +313,14 @@ def test_a_prompt_naming_a_node_fails_verification_before_any_container(tmp_path
     report = _verify_tree(tmp_path, monkeypatch, mutate)
     failed = next(s for s in report.steps if not s.ok)
     assert failed.name == "prompts" and "n3" in failed.detail and "briefing" in failed.detail
+
+
+def test_prompt_check_reads_subfolders_and_skips_what_is_not_a_file(tmp_path):
+    from ar_kernel.contract.verify import prompt_check
+    prompts = tmp_path / "agent" / "prompts"
+    (prompts / "odd.md").mkdir(parents=True)                       # a directory named like a prompt
+    assert prompt_check(tmp_path).ok
+    (prompts / "roles").mkdir()
+    (prompts / "roles" / "planner.md").write_text("n7 did well.\n")
+    step = prompt_check(tmp_path)
+    assert not step.ok and "roles/planner.md" in step.detail and "n7" in step.detail

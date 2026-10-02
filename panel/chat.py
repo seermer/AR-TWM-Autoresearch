@@ -72,13 +72,15 @@ def request_tools(payload: dict | None) -> list[dict]:
     return list(((payload or {}).get("body") or {}).get("tools") or [])
 
 
-def _type(schema: dict) -> str:
+def _type(schema) -> str:
+    if not isinstance(schema, dict):                # `true` is a valid schema
+        return "any"
     if "enum" in schema:
         return " | ".join(map(str, schema["enum"]))
     if "anyOf" in schema:
-        return " | ".join(_type(s) for s in schema["anyOf"] if s.get("type") != "null")
+        return " | ".join(_type(s) for s in schema["anyOf"] if not (isinstance(s, dict) and s.get("type") == "null"))
     if schema.get("type") == "array":
-        return f"[{_type(schema.get('items') or {})}]"
+        return f"[{_type(schema.get('items', {}))}]"
     return str(schema.get("type", "any"))
 
 

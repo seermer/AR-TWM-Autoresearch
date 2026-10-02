@@ -78,11 +78,12 @@ _NODE_FACT = re.compile(r"\b(n\d+|" + "|".join(alias for alias, _, _ in AGENT_ME
 def prompt_check(code: Path) -> ContractStep:
     """A role prompt holds a mission and general behaviour: it may not name a node or a metric.
     Checked here, not in the agent's own self-test, which the agent can edit."""
-    for path in sorted((code / "agent" / "prompts").glob("*.md")):
+    prompts = code / "agent" / "prompts"
+    for path in sorted(p for p in prompts.rglob("*.md") if p.is_file() and not p.is_symlink()):
         found = sorted(set(_NODE_FACT.findall(path.read_text(encoding="utf-8", errors="replace"))))
         if found:
             return ContractStep("prompts", False,
-                                f"agent/prompts/{path.name} names {', '.join(found)}. A prompt holds a role's "
+                                f"agent/prompts/{path.relative_to(prompts)} names {', '.join(found)}. A prompt holds a role's "
                                 "mission and general behaviour only: put facts about nodes and metrics in what "
                                 "the role is told first (agent/briefing.py), not in its prompt")
     return ContractStep("prompts", True)

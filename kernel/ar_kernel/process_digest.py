@@ -87,6 +87,8 @@ def _rounds(run_dir: Path, node_id: str) -> dict:
     anything that is not a list of round objects counts as nothing."""
     out: dict[str, dict] = {}
     for path in sorted((run_dir / "nodes" / node_id / "attempts").glob("*/workspace/plans.json")):
+        if path.is_symlink() or not path.is_file():       # the agent's file: never follow a link or open a FIFO
+            continue
         try:
             rounds = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):

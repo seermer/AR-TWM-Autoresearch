@@ -79,6 +79,16 @@ def test_tool_results_are_censored_not_audited(tmp_path):
                            {"type": "message", "role": "user", "content": "x"}]}
     assert censor_tool_results(responses, names)["input"][0]["output"] == "about render"
     assert censor_tool_results({"input": "a plain string"}, names) == {"input": "a plain string"}
+    other = {"messages": [{"role": "function", "name": "f", "content": "WBench list"},
+                          {"role": "user", "content": "log tail: run_wbench.py"},
+                          {"role": "assistant", "content": "I will look at WBench"}],
+             "input": [{"type": "custom_tool_call_output", "output": "WBench"},
+                       {"type": "function_call", "name": "f", "arguments": "WBench"},
+                       {"type": "reasoning", "summary": [{"text": "WBench"}]},
+                       {"type": "message", "role": "assistant", "content": "WBench"}]}
+    out = censor_tool_results(other, names)
+    assert [m["content"] for m in out["messages"]] == ["render list", "log tail: run_render.py", "I will look at WBench"]
+    assert out["input"][0]["output"] == "render" and out["input"][1:] == other["input"][1:]   # the model's own words stay
 
 
 

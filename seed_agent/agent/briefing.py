@@ -107,9 +107,9 @@ def _data(n: dict) -> str:
 
 def _hypothesis(rationale: str | None) -> str | None:
     """The data idea a node tested: run_task records its final plan in the rationale as a `Plan: {json}` line."""
-    match = re.search(r"^Plan: (\{.*\})$", rationale or "", re.MULTILINE)
+    plans = re.findall(r"^Plan: (\{.*\})$", rationale or "", re.MULTILINE)
     try:
-        return json.loads(match.group(1)).get("hypothesis") if match else None
+        return json.loads(plans[-1]).get("hypothesis") if plans else None      # the last one: run_task appends it
     except ValueError:                                      # a line of the rationale that only looks like one
         return None
 

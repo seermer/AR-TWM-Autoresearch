@@ -155,3 +155,17 @@ def test_the_kernels_own_contract_run_is_not_a_role(tmp_path):
         rec.event("llm.request", node="n1", phase=phase, conversation_id=phase,
                   payload={"body": {"messages": [{"role": "user", "content": "ping"}]}})
     assert [r["phase"] for r in process_digest(tmp_path, "n1")["roles"]] == ["edit_self"]
+
+
+def test_a_plans_json_that_is_not_a_regular_file_is_skipped(tmp_path):
+    import os
+    rec = _rec(tmp_path)
+    rec.event("tool.call", node="n1", phase="edit_self", tool="ask", component="tools", payload={})
+    ws = tmp_path / "nodes" / "n1" / "attempts" / "edit_self-1" / "workspace"
+    ws.mkdir(parents=True)
+    os.mkfifo(ws / "plans.json")                    # reading it would block forever
+    ws2 = tmp_path / "nodes" / "n1" / "attempts" / "edit_self-2" / "workspace"
+    ws2.mkdir(parents=True)
+    (tmp_path / "real.json").write_text(json.dumps([{"plan": {}}]))
+    (ws2 / "plans.json").symlink_to(tmp_path / "real.json")
+    assert process_digest(tmp_path, "n1")["rounds"] == {}

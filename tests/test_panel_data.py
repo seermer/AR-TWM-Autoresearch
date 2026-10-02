@@ -646,3 +646,5 @@ def test_tools_offered_show_each_tools_parameters():
         {"type": "function", "function": {"name": "bare"}}]
     assert tool_lines(tools) == ("- data_query(limit: integer, camera_motion?: moving | static, clip_ids?: [string]): "
                                  "Search the pool.\n- bare(): ")
+    odd = [{"type": "function", "function": {"name": "t", "parameters": {"properties": {"x": True, "y": {"items": True, "type": "array"}}}}}]
+    assert tool_lines(odd) == "- t(x?: any, y?: [any]): "

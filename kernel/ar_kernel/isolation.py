@@ -83,18 +83,20 @@ def censor_names(cfg) -> list[str]:
     return list(dict.fromkeys([*(cfg.get("isolation.blocked_names") or []), *(cfg.get("isolation.audit_patterns") or [])]))
 
 
+MODEL_ITEMS = ("function_call", "reasoning")       # Responses input items the model itself wrote
+
+
 def censor_tool_results(body: dict, names: list[str]) -> dict:
-    """An LLM request body with `names` replaced in every tool result (Chat Completions `tool` messages,
-    Responses `function_call_output` items). What the model itself wrote is left as it is: the audit
-    reads that. So a mention the agent only came across never reaches the model or a transcript."""
+    """An LLM request body with `names` replaced in everything the model did not write: tool results
+    and user and system messages, in Chat Completions `messages` and Responses `input`. What the model
+    wrote (assistant messages, its tool calls and reasoning) is left as it is: the audit reads that.
+    So a mention the agent only came across never reaches the model or a transcript."""
+    def own(item) -> bool:
+        return not isinstance(item, dict) or item.get("role") == "assistant" or item.get("type") in MODEL_ITEMS
     out = dict(body)
-    if isinstance(body.get("messages"), list):
-        out["messages"] = [{**m, "content": scrub(m.get("content"), names)}
-                           if isinstance(m, dict) and m.get("role") == "tool" else m for m in body["messages"]]
-    if isinstance(body.get("input"), list):
-        out["input"] = [{**item, "output": scrub(item.get("output"), names)}
-                        if isinstance(item, dict) and item.get("type") == "function_call_output" else item
-                        for item in body["input"]]
+    for key in ("messages", "input"):
+        if isinstance(body.get(key), list):
+            out[key] = [item if own(item) else scrub(item, names) for item in body[key]]
     return out
 
 
