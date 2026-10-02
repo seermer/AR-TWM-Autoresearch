@@ -4,16 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .process_digest import _payload, _text
+from .process_digest import _payload, _text, role_of
 from .telemetry.recorder import Recorder
 
 AGENT_PHASES = ("edit_self", "improve_recipe")
-
-
-def _role(body: dict) -> str:
-    """Named after the role's submit_<x> tool: the only role label the kernel can see."""
-    names = [(t.get("function") or {}).get("name", "") for t in body.get("tools") or []]
-    return next((n.removeprefix("submit_") for n in names if n.startswith("submit_")), "conversation")
 
 
 def render(messages: list[dict]) -> str:
@@ -58,7 +52,7 @@ def write_transcripts(run_dir: Path, node_id: str) -> None:
             choices = (_payload(rec, conv["response"]).get("body") or {}).get("choices") if "response" in conv else None
             if choices:
                 messages.append(choices[0].get("message") or {})
-            path = out / conv["dir"] / f"{i:02d}-{_role(body)}.md"
+            path = out / conv["dir"] / f"{i:02d}-{role_of(body)}.md"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(render(messages), encoding="utf-8")
     except Exception:                                   # noqa: BLE001 -- never fail a node over transcripts
