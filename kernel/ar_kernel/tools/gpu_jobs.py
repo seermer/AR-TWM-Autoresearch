@@ -18,9 +18,10 @@ from types import SimpleNamespace
 from typing import Annotated, Any, Callable
 
 from mcp.server.mcpserver import Context
-from pydantic import WithJsonSchema
+from pydantic import Field, WithJsonSchema
 
 from ..archive.blobs import sha256_file
+from ..isolation import EXCLUDED_PROMPT, copies_held_out, strings
 from ..subproc import file_tail
 from .captioner import clip_host_path, container_path, stage_clip
 from .context import STAGING, PathError
@@ -30,7 +31,7 @@ from .server import ToolError
 from .vllm_server import gpu_memory_mib, wait_gpu_release
 
 
-def _items(properties: dict, required: list[str]) -> WithJsonSchema:
+def items_schema(properties: dict, required: list[str]) -> WithJsonSchema:
     """The listed JSON schema of an `items` list. Only the schema: the values still reach the tool
     as plain dicts and each backend's check_args validates them, so a bad value is a recorded
     tool.error rather than a failure inside the MCP layer."""
@@ -38,18 +39,34 @@ def _items(properties: dict, required: list[str]) -> WithJsonSchema:
                                                       "required": required, "additionalProperties": False}})
 
 
-_STR, _INT = {"type": "string"}, {"type": "integer"}
-ImageItems = Annotated[list[dict[str, Any]], _items({"prompt": _STR, "seed": _INT}, ["prompt", "seed"])]
-ClipItems = Annotated[list[dict[str, Any]], _items({"prompt": _STR, "image": _STR, "seed": _INT},
-                                                   ["prompt", "seed"])]
-_TURN = {"type": "object", "properties": {"action": _STR, "subject_action": _STR, "event_edit": _STR,
-                                          "perspective_switch": _STR},
-         "required": ["action"], "additionalProperties": False}
-CaseItems = Annotated[list[dict[str, Any]], _items(
-    {"image": _STR, "perspective": {"type": "string", "enum": ["first_person", "third_person"]},  # rollouts.PERSPECTIVES
-     "environment_prompt": _STR, "character_prompt": _STR, "perspective_prompt": _STR, "subject_mask": _STR,
-     "turns": {"type": "array", "items": _TURN}},
-    ["image", "perspective", "environment_prompt", "turns"])]
+def _str(description: str) -> dict:
+    return {"type": "string", "description": description}
+
+
+_SEED = {"type": "integer", "description": "random seed; the same item and seed give the same output"}
+_FRAME = _str("first frame: an image file under /workspace (any size; it is cropped and resized)")
+ImageItems = Annotated[list[dict[str, Any]], items_schema(
+    {"prompt": _str("what the image shows"), "seed": _SEED}, ["prompt", "seed"])]
+ClipItems = Annotated[list[dict[str, Any]], items_schema(
+    {"prompt": _str("what the clip shows"), "image": _FRAME, "seed": _SEED}, ["prompt", "seed"])]
+_TURN = {"type": "object", "additionalProperties": False, "required": ["action"], "properties": {
+    "action": _str("camera move for this turn: W, A, S, D (translate), left, right, up, down (rotate), stop, "
+                   "or two joined with '+', e.g. 'W+left'"),
+    "event": _str("something that happens in the scene during this turn"),
+    "subject_action": _str("something the subject does during this turn"),
+    "viewpoint_change": _str("a change of viewpoint during this turn: 'fp_to_tp', 'tp_to_fp', 'fp_to_scope', "
+                             "or 'tp_to_tp: <the new view>'")}}
+WorldItems = Annotated[list[dict[str, Any]], items_schema(
+    {"image": _str("first frame: an image file under /workspace (.jpg, .png, ...; any size)"),
+     "viewpoint": {"type": "string", "enum": ["first_person", "third_person"],     # rollouts.VIEWPOINTS
+                   "description": "whose eyes the first frame is seen through"},
+     "scene_prompt": _str("the scene: place, objects, light"),
+     "character_prompt": _str("the subject, if there is one"),
+     "viewpoint_prompt": _str("how the camera sees the scene at the start"),
+     "subject_mask": _str("an image under /workspace, white where the subject is in the first frame"),
+     "turns": {"type": "array", "items": _TURN,
+               "description": "the clip, turn by turn; each turn lasts `rounds_per_turn` rounds"}},
+    ["image", "viewpoint", "scene_prompt", "turns"])]
 
 
 def is_int(value) -> bool:
@@ -108,6 +125,12 @@ class GpuJob:
         if len(items) > self.max_items:
             raise ToolError(f"at most {self.max_items} items per job")
         self.check_args(args)
+        for n, item in enumerate(items):
+            if copies_held_out(self.cfg, *strings(item)):       # before a GPU is scheduled
+                self.recorder.event("isolation.refused", node=caller.node, phase=caller.phase,
+                                    attempt=caller.attempt, component="tools", tool=self.name,
+                                    payload={"item": n})
+                raise ToolError(f"item {n}: {EXCLUDED_PROMPT}")
         for n, item in enumerate(items):
             for key in self.file_keys:
                 if isinstance(item.get(key), str):
@@ -301,34 +324,50 @@ def register_gpu_tools(mcp, kit, q) -> None:
 
     if "annotate_camera" in b:
         @mcp.tool(name="annotate_camera", description=b["annotate_camera"].description)
-        async def annotate_camera(paths: list[str], ctx: Context) -> dict[str, Any]:
+        async def annotate_camera(
+                paths: Annotated[list[str], Field(description="mp4 files under /workspace, at most 1200 frames each")],
+                ctx: Context) -> dict[str, Any]:
             return await kit.call(ctx, "annotate_camera", {"paths": paths},
                                   lambda c: b["annotate_camera"].submit(q, c, {"items": [{"video": p} for p in paths]}))
 
     if "rollout_alayaworld" in b:
         @mcp.tool(name="rollout_alayaworld", description=b["rollout_alayaworld"].description)
-        async def rollout_alayaworld(items: CaseItems, ctx: Context, variant: str | None = None,
-                                     rounds_per_turn: int | None = None, seed: int | None = None,
-                                     node: str | None = None) -> dict[str, Any]:
+        async def rollout_alayaworld(
+                items: WorldItems, ctx: Context,
+                variant: Annotated[str | None, Field(description="sampler; default the first one listed above")] = None,
+                rounds_per_turn: Annotated[int | None, Field(description="1..3, default 3; a round is 32 frames at 24 fps")] = None,
+                seed: Annotated[int | None, Field(description="default 42; one seed for the whole job")] = None,
+                node: Annotated[str | None, Field(description="render with this scored node's fine-tune instead of the released model")] = None,
+        ) -> dict[str, Any]:
             return await submit(ctx, "rollout_alayaworld", items=items, variant=variant,
                                 rounds_per_turn=rounds_per_turn, seed=seed, node=node)
 
     if "generate_images" in b:
         @mcp.tool(name="generate_images", description=b["generate_images"].description)
-        async def generate_images(items: ImageItems, ctx: Context, width: int | None = None,
-                                  height: int | None = None) -> dict[str, Any]:
+        async def generate_images(
+                items: ImageItems, ctx: Context,
+                width: Annotated[int | None, Field(description="multiple of 16 in 256..1920, default 1280")] = None,
+                height: Annotated[int | None, Field(description="multiple of 16 in 256..1920, default 720")] = None,
+        ) -> dict[str, Any]:
             return await submit(ctx, "generate_images", items=items, width=width, height=height)
 
     if "rollout_wan22" in b:
         @mcp.tool(name="rollout_wan22", description=b["rollout_wan22"].description)
-        async def rollout_wan22(items: ClipItems, ctx: Context, frames: int | None = None) -> dict[str, Any]:
+        async def rollout_wan22(
+                items: ClipItems, ctx: Context,
+                frames: Annotated[int | None, Field(description="4k+1 frames at 24 fps; one value for the job")] = None,
+        ) -> dict[str, Any]:
             return await submit(ctx, "rollout_wan22", items=items, frames=frames)
 
     if "rollout_ltx25" in b:
         @mcp.tool(name="rollout_ltx25", description=b["rollout_ltx25"].description)
-        async def rollout_ltx25(items: ClipItems, ctx: Context, variant: str | None = None,
-                                frames: int | None = None, height: int | None = None,
-                                width: int | None = None) -> dict[str, Any]:
+        async def rollout_ltx25(
+                items: ClipItems, ctx: Context,
+                variant: Annotated[str | None, Field(description="default the first one listed above")] = None,
+                frames: Annotated[int | None, Field(description="8k+1 frames at 24 fps; one value for the job")] = None,
+                height: Annotated[int | None, Field(description="with width, one of the listed resolutions")] = None,
+                width: Annotated[int | None, Field(description="with height, one of the listed resolutions")] = None,
+        ) -> dict[str, Any]:
             return await submit(ctx, "rollout_ltx25", items=items, variant=variant, frames=frames,
                                 height=height, width=width)
 

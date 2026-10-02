@@ -298,10 +298,14 @@ def test_listed_item_schemas_type_every_field(tmp_path):
     for name in ("rollout_wan22", "rollout_ltx25"):
         assert tools[name].input_schema["properties"]["items"]["items"]["properties"]["image"]["type"] == "string"
     alaya = tools["rollout_alayaworld"].input_schema["properties"]["items"]["items"]
-    from ar_kernel.tools.rollouts import PERSPECTIVES
-    assert alaya["properties"]["perspective"]["enum"] == list(PERSPECTIVES)
-    assert set(alaya["required"]) == {"image", "perspective", "environment_prompt", "turns"}
+    from ar_kernel.tools.rollouts import VIEWPOINTS
+    assert alaya["properties"]["viewpoint"]["enum"] == list(VIEWPOINTS)
+    assert set(alaya["required"]) == {"image", "viewpoint", "scene_prompt", "turns"}
     turn = alaya["properties"]["turns"]["items"]
+    assert set(turn["properties"]) == {"action", "event", "subject_action", "viewpoint_change"}
+    for field in (*alaya["properties"].values(), *turn["properties"].values()):
+        assert field["description"]                    # every item field says what it is
+    assert tools["rollout_alayaworld"].input_schema["properties"]["rounds_per_turn"]["description"]
     assert turn["properties"]["action"]["type"] == "string" and turn["required"] == ["action"]
 
 
@@ -321,3 +325,29 @@ def test_bad_or_missing_seed_is_refused_clearly(tmp_path, name, seed, match):
     item = {"prompt": "p"} if seed is None else {"prompt": "p", "seed": seed}
     with pytest.raises(ToolError, match=match):
         backends[name].check_args({"items": [item]})
+
+
+def test_a_prompt_copied_from_the_evaluation_is_refused_before_the_job_is_queued(tmp_path):
+    from ar_kernel.config import KernelConfig
+    from ar_kernel.isolation import EXCLUDED_PROMPT
+    from ar_kernel.tools.images import ImageBackend
+    from ar_kernel.tools.server import ToolError
+    rec = Recorder(tmp_path / "run")
+    reg = TokenRegistry(rec)
+    caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=tmp_path,
+                       staging_host=tmp_path)
+    backend = ImageBackend(KernelConfig.load(), tmp_path / "run", [0], reg, rec)
+
+    class Queue:
+        submitted = 0
+
+        def submit(self, caller, name, args):
+            self.submitted += 1
+            return "job1"
+    q = Queue()
+    copied = "A hall. Torch sconces on both walls cast flickering orange light."
+    with pytest.raises(ToolError, match="item 1: " + EXCLUDED_PROMPT):
+        backend.submit(q, caller, {"items": [{"prompt": "a quiet beach", "seed": 1}, {"prompt": copied, "seed": 2}]})
+    assert q.submitted == 0
+    assert backend.submit(q, caller, {"items": [{"prompt": "a quiet beach", "seed": 1}]}) == {"job_id": "job1"}
+    assert [e["type"] for e in rec.read_events("n1")].count("isolation.refused") == 1

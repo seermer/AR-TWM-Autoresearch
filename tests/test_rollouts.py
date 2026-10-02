@@ -40,19 +40,19 @@ def small_cfg(env="autoresearcher", enabled=("dmd4", "ar30")):
 
 
 def first_person(**over):
-    return {"image": "frame.png", "perspective": "first_person",
-            "environment_prompt": "A wet city street at night with neon signs.",
-            "character_prompt": "", "perspective_prompt": "First-person view at eye level.",
-            "turns": [{"action": "W"}, {"action": "left", "event_edit": "It starts to rain heavily."}], **over}
+    return {"image": "frame.png", "viewpoint": "first_person",
+            "scene_prompt": "A wet city street at night with neon signs.",
+            "character_prompt": "", "viewpoint_prompt": "First-person view at eye level.",
+            "turns": [{"action": "W"}, {"action": "left", "event": "It starts to rain heavily."}], **over}
 
 
 def third_person(**over):
-    return {"image": "frame.png", "perspective": "third_person", "subject_mask": "mask.png",
-            "environment_prompt": "A mountain trail above a valley.",
+    return {"image": "frame.png", "viewpoint": "third_person", "subject_mask": "mask.png",
+            "scene_prompt": "A mountain trail above a valley.",
             "character_prompt": "A hiker in a red jacket.",
-            "perspective_prompt": "Third-person view from behind the hiker.",
+            "viewpoint_prompt": "Third-person view from behind the hiker.",
             "turns": [{"action": "W+left", "subject_action": "The hiker raises a hand and waves."},
-                      {"action": "stop", "perspective_switch": "tp_to_fp"}], **over}
+                      {"action": "stop", "viewpoint_change": "tp_to_fp"}], **over}
 
 
 # ---- case writer: WorldModel's own loader reads it back ----
@@ -195,8 +195,8 @@ def submit(q, caller, items, **params):
     (first_person(), {"rounds_per_turn": 0}, "rounds_per_turn"),
     (first_person(), {"rounds_per_turn": 4}, "rounds_per_turn"),
     (third_person(subject_mask="mask.txt"), {}, "subject_mask"),
-    (first_person(perspective="top_down"), {}, "perspective"),
-    (first_person(environment_prompt=""), {}, "environment_prompt"),
+    (first_person(viewpoint="top_down"), {}, "viewpoint"),
+    (first_person(scene_prompt=""), {}, "scene_prompt"),
     (first_person(image="frame.txt"), {}, "image"),
     (first_person(turns=[{"action": "W", "camera": "fly"}]), {}, "camera"),
     (first_person(), {"variant": "dmd8"}, "variant"),
@@ -223,7 +223,7 @@ def test_submit_with_only_ar30_enabled_defaults_to_ar30(tmp_path):
     assert args["variant"] == "ar30"
 
 
-def test_submit_accepts_every_wbench_action_and_fills_defaults(tmp_path):
+def test_submit_accepts_every_action_and_fills_defaults(tmp_path):
     rec = Recorder(tmp_path / "run")
     b = AlayaWorldBackend(small_cfg(), tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
     actions = ["W", "S", "A", "D", "left", "right", "up", "down", "stop", "W+left", "S+D", "W+down", "w"]
@@ -404,7 +404,7 @@ def test_precache_is_charged_to_the_job_timeout(env):
     q, caller, _, run_dir = env
     q.backends["rollout_alayaworld"].timeout_s = 2
     t0 = time.monotonic()
-    job = submit(q, caller, [first_person(environment_prompt="PRECACHE_HANG street")])["job_id"]
+    job = submit(q, caller, [first_person(scene_prompt="PRECACHE_HANG street")])["job_id"]
     out = q.wait(caller, job, 60)
     assert out["state"] == "failed" and "timed out" in out["error"], out
     assert time.monotonic() - t0 < 30
@@ -422,7 +422,7 @@ def test_rounds_per_turn_1_gives_a_segment_per_round(env):
 def test_a_case_without_video_and_a_bad_image_fail_alone(env):
     q, caller, staging, _ = env
     (staging.parent / "ws" / "broken.png").write_bytes(b"not a png")
-    _, by = run_job(q, caller, [first_person(environment_prompt="NO_VIDEO here"), first_person(image="broken.png"),
+    _, by = run_job(q, caller, [first_person(scene_prompt="NO_VIDEO here"), first_person(image="broken.png"),
                                 first_person()])
     assert by[0]["error"] == "no video rendered"
     assert by[1]["error"].startswith("input:")
@@ -607,19 +607,19 @@ def test_real_alayaworld_rollout(tmp_path, variant):
         assert img["state"] == "done", img.get("error")
         hiker = img["result"]["items"][0]["image"]
         items = [
-            {"image": "street.png", "perspective": "first_person",
-             "environment_prompt": "A rainy city street lined with parked cars and trees, wet asphalt reflecting "
+            {"image": "street.png", "viewpoint": "first_person",
+             "scene_prompt": "A rainy city street lined with parked cars and trees, wet asphalt reflecting "
                                    "the grey daylight, apartment blocks in the distance.",
-             "perspective_prompt": "First-person view at eye level from the sidewalk.",
-             "turns": [{"action": "W", "event_edit": "A red umbrella blows across the street in the wind."},
+             "viewpoint_prompt": "First-person view at eye level from the sidewalk.",
+             "turns": [{"action": "W", "event": "A red umbrella blows across the street in the wind."},
                        {"action": "left", "subject_action": "A cyclist in a yellow raincoat rides past."}]},
-            {"image": hiker, "subject_mask": "hiker_mask.png", "perspective": "third_person",
-             "environment_prompt": "A narrow dirt trail along a green mountain ridge above a wide valley, "
+            {"image": hiker, "subject_mask": "hiker_mask.png", "viewpoint": "third_person",
+             "scene_prompt": "A narrow dirt trail along a green mountain ridge above a wide valley, "
                                    "distant peaks under a clear afternoon sky.",
              "character_prompt": "A hiker in a bright red jacket and grey backpack.",
-             "perspective_prompt": "Third-person view from behind the hiker.",
+             "viewpoint_prompt": "Third-person view from behind the hiker.",
              "turns": [{"action": "W", "subject_action": "The hiker raises the right arm and waves."},
-                       {"action": "right", "event_edit": "Low clouds roll over the ridge."}]},
+                       {"action": "right", "event": "Low clouds roll over the ridge."}]},
         ]
         peak, stop = _peak_sampler(gpus)
         t0 = time.monotonic()
@@ -713,8 +713,8 @@ def test_real_alayaworld_rollout_of_a_node(tmp_path, variant):
     q = JobQueue(rec, threading.Lock(), wait_cap_s=3600)
     q.register(AlayaWorldBackend(cfg, run_dir, gpus, reg, rec))
     caller = reg.issue(node="gpu", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
-    item = {"image": "street.png", "perspective": "first_person",
-            "environment_prompt": "A rainy city street lined with parked cars and trees.",
+    item = {"image": "street.png", "viewpoint": "first_person",
+            "scene_prompt": "A rainy city street lined with parked cars and trees.",
             "turns": [{"action": "W"}]}
     frames = {}
     try:

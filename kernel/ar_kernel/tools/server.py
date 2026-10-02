@@ -11,6 +11,7 @@ from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError as _MCPToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
+from ..isolation import scrub
 from .context import bearer
 
 
@@ -43,9 +44,10 @@ def build_tool_app(mcp: MCPServer):
 
 
 class ToolKit:
-    def __init__(self, registry, recorder) -> None:
+    def __init__(self, registry, recorder, scrub_names: list[str] = ()) -> None:
         self.registry = registry
         self.recorder = recorder
+        self.scrub_names = list(scrub_names)      # replaced in everything a tool returns to an agent
 
     async def call(self, ctx: Context, name: str, args: dict, fn: Callable[[Any], Any]) -> Any:
         request = getattr(ctx.request_context, "request", None)
@@ -62,14 +64,14 @@ class ToolKit:
             self.recorder.event("tool.error", parent_span_id=span, tool=name,
                                  duration_s=time.monotonic() - started,
                                  payload={"tool": name, "error": str(exc)}, **base)
-            raise
+            raise ToolError(scrub(str(exc), self.scrub_names)) from None
         except Exception as exc:                          # noqa: BLE001 -- contain kernel bugs
             self.recorder.event("tool.error", parent_span_id=span, tool=name,
                                  duration_s=time.monotonic() - started,
                                  payload={"tool": name, "error": f"{type(exc).__name__}: {exc}",
                                           "traceback": traceback.format_exc()}, **base)
-            raise ToolError(f"{type(exc).__name__}: {exc}") from exc
+            raise ToolError(scrub(f"{type(exc).__name__}: {exc}", self.scrub_names)) from exc
         self.recorder.event("tool.result", parent_span_id=span, tool=name,
                              duration_s=time.monotonic() - started,
                              payload={"tool": name, "result": result}, **base)
-        return result
+        return scrub(result, self.scrub_names)

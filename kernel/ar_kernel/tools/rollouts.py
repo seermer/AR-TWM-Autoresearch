@@ -1,10 +1,11 @@
-"""rollout_alayaworld: WBench-style cases rendered by AlayaWorld through
-the WBench eval's own render path (WorldModel scripts/tools/run_wbench.py, configs/wbench_full.yaml).
+"""rollout_alayaworld: clips rendered by AlayaWorld from the agent's own items, through WorldModel's
+turn-based render path (scripts/tools/run_wbench.py, configs/wbench_full.yaml).
 
-The agent writes cases (first frame, perspective, prompts, per-turn actions). The kernel stages
-them as WBench case files, pre-encodes their prompts (the eval runs with the text encoder off),
+The agent writes items (first frame, viewpoint, scene and character text, per-turn camera move and
+instruction). The kernel stages them in the render script's input schema, pre-encodes their prompts,
 renders them, and publishes each clip with its round boundaries on the per_chunk grid (25 + 32k
-frames) and one caption segment per round from the prompts the render used.
+frames) and one caption segment per round from the prompts the render used. Nothing the agent sees
+names that script, its schema or the evaluation.
 
 No pose is published (user decision 2026-09-26): the renders follow the commanded translation
 but only weakly the commanded turns and orbits, so the commanded camera path is
@@ -49,11 +50,12 @@ ACTION_TOKENS = frozenset({
     "W", "S", "A", "D", "w", "a", "s", "d", "left", "right", "up", "down", "stop",
     "forward", "backward", "cam_left", "cam_right", "cam_up", "cam_down", "look_left", "look_right",
     "look_up", "look_down", "pitch_up", "pitch_down", "yaw_left", "yaw_right", "->", "→", "<-", "←"})
-TURN_TYPES = ("subject_action", "event_edit", "perspective_switch")     # WBench interaction types
+# Item key of a turn's instruction -> the render script's interaction type.
+TURN_KEYS = {"subject_action": "subject_action", "event": "event_edit", "viewpoint_change": "perspective_switch"}
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")                 # alaya/data/wbench.py _IMAGE_EXTS
-PERSPECTIVES = ("first_person", "third_person")
+VIEWPOINTS = ("first_person", "third_person")
 VARIANTS = ("dmd4", "ar30")
-VARIANT_TEXT = {"dmd4": "the eval's 4-step student", "ar30": "the 30-step AR teacher"}
+VARIANT_TEXT = {"dmd4": "4 sampling steps, fast", "ar30": "30 sampling steps, slower"}
 # ar30 = the AR teacher without the DMD LoRA, sampled as configs/infer_i2v_camera_ar.yaml does.
 AR30 = {("paths", "dmd_resume"): None, ("validation", "sampling_steps"): 30,
         ("validation", "scheduler"): "shift", ("validation", "cfg_scale"): 3.0}
@@ -69,16 +71,16 @@ def valid_action(action) -> bool:
 
 
 def case_json(index: int, item: dict, image_rel: str, mask_rel: str | None) -> dict:
-    """One item as a WBench case (the schema of WBench/data/cases/*.json): a navigation entry per
-    turn, plus that turn's subject_action / event_edit / perspective_switch."""
+    """One item in the render script's input schema: a navigation entry per turn, plus that turn's
+    instruction under the script's own type name."""
     interactions = []
     for turn, t in enumerate(item["turns"], 1):
         interactions.append({"type": "navigation", "action": t["action"], "turn": turn})
-        interactions += [{"type": k, "action": t[k], "turn": turn} for k in TURN_TYPES if t.get(k)]
-    return {"id": str(index), "environment_prompt": item["environment_prompt"],
+        interactions += [{"type": kind, "action": t[key], "turn": turn} for key, kind in TURN_KEYS.items() if t.get(key)]
+    return {"id": str(index), "environment_prompt": item["scene_prompt"],
             "character_prompt": item.get("character_prompt", ""),
-            "perspective_prompt": item.get("perspective_prompt", ""),
-            "settings": {"perspective": item["perspective"], "subject": {"type": "unknown", "desc": ""},
+            "perspective_prompt": item.get("viewpoint_prompt", ""),
+            "settings": {"perspective": item["viewpoint"], "subject": {"type": "unknown", "desc": ""},
                          "tracking_object": None, "initial_image": image_rel, "subject_mask": mask_rel},
             "interactions": interactions, "metric_list": []}
 
@@ -172,25 +174,17 @@ class AlayaWorldBackend(GpuJob):
     file_keys = ("image", "subject_mask")
     max_turns = 9
     description = (
-        "Render WBench-style cases with AlayaWorld exactly as the WBench eval does. The clips come from "
-        "the released model, the same model every node fine-tunes, or with `node` from that scored node's "
-        "fine-tune. A GPU job: returns "
-        "{job_id} at once; collect with job_wait. Params: `variant` ({variants}; default the first), "
-        "`node` (the id of a scored node other than the root; default the released model), "
-        "`rounds_per_turn` 1..3 (default 3; a round "
-        "is 32 frames at 24 fps), `seed` (int, default 42). Item: {'image': first frame under /workspace "
-        "(.jpg/.png/..., any size), 'perspective': 'first_person'|'third_person', 'environment_prompt', "
-        "'character_prompt'?, 'perspective_prompt'?, 'subject_mask'? (image, white = subject), 'turns': "
-        "[{'action': WBench navigation action (W, A, S, D, left, right, up, down, stop, or combined like "
-        "'W+left'), 'subject_action'?: text, 'event_edit'?: text, 'perspective_switch'?: a WBench code such as "
-        "'fp_to_tp', 'tp_to_fp', 'fp_to_scope', or 'tp_to_tp: <new view>'}, ...]}. Each turn holds its action "
-        "and prompt for all its rounds. Actions steer translation reliably, rotation (turns, orbits) only "
-        "weakly. Each result item gives a `candidate` (mp4, caption with one segment per round, "
-        "provenance) with NO pose and no camera_motion: run annotate_camera on candidate.video, then "
-        "data_ingest it with that pose and camera_motion 'moving' (eligible for "
-        "video_timed_prompts_camera:per_chunk). Metadata, not labels: `commanded_camera` (npz of the camera "
-        "path the actions commanded, one pose per frame; not what the video shows), `actions` and "
-        "`turn_segments` (frame ranges in the published clip).")
+        "Render clips with AlayaWorld itself: the released model that every node fine-tunes, or with `node` a "
+        "scored node's fine-tune. A GPU job: returns {job_id} at once; collect with job_wait. Each item is a "
+        "first frame, the scene and character text, and a list of turns. A turn moves the camera and may add one "
+        "instruction: an event in the scene, an action of the subject, or a change of viewpoint. A turn keeps its "
+        "camera move and its text for all its rounds. Samplers (`variant`): {variants}. Camera moves steer "
+        "translation reliably, rotation (turns, orbits) only weakly. Each result item gives a `candidate` (mp4, "
+        "caption with one segment per round, provenance) with NO pose and no camera_motion: run annotate_camera "
+        "on candidate.video, then data_ingest it with that pose and camera_motion 'moving' (eligible for "
+        "video_timed_prompts_camera:per_chunk). Metadata, not labels: `commanded_camera` (npz of the camera path "
+        "the moves commanded, one pose per frame; not what the video shows), `actions` and `turn_segments` "
+        "(frame ranges in the published clip). At most 100 items and 9 turns per item.")
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -223,11 +217,11 @@ class AlayaWorldBackend(GpuJob):
             raise ToolError(f"item {n}: {msg}")
         if not str(item.get("image", "")).lower().endswith(IMAGE_EXTS):
             bad(f"image must be an image file ({', '.join(IMAGE_EXTS)}): got {item.get('image')!r}")
-        if item.get("perspective") not in PERSPECTIVES:
-            bad(f"perspective must be one of {PERSPECTIVES}: got {item.get('perspective')!r}")
-        if not isinstance(item.get("environment_prompt"), str) or not item["environment_prompt"].strip():
-            bad("environment_prompt must be a non-empty string")
-        for key in ("character_prompt", "perspective_prompt"):
+        if item.get("viewpoint") not in VIEWPOINTS:
+            bad(f"viewpoint must be one of {VIEWPOINTS}: got {item.get('viewpoint')!r}")
+        if not isinstance(item.get("scene_prompt"), str) or not item["scene_prompt"].strip():
+            bad("scene_prompt must be a non-empty string")
+        for key in ("character_prompt", "viewpoint_prompt"):
             if not isinstance(item.get(key, ""), str):
                 bad(f"{key} must be a string")
         mask = item.get("subject_mask")
@@ -245,8 +239,8 @@ class AlayaWorldBackend(GpuJob):
                 bad(f"turn {t}: unknown action {turn.get('action')!r}; use W, A, S, D, left, right, up, "
                     f"down or stop, alone or joined with '+'")
             for key, value in turn.items():
-                if key != "action" and (key not in TURN_TYPES or not isinstance(value, str)):
-                    bad(f"turn {t}: {key!r} is not one of {TURN_TYPES} with a text value")
+                if key != "action" and (key not in TURN_KEYS or not isinstance(value, str)):
+                    bad(f"turn {t}: {key!r} is not one of {tuple(TURN_KEYS)} with a text value")
 
     def _node(self, node_id) -> dict:
         """The archive row of a node whose fine-tune can be rendered."""

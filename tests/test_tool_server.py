@@ -113,3 +113,21 @@ def test_stop_leaves_no_live_threads_and_no_sockets(live):
 
     assert not any(thread.is_alive() for thread in threads)
     assert not any(p.exists() for p in sock_paths)
+
+
+def test_tool_results_and_errors_have_blocked_names_replaced(tmp_path):
+    rec = Recorder(tmp_path / "run")
+    reg = TokenRegistry(rec)
+    kit = ToolKit(reg, rec, scrub_names=["wbench"])
+    caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=tmp_path,
+                       staging_host=tmp_path)
+    request = type("R", (), {"headers": {"authorization": f"Bearer {caller.token}"}})()
+    ctx = type("C", (), {"request_context": type("RC", (), {"request": request})()})()
+
+    def fail(_caller):
+        raise ToolError("worker log: [run_wbench] failed")
+    assert asyncio.run(kit.call(ctx, "t", {}, lambda c: {"log": "[run_WBench] ok"})) == {"log": "[run_render] ok"}
+    with pytest.raises(ToolError, match=r"\[run_render\] failed"):
+        asyncio.run(kit.call(ctx, "t", {}, fail))
+    errors = [rec.load_payload(e["payload"]) for e in rec.read_events("n1") if e["type"] == "tool.error"]
+    assert "run_wbench" in errors[0]["error"]                 # telemetry keeps the real text

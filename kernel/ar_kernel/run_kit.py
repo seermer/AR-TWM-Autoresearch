@@ -60,7 +60,7 @@ def build_run_kit(cfg, run_dir: Path, gpus: list[int], recorder, environ) -> Run
     queue = JobQueue(recorder, gpu_lock, wait_cap_s=float(cfg.get("tools.job_wait_max_s")))
     for backend in build_gpu_backends(cfg, run_dir, gpus, registry, recorder):
         queue.register(backend)
-    kit, mcp = ToolKit(registry, recorder), new_mcp()
+    kit, mcp = ToolKit(registry, recorder, cfg.get("isolation.blocked_names") or []), new_mcp()
     register_data_tools(mcp, kit, DataTools(cfg, run_dir, recorder, gpus, gpu_lock))
     register_hf_tools(mcp, kit, HfTools(cfg, Path(run_dir) / "hf_tmp"))
     register_job_tools(mcp, kit, queue)
