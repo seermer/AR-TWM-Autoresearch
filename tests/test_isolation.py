@@ -79,3 +79,68 @@ def test_tool_results_are_censored_not_audited(tmp_path):
                            {"type": "message", "role": "user", "content": "x"}]}
     assert censor_tool_results(responses, names)["input"][0]["output"] == "about render"
     assert censor_tool_results({"input": "a plain string"}, names) == {"input": "a plain string"}
+
+
+import asyncio
+import re
+import threading
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+FORBIDDEN = re.compile(r"wbench|benchmark|meituan|2605\.25874|\b(test|eval\w*|proxy) cases?\b", re.IGNORECASE)
+
+
+def _agent_visible_texts(tmp_path):
+    """Everything an agent can read that the kernel or the seed ships: the seed agent, the contract
+    package, the skills, and every kernel tool's description and schema."""
+    from ar_kernel.contract.verify import _MockData, _MockHf
+    from ar_kernel.telemetry.recorder import Recorder
+    from ar_kernel.tools.ask import MockAsk, register_ask_tool
+    from ar_kernel.tools.captioner import register_caption_tool
+    from ar_kernel.tools.context import TokenRegistry
+    from ar_kernel.tools.data_tools import register_data_tools
+    from ar_kernel.tools.gpu_jobs import build_gpu_backends, register_gpu_tools
+    from ar_kernel.tools.hf_tools import register_hf_tools
+    from ar_kernel.tools.jobs import JobQueue, register_job_tools
+    from ar_kernel.tools.server import ToolKit, new_mcp
+    from ar_kernel.tools.skills import register_skill_tool
+    texts = {}
+    for root in (REPO / "seed_agent", REPO / "contract", REPO / "kernel" / "ar_kernel" / "skills"):
+        for path in root.rglob("*"):
+            if path.is_file() and path.suffix in (".py", ".md", ".txt"):
+                texts[str(path.relative_to(REPO))] = path.read_text(encoding="utf-8")
+    rec = Recorder(tmp_path)
+    reg = TokenRegistry(rec)
+    queue = JobQueue(rec, threading.Lock(), wait_cap_s=5.0)
+    try:
+        for backend in build_gpu_backends(CFG, tmp_path, [0, 1, 2, 3], reg, rec):
+            queue.register(backend)
+        kit, mcp = ToolKit(reg, rec), new_mcp()
+        register_data_tools(mcp, kit, _MockData())
+        register_hf_tools(mcp, kit, _MockHf())
+        register_job_tools(mcp, kit, queue)
+        register_gpu_tools(mcp, kit, queue)
+        register_caption_tool(mcp, kit, queue)
+        register_ask_tool(mcp, kit, MockAsk())
+        register_skill_tool(mcp, kit)
+        for tool in asyncio.run(mcp.list_tools()):
+            texts[f"tool {tool.name}"] = f"{tool.description}\n{json.dumps(tool.input_schema)}"
+    finally:
+        queue.shutdown()
+    return texts
+
+
+def test_nothing_an_agent_sees_names_the_evaluation(tmp_path):
+    texts = _agent_visible_texts(tmp_path)
+    assert {"tool rollout_alayaworld", "tool read_skill", "tool data_ingest"} <= set(texts)
+    found = {name: sorted(set(m.group(0) for m in FORBIDDEN.finditer(text))) for name, text in texts.items()}
+    assert {name: hits for name, hits in found.items() if hits} == {}
+
+
+def test_agent_facing_messages_are_neutral():
+    from ar_kernel.context_bundle import KERNEL_FAILURES
+    from ar_kernel.eval.score import AGENT_METRICS
+    from ar_kernel.isolation import EXCLUDED_CLIP, EXCLUDED_PROMPT
+    words = " ".join([EXCLUDED_CLIP, EXCLUDED_PROMPT, *KERNEL_FAILURES.values(),
+                      *[f"{alias} {text}" for alias, _, text in AGENT_METRICS.values()]])
+    assert not FORBIDDEN.search(words) and "leak" not in words.lower()
