@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .process_digest import _payload, _text, role_of
+from .process_digest import AGENT_PHASES, _payload, _text, role_of
 from .telemetry.recorder import Recorder
 
-AGENT_PHASES = ("edit_self", "improve_recipe")
 
 
 def render(messages: list[dict]) -> str:

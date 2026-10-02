@@ -147,3 +147,11 @@ def test_a_plans_file_of_another_shape_does_not_break_the_digest(tmp_path):
     d = process_digest(tmp_path, "n1")
     assert d["tools"] == {"ask": {"calls": 1, "errors": 0}}
     assert d["rounds"] == {"edit_self": {"plans": 1, "reports": 0}}
+
+
+def test_the_kernels_own_contract_run_is_not_a_role(tmp_path):
+    rec = _rec(tmp_path)
+    for phase in ("contract", "edit_self"):
+        rec.event("llm.request", node="n1", phase=phase, conversation_id=phase,
+                  payload={"body": {"messages": [{"role": "user", "content": "ping"}]}})
+    assert [r["phase"] for r in process_digest(tmp_path, "n1")["roles"]] == ["edit_self"]

@@ -73,6 +73,7 @@ def _continuations(rec: Recorder, requests: dict, responses: dict) -> list[tuple
 
 
 MAX_REASONS = 5
+AGENT_PHASES = ("edit_self", "improve_recipe")
 
 
 def role_of(body: dict) -> str:
@@ -120,6 +121,8 @@ def _digest(run_dir: Path, node_id: str) -> dict:
         kind, phase = e["type"], e.get("phase")
         if kind in ("llm.request", "llm.response") and e.get("tool"):
             pass                                  # a kernel tool's own model call (ask), not a role's conversation
+        elif kind in ("llm.request", "llm.response") and phase not in AGENT_PHASES:
+            pass                                  # the kernel's contract smoke run
         elif kind == "llm.request":
             requests[(phase, e.get("conversation_id"))].append(e)
         elif kind == "llm.response":

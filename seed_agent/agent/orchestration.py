@@ -33,7 +33,8 @@ from .tools import discarded_changes, kernel_tools, local_tools, result_text, sn
 
 AGENT_PKG = Path(__file__).resolve().parent
 RECORD = Path(WORKSPACE) / "plans.json"       # every plan and report; carried to a retry with the workspace
-PLAN_FIELD_CHARS = 1500                       # a plan states intent: too short to dictate file contents
+PLAN_FIELD_CHARS = 4000                       # a safety cap: plans that state intent stay well under it, ones that
+                                              # dictate file contents (5,800 characters and up) do not fit
 REMIND = ("You stopped without calling {tools}. Finish the task, then call {tools} with the result. "
           "The work is only recorded through {tools}.")
 REPLAN = "Revise the plan. The engineer carries out the plan you submit next."

@@ -361,7 +361,7 @@ def _scripts():
     """An accepted submit ends the role's run, so no reply follows one. Replies are consumed in order
     by whichever role calls the model next."""
     recipe = [
-        [_call("submit_plan", {**PLAN, "data": "x" * 1501})],                       # planner: over the cap
+        [_call("submit_plan", {**PLAN, "data": "x" * 4001})],                       # planner: over the cap
         [_call("submit_plan", PLAN)],
         [_call("data_query", {"format": "video_caption_camera"}), _call("no_such_tool", {}),     # engineer
          _call("hf_download", {"repo": "x/y", "revision": "main", "patterns": ["*.mp4"]})],
@@ -513,7 +513,7 @@ def test_improve_recipe_full_flow(kernel, tmp_path):
     assert body["result"]["data_commit"] == C0
     assert body["result"]["recipe"] == {"optimizer.max_steps": 200, "optimizer.lr": 1e-5}   # int coerced
     outputs = _tool_outputs(rec, "n-recipe")
-    assert any("Error invoking tool 'submit_plan'" in o and "at most 1500 characters" in o for o in outputs)
+    assert any("Error invoking tool 'submit_plan'" in o and "at most 4000 characters" in o for o in outputs)
     assert any("no_such_tool is not a valid tool" in o for o in outputs)                       # unknown tool
     assert any(o.startswith("Error: ToolException(") and "downloads are disabled" in o
                for o in outputs)                                                 # kernel tool error reported
@@ -674,9 +674,10 @@ def test_the_held_out_rule_is_in_the_data_prompts_and_the_prompt_rule_in_the_edi
 def test_plan_fields_are_capped_so_a_plan_cannot_dictate_file_contents():
     from pydantic import ValidationError
     from agent.orchestration import PLAN_FIELD_CHARS, DataPlan, EditPlan
-    assert PLAN_FIELD_CHARS == 1500
+    assert PLAN_FIELD_CHARS == 4000
     ok = dict(problem="p", evidence="e", mechanism="m", check="c")
     EditPlan(**ok)
-    with pytest.raises(ValidationError, match="at most 1500"):
-        EditPlan(**{**ok, "mechanism": "x" * 1501})
+    EditPlan(**{**ok, "evidence": "x" * 2800})            # the longest evidence a real plan carried
+    with pytest.raises(ValidationError, match="at most 4000"):
+        EditPlan(**{**ok, "mechanism": "x" * 5800})       # the shortest plan that dictated file contents
     assert DataPlan(hypothesis="h", expected_change="c", data="d").constraints == ""

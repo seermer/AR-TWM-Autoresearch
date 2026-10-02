@@ -168,7 +168,8 @@ holds general behaviour only.
   kinds of clips, from which verified sources), `constraints`.
 - `EditPlan`: `problem`, `evidence` (node and transcript locations), `mechanism`, `check` (what a later
   edit planner would observe in the process digest if it worked).
-- Each text field has a length cap (about 1,500 characters), so a plan cannot dictate file contents.
+- Each text field has a safety cap of 4,000 characters: real intent-only fields ran up to 2,800, the ones that
+  dictated file contents 5,800 and more.
 - `EditResult.summary` is the coder's own short summary, not the plan text.
 
 ### D4. Talking back
