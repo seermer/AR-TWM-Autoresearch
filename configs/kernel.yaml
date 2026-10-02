@@ -35,6 +35,11 @@ leakage:
   phash_max_distance: 4
   min_ncc: 0.95
   min_entropy: 4.0
+isolation:                       # keeps the evaluation set out of agents' reach
+  blocked_names: [wbench]        # case-insensitive substrings: a Hub repo naming one does not exist for agents,
+                                 #   and one in a kernel tool's output is replaced
+  audit_patterns: [wbench, meituan-longcat, "2605.25874"]   # a model output naming one quarantines the node;
+                                 #   in a tool result the gateway replaces it
 train:
   resolution_allowlist: [[416, 736], [352, 608]]
   lora_allowlist: [[16, 16], [32, 32], [64, 64]]

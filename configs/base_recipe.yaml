@@ -84,7 +84,7 @@ spatial_memory:
   vigeo_num_tokens: 1369
   vigeo_stream_chunk_size: 16
   # 262144 is sized for 80GB cards; ViGeo's KV cache alone then wants ~12GB on top
-  # of the sharded DiT. 65536 is the value the WBench 24GB work validated.
+  # of the sharded DiT. 65536 is the value validated on 24 GB cards.
   vigeo_cache_budget: 65536
   vigeo_single_frame_scale: 1.0
   vigeo_generated_source_pose_mode: aligned_vigeo
