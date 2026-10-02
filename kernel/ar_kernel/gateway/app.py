@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from ..budget import Budget
-from ..isolation import censor_tool_results
+from ..isolation import censor_request
 from ..telemetry.recorder import TelemetryError
 from ..tools.context import bearer
 from .mock import MockBook
@@ -161,7 +161,7 @@ def create_gateway_app(*, registry, store: CallStore, allowed_models: set[str],
                 return JSONResponse({"error": {"message": why}}, status_code=402)
         if not mock:
             body = upstream.enforce(upstream_path, body)   # before begin: record what is forwarded
-        body = censor_tool_results(body, list(censor))    # before begin: the model and the record get the same
+        body = censor_request(body, list(censor))    # before begin: the model and the record get the same
         try:
             meta = store.begin(caller, endpoint, body)
         except TelemetryError as exc:

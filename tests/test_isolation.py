@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from ar_kernel.config import KernelConfig
 from ar_kernel.isolation import blocked, copies_held_out, scrub
 
@@ -58,38 +60,52 @@ def test_the_audit_reads_everything_the_model_wrote_in_one_attempt(tmp_path):
     assert audit(CFG, rec, "n2", "improve_recipe", 2) == []
 
 
-def test_tool_results_are_censored_not_audited(tmp_path):
-    from ar_kernel.isolation import audit, censor_tool_results
+def test_tool_results_are_not_audited(tmp_path):
+    from ar_kernel.isolation import audit
     from ar_kernel.telemetry.recorder import Recorder
     rec = Recorder(tmp_path)
     rec.event("llm.request", node="n2", phase="improve_recipe", attempt=1, conversation_id="c", payload={"body": {
         "messages": [{"role": "tool", "content": "a paper abstract that compares models on WBench"}]}})
     assert audit(CFG, rec, "n2", "improve_recipe", 1) == []
-    names = ["wbench", "2605.25874"]
+
+
+NAMES = ["wbench", "meituan-longcat", "2605.25874"]
+
+
+@pytest.mark.parametrize("text,left", [
+    ("We evaluate on WBench (arXiv:2605.25874). Our model also improves FVD.", "Our model also improves FVD."),
+    ("First line.\nWBench has 289 cases\nLast line.", "First line.\n\nLast line."),
+    ('{"title": "WBench: A World Model Benchmark", "published": "2026-05-01"}', '{"title": "", "published": "2026-05-01"}'),
+    ("see https://huggingface.co/datasets/meituan-longcat/WBench", "see https://huggingface."),
+    ("DrawBench has prompts. Nothing to drop here.", "DrawBench has prompts. Nothing to drop here."),
+])
+def test_a_sentence_that_names_the_evaluation_is_dropped_whole(text, left):
+    from ar_kernel.isolation import drop_sentences
+    assert drop_sentences(text, NAMES) == left
+    assert drop_sentences({"a": [text, 3]}, NAMES) == {"a": [left, 3]}
+
+
+def test_the_gateway_drops_such_sentences_from_everything_the_model_did_not_write():
+    from ar_kernel.isolation import censor_request
     chat = {"model": "m", "messages": [
-        {"role": "user", "content": "plan"},
-        {"role": "tool", "tool_call_id": "c1", "content": "WBench (arXiv:2605.25874) ranks models"},
-        {"role": "tool", "tool_call_id": "c2", "content": [{"type": "text", "text": "see run_wbench.py"}]}]}
-    out = censor_tool_results(chat, names)
-    assert out["messages"][0] == chat["messages"][0]
-    assert out["messages"][1]["content"] == "render (arXiv:render) ranks models"
-    assert out["messages"][2]["content"] == [{"type": "text", "text": "see run_render.py"}]
+        {"role": "user", "content": "Plan. The WBench paper is public."},
+        {"role": "tool", "tool_call_id": "c1", "content": "WBench ranks models. Clip 3 is static."},
+        {"role": "tool", "tool_call_id": "c2", "content": [{"type": "text", "text": "ok. see WBench"}]},
+        {"role": "function", "name": "f", "content": "WBench list"},
+        {"role": "assistant", "content": "I will look at WBench"}]}
+    out = censor_request(chat, NAMES)
+    assert [m["content"] for m in out["messages"]] == [
+        "Plan.", "Clip 3 is static.", [{"type": "text", "text": "ok."}], "", "I will look at WBench"]
     assert chat["messages"][1]["content"].startswith("WBench")              # the caller's body is not changed
     responses = {"input": [{"type": "function_call_output", "call_id": "c", "output": "about WBench"},
-                           {"type": "message", "role": "user", "content": "x"}]}
-    assert censor_tool_results(responses, names)["input"][0]["output"] == "about render"
-    assert censor_tool_results({"input": "a plain string"}, names) == {"input": "a plain string"}
-    other = {"messages": [{"role": "function", "name": "f", "content": "WBench list"},
-                          {"role": "user", "content": "log tail: run_wbench.py"},
-                          {"role": "assistant", "content": "I will look at WBench"}],
-             "input": [{"type": "custom_tool_call_output", "output": "WBench"},
-                       {"type": "function_call", "name": "f", "arguments": "WBench"},
-                       {"type": "reasoning", "summary": [{"text": "WBench"}]},
-                       {"type": "message", "role": "assistant", "content": "WBench"}]}
-    out = censor_tool_results(other, names)
-    assert [m["content"] for m in out["messages"]] == ["render list", "log tail: run_render.py", "I will look at WBench"]
-    assert out["input"][0]["output"] == "render" and out["input"][1:] == other["input"][1:]   # the model's own words stay
-
+                           {"type": "custom_tool_call_output", "output": "WBench"},
+                           {"type": "function_call", "name": "f", "arguments": "WBench"},
+                           {"type": "reasoning", "summary": [{"text": "WBench"}]},
+                           {"type": "message", "role": "assistant", "content": "WBench"}]}
+    out = censor_request(responses, NAMES)
+    assert out["input"][0]["output"] == "" and out["input"][1]["output"] == ""
+    assert out["input"][2:] == responses["input"][2:]                        # the model's own words stay
+    assert censor_request({"input": "a plain string"}, NAMES) == {"input": "a plain string"}
 
 
 def test_a_name_that_only_ends_like_a_blocked_one_is_left_alone():

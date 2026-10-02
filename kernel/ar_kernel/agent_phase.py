@@ -16,7 +16,7 @@ from .archive.clips import ClipStore
 from .archive.commits import CommitStore
 from .archive.nodes import NOT_SHOWN, NodeStore
 from .context_bundle import build_edit_context, build_recipe_context, write_bundle
-from .isolation import censor_names, scrub
+from .isolation import scrub
 from .liveness import Liveness, tree_mark
 from .sandbox.image import ImageBuildError, ensure_image
 from .sandbox.runner import Mounts, RunResult, container_name, diff, run_container, snapshot
@@ -112,7 +112,7 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
     elif result_file.is_dir():
         shutil.rmtree(result_file)
     (Path(env.run_dir) / "store").mkdir(exist_ok=True)
-    write_bundle(ctx, dirs["context"], censor_names(env.cfg))
+    write_bundle(ctx, dirs["context"], env.cfg.get("isolation.blocked_names") or [])
     reqs = running / "agent" / "requirements.txt"
     try:
         reqs_text = reqs.read_text(encoding="utf-8") if reqs.exists() else ""
@@ -256,7 +256,7 @@ def smoke_contexts(env: PhaseEnv, *, conn, node: str, parent_id: str, nodes_rema
     recipe = build_recipe_context(cfg=env.cfg, node_id=node, n_gpus=len(env.gpus), tools=_recipe_tools(env),
                                   **common)
     return scrub({"edit_self": build_edit_context(**common).model_dump(mode="json"),
-                  "improve_recipe": recipe.model_dump(mode="json")}, censor_names(env.cfg))
+                  "improve_recipe": recipe.model_dump(mode="json")}, env.cfg.get("isolation.blocked_names") or [])
 
 
 def run_improve_recipe(env: PhaseEnv, *, conn, node: str, parent_id: str, agent_commit: str, attempt: int,

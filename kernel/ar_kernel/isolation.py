@@ -11,7 +11,8 @@ from pathlib import Path
 from .process_digest import _payload
 
 RUN_WORDS = 8               # this many consecutive words shared with an evaluation prompt is a copy
-SCRUBBED = "render"         # what a blocked name is replaced with: run_<name> reads run_render
+SCRUBBED = "render"         # what a blocked name becomes in the kernel's own output, where it only occurs
+                            # inside the kernel's file names: run_<name>.py reads run_render.py
 EXCLUDED_CLIP = ("this clip is on the kernel's exclusion list and cannot be used as training data. "
                  "Use a different clip.")
 EXCLUDED_PROMPT = "this prompt is on the kernel's exclusion list. Write a different one."
@@ -79,24 +80,47 @@ def scrub(value, names: list[str]):
 
 
 def censor_names(cfg) -> list[str]:
-    """Every name the gateway replaces in what a tool returned to the model."""
+    """Every name whose sentence the gateway drops from what the model did not write."""
     return list(dict.fromkeys([*(cfg.get("isolation.blocked_names") or []), *(cfg.get("isolation.audit_patterns") or [])]))
+
+
+_MARK = "\x00"
+_PART = r'[^.!?\n"' + _MARK + "]*"                  # text inside one sentence, line or quoted string
+_SENTENCE = f"{_PART}{_MARK}(?:{_PART}{_MARK})*{_PART}[.!?]?"
+_MARKED = re.compile(rf"(?:\A|(?<=\n)){_SENTENCE}[ \t]*|{_SENTENCE}")
+
+
+def drop_sentences(value, names: list[str]):
+    """`value` without any sentence that holds one of `names`. For text from outside (search results,
+    papers, web pages): no word could stand in for the name there, and the sentence around it is about
+    what the agent must not read. A sentence ends at . ! ? a newline or a double quote."""
+    if isinstance(value, str):
+        return _MARKED.sub("", _matcher(tuple(names)).sub(_MARK, value)) if names else value
+    if isinstance(value, dict):
+        return {key: drop_sentences(item, names) for key, item in value.items()}
+    if isinstance(value, list):
+        return [drop_sentences(item, names) for item in value]
+    return value
 
 
 MODEL_ITEMS = ("function_call", "reasoning")       # Responses input items the model itself wrote
 
 
-def censor_tool_results(body: dict, names: list[str]) -> dict:
-    """An LLM request body with `names` replaced in everything the model did not write: tool results
-    and user and system messages, in Chat Completions `messages` and Responses `input`. What the model
-    wrote (assistant messages, its tool calls and reasoning) is left as it is: the audit reads that.
-    So a mention the agent only came across never reaches the model or a transcript."""
+def censor_request(body: dict, names: list[str]) -> dict:
+    """An LLM request body without the sentences that hold one of `names`, in everything the model did
+    not write: tool results and user and system messages (Chat Completions `messages`, Responses
+    `input`). What the model wrote (assistant messages, its tool calls and reasoning) is left as it is:
+    the audit reads that. So a mention the agent only came across never reaches the model or a transcript."""
     def own(item) -> bool:
         return not isinstance(item, dict) or item.get("role") == "assistant" or item.get("type") in MODEL_ITEMS
+
+    def censored(item: dict) -> dict:
+        return {key: value if key in ("role", "type", "name", "tool_call_id", "call_id") else drop_sentences(value, names)
+                for key, value in item.items()}
     out = dict(body)
     for key in ("messages", "input"):
         if isinstance(body.get(key), list):
-            out[key] = [item if own(item) else scrub(item, names) for item in body[key]]
+            out[key] = [item if own(item) else censored(item) for item in body[key]]
     return out
 
 

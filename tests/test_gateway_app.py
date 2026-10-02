@@ -398,7 +398,7 @@ def test_the_gateway_censors_tool_results_before_forwarding_and_recording(tmp_pa
     app = create_gateway_app(registry=reg, store=store, allowed_models={"gpt-x"}, censor=["wbench"],
                              upstream=_upstream_that(_ok, seen), mocks=MockBook.default())
     body = {"model": "gpt-x", "messages": [{"role": "user", "content": "hi"},
-                                           {"role": "tool", "tool_call_id": "c", "content": "ranked on WBench"}]}
+                                           {"role": "tool", "tool_call_id": "c", "content": "ranked on WBench. 3 clips ok."}]}
     assert _post(TestClient(app), caller.token, body, "/v1/chat/completions").status_code == 200
-    assert seen[0]["messages"][1]["content"] == "ranked on render"
+    assert seen[0]["messages"][1]["content"] == "3 clips ok."
     assert not _telemetry_contains(tmp_path, rec, "WBench")

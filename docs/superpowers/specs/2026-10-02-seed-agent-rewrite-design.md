@@ -64,8 +64,8 @@ Nothing about judge questions, frame sampling or prompt assembly.
   viewpoint, scene and character text, turns of a camera move plus an optional event, subject action or
   viewpoint change). No benchmark name, no "exactly as the eval does", turn keys renamed to match A1.
 - Every other tool description, error and context string: no benchmark name, no "case".
-- Every kernel tool result and error passes through one scrub that replaces a blocked name with
-  `render` (worker log tails name the render script). Telemetry keeps the real text.
+- Every kernel tool result and error, and the context files, pass through one scrub that replaces a blocked
+  name with `render`: in the kernel's own output the name only occurs inside file names (`run_render.py`) (worker log tails name the render script). Telemetry keeps the real text.
 - A node that ended `eval_failed` or `crashed` shows a fixed kernel-side sentence as its error in
   contexts: the raw error can name the benchmark.
 
@@ -88,9 +88,10 @@ Nothing about judge questions, frame sampling or prompt assembly.
 ### A4. Audit
 After each agent phase, before training, the kernel scans everything the model wrote in that attempt
 (reasoning, text, tool-call arguments) for `isolation.audit_patterns` (benchmark name, org, paper id).
-Tool results are not audited: the gateway replaces those patterns in tool-result messages before the
-model sees them and before they are recorded, so a passive mention neither reaches the model nor ends
-the node. A hit makes the
+Text the model did not write (tool results, user and system messages) is not audited: the gateway drops
+every sentence that holds a pattern before the model sees it and before it is recorded, so a passive
+mention neither reaches the model nor ends the node. A sentence is dropped whole, not reworded: no
+substitute word reads sensibly in prose, a URL or a paper id, and the sentence is about the benchmark. A hit makes the
 node `quarantined`: terminal, no retry, never a parent, not mounted under `/nodes`, absent from every
 context, and its clips leave the clip pool. The panel shows the hit.
 
