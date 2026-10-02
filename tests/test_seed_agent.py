@@ -171,30 +171,104 @@ def test_check_roles_builds_every_role_and_the_selftest_uses_it(tmp_path, monkey
     assert any("coder.md" in e for e in selftest(str(copy)))
 
 
-def _lineage(depth):
-    node = {"status": "scored", "score": 0.7, "edit": {"summary": "x\n\ncoder text"},
-            "data": {"d": {"format": "video_caption_camera", "clips": 8, "weight": 1.0}}, "recipe": {"optimizer.lr": 1e-4},
-            "aggregates": {"dimensions": {"quality": 0.7}, "strata": {"category": {"Urban": {"quality": 0.7}}, "perspective": {"first_person": {"quality": 0.7}}},
-                           "metrics": {"aesthetic_quality": 0.6}}, "process": {"phases": {"train_s": 600}}}
-    return [{"node_id": "root", "score": 0.6, "status": "scored", "aggregates": node["aggregates"]},
+
+
+
+
+def _data_lineage(depth):
+    node = {"status": "scored", "score": 0.7, "error": None, "recipe": {"optimizer.lr": 1e-4},
+            "data": {"d": {"format": "video_caption_camera", "prompt_mode": None, "clips": 8, "weight": 1.0,
+                           "sources": {"hf:org/walks": 8}}},
+            "rationale": 'why\n\nPlan: {"hypothesis": "more turning clips"}\nData: notes',
+            "metrics": {"frame_aesthetics": 0.6},
+            "aggregates": {"dimensions": {"quality": 0.7}, "metrics": {"frame_aesthetics": 0.6},
+                           "groups": {"category": {"Urban": {"quality": 0.7}},
+                                      "viewpoint": {"first_person": {"quality": 0.7}}}}}
+    return [{**node, "node_id": "root", "score": 0.6, "data": {}, "recipe": None, "rationale": None},
             *[{**node, "node_id": f"n{i}"} for i in range(1, depth)]]
 
 
-def test_the_digest_describes_the_recent_lineage_and_keeps_the_root_as_baseline():
+def _edit_lineage(depth):
+    process = {"roles": [{"phase": "improve_recipe", "role": "plan", "conversations": 1, "turns": 12,
+                          "compactions": 0}],
+               "tools": {"data_ingest": {"calls": 9, "errors": 4}}, "tool_errors": [],
+               "local_errors": {"run_command_nonzero": 3}, "gpu_jobs": {"run": 2, "failed": 1},
+               "ingest": {"accepted": 5, "rejected": 4, "reasons": [{"reason": "moving clips need poses", "count": 4}]},
+               "rounds": {"improve_recipe": {"plans": 1, "reports": 0}}, "gates": {},
+               "attempts": [{"phase": "edit_self", "attempt": 1, "outcome": "contract_failed"},
+                            {"phase": "edit_self", "attempt": 2, "outcome": "passed"}]}
+    node = {"status": "scored", "error": None, "edit": {"summary": "Added a pose check tool."},
+            "code_diff_stats": [{"path": "agent/tools.py", "added": 30, "removed": 2}], "process": process}
+    return [{"node_id": "root", "status": "scored", "error": None, "edit": None, "code_diff_stats": [],
+             "process": {"attempts": []}},
+            *[{**node, "node_id": f"n{i}"} for i in range(1, depth)]]
+
+
+GUIDE = {"cause_and_effect": {"dimension": "physics", "weight": 4.5, "measures": "physics holds"}}
+
+
+def _recipe_ctx(**over):
     from ar_contract.models import RecipeContext
+    return RecipeContext(**{**dict(
+        nodes_remaining=1, attempt=1, max_attempts=3, n_gpus=4, metric_guide=GUIDE,
+        tunable_rules={"optimizer.lr": {"type": "float", "min": 0, "max": None}},
+        recipe_guide={"optimizer.lr": {"base": 1e-4, "meaning": "peak rate"}},
+        resolution_allowlist=[[416, 736]], lora_allowlist=[[64, 64]]), **over})
+
+
+def test_the_data_digest_has_scores_the_metric_guide_and_the_recent_lineage():
     from agent.briefing import LINEAGE_SHOWN, recipe_context
-    ctx = RecipeContext(nodes_remaining=1, attempt=2, max_attempts=3, lineage=_lineage(100), n_gpus=4,
-                        tunable_rules={"optimizer.lr": {"type": "float", "min": 0, "max": None}},
-                        recipe_guide={"optimizer.lr": {"base": 1e-4, "meaning": "peak rate"}},
-                        resolution_allowlist=[[416, 736]], lora_allowlist=[[64, 64]], format_rules="rules text",
-                        retry={"kind": "train", "log_tail": "oom\nline", "data_commit": "c1"})
+    ctx = _recipe_ctx(attempt=2, lineage=_data_lineage(100), siblings=_data_lineage(3)[1:],
+                      retry={"kind": "train", "log_tail": "oom\nline", "data_commit": "c1"})
     text = recipe_context(ctx, [{"plan": {"hypothesis": "h"}, "report": "r"}])
-    assert text.index("## Retry") < text.index("## Recipe") < text.index("## Lineage")      # small sections first
+    assert text.index("## Retry") < text.index("## Recipe") < text.index("## Metrics") < text.index("## Siblings") \
+        < text.index("## Lineage")
     assert "```\noom\nline\n```" in text and '"hypothesis": "h"' in text
-    assert text.count("\n### n") == LINEAGE_SHOWN and "### n99:" in text and "### n89:" not in text
+    assert "| cause_and_effect | physics | 4.5 | physics holds |" in text
     assert "|  | root | n90 | n91 |" in text                    # score tables: the root, then the last 10
-    assert "### Dimensions by group of test cases" in text and "| perspective: first_person / quality | 0.7 |" in text
-    assert len(text) < 40_000                                   # the same size at any depth
+    assert "| viewpoint: first_person / quality | 0.7 |" in text and "Urban" not in text
+    assert text.count("\n### n") == LINEAGE_SHOWN + 2 and "### n99: scored, score 0.7" in text and "### n89:" not in text
+    assert "- Hypothesis: more turning clips" in text and "hf:org/walks x8" in text
+    assert "Data formats" not in text and len(text) < 40_000
+
+
+def test_a_node_that_failed_before_scoring_still_renders_in_the_data_digest():
+    from agent.briefing import recipe_context
+    failed = {"node_id": "n1", "status": "train_failed", "score": None, "error": "loss became nan",
+              "metrics": {}, "aggregates": None, "data": {}, "recipe": None, "rationale": None}
+    text = recipe_context(_recipe_ctx(lineage=[_data_lineage(1)[0], failed]), None)
+    assert "### n1: train_failed, score -" in text and "- Error: loss became nan" in text
+
+
+def test_the_edit_digest_shows_how_runs_went_and_no_score():
+    from ar_contract.models import EditContext
+    from agent.briefing import edit_context
+    ctx = EditContext(nodes_remaining=4, attempt=1, max_attempts=3, lineage=_edit_lineage(3),
+                      siblings=_edit_lineage(2)[1:],
+                      archive={"nodes": [{"node_id": "root", "status": "scored"}, {"node_id": "n1", "status": "scored"},
+                                         {"node_id": "n2", "status": "train_failed"}]})
+    text = edit_context(ctx, {"tools": "agent/tools.py -- the agent's tools"}, None)
+    assert ", score " not in text and "| score |" not in text and "0.7" not in text      # a status may say "scored"
+    assert "### Scores" not in text and "### Metrics" not in text and " min" not in text
+    assert "3 nodes: scored 2, train_failed 1" in text
+    assert "  - tools: agent/tools.py -- the agent's tools" in text
+    for line in ("### n2: scored", "- Edit: Added a pose check tool.", "- Code changed: agent/tools.py (+30/-2)",
+                 "- improve_recipe / plan: 12 model turns, 0 compactions",
+                 "- Kernel tool calls (errors): data_ingest 9 (4)", "- Local tool failures: run_command_nonzero 3",
+                 "- GPU jobs: 2 run, 1 failed",
+                 "- Ingest: 5 accepted, 4 rejected; 4x moving clips need poses",
+                 "- improve_recipe rounds: 1 plans, 0 reports back",
+                 "- Failed attempts: edit_self 1 contract_failed"):
+        assert line in text, line
+
+
+def test_engineers_get_what_they_act_on_and_not_the_history():
+    from agent.briefing import coder_context, engineer_context
+    text = engineer_context(_recipe_ctx(lineage=_data_lineage(5), retry={"kind": "gate", "failures": ["too few clips"]}),
+                            [{"plan": {"hypothesis": "h"}}])
+    assert "## Recipe" in text and "## Metrics" in text and "too few clips" in text
+    assert "## Lineage" not in text and "## Archive" not in text
+    assert "  - harness: agent/harness.py" in coder_context({"harness": "agent/harness.py"})
 
 
 def test_brief_marks_a_cut_and_points_to_the_full_context(monkeypatch):
@@ -560,17 +634,6 @@ def test_prompts_and_knowledge_have_no_wrapped_commands_or_dated_notes():
         assert "*(20" not in text, f"{path.name}: dated note"
 
 
-def test_the_digest_describes_the_parents_finished_children_before_the_lineage():
-    from ar_contract.models import EditContext
-    from agent.briefing import SIBLINGS_SHOWN, edit_context
-    siblings = [{**n, "node_id": f"s{i}"} for i, n in enumerate(_lineage(15)[1:])]
-    ctx = EditContext(nodes_remaining=1, attempt=1, max_attempts=3, lineage=_lineage(2), siblings=siblings)
-    text = edit_context(ctx, {"prompts": "p.md"}, None)
-    assert text.index("## Siblings") < text.index("## Lineage")
-    assert text.count("\n### s") == SIBLINGS_SHOWN and "### s13:" in text and "### s3:" not in text
-    assert "### s13:" in text and "| s3 | scored | 0.7 |" in text         # every sibling in one line
-    assert "| root | s13 |" not in text                            # but not a column of the lineage tables
-    assert "## Siblings" not in edit_context(EditContext(nodes_remaining=1, attempt=1, max_attempts=3), {}, None)
 
 
 def test_the_eval_knowledge_states_the_score_weights_of_the_kernel_config():
@@ -589,21 +652,6 @@ def test_the_eval_knowledge_states_the_score_weights_of_the_kernel_config():
     assert half and "Those four are half the score." in line
 
 
-def test_an_earlier_node_is_described_by_what_the_phase_acts_on():
-    from agent.briefing import data_node, edit_node
-    node = {"node_id": "n1", "status": "scored", "score": 0.7,
-            "edit": {"summary": "ask for posed clips\n\ncoder text"},
-            "code_diff_stats": [{"path": "agent/prompts/planner.md", "added": 2, "removed": 1}],
-            "data": {"d": {"format": "video_caption_camera", "clips": 8, "weight": 1.0, "sources": {"hf:org/set": 8}}},
-            "recipe": {"optimizer.lr": 1e-4},
-            "rationale": 'why\n\nPlan: {"hypothesis": "more turning clips", "actions": ["a"]}\nData: notes',
-            "process": {"phases": {"train_s": 600}, "tool_errors": [{"tool": "data_ingest", "count": 3, "example": "long message"}]}}
-    data, edit = data_node(node), edit_node(node)
-    assert "- Hypothesis: more turning clips" in data and "- Recipe: optimizer.lr 0.0001" in data
-    assert "from hf:org/set x8" in data and "from hf:org/set x8" in edit
-    assert not any(word in data for word in ("Edit:", "Code changed", "Process", "min"))   # no code, no timings
-    assert "- Edit: ask for posed clips" in edit and "agent/prompts/planner.md (+2/-1)" in edit
-    assert "tool errors: data_ingest x3" in edit and "long message" not in edit and "Recipe" not in edit
 
 
 def test_the_eval_knowledge_lists_each_dimensions_metrics_as_wbench_groups_them():
@@ -618,21 +666,9 @@ def test_the_eval_knowledge_lists_each_dimensions_metrics_as_wbench_groups_them(
         assert line.split(": ", 1)[1].rstrip(".").split(", ") == metrics
 
 
-def test_the_engineer_gets_what_it_acts_on_and_the_planner_also_the_history():
-    from ar_contract.models import RecipeContext
-    from agent.briefing import engineer_context, recipe_context
-    ctx = RecipeContext(nodes_remaining=1, attempt=2, max_attempts=3, lineage=_lineage(3), siblings=_lineage(3)[1:],
-                        n_gpus=4, format_rules="rules text", retry={"kind": "gate", "failures": ["too few clips"]},
-                        tunable_rules={"optimizer.lr": {"type": "float", "min": 0, "max": None}})
-    engineer, planner = engineer_context(ctx, None), recipe_context(ctx, None)
-    for part in ("## This node", "## Retry", "too few clips", "## Recipe", "## Data formats"):
-        assert part in engineer and part in planner
-    assert planner.startswith(engineer)
-    assert not any(part in engineer for part in ("## Lineage", "## Siblings", "## Archive"))
-    assert "category: Urban" not in planner            # scene-category groups are left to context.json
 
 
 def test_a_rationale_line_that_only_looks_like_the_plan_is_ignored():
     from agent.briefing import _hypothesis
-    assert _hypothesis('why\n\nPlan: {"hypothesis": "more turns", "actions": ["a"]}\nData: x') == "more turns"
+    assert _hypothesis('why\n\nPlan: {"hypothesis": "more turns"}\nData: x') == "more turns"
     assert _hypothesis("why\n\nPlan: {not json}\nData: x") is None
