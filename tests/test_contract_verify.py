@@ -265,7 +265,7 @@ def _failed_step(report):
 def test_good_agent_passes_every_step(harness, tmp_path):
     report = _verify(harness, tmp_path, "good")
     assert report.ok, report.steps
-    assert [s.name for s in report.steps] == ["build", "static", "import", "smoke:edit_self",
+    assert [s.name for s in report.steps] == ["build", "static", "prompts", "import", "smoke:edit_self",
                                               "smoke:improve_recipe"]
 
 
