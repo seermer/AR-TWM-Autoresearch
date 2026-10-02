@@ -285,3 +285,31 @@ def test_hanging_smoke_run_times_out(harness, tmp_path):
     report = _verify(harness, tmp_path, "hangs", smoke_timeout_s=15)
     failed = _failed_step(report)
     assert failed.name == "smoke:edit_self" and "timed out" in failed.detail
+
+
+@pytest.mark.parametrize("text,ok,fragment", [
+    ("# Mission\nYou choose the data idea.\n", True, ""),
+    ("# Mission\nKeep in mind that n12 scored best.\n", False, "n12"),
+    ("# How you work\nRaise follows_event_instruction first.\n", False, "follows_event_instruction"),
+    ("# Mission\nThe plan needs no nine-step list; turn 1 comes first.\n", True, ""),
+])
+def test_prompt_check_refuses_node_ids_and_metric_names(tmp_path, text, ok, fragment):
+    from ar_kernel.contract.verify import prompt_check
+    (tmp_path / "agent" / "prompts").mkdir(parents=True)
+    (tmp_path / "agent" / "prompts" / "planner.md").write_text(text)
+    step = prompt_check(tmp_path)
+    assert step.name == "prompts" and step.ok is ok and fragment in step.detail
+
+
+def test_an_agent_without_a_prompts_folder_passes_the_prompt_check(tmp_path):
+    from ar_kernel.contract.verify import prompt_check
+    assert prompt_check(tmp_path).ok
+
+
+def test_a_prompt_naming_a_node_fails_verification_before_any_container(tmp_path, monkeypatch):
+    def mutate(agent):
+        (agent / "prompts").mkdir(exist_ok=True)
+        (agent / "prompts" / "planner.md").write_text("Remember: n3 used too many static clips.\n")
+    report = _verify_tree(tmp_path, monkeypatch, mutate)
+    failed = next(s for s in report.steps if not s.ok)
+    assert failed.name == "prompts" and "n3" in failed.detail and "briefing" in failed.detail

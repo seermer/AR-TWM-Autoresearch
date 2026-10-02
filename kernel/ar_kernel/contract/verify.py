@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import shutil
 import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from ..agent_phase import read_result
+from ..eval.score import AGENT_METRICS
 from ..gateway.app import create_gateway_app
 from ..gateway.mock import MockBook
 from ..gateway.store import CallStore
@@ -68,6 +70,22 @@ def static_check(entry_source: str) -> ContractStep:
             return ContractStep("static", False,
                                 f"{name} must take exactly one positional parameter (ctx)")
     return ContractStep("static", True)
+
+
+_NODE_FACT = re.compile(r"\b(n\d+|" + "|".join(alias for alias, _, _ in AGENT_METRICS.values()) + r")\b")
+
+
+def prompt_check(code: Path) -> ContractStep:
+    """A role prompt holds a mission and general behaviour: it may not name a node or a metric.
+    Checked here, not in the agent's own self-test, which the agent can edit."""
+    for path in sorted((code / "agent" / "prompts").glob("*.md")):
+        found = sorted(set(_NODE_FACT.findall(path.read_text(encoding="utf-8", errors="replace"))))
+        if found:
+            return ContractStep("prompts", False,
+                                f"agent/prompts/{path.name} names {', '.join(found)}. A prompt holds a role's "
+                                "mission and general behaviour only: put facts about nodes and metrics in what "
+                                "the role is told first (agent/briefing.py), not in its prompt")
+    return ContractStep("prompts", True)
 
 
 class _MockData:
@@ -181,6 +199,10 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
         step = ContractStep("static", False, f"cannot read agent/entry.py as UTF-8 text: {exc}")
     else:
         step = static_check(entry_source)
+    report.steps.append(step)
+    if not step.ok:
+        return finish(False)
+    step = prompt_check(code)
     report.steps.append(step)
     if not step.ok:
         return finish(False)
