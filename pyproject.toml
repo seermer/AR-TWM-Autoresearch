@@ -23,6 +23,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["kernel", "contract"]
 
+[tool.setuptools.package-data]
+ar_kernel = ["skills/*.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = [".", "kernel"]

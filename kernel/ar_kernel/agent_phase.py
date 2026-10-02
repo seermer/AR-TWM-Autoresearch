@@ -243,7 +243,7 @@ def run_edit_self(env: PhaseEnv, *, conn, node: str, parent_id: str, base_commit
 
 def _recipe_tools(env: PhaseEnv) -> list[str]:
     return ["video_probe", "data_ingest", "data_query", "data_commit", "recipe_check",
-            "hf_search", "hf_list_files", "hf_download", "job_status", "job_wait", "job_cancel", "ask",
+            "hf_search", "hf_list_files", "hf_download", "job_status", "job_wait", "job_cancel", "ask", "read_skill",
             *sorted(b.tool for b in env.queue.backends.values())]
 
 

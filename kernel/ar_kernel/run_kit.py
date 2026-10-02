@@ -20,6 +20,7 @@ from .tools.gpu_jobs import build_gpu_backends, register_gpu_tools
 from .tools.hf_tools import HfTools, register_hf_tools
 from .tools.jobs import JobQueue, register_job_tools
 from .tools.server import ToolKit, build_tool_app, new_mcp
+from .tools.skills import register_skill_tool
 
 
 @dataclass
@@ -66,6 +67,7 @@ def build_run_kit(cfg, run_dir: Path, gpus: list[int], recorder, environ) -> Run
     register_job_tools(mcp, kit, queue)
     register_gpu_tools(mcp, kit, queue)
     register_caption_tool(mcp, kit, queue)
+    register_skill_tool(mcp, kit)
     model = environ["OPENAI_MODEL"]
     store = CallStore(recorder)
     upstream = Upstream.from_env(environ, timeout_s=float(cfg.get("gateway.upstream_timeout_s")),

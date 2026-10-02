@@ -31,11 +31,11 @@ from .server import ToolError
 from .vllm_server import gpu_memory_mib, wait_gpu_release
 
 
-def items_schema(properties: dict, required: list[str]) -> WithJsonSchema:
+def items_schema(description: str, properties: dict, required: list[str]) -> WithJsonSchema:
     """The listed JSON schema of an `items` list. Only the schema: the values still reach the tool
     as plain dicts and each backend's check_args validates them, so a bad value is a recorded
     tool.error rather than a failure inside the MCP layer."""
-    return WithJsonSchema({"type": "array", "items": {"type": "object", "properties": properties,
+    return WithJsonSchema({"type": "array", "description": description, "items": {"type": "object", "properties": properties,
                                                       "required": required, "additionalProperties": False}})
 
 
@@ -46,8 +46,10 @@ def _str(description: str) -> dict:
 _SEED = {"type": "integer", "description": "random seed; the same item and seed give the same output"}
 _FRAME = _str("first frame: an image file under /workspace (any size; it is cropped and resized)")
 ImageItems = Annotated[list[dict[str, Any]], items_schema(
+    "the images to make, one item each",
     {"prompt": _str("what the image shows"), "seed": _SEED}, ["prompt", "seed"])]
 ClipItems = Annotated[list[dict[str, Any]], items_schema(
+    "the clips to render, one item each",
     {"prompt": _str("what the clip shows"), "image": _FRAME, "seed": _SEED}, ["prompt", "seed"])]
 _TURN = {"type": "object", "additionalProperties": False, "required": ["action"], "properties": {
     "action": _str("camera move for this turn: W, A, S, D (translate), left, right, up, down (rotate), stop, "
@@ -57,6 +59,7 @@ _TURN = {"type": "object", "additionalProperties": False, "required": ["action"]
     "viewpoint_change": _str("a change of viewpoint during this turn: 'fp_to_tp', 'tp_to_fp', 'fp_to_scope', "
                              "or 'tp_to_tp: <the new view>'")}}
 WorldItems = Annotated[list[dict[str, Any]], items_schema(
+    "the clips to render, one item each",
     {"image": _str("first frame: an image file under /workspace (.jpg, .png, ...; any size)"),
      "viewpoint": {"type": "string", "enum": ["first_person", "third_person"],     # rollouts.VIEWPOINTS
                    "description": "whose eyes the first frame is seen through"},

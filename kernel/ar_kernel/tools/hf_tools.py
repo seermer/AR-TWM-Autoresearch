@@ -8,10 +8,11 @@ import shutil
 import uuid
 from collections import Counter
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Annotated, Any
 
 from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
 from mcp.server.mcpserver import Context
+from pydantic import Field
 
 from ..isolation import blocked
 from .context import STAGING
@@ -171,7 +172,11 @@ class HfTools:
 def register_hf_tools(mcp, kit, tools: HfTools) -> None:
     @mcp.tool(name="hf_search", description="Search Hugging Face datasets. Every word of `query` must appear in the dataset id or tags. "
               "Returns ids, license, tags and whether the dataset is gated.")
-    async def hf_search(query: str, ctx: Context, kind: str = "dataset", limit: int = 20) -> list[dict]:
+    async def hf_search(
+            query: Annotated[str, Field(description="words that must all appear in the dataset id or tags")],
+            ctx: Context,
+            kind: Annotated[str, Field(description="only 'dataset'")] = "dataset",
+            limit: Annotated[int, Field(description="results to return, at most 100")] = 20) -> list[dict]:
         return await kit.call(ctx, "hf_search", {"query": query, "kind": kind, "limit": limit},
                               lambda c: tools.search(c, query, kind, limit))
 
@@ -180,8 +185,13 @@ def register_hf_tools(mcp, kit, tools: HfTools) -> None:
               "'videos/*.mp4'), sorted, one page of `limit` (default 200, at most 1000) from `offset`. "
               "Also returns the pinned revision, license, the matching count and bytes, and `gated` / `accessible` "
               "(a gated dataset with accessible false cannot be downloaded with this token).")
-    async def hf_list_files(repo: str, revision: str, ctx: Context, pattern: str = "*",
-                            limit: int = LIST_PAGE, offset: int = 0) -> dict[str, Any]:
+    async def hf_list_files(
+            repo: Annotated[str, Field(description="dataset id, 'owner/name'")],
+            revision: Annotated[str, Field(description="branch, tag or commit, e.g. 'main'")],
+            ctx: Context,
+            pattern: Annotated[str, Field(description="fnmatch pattern; '*' also crosses folders, e.g. 'videos/*.mp4'")] = "*",
+            limit: Annotated[int, Field(description="files per page, at most 1000")] = LIST_PAGE,
+            offset: Annotated[int, Field(description="skip this many matching files")] = 0) -> dict[str, Any]:
         return await kit.call(ctx, "hf_list_files",
                               {"repo": repo, "revision": revision, "pattern": pattern, "limit": limit,
                                "offset": offset},
@@ -190,8 +200,12 @@ def register_hf_tools(mcp, kit, tools: HfTools) -> None:
     @mcp.tool(name="hf_download", description="Download files matching glob patterns from a dataset "
               "repo into /workspace/staging/hf/. The revision is pinned to a commit SHA; the result "
               "includes a ready-made provenance record for data_ingest.")
-    async def hf_download(repo: str, revision: str, patterns: list[str], ctx: Context,
-                          max_bytes: int | None = None) -> dict[str, Any]:
+    async def hf_download(
+            repo: Annotated[str, Field(description="dataset id, 'owner/name'")],
+            revision: Annotated[str, Field(description="branch, tag or commit; the result pins it to a commit")],
+            patterns: Annotated[list[str], Field(description="fnmatch patterns or exact paths of the files to fetch")],
+            ctx: Context,
+            max_bytes: Annotated[int | None, Field(description="refuse if the matching files total more than this; the kernel's own cap is 20 GiB per call")] = None) -> dict[str, Any]:
         return await kit.call(ctx, "hf_download",
                               {"repo": repo, "revision": revision, "patterns": patterns,
                                "max_bytes": max_bytes},

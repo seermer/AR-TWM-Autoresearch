@@ -13,10 +13,11 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import httpx
 from mcp.server.mcpserver import Context
+from pydantic import Field
 
 from .context import WORKSPACE, PathError, to_container, to_host
 from ..subproc import free_port
@@ -203,11 +204,15 @@ def submit(q, caller, paths: list[str], prompt: str) -> dict:
 def register_caption_tool(mcp, kit, q) -> None:
     """caption_videos queues a job for the queue's `caption_videos` backend (the real
     CaptionBackend, or a fake in smoke runs)."""
-    @mcp.tool(name=TOOL, description="Caption video clips with the kernel's local video model. A GPU job: "
-              "returns {job_id} at once; collect the result with job_wait. Loading the model takes minutes, "
-              "so caption many clips per call. `paths`: video files under /workspace (relative paths "
-              "resolve against /workspace); `prompt`: the instruction sent with every clip. The finished "
-              "job's result.clips maps each path to {caption} or {error}.")
-    async def caption_videos(paths: list[str], prompt: str, ctx: Context) -> dict[str, Any]:
+    @mcp.tool(name=TOOL, description="Caption video clips with the kernel's local video model, which sees the "
+              "whole clip. A GPU job: returns {job_id} at once; collect the result with job_wait. Loading the "
+              "model takes minutes, then seconds per clip, so send every clip in one call. The finished job's "
+              "result.clips maps each path to {caption} or {error}. The tool returns text only: write "
+              "{\"caption\": \"<text>\"} to a JSON file under /workspace/staging/ yourself before data_ingest.")
+    async def caption_videos(
+            paths: Annotated[list[str], Field(description="video files under /workspace (relative paths resolve against /workspace)")],
+            prompt: Annotated[str, Field(description="the instruction sent with every clip, e.g. 'Write one factual "
+                              "caption (1-3 sentences) describing the scene and how the camera moves.'")],
+            ctx: Context) -> dict[str, Any]:
         return await kit.call(ctx, TOOL, {"paths": paths, "prompt": prompt},
                               lambda c: submit(q, c, paths, prompt))

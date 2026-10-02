@@ -6,9 +6,10 @@ import shutil
 import threading
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, Literal
 
 from mcp.server.mcpserver import Context
+from pydantic import Field
 
 from ..archive.blobs import BlobStore
 from ..archive.clips import ClipStore
@@ -20,6 +21,7 @@ from ..data.leakage import LeakageChecker
 from ..data.probe import probe_video
 from ..train.gate import Gate
 from .context import PathError, to_host
+from .gpu_jobs import items_schema
 from .server import ToolError
 
 QUERY_LIMIT = 100           # clips per page: a clip record is about 1,200 characters
@@ -202,40 +204,80 @@ def scores_by_clip(conn) -> dict[str, list[float]]:
     return out
 
 
+_FORMATS = "video_caption_camera, video_timed_prompts_camera (prompt_mode per_chunk or segment), video_caption_static"
+_STAGED = "absolute container path under /workspace/staging/"
+Candidates = Annotated[list[dict[str, Any]], items_schema("the clips to ingest, one candidate each", {
+    "video": {"type": "string", "description": f"the mp4: {_STAGED}"},
+    "caption": {"type": "string", "description": f"the caption JSON file (not the text): {_STAGED}. It holds "
+                                                 "{\"caption\": str} and, for timed prompts, \"segments\""},
+    "pose": {"type": "string", "description": f"the pose npz with cam_c2w: {_STAGED}. Required for 'moving', "
+                                              "forbidden for 'static'"},
+    "camera_motion": {"type": "string", "enum": ["moving", "static"],
+                      "description": "'static' only when a measurement shows the camera does not move"},
+    "provenance": {"type": "object", "description": "where the clip came from: the record hf_download returned, "
+                   "the one in a rollout's `candidate`, or for a clip you derived {\"kind\": \"derived\", "
+                   "\"from\": [...], \"transform\": \"what you did\"}"},
+    "license": {"type": "string", "description": "the source's license, when known"},
+    "derived_from": {"type": "array", "items": {"type": "string"},
+                     "description": "ids of archive clips this clip was made from"}},
+    ["video", "caption", "camera_motion", "provenance"])]
+
+
 def register_data_tools(mcp, kit, tools: DataTools) -> None:
     @mcp.tool(name="video_probe", description="Frame count, fps, coded size, rotation, pixel "
               "aspect and display aspect of a video under /workspace.")
-    async def video_probe(path: str, ctx: Context) -> dict:
+    async def video_probe(path: Annotated[str, Field(description="a video file under /workspace")],
+                          ctx: Context) -> dict:
         return await kit.call(ctx, "video_probe", {"path": path}, lambda c: tools.probe(c, path))
 
-    @mcp.tool(name="data_ingest", description="Ingest staged candidates. Each: video, "
-              "caption, optional pose (container paths under /workspace/staging), camera_motion "
-              "'moving'|'static', provenance, optional license and derived_from. Ingest MOVES each "
-              "staged file into the archive: copy it first if you still need it. Returns accepted + "
-              "clip_id + eligible formats, or rejected + reasons, per candidate.")
-    async def data_ingest(candidates: list[dict[str, Any]], ctx: Context) -> list[dict]:
+    @mcp.tool(name="data_ingest", description="Ingest staged candidates into the run's clip pool. The formats "
+              "a clip must meet are in skill data_formats. Ingest MOVES each staged file into the archive: copy "
+              "it first if you still need it. Returns, per candidate, accepted + clip_id + eligible formats + "
+              "warnings, or rejected + reasons. Read the reasons and change the candidate; a clip the kernel "
+              "excludes cannot be made acceptable.")
+    async def data_ingest(candidates: Candidates, ctx: Context) -> list[dict]:
         return await kit.call(ctx, "data_ingest", {"candidates": candidates},
                               lambda c: tools.ingest(c, candidates))
 
-    @mcp.tool(name="data_query", description="Search the archive-wide clip pool. Filter keys: "
-              "format, camera_motion, clip_ids, ingested_by, limit (default 100), offset (for the next page; "
-              "`total` counts all matches). Each clip includes provenance, "
-              "metadata, eligible formats and the scores of nodes that trained on it.")
-    async def data_query(filter: dict[str, Any], ctx: Context) -> dict:
-        return await kit.call(ctx, "data_query", {"filter": filter}, lambda c: tools.query(c, filter))
+    @mcp.tool(name="data_query", description="Search the clip pool of the whole run. Every argument narrows the "
+              "result; with none, all clips are listed. Each clip has its provenance, metadata, eligible formats "
+              "and the scores of the nodes that trained on it. `total` counts all matches; page with `offset`.")
+    async def data_query(
+            ctx: Context,
+            format: Annotated[str | None, Field(description="keep clips eligible for this format, e.g. "
+                              "'video_caption_camera' or 'video_timed_prompts_camera:per_chunk'")] = None,
+            camera_motion: Annotated[Literal["moving", "static"] | None, Field(description="keep clips with this camera motion")] = None,
+            clip_ids: Annotated[list[str] | None, Field(description="keep only these clip ids")] = None,
+            ingested_by: Annotated[str | None, Field(description="keep clips this node ingested, e.g. the id of the node being built")] = None,
+            limit: Annotated[int, Field(description="clips per page")] = QUERY_LIMIT,
+            offset: Annotated[int, Field(description="skip this many matches")] = 0) -> dict:
+        given = dict(format=format, camera_motion=camera_motion, clip_ids=clip_ids, ingested_by=ingested_by,
+                     limit=limit, offset=offset)
+        filter = {key: value for key, value in given.items() if value is not None}
+        return await kit.call(ctx, "data_query", filter, lambda c: tools.query(c, filter))
 
-    @mcp.tool(name="data_commit", description="Create an immutable data commit. "
-              "datasets: {name: {format, prompt_mode, weight, clips: [clip_id]}}. Set prompt_mode only for "
-              "format video_timed_prompts_camera; omit it for every other format.")
-    async def data_commit(parent: str | None, datasets: dict[str, Any], message: str,
-                          ctx: Context) -> dict:
+    @mcp.tool(name="data_commit", description="Create an immutable data commit: the training set of this node.")
+    async def data_commit(
+            parent: Annotated[str | None, Field(description="the commit this one follows (the parent node's data commit), or null")],
+            datasets: Annotated[dict[str, Any], Field(description="{name: {format, prompt_mode, weight, clips: "
+                                f"[clip_id]}}}}. format is one of: {_FORMATS}. Set prompt_mode only for "
+                                "video_timed_prompts_camera; omit it otherwise. weight is the dataset's sampling "
+                                "weight. Each dataset needs at least as many clips as training GPUs")],
+            message: Annotated[str, Field(description="what this commit contains")],
+            ctx: Context) -> dict:
         return await kit.call(ctx, "data_commit",
                               {"parent": parent, "datasets": datasets, "message": message},
                               lambda c: tools.commit(c, parent, datasets, message))
 
-    @mcp.tool(name="recipe_check", description="Run every recipe-gate check on a recipe "
-              "and data commit without consuming an attempt. `recipe` is a flat {tunable key: value} map, "
-              "e.g. {\"optimizer.lr\": 1e-4}, with no wrapper key. Returns ok and the failures.")
-    async def recipe_check(recipe: dict[str, Any], data_commit: str, ctx: Context) -> dict:
+    @mcp.tool(name="recipe_check", description="Run every pre-training check on a recipe and a data commit "
+              "without using up an attempt. Returns ok and the failures. Among the checks: steps_per_epoch = "
+              "floor(floor(epoch_windows / n_gpus) / optimizer.grad_accum_steps) must be at least 1, and "
+              "optimizer.epochs * steps_per_epoch at least optimizer.max_steps, where epoch_windows is the "
+              "largest, over the commit's datasets, of ceil(clips / (weight / total_weight)).")
+    async def recipe_check(
+            recipe: Annotated[dict[str, Any], Field(description="a flat {tunable key: value} map, e.g. "
+                              "{\"optimizer.lr\": 1e-4}, with no wrapper key")],
+            data_commit: Annotated[str, Field(description="the commit id data_commit returned")],
+            ctx: Context) -> dict:
         return await kit.call(ctx, "recipe_check", {"recipe": recipe, "data_commit": data_commit},
                               lambda c: tools.recipe_check(c, recipe, data_commit))

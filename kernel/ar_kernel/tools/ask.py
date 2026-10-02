@@ -10,10 +10,11 @@ import base64
 import io
 import threading
 import time
-from typing import Any
+from typing import Annotated, Any
 
 from mcp.server.mcpserver import Context
 from PIL import Image
+from pydantic import Field
 
 from .captioner import clip_host_path
 from .context import PathError
@@ -99,6 +100,10 @@ class MockAsk:
 
 def register_ask_tool(mcp, kit, ask) -> None:
     @mcp.tool(name="ask", description=ask.description)
-    async def ask_tool(question: str, ctx: Context, images: list[str] | None = None) -> dict[str, Any]:
+    async def ask_tool(
+            question: Annotated[str, Field(description="the whole question: the model sees nothing else of your conversation")],
+            ctx: Context,
+            images: Annotated[list[str] | None, Field(description="image files under /workspace to show with the question")] = None,
+    ) -> dict[str, Any]:
         return await kit.call(ctx, "ask", {"question": question, "images": images or []},
                               lambda c: ask.ask(c, question, images or []))

@@ -9,7 +9,9 @@ import traceback
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Annotated, Any, Callable, Protocol
+
+from pydantic import Field
 
 from mcp.server.mcpserver import Context
 
@@ -216,15 +218,16 @@ def run_cancellable(env: str, args: list[str], *, cwd: Path, cancel: threading.E
 
 def register_job_tools(mcp, kit, q: JobQueue) -> None:
     @mcp.tool(name="job_status", description="State, progress and (when finished) the result of a GPU job.")
-    async def job_status(job_id: str, ctx: Context) -> dict[str, Any]:
+    async def job_status(job_id: Annotated[str, Field(description="the job_id a GPU tool returned (its first 8 characters are enough)")], ctx: Context) -> dict[str, Any]:
         return await kit.call(ctx, "job_status", {"job_id": job_id}, lambda c: q.status(c, job_id))
 
     @mcp.tool(name="job_wait", description="Wait for a GPU job, at most 300 s per call; returns "
               "state 'running' if it has not finished. Call again to keep waiting.")
-    async def job_wait(job_id: str, ctx: Context, timeout_s: float = 300) -> dict[str, Any]:
+    async def job_wait(job_id: Annotated[str, Field(description="the job_id a GPU tool returned (its first 8 characters are enough)")], ctx: Context,
+                       timeout_s: Annotated[float, Field(description="seconds to wait, at most 300; call again if the job is still running")] = 300) -> dict[str, Any]:
         return await kit.call(ctx, "job_wait", {"job_id": job_id, "timeout_s": timeout_s},
                               lambda c: q.wait(c, job_id, timeout_s))
 
     @mcp.tool(name="job_cancel", description="Cancel a queued or running GPU job.")
-    async def job_cancel(job_id: str, ctx: Context) -> dict[str, Any]:
+    async def job_cancel(job_id: Annotated[str, Field(description="the job_id a GPU tool returned (its first 8 characters are enough)")], ctx: Context) -> dict[str, Any]:
         return await kit.call(ctx, "job_cancel", {"job_id": job_id}, lambda c: q.cancel(c, job_id))
