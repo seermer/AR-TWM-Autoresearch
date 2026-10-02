@@ -81,7 +81,7 @@ class DataTools:
     def query(self, caller, filter: dict) -> dict:
         conn = open_db(self.run_dir)
         try:
-            clips = ClipStore(conn).all()
+            clips = pool_clips(conn)
             usage = scores_by_clip(conn)
         finally:
             conn.close()
@@ -142,6 +142,12 @@ def _parent_commit(conn, node_id: str) -> str | None:
         return nodes.get(parent_id)["data_commit"] if parent_id else None
     except KeyError:
         return None
+
+
+def pool_clips(conn) -> list[dict]:
+    """The clips agents may use: all of them except those a quarantined node ingested."""
+    hidden = {n["node_id"] for n in NodeStore(conn).all() if n["status"] == "quarantined"}
+    return [c for c in ClipStore(conn).all() if c.get("ingested_by") not in hidden]
 
 
 def clip_source(clip: dict, by_id: dict[str, dict]) -> str:

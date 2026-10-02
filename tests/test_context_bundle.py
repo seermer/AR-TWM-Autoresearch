@@ -6,8 +6,9 @@ import yaml
 from ar_kernel.archive.db import open_db
 from ar_kernel.archive.nodes import NodeStore
 from ar_kernel.config import KernelConfig
-from ar_kernel.context_bundle import (FORMAT_RULES, archive_summary, build_edit_context,
-                                      build_recipe_context, lineage, write_bundle)
+from ar_kernel.context_bundle import (archive_summary, build_edit_context, build_recipe_context, lineage,
+                                      siblings, write_bundle)
+from ar_kernel.eval.score import agent_aggregates
 from ar_kernel.vcs.agents_repo import AgentsRepo
 
 CFG = KernelConfig.load()
@@ -38,21 +39,6 @@ def world(tmp_path):
     return conn, repo, tmp_path
 
 
-def test_lineage_is_root_first_and_carries_artifacts(world):
-    conn, repo, run = world
-    lin = lineage(conn, run, repo, "root")
-    assert [e["node_id"] for e in lin] == ["root"]
-    assert lin[0]["score"] == 0.78 and lin[0]["aggregates"] == AGGREGATES
-    assert lin[0]["rationale"] == "released checkpoint"
-    assert lin[0]["edit"] == {"summary": "s"}
-
-
-def test_archive_summary_names_the_best_node(world):
-    conn, _, _ = world
-    s = archive_summary(conn)
-    assert s["best"] == {"node_id": "root", "score": 0.78} and s["n_scored"] == 1
-
-
 def test_edit_context_validates_and_round_trips(world, tmp_path):
     conn, repo, run = world
     ctx = build_edit_context(conn=conn, run_dir=run, repo=repo, parent_id="root", attempt=1,
@@ -72,21 +58,10 @@ def test_recipe_context_carries_rules_allowlists_and_retry(world, tmp_path):
     assert "optimizer.max_steps" in ctx.tunable_rules
     assert ctx.resolution_allowlist == [[416, 736], [352, 608]]
     assert ctx.base_recipe["optimizer"]["batch_size"] == 1
-    assert "57 frames" in ctx.format_rules and ctx.format_rules == FORMAT_RULES
+    assert not hasattr(ctx, "format_rules")
+    assert ctx.metric_guide["cause_and_effect"]["weight"] == 4.5 and len(ctx.metric_guide) == 22
     write_bundle(ctx, tmp_path / "ctx2")
     assert json.loads((tmp_path / "ctx2" / "retry.json").read_text()) == retry
-
-
-def test_lineage_and_archive_summary_carry_component_and_error(world):
-    conn, repo, run = world
-    nodes = NodeStore(conn)
-    nodes.set_status("n1", "invalid_code")
-    nodes.set_fields("n1", error="contract import failed")
-    lin = lineage(conn, run, repo, "n1")
-    assert lin[-1]["error"] == "contract import failed"
-    summary_nodes = {n["node_id"]: n for n in archive_summary(conn)["nodes"]}
-    assert summary_nodes["n1"]["error"] == "contract import failed"
-    assert summary_nodes["root"]["error"] is None
 
 
 def test_parent_recipe_is_read_from_the_node_artifact(world):
@@ -105,11 +80,6 @@ def test_recipe_context_carries_the_guide(world):
     assert set(ctx.recipe_guide) == set(ctx.tunable_rules)
 
 
-def test_lineage_entries_carry_the_process_digest(world):
-    conn, repo, run = world
-    assert lineage(conn, run, repo, "n1")[-1]["process"] == {}        # no events: empty, not an error
-
-
 def test_siblings_are_the_parents_finished_children(world):
     from ar_kernel.context_bundle import siblings
     conn, repo, run = world
@@ -118,7 +88,7 @@ def test_siblings_are_the_parents_finished_children(world):
     nodes.create("n3", "root", 1), nodes.set_status("n3", "train_failed")
     nodes.create("n4", "root", 1), nodes.set_status("n4", "interrupted")
     nodes.create("n5", "n2", 2), nodes.set_status("n5", "scored")
-    assert [(s["node_id"], s["status"], s["score"]) for s in siblings(conn, run, repo, "root")] == [
+    assert [(s["node_id"], s["status"], s["score"]) for s in siblings(conn, run, repo, "root", "improve_recipe")] == [
         ("n2", "scored", 0.8), ("n3", "train_failed", None)]
     ctx = build_edit_context(conn=conn, run_dir=run, repo=repo, parent_id="root", attempt=1, max_attempts=3,
                              retry=None, nodes_remaining=3)
@@ -136,3 +106,70 @@ def test_every_finished_node_is_mounted_but_not_the_one_being_built(world):
     for node in ("n1", "n2", "n3"):
         (run / "nodes" / node).mkdir(parents=True)
     assert finished_node_dirs(conn, run) == {"root": run / "nodes" / "root", "n2": run / "nodes" / "n2"}
+
+
+def test_a_data_entry_carries_scores_under_agent_names_and_no_code_or_process(world):
+    conn, repo, run = world
+    [entry] = lineage(conn, run, repo, "root", "improve_recipe")
+    assert sorted(entry) == ["aggregates", "data", "error", "metrics", "node_id", "rationale", "recipe",
+                             "score", "status"]
+    assert entry["score"] == 0.78 and entry["metrics"] == {"frame_aesthetics": 0.78}
+    assert entry["aggregates"] == agent_aggregates(AGGREGATES) and "instruction_kind" in entry["aggregates"]["groups"]
+    assert entry["rationale"] == "released checkpoint"
+    assert json.loads((run / "nodes" / "root" / "eval" / "aggregates.json").read_text()) == AGGREGATES   # disk unchanged
+
+
+def test_an_edit_entry_carries_code_and_process_and_no_score(world):
+    conn, repo, run = world
+    NodeStore(conn).add_attempt("root", "edit_self", 1, "contract_failed", {})
+    [entry] = lineage(conn, run, repo, "root", "edit_self")
+    assert sorted(entry) == ["code_diff_stats", "edit", "error", "node_id", "process", "status"]
+    assert entry["edit"] == {"summary": "s"}
+    assert entry["process"] == {"attempts": [{"phase": "edit_self", "attempt": 1, "outcome": "contract_failed"}]}
+    ctx = build_edit_context(conn=conn, run_dir=run, repo=repo, parent_id="root", attempt=1, max_attempts=3,
+                             retry=None, nodes_remaining=9)
+    assert "0.78" not in ctx.model_dump_json()                  # no score anywhere in an edit context
+    assert ctx.archive == {"nodes": [{"node_id": "root", "parent_id": None, "status": "scored", "depth": 0},
+                                     {"node_id": "n1", "parent_id": "root", "status": "running", "depth": 1}]}
+
+
+def test_archive_summary_names_the_best_node(world):
+    conn, _, _ = world
+    s = archive_summary(conn, "improve_recipe")
+    assert s["best"] == {"node_id": "root", "score": 0.78} and s["n_scored"] == 1
+    assert "error" not in s["nodes"][0]
+
+
+def test_kernel_failures_show_a_fixed_error_and_agent_failures_their_own(world):
+    conn, repo, run = world
+    nodes = NodeStore(conn)
+    nodes.set_status("n1", "invalid_code")
+    nodes.set_fields("n1", error="contract import failed")
+    assert lineage(conn, run, repo, "n1", "edit_self")[-1]["error"] == "contract import failed"
+    nodes.set_status("n1", "eval_failed")
+    nodes.set_fields("n1", error="RuntimeError: wbench gpu failed (rc=1)")
+    for phase in ("edit_self", "improve_recipe"):
+        entry = lineage(conn, run, repo, "n1", phase)[-1]
+        assert entry["error"] == "the kernel's evaluation of this node failed"
+        if phase == "improve_recipe":                          # failed before scoring: nothing to alias
+            assert entry["aggregates"] is None and entry["metrics"] == {}
+
+
+def test_a_quarantined_node_is_in_no_context_and_its_clips_leave_the_pool(world):
+    from ar_kernel.archive.clips import ClipStore
+    from ar_kernel.tools.data_tools import pool_clips
+    conn, repo, run = world
+    nodes = NodeStore(conn)
+    nodes.create("n2", "root", 1), nodes.set_status("n2", "quarantined")
+    clip = {"clip_id": "a" * 64, "video_digest": "v", "caption_digest": "c", "pose_digest": None,
+            "camera_motion": "static", "metadata": {}, "formats": [], "warnings": [],
+            "provenance": {"kind": "derived"}, "license": None, "derived_from": []}
+    ClipStore(conn).add({**clip, "ingested_by": "n2"})
+    ClipStore(conn).add({**clip, "clip_id": "b" * 64, "ingested_by": "n1"})
+    assert [c["clip_id"] for c in pool_clips(conn)] == ["b" * 64]
+    for phase in ("edit_self", "improve_recipe"):
+        assert siblings(conn, run, repo, "root", phase) == []
+        assert "n2" not in [n["node_id"] for n in archive_summary(conn, phase)["nodes"]]
+    ctx = build_recipe_context(cfg=CFG, conn=conn, run_dir=run, repo=repo, node_id="n1", parent_id="root",
+                               attempt=1, max_attempts=3, retry=None, nodes_remaining=1, n_gpus=4, tools=[])
+    assert ctx.clip_pool_size == 1 and [c["clip_id"] for c in ctx.clip_pool] == ["b" * 64]

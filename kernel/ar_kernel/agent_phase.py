@@ -14,7 +14,7 @@ from pydantic import ValidationError
 from .archive.blobs import BlobStore
 from .archive.clips import ClipStore
 from .archive.commits import CommitStore
-from .archive.nodes import UNFINISHED, NodeStore
+from .archive.nodes import NOT_SHOWN, NodeStore
 from .context_bundle import build_edit_context, build_recipe_context, write_bundle
 from .liveness import Liveness, tree_mark
 from .sandbox.image import ImageBuildError, ensure_image
@@ -58,7 +58,7 @@ def attempt_dirs(run_dir: Path, node: str, phase: str, attempt: int) -> dict[str
 def finished_node_dirs(conn, run_dir: Path) -> dict[str, Path]:
     """The node dir of every finished node, by node id: not the node being built, nor an interrupted one."""
     out = {n["node_id"]: Path(run_dir) / "nodes" / n["node_id"] for n in NodeStore(conn).all()
-           if n["status"] not in UNFINISHED}
+           if n["status"] not in NOT_SHOWN}
     return {node: path for node, path in out.items() if path.is_dir()}
 
 
