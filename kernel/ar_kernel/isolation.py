@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from functools import lru_cache
 from pathlib import Path
 
@@ -49,11 +50,15 @@ def _runs(text: str) -> set[tuple]:
 
 @lru_cache(maxsize=None)
 def _held_out_runs(cases_dir: Path) -> frozenset:
-    runs: set[tuple] = set()
+    """The word runs that belong to exactly one evaluation prompt set. A run several of them share
+    ("first person view at eye level from the") is boilerplate anyone might write, not a copy."""
+    seen: Counter = Counter()
     for path in sorted(cases_dir.glob("case_*.json")):
+        runs: set[tuple] = set()
         for text in strings(json.loads(path.read_text(encoding="utf-8"))):
             runs |= _runs(text)
-    return frozenset(runs)
+        seen.update(runs)
+    return frozenset(run for run, cases in seen.items() if cases == 1)
 
 
 def copies_held_out(cfg, *texts) -> bool:

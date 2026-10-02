@@ -163,3 +163,9 @@ def test_agent_facing_messages_are_neutral():
     words = " ".join([EXCLUDED_CLIP, EXCLUDED_PROMPT, *KERNEL_FAILURES.values(),
                       *[f"{alias} {text}" for alias, _, text in AGENT_METRICS.values()]])
     assert not FORBIDDEN.search(words) and "leak" not in words.lower()
+
+
+def test_boilerplate_shared_by_several_evaluation_prompts_is_not_a_copy():
+    assert not copies_held_out(CFG, "First-person view at eye level from the sidewalk.")
+    assert not copies_held_out(CFG, "Third-person view from behind and slightly above the hiker.")
+    assert copies_held_out(CFG, CASE["environment_prompt"])               # a whole prompt still is
