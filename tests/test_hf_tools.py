@@ -22,7 +22,8 @@ class FakeApi:
     def list_datasets(self, search, limit, full=True):
         self.last_search = search
         if self.datasets is not None:
-            return [SimpleNamespace(tags=[], downloads=0, last_modified=None, card_data={}, **d) for d in self.datasets]
+            return [SimpleNamespace(**{"tags": [], "downloads": 0, "last_modified": None, "card_data": {}, **d})
+                    for d in self.datasets]
         return [SimpleNamespace(id="org/walks", tags=["license:cc-by-4.0", "task:video"],
                                 downloads=12, last_modified=None, card_data={"license": "cc-by-4.0"})]
 
@@ -158,7 +159,7 @@ class DatasetInfoRaisesApi(FakeApi):
 
 @pytest.mark.parametrize("cls, message", [
     (hf_errors.GatedRepoError, "403 Client Error: gated"),
-    (hf_errors.RepositoryNotFoundError, "404 Client Error: repo not found"),
+    (hf_errors.RepositoryNotFoundError, "was not found on the Hub"),
     (hf_errors.RevisionNotFoundError, "404 Client Error: revision not found"),
 ])
 def test_dataset_info_hub_errors_become_tool_errors(cls, message, tmp_path):
@@ -291,3 +292,27 @@ def test_list_files_reports_gated_and_access(env):
     tools.api.no_access = True
     out = tools.list_files(caller, "org/walks", "main")
     assert out["accessible"] is False and "gated" in out
+
+
+def test_a_blocked_repo_is_absent_from_search(env):
+    tools, caller = env
+    tools.api.datasets = [{"id": "org/walks"}, {"id": "meituan-longcat/WBench"},
+                          {"id": "org/mirror", "tags": ["wbench"]}]
+    assert [h["id"] for h in tools.search(caller, "org", "dataset", 5)] == ["org/walks"]
+
+
+def test_a_blocked_repo_reads_exactly_like_a_missing_one(env, monkeypatch):
+    tools, caller = env
+
+    def missing(repo_id, revision=None, files_metadata=False):
+        raise hf_errors.RepositoryNotFoundError(
+            "404", response=httpx.Response(404, request=httpx.Request("GET", "http://x")))
+    monkeypatch.setattr(tools.api, "dataset_info", missing)
+    messages = []
+    for repo in ("org/gone", "meituan-longcat/WBench"):
+        for call in (lambda: tools.list_files(caller, repo, "main"),
+                     lambda: tools.download(caller, repo, "main", ["*"])):
+            with pytest.raises(ToolError) as err:
+                call()
+            messages.append(str(err.value).replace(repo, "<repo>"))
+    assert set(messages) == {"dataset '<repo>' was not found on the Hub"}

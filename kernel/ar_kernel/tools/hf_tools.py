@@ -13,6 +13,7 @@ from typing import Any
 from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
 from mcp.server.mcpserver import Context
 
+from ..isolation import blocked
 from .context import STAGING
 from .server import ToolError
 
@@ -67,7 +68,7 @@ class HfTools:
             import huggingface_hub
             api = api or huggingface_hub.HfApi()
             snapshot = snapshot or huggingface_hub.snapshot_download
-        self.api, self.snapshot = api, snapshot
+        self.api, self.snapshot, self.cfg = api, snapshot, cfg
         self.cap = int(cfg.get("tools.hf_download_max_bytes"))
 
     def search(self, caller, query: str, kind: str = "dataset", limit: int = 20) -> list[dict]:
@@ -82,14 +83,22 @@ class HfTools:
                  "gated": getattr(d, "gated", False),
                  "downloads": getattr(d, "downloads", None),
                  "last_modified": str(getattr(d, "last_modified", None))}
-                for d in hits if all(w in " ".join([d.id, *(d.tags or [])]).lower() for w in words)]
+                for d in hits if all(w in " ".join([d.id, *(d.tags or [])]).lower() for w in words)
+                and not blocked(self.cfg, " ".join([d.id, *(d.tags or [])]))]
         return rows[:min(int(limit), 100)]
 
     def _info(self, repo: str, revision: str):
         if not REPO_RE.match(repo or ""):
             raise ToolError(f"invalid dataset repo id {repo!r}")
+        missing = ToolError(f"dataset {repo!r} was not found on the Hub")
+        if blocked(self.cfg, repo):             # reads exactly like a repo that does not exist
+            raise missing
         try:
             return self.api.dataset_info(repo, revision=revision, files_metadata=True)
+        except GatedRepoError as exc:           # a RepositoryNotFoundError too, but the repo exists
+            raise ToolError(str(exc)) from None
+        except RepositoryNotFoundError:
+            raise missing from None
         except HfHubHTTPError as exc:
             raise ToolError(str(exc)) from None
 
