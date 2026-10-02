@@ -1,12 +1,12 @@
-"""Which roles run, in what order, with which tools and context.
+"""Which roles run, in what order, with which tools and what they are told first.
 
-A role = a system prompt (+ the knowledge index) and a tool list, run on the harness. It returns its result
-by calling a submit tool; one that stops without submitting gets one reminder.
-Both phases are a planner/engineer loop: the planner submits a plan, the engineer carries it out, then either
-finishes the phase or reports back for a new plan, up to MAX_ROUNDS plans. Each role keeps its conversation
-across rounds. The last plan is the final one; every plan is recorded. A planner has the same local tools as
-an engineer, but what it changes on disk is undone after each of its turns, and its kernel tools are read-only.
-The roles of edit_self have one kernel tool, ask.
+A role = a system prompt and a tool list, run on the harness. It returns its result by calling a
+submit tool; one that stops without submitting gets one reminder.
+Both phases are a planner and an engineer. The planner submits a plan that states intent; the engineer
+carries it out, then either finishes the phase or reports back with request_replan for a new plan, up to
+MAX_ROUNDS plans per phase. Each role keeps its conversation throughout. Every plan and report is
+recorded in plans.json. A planner has the engineer's file and shell tools, but what it
+changes on disk while planning is undone, and its kernel tools only read.
 - improve_recipe: planner -> data engineer, who builds the data commit and writes the recipe
   (recipe_check must pass before the submission is accepted).
 - edit_self: edit planner -> coder (the self-test must pass before the submission is accepted).
@@ -27,23 +27,29 @@ from langchain_core.tools import ToolException
 from pydantic import BaseModel, Field
 
 from .entry import AGENT_ROOT, BRIEF_CHARS, COMPACT_AT, CONTEXT_WINDOW, MAX_ROUNDS, MODEL, WORKSPACE
-from .briefing import edit_context, engineer_context, recipe_context
+from .briefing import coder_context, edit_context, engineer_context, recipe_context
 from .harness import build_react_agent
 from .tools import discarded_changes, kernel_tools, local_tools, result_text, snap_timed_prompts, submit_tool
 
 AGENT_PKG = Path(__file__).resolve().parent
+RECORD = Path(WORKSPACE) / "plans.json"       # every plan and report; carried to a retry with the workspace
+PLAN_FIELD_CHARS = 1500                       # a plan states intent: too short to dictate file contents
 REMIND = ("You stopped without calling {tools}. Finish the task, then call {tools} with the result. "
           "The work is only recorded through {tools}.")
 REPLAN = "Revise the plan. The engineer carries out the plan you submit next."
+PLANNING_KERNEL_TOOLS = {"hf_search", "hf_list_files", "data_query", "ask", "read_skill"}    # read-only
+EDIT_KERNEL_TOOLS = {"ask", "read_skill"}
 
-# Where each component lives in this agent.
+# Where each component lives in this agent, in the order an edit should consider them.
 COMPONENTS = {
-    "prompts": "agent/prompts/*.md -- the system prompt of each role",
-    "tools": "agent/tools.py -- agent-local tools and the kernel-tool adapter (not the kernel tools themselves)",
+    "tools": "agent/tools.py -- the agent's own tools and the adapter for kernel tools (the kernel's tools and "
+             "skills themselves are fixed)",
+    "orchestration": "agent/orchestration.py -- the roles, their tools, the plan and question loop, the plan "
+                     "and result schemas",
+    "briefing": "agent/briefing.py -- what each role is told first, built from the kernel's context",
     "harness": "agent/harness.py -- the single-agent inner loop: ReAct graph, tool execution, auto-compaction",
-    "orchestration": "agent/orchestration.py (+ agent/briefing.py, agent/entry.py settings) -- which roles "
-                     "run, in what order, with which tools and what they are told first",
-    "knowledge": "agent/knowledge/*.md -- reference material that roles read",
+    "prompts": "agent/prompts/*.md -- each role's mission and general behaviour",
+    "settings": "agent/entry.py -- limits: plans per phase, the context digest cap",
 }
 
 
@@ -54,18 +60,8 @@ def block(tag: str, text: str, **attrs) -> str:
     return f"<{tag}{attributes}>\n{text.strip()}\n</{tag}>"
 
 
-def description(text: str) -> str:
-    """The `description:` of a knowledge file's front matter."""
-    head = text.split("\n---", 1)[0] if text.startswith("---\n") else ""
-    return next((line.split(":", 1)[1].strip() for line in head.splitlines() if line.startswith("description:")), "")
-
-
 def system_prompt(name: str) -> str:
-    """The role's prompt, then the index of knowledge files: each path with when it is needed."""
-    prompt = (AGENT_PKG / "prompts" / f"{name}.md").read_text()
-    index = "\n".join(f"- {path}: {description(path.read_text())}"
-                      for path in sorted((AGENT_PKG / "knowledge").glob("*.md")))
-    return f"{prompt.strip()}\n\n{block('knowledge', index)}"
+    return (AGENT_PKG / "prompts" / f"{name}.md").read_text()
 
 
 def brief(text: str) -> str:
@@ -113,15 +109,20 @@ async def ping() -> str:
 
 
 class Replan(BaseModel):
-    report: str = Field(min_length=1, description="what you did and found, and why the plan must change")
+    report: str = Field(min_length=1, description="what you did and found, and why the plan should change")
+
+
+def save(rounds: list) -> None:
+    RECORD.write_text(json.dumps(rounds, indent=1))
 
 
 def replan_tool(rounds: list) -> tuple:
+    """The engineer's way back to the planner."""
     async def check(_) -> None:
         if len(rounds) >= MAX_ROUNDS:
             raise ToolException(f"No replans left: all {MAX_ROUNDS} plans are used. Finish with the current plan.")
-    return submit_tool("request_replan", "Stop and send a report back to the planner, who then revises the plan.",
-                       Replan, check)
+    return submit_tool("request_replan", "Stop and send a report back to the planner, who then revises the plan. "
+                       "The normal step when what you found changes what should be done.", Replan, check)
 
 
 @dataclass
@@ -134,46 +135,54 @@ class Team:
     rounds: list                  # every plan, with the engineer's report when it asked for a new one
 
 
-async def plan_and_engineer(team: Team, *, task: str, show, engineer_context: str | None, record: Path) -> None:
+async def plan_and_engineer(team: Team, *, task: str, show, engineer_context: str) -> None:
     """Plan, carry out, and replan when the engineer asks, until the engineer finishes. Every round is
-    appended to team.rounds and saved to `record`."""
+    appended to team.rounds and saved."""
     while True:
         await team.planner.run(task)
         team.rounds.append({"plan": team.plan.value.model_dump()})
-        record.write_text(json.dumps(team.rounds, indent=1))
+        save(team.rounds)
         work = show(team.plan.value)
-        if team.engineer.messages:
-            work = f"The planner revised the plan.\n\n{work}"
-        elif engineer_context:
-            work = f"{work}\n\n{engineer_context}"
+        work = f"The planner revised the plan.\n\n{work}" if team.engineer.messages else f"{work}\n\n{engineer_context}"
         if await team.engineer.run(work) is team.done:
             return
         team.rounds[-1]["report"] = team.replan.value.report
-        record.write_text(json.dumps(team.rounds, indent=1))
+        save(team.rounds)
         task = f"{block('engineer_report', team.replan.value.report)}\n\n{REPLAN}"
 
 
 def check_roles() -> None:
-    """Build every role of both phases (prompts, knowledge index, tool schemas) without calling a model."""
+    """Build every role of both phases (prompts, tool schemas) without calling a model."""
     recipe_team(None, None, [])
     edit_team([])
+
+
+def previous_plans(ctx) -> list | None:
+    """The failed attempt's plans, on a retry: read before this attempt overwrites the record."""
+    return json.loads(RECORD.read_text()) if ctx.retry and RECORD.exists() else None
+
+
+def plan_text(length: str, description: str, **kwargs):
+    return Field(max_length=PLAN_FIELD_CHARS, description=f"{description} ({length})", **kwargs)
 
 
 # ---- improve_recipe ----
 
 class DataPlan(BaseModel):
-    hypothesis: str = Field(min_length=1, description="the one testable data hypothesis of this node")
-    actions: list[str] = Field(min_length=1, description="concrete steps that test it")
+    hypothesis: str = plan_text("one or two sentences", "the one data idea this node tests, and what in "
+                                "earlier nodes suggests it", min_length=1)
+    expected_change: str = plan_text("a sentence", "which metrics or groups should move, and in which direction",
+                                     min_length=1)
+    data: str = plan_text("a short paragraph", "what the training set should contain and where it comes from "
+                          "(sources you checked exist); not the steps to build it", min_length=1)
+    constraints: str = plan_text("optional", "what the engineer must keep or must not do, if anything", default="")
 
 
 class DataAndRecipe(BaseModel):
     data_commit: str = Field(min_length=1, description="the data_commit id to train on")
-    notes: str = Field(description="what the commit contains and why")
+    notes: str = Field(description="what the commit contains, and where it departs from the plan")
     recipe: dict[str, float] = Field(description="tunable key -> value")
     rationale: str = Field(min_length=1, description="why each changed key has its value")
-
-
-PLANNING_KERNEL_TOOLS = {"hf_search", "hf_list_files", "data_query", "ask"}       # read-only: planning changes nothing
 
 
 def typed(recipe: dict, rules: dict) -> dict:
@@ -188,15 +197,15 @@ def recipe_team(ctx: RecipeContext | None, session, ktools: list) -> Team:
         if not check.get("ok"):
             raise ToolException(f"recipe_check failed: {check.get('failures')}")
 
+    rounds: list[dict] = []
     plan_tool, plan = submit_tool("submit_plan", "Submit the data plan for this node.", DataPlan)
+    planner = Role("planner", [plan_tool, *[t for t in ktools if t.name in PLANNING_KERNEL_TOOLS],
+                               *local_tools(WORKSPACE, papers=True)], [plan], discard=(WORKSPACE,))
     done_tool, done = submit_tool("submit_data_and_recipe", "Submit the data commit and the recipe to train on. "
                                   "It is accepted only if recipe_check passes.", DataAndRecipe, recipe_passes)
-    rounds: list[dict] = []
     replan_t, replan = replan_tool(rounds)
-    planner = Role("planner", [plan_tool, *[t for t in ktools if t.name in PLANNING_KERNEL_TOOLS],
-                               *local_tools(WORKSPACE)], [plan], discard=(WORKSPACE,))
-    engineer = Role("data_engineer", [*ktools, *local_tools(WORKSPACE), snap_timed_prompts, done_tool, replan_t],
-                    [done, replan])
+    engineer = Role("data_engineer", [*ktools, *local_tools(WORKSPACE, papers=True), snap_timed_prompts,
+                                      done_tool, replan_t], [done, replan])
     return Team(planner, plan, engineer, done, replan, rounds)
 
 
@@ -204,8 +213,7 @@ async def run_task(ctx: RecipeContext) -> RecipeResult:
     async with mcp_session() as session:
         ktools = await kernel_tools(session)
         team = recipe_team(ctx, session, ktools)
-        record = Path(WORKSPACE) / "plans.json"             # carried to a retry with the workspace
-        previous = json.loads(record.read_text()) if ctx.retry and record.exists() else None
+        previous = previous_plans(ctx)
         # Both built in a dry run too: it gets the real context.
         context, for_engineer = brief(recipe_context(ctx, previous)), brief(engineer_context(ctx, previous))
         if ctx.dry_run:
@@ -213,7 +221,7 @@ async def run_task(ctx: RecipeContext) -> RecipeResult:
                                 rationale=f"dry run: roles and the first message built, {len(ktools)} kernel "
                                           f"tools, model said {await ping()!r}")
         await plan_and_engineer(team, task=context, show=lambda p: block("plan", p.model_dump_json(indent=2)),
-                                engineer_context=for_engineer, record=record)
+                                engineer_context=for_engineer)
     r = team.done.value
     return RecipeResult(data_commit=r.data_commit, recipe=typed(r.recipe, ctx.tunable_rules),
                         rationale=f"{r.rationale}\n\nPlan: {json.dumps(team.rounds[-1]['plan'])}\nData: {r.notes}")
@@ -221,15 +229,19 @@ async def run_task(ctx: RecipeContext) -> RecipeResult:
 
 # ---- edit_self ----
 
-class EditSummary(BaseModel):
-    summary: str = Field(min_length=1, description="one paragraph: what you changed and why")
-
-
 class EditPlan(BaseModel):
-    change: str = Field(min_length=1, description="what to change")
-    files: list[str] = Field(description="files you expect to change, relative to /agent")
-    rationale: str = Field(min_length=1, description="evidence from the lineage for this change")
-    expected_effect: str = Field(min_length=1, description="what should improve, and how you will know")
+    problem: str = plan_text("one or two sentences", "where the agent system made its roles waste effort, lack a "
+                             "capability or lose information", min_length=1)
+    evidence: str = plan_text("a short paragraph", "where it shows: nodes, transcript files, process lines",
+                              min_length=1)
+    mechanism: str = plan_text("a short paragraph", "what should change in the agent system and in which "
+                               "component, as intent; not the code or the text to write", min_length=1)
+    check: str = plan_text("a sentence", "what a later reader of the process lines and transcripts would see if "
+                           "it worked", min_length=1)
+
+
+class EditSummary(BaseModel):
+    summary: str = Field(min_length=1, description="one paragraph: what you changed and how you checked it")
 
 
 def selftest(root: str) -> list[str]:
@@ -259,28 +271,24 @@ def edit_team(ktools: list) -> Team:
         if errors:
             raise ToolException("The self-test failed. Fix these first:\n" + "\n".join(errors))
 
-    plan_tool, plan = submit_tool("submit_edit_plan",
-                                  "Submit the edit plan.", EditPlan)
+    rounds: list[dict] = []
+    kernel = [t for t in ktools if t.name in EDIT_KERNEL_TOOLS]
+    plan_tool, plan = submit_tool("submit_edit_plan", "Submit the edit plan.", EditPlan)
+    planner = Role("edit_planner", [plan_tool, *kernel, *local_tools(AGENT_ROOT, papers=False)], [plan],
+                   discard=(AGENT_ROOT, WORKSPACE))
     done_tool, done = submit_tool("submit_edit", "Submit the summary of the change you made. It is accepted "
                                   "only if the self-test passes.", EditSummary, selftest_passes)
-    rounds: list[dict] = []
     replan_t, replan = replan_tool(rounds)
-    ask = [t for t in ktools if t.name == "ask"]
-    planner = Role("edit_planner", [plan_tool, *ask, *local_tools(AGENT_ROOT)], [plan],
-                   discard=(AGENT_ROOT, WORKSPACE))
-    engineer = Role("coder", [*ask, *local_tools(AGENT_ROOT), done_tool, replan_t], [done, replan])
+    engineer = Role("coder", [*kernel, *local_tools(AGENT_ROOT, papers=False), done_tool, replan_t], [done, replan])
     return Team(planner, plan, engineer, done, replan, rounds)
 
 
 async def run_meta(ctx: EditContext) -> EditResult:
     async with mcp_session() as session:
         team = edit_team(await kernel_tools(session))
-        record = Path(WORKSPACE) / "plans.json"             # carried to a retry with the workspace
-        previous = json.loads(record.read_text()) if ctx.retry and record.exists() else None
-        task = brief(edit_context(ctx, COMPONENTS, previous))   # built in a dry run too: it gets the real context
+        task = brief(edit_context(ctx, COMPONENTS, previous_plans(ctx)))    # built in a dry run too: it gets the real context
         if ctx.dry_run:
             return EditResult(summary=f"dry run: roles and the first message built, model said {await ping()!r}")
-        await plan_and_engineer(
-            team, record=record, engineer_context=None, task=task,
-            show=lambda p: block("edit_plan", p.model_dump_json(indent=2)))
-    return EditResult(summary=f"{team.plan.value.change}\n\n{team.done.value.summary}")
+        await plan_and_engineer(team, task=task, show=lambda p: block("edit_plan", p.model_dump_json(indent=2)),
+                                engineer_context=brief(coder_context(COMPONENTS)))
+    return EditResult(summary=team.done.value.summary)

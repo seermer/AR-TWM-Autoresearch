@@ -284,8 +284,9 @@ def arxiv_read(arxiv_id: str) -> dict:
     return {"path": str(path), "chars": len(text), "sections": [h for h in parser.headings if h]}
 
 
-def local_tools(root: str) -> list:
-    return [*make_file_tools(root), arxiv_search, arxiv_read]
+def local_tools(root: str, papers: bool) -> list:
+    """File and shell tools bound to `root`; `papers` adds arXiv search and reading."""
+    return [*make_file_tools(root), *([arxiv_search, arxiv_read] if papers else [])]
 
 
 # ---- timed prompts ----

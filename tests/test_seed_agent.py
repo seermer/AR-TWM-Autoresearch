@@ -298,12 +298,12 @@ def test_submit_tool_validates_then_captures():
     from agent.orchestration import EditPlan
     from agent.tools import submit_tool
     tool, box = submit_tool("submit_edit_plan", "d", EditPlan)
-    plan = {"change": "", "files": [], "rationale": "r", "expected_effect": "e"}
+    plan = {"problem": "", "evidence": "e", "mechanism": "m", "check": "c"}
     with pytest.raises(ValidationError):
         asyncio.run(tool.ainvoke(plan))
     assert box.value is None
-    asyncio.run(tool.ainvoke({**plan, "change": "x"}))
-    assert box.value.change == "x"
+    asyncio.run(tool.ainvoke({**plan, "problem": "x"}))
+    assert box.value.problem == "x"
 
 
 def test_kernel_results_prefer_structured_content():
@@ -351,34 +351,37 @@ def _call(name, args):
     return function_call(name, args, f"call_{uuid.uuid4().hex[:12]}")
 
 
+PLAN = {"hypothesis": "more walking clips", "expected_change": "camera path accuracy up",
+        "data": "forward-walking clips with poses from the pool"}
+EDIT_PLAN = {"problem": "the planner sees too many siblings", "evidence": "the first message is long",
+             "mechanism": "show fewer siblings in the briefing", "check": "fewer planner compactions"}
+
+
 def _scripts():
-    """An accepted submit ends the role's run, so no reply follows one."""
+    """An accepted submit ends the role's run, so no reply follows one. Replies are consumed in order
+    by whichever role calls the model next."""
     recipe = [
-        [_call("submit_plan", {"hypothesis": "more walking clips"})],               # invalid: no actions
-        [_call("submit_plan", {"hypothesis": "more walking clips", "actions": ["download walking clips"]})],
-        [_call("data_query", {"filter": {"format": "video_caption_camera"}}), _call("no_such_tool", {}),
+        [_call("submit_plan", {**PLAN, "data": "x" * 1501})],                       # planner: over the cap
+        [_call("submit_plan", PLAN)],
+        [_call("data_query", {"format": "video_caption_camera"}), _call("no_such_tool", {}),     # engineer
          _call("hf_download", {"repo": "x/y", "revision": "main", "patterns": ["*.mp4"]})],
         [_call("request_replan", {"report": "downloads are disabled; the pool has clips"})],
-        [_call("submit_plan", {"hypothesis": "pool clips suffice", "actions": ["commit the pool clips"]})],
+        [_call("submit_plan", {**PLAN, "hypothesis": "pool clips suffice"})],                    # planner
         [_call("submit_data_and_recipe", {"data_commit": C0, "notes": "pool clips", "rationale": "fits the data",
                                           "recipe": {"optimizer.max_steps": 200.4, "optimizer.lr": 1e-5}})],
     ]
     edit = [
         [_call("read_file", {"path": "agent/prompts/planner.md"}),       # planning may try things out ...
          _call("run_command", {"command": "echo junk >> agent/prompts/coder.md && touch agent/stray.py"})],
-        [_call("submit_edit_plan", {"change": "", "files": [],
-                                    "rationale": "r", "expected_effect": "e"})],   # invalid: no change
-        [_call("submit_edit_plan", {"change": "ask for posed clips first",
-                                    "files": ["agent/prompts/planner.md"], "rationale": "static-only clips",
-                                    "expected_effect": "more moving clips"})],
+        [_call("submit_edit_plan", {**EDIT_PLAN, "problem": ""})],       # invalid: no problem
+        [_call("submit_edit_plan", EDIT_PLAN)],
         [_call("edit_file", {"path": "agent/entry.py", "old": "def edit_self(ctx: EditContext)",
-                             "new": "def edit_self(ctx: EditContext, extra)"})],       # breaks the self-test
+                             "new": "def edit_self(ctx: EditContext, extra)"})],       # coder: breaks the self-test
         [_call("submit_edit", {"summary": "too early"})],
         [_call("edit_file", {"path": "agent/entry.py", "old": "def edit_self(ctx: EditContext, extra)",
                              "new": "def edit_self(ctx: EditContext)"})],
-        [_call("edit_file", {"path": "agent/prompts/planner.md", "old": "Finish by calling submit_plan.",
-                             "new": "Prefer clips with poses. Finish by calling submit_plan."})],
-        [_call("submit_edit", {"summary": "Changed the planner prompt to prefer clips with poses."})],
+        [_call("edit_file", {"path": "agent/briefing.py", "old": "SIBLINGS_SHOWN = 10", "new": "SIBLINGS_SHOWN = 8"})],
+        [_call("submit_edit", {"summary": "The briefing now shows eight siblings."})],
     ]
     return {"recipe": recipe, "edit": edit}
 
@@ -408,6 +411,8 @@ def kernel(tmp_path_factory):
     queue.register(_MockCaption())
     register_caption_tool(mcp, kit, queue)
     register_ask_tool(mcp, kit, MockAsk())
+    from ar_kernel.tools.skills import register_skill_tool
+    register_skill_tool(mcp, kit)
     book = MockBook.default()
     for name, script in _scripts().items():
         book.add(name, script)
@@ -508,7 +513,7 @@ def test_improve_recipe_full_flow(kernel, tmp_path):
     assert body["result"]["data_commit"] == C0
     assert body["result"]["recipe"] == {"optimizer.max_steps": 200, "optimizer.lr": 1e-5}   # int coerced
     outputs = _tool_outputs(rec, "n-recipe")
-    assert any("Error invoking tool 'submit_plan'" in o and "actions" in o for o in outputs)   # bad args
+    assert any("Error invoking tool 'submit_plan'" in o and "at most 1500 characters" in o for o in outputs)
     assert any("no_such_tool is not a valid tool" in o for o in outputs)                       # unknown tool
     assert any(o.startswith("Error: ToolException(") and "downloads are disabled" in o
                for o in outputs)                                                 # kernel tool error reported
@@ -526,8 +531,11 @@ def test_improve_recipe_full_flow(kernel, tmp_path):
     assert [r["plan"]["hypothesis"] for r in rounds] == ["more walking clips", "pool clips suffice"]
     assert rounds[0]["report"].startswith("downloads are disabled") and "report" not in rounds[1]
     assert "pool clips suffice" in body["result"]["rationale"]                  # the final plan
-    planner_tools = _tools_of(rec, "n-recipe", "# Role\nYou plan the training-data work")
-    assert {"hf_search", "data_query", "ask", "read_file", "run_command", "arxiv_search"} <= planner_tools
+    planner_tools = _tools_of(rec, "n-recipe", "# Mission\nYou choose the one data idea")
+    assert {"hf_search", "data_query", "ask", "read_skill", "read_file", "run_command", "arxiv_search"} <= planner_tools
+    engineer_tools = _tools_of(rec, "n-recipe", "# Mission\nYou build the training data")
+    assert {"request_replan", "read_skill", "data_ingest", "arxiv_search"} <= engineer_tools
+    assert "ask_planner" not in engineer_tools
     assert not {"hf_download", "data_ingest", "data_commit", "caption_videos"} & planner_tools
     # The panel shows one conversation per role, each holding all of its rounds.
     chats = _panel_chats(rec, "n-recipe", "improve_recipe")
@@ -542,24 +550,27 @@ def test_edit_self_plans_then_edits(kernel, tmp_path):
     rec = kernel[0]
     proc, body, agent = _run(kernel, tmp_path, "edit_self", "edit", "n-edit", BASE)
     assert proc.returncode == 0 and body["ok"], (body, proc.stderr[-2000:])
-    assert body["result"]["summary"].startswith("ask for posed clips first")
-    assert "prefer clips with poses" in body["result"]["summary"]
-    assert "Prefer clips with poses." in (agent / "agent" / "prompts" / "planner.md").read_text()
+    assert body["result"]["summary"] == "The briefing now shows eight siblings."      # the coder's own words
+    assert "SIBLINGS_SHOWN = 8" in (agent / "agent" / "briefing.py").read_text()
     # ... but what the planner changed is undone before the coder starts; its command log stays
     assert (agent / "agent" / "prompts" / "coder.md").read_text() == (SEED / "agent" / "prompts" / "coder.md").read_text()
     assert not (agent / "agent" / "stray.py").exists()
     assert list((tmp_path / "ws" / "tool_output").glob("run_command-*.log"))
     [round_] = json.loads((tmp_path / "ws" / "plans.json").read_text())
-    assert round_["plan"]["change"] == "ask for posed clips first" and "report" not in round_
+    assert round_["plan"] == EDIT_PLAN and "report" not in round_
     outputs = _tool_outputs(rec, "n-edit")
-    assert any("Error invoking tool 'submit_edit_plan'" in o and "change" in o for o in outputs)
+    assert any("Error invoking tool 'submit_edit_plan'" in o and "problem" in o for o in outputs)
     assert any("The self-test failed" in o and "exactly one parameter" in o for o in outputs)   # submit refused
     assert [role for role, _ in _panel_chats(rec, "n-edit", "edit_self")] == ["edit_planner", "coder"]
-    planner_tools = _tools_of(rec, "n-edit", "# Role\nYou plan an improvement")
-    assert {"read_file", "list_dir", "run_command", "arxiv_search", "arxiv_read", "ask"} <= planner_tools
-    assert not {"data_ingest", "hf_download", "caption_videos"} & planner_tools      # ask is its only kernel tool
-    coder_tools = _tools_of(rec, "n-edit", "# Role\nYou carry out the edit plan")
-    assert "ask" in coder_tools and "data_ingest" not in coder_tools
+    planner_tools = _tools_of(rec, "n-edit", "# Mission\nYou improve this agent system")
+    assert {"read_file", "list_dir", "run_command", "ask", "read_skill"} <= planner_tools
+    assert not {"data_ingest", "hf_download", "caption_videos", "arxiv_search", "arxiv_read"} & planner_tools
+    coder_tools = _tools_of(rec, "n-edit", "# Mission\nYou implement the edit plan")
+    assert {"ask", "read_skill", "request_replan"} <= coder_tools and "data_ingest" not in coder_tools
+    coder_first = next(str(m["content"]) for e in rec.read_events("n-edit") if e["type"] == "llm.request"
+                       for m in rec.load_payload(e["payload"])["body"]["messages"]
+                       if m.get("role") == "user" and str(m["content"]).startswith("<edit_plan>"))
+    assert "- Components of this agent:" in coder_first
 
 
 @pytest.mark.docker
@@ -575,16 +586,17 @@ def test_seed_agent_passes_contract_verification(tmp_path):
     try:
         repo = AgentsRepo(tmp_path / "agents.git")
         commit = repo.init(SEED)
-        common = dict(nodes_remaining=1, attempt=1, max_attempts=1, dry_run=True, lineage=_lineage(3),
-                      siblings=_lineage(3)[1:])
-        recipe = RecipeContext(**common, n_gpus=4, clip_pool_size=7, format_rules="rules text",
+        common = dict(nodes_remaining=1, attempt=1, max_attempts=1, dry_run=True)
+        edit = EditContext(**common, lineage=_edit_lineage(3), siblings=_edit_lineage(3)[1:])
+        recipe = RecipeContext(**common, lineage=_data_lineage(3), siblings=_data_lineage(3)[1:], metric_guide=GUIDE,
+                               n_gpus=4, clip_pool_size=7,
                                tunable_rules={"optimizer.lr": {"type": "float", "min": 0, "max": None}},
                                recipe_guide={"optimizer.lr": {"base": 1e-4, "meaning": "peak rate"}},
                                resolution_allowlist=[[416, 736]], lora_allowlist=[[64, 64]])
         report = verify_contract(cfg=KernelConfig.load(), run_dir=tmp_path / "run", run_id="seed", repo=repo,
                                  commit=commit, harness=harness, recorder=Recorder(tmp_path / "run"),
                                  node="root", attempt=1,
-                                 contexts={"edit_self": EditContext(**common).model_dump(mode="json"),
+                                 contexts={"edit_self": edit.model_dump(mode="json"),
                                            "improve_recipe": recipe.model_dump(mode="json")})
     finally:
         harness.stop()
@@ -604,31 +616,15 @@ def test_edit_file_parallel_calls_do_not_lose_edits(tmp_path):
         assert (tmp_path / "p.md").read_text() == "A B"
 
 
-def test_system_prompt_is_the_role_prompt_then_the_knowledge_index():
-    from agent.orchestration import system_prompt
-    text = system_prompt("planner")
-    assert text.startswith("# Role") and "<memory>" not in text
-    index = text.split("<knowledge>\n", 1)[1]
-    for path in (SEED / "agent" / "knowledge").glob("*.md"):
-        assert f"{path.resolve()}: Use when" in index
-    assert "\n\n\n" not in text and not text.endswith("\n")
 
 
-def test_knowledge_files_start_with_their_name_and_when_to_use_them():
-    for path in (SEED / "agent" / "knowledge").glob("*.md"):
-        head = path.read_text().split("\n")
-        assert head[0] == "---" and head[1] == f"name: {path.stem}" and head[2].startswith("description: Use when")
-        assert head[3] == "---"
 
 
-def test_every_role_prompt_points_to_the_knowledge_index():
-    for name in ("planner", "data_engineer", "edit_planner", "coder"):
-        assert "Read a knowledge file only at the moment you are about to do what its description names" in (SEED / "agent" / "prompts" / f"{name}.md").read_text()
 
 
-def test_prompts_and_knowledge_have_no_wrapped_commands_or_dated_notes():
+def test_prompts_have_no_wrapped_commands_or_dated_notes():
     agent = SEED / "agent"
-    for path in [*(agent / "prompts").glob("*.md"), *(agent / "knowledge").glob("*.md")]:
+    for path in (agent / "prompts").glob("*.md"):
         text = path.read_text()
         assert not any(line.count("`") % 2 for line in text.splitlines()), f"{path.name}: inline code wraps"
         assert "*(20" not in text, f"{path.name}: dated note"
@@ -636,34 +632,6 @@ def test_prompts_and_knowledge_have_no_wrapped_commands_or_dated_notes():
 
 
 
-def test_the_eval_knowledge_states_the_score_weights_of_the_kernel_config():
-    """The knowledge file is fixed text; it must not drift from configs/kernel.yaml."""
-    import re
-    from ar_kernel.config import KernelConfig
-    from ar_kernel.eval.score import DIMENSION_METRICS
-    weights = KernelConfig.load().get("eval.score_weights")
-    text = (SEED / "agent" / "knowledge" / "eval_prompts_and_turns.md").read_text()
-    [line] = [l for l in text.splitlines() if l.startswith("- Score: ")]
-    names, value = re.search(r"means: (.+) weigh ([\d.]+) each, every other metric weighs 1\.", line).groups()
-    assert set(re.findall(r"`(\w+)`", names)) == set(weights)
-    assert set(weights.values()) == {float(value)}
-    assert f"of the {len(DIMENSION_METRICS)} metric means" in line
-    half = sum(weights.values()) == len(DIMENSION_METRICS) - len(weights)
-    assert half and "Those four are half the score." in line
-
-
-
-
-def test_the_eval_knowledge_lists_each_dimensions_metrics_as_wbench_groups_them():
-    import ast
-    from ar_kernel.config import KernelConfig
-    source = (KernelConfig.load().wbench / "main.py").read_text()
-    node = next(n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Assign)
-                and any(getattr(t, "id", None) == "DIMENSION_MAP" for t in n.targets))
-    text = (SEED / "agent" / "knowledge" / "eval_prompts_and_turns.md").read_text()
-    for dimension, metrics in ast.literal_eval(node.value).items():
-        [line] = [l for l in text.splitlines() if l.startswith(f"  - `{dimension}`: ")]
-        assert line.split(": ", 1)[1].rstrip(".").split(", ") == metrics
 
 
 
@@ -672,3 +640,43 @@ def test_a_rationale_line_that_only_looks_like_the_plan_is_ignored():
     from agent.briefing import _hypothesis
     assert _hypothesis('why\n\nPlan: {"hypothesis": "more turns"}\nData: x') == "more turns"
     assert _hypothesis("why\n\nPlan: {not json}\nData: x") is None
+
+
+ROLES = ("planner", "data_engineer", "edit_planner", "coder")
+
+
+def test_the_system_prompt_is_the_role_prompt_file_and_nothing_else(monkeypatch):
+    monkeypatch.setenv("AR_TOKEN", "t")
+    from agent.orchestration import system_prompt
+    for role in ROLES:
+        assert system_prompt(role) == (SEED / "agent" / "prompts" / f"{role}.md").read_text()
+    assert not (SEED / "agent" / "knowledge").exists()
+
+
+def test_every_role_prompt_has_the_same_four_parts_and_no_node_facts():
+    from ar_kernel.contract.verify import prompt_check
+    for role in ROLES:
+        text = (SEED / "agent" / "prompts" / f"{role}.md").read_text()
+        heads = [line for line in text.splitlines() if line.startswith("# ")]
+        assert heads == ["# Mission", "# What you receive", "# How you work", "# Finish"], role
+    assert prompt_check(SEED).ok
+
+
+def test_the_held_out_rule_is_in_the_data_prompts_and_the_prompt_rule_in_the_edit_prompts():
+    read = lambda role: (SEED / "agent" / "prompts" / f"{role}.md").read_text()
+    for role in ("planner", "data_engineer"):
+        assert "The evaluation set is held out." in read(role)
+    for role in ("edit_planner", "coder"):
+        assert "A prompt holds a role's mission and general behaviour" in read(role)
+    assert "score" not in read("coder").lower()
+
+
+def test_plan_fields_are_capped_so_a_plan_cannot_dictate_file_contents():
+    from pydantic import ValidationError
+    from agent.orchestration import PLAN_FIELD_CHARS, DataPlan, EditPlan
+    assert PLAN_FIELD_CHARS == 1500
+    ok = dict(problem="p", evidence="e", mechanism="m", check="c")
+    EditPlan(**ok)
+    with pytest.raises(ValidationError, match="at most 1500"):
+        EditPlan(**{**ok, "mechanism": "x" * 1501})
+    assert DataPlan(hypothesis="h", expected_change="c", data="d").constraints == ""
