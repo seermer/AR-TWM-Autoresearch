@@ -159,3 +159,38 @@ def test_aggregates_strata_give_each_dimension_per_group_and_leak_no_case_ids():
     assert not set(_keys(full)) & set(per_case)
 
 
+
+
+def test_every_metric_has_one_alias_and_no_alias_is_a_real_name():
+    from ar_kernel.eval.score import AGENT_METRICS, DIMENSION_METRICS
+    assert set(AGENT_METRICS) == set(DIMENSION_METRICS)
+    aliases = [alias for alias, _, _ in AGENT_METRICS.values()]
+    assert len(set(aliases)) == len(aliases) and not set(aliases) & set(DIMENSION_METRICS)
+    assert {dim for _, dim, _ in AGENT_METRICS.values()} == {"quality", "consistency", "control", "description", "physics"}
+
+
+def test_agent_aggregates_alias_metrics_dimensions_axes_and_groups():
+    from ar_kernel.eval.score import agent_aggregates
+    real = {"metrics": {"event_edit_adherence": 0.4, "aesthetic_quality": 0.7},
+            "dimensions": {"interaction": 0.4, "quality": 0.7, "setting": 0.5, "physical": 0.6},
+            "strata": {"interaction_type": {"event_edit": {"interaction": 0.4}, "navigation": {"quality": 0.7}},
+                       "category": {"Indoor": {"physical": 0.6}},
+                       "perspective": {"first_person": {"setting": 0.5}}}}
+    assert agent_aggregates(real) == {
+        "metrics": {"follows_event_instruction": 0.4, "frame_aesthetics": 0.7},
+        "dimensions": {"control": 0.4, "quality": 0.7, "description": 0.5, "physics": 0.6},
+        "groups": {"instruction_kind": {"event": {"control": 0.4}, "camera_move": {"quality": 0.7}},
+                   "category": {"Indoor": {"physics": 0.6}},
+                   "viewpoint": {"first_person": {"description": 0.5}}}}
+    assert agent_aggregates(None) is None
+
+
+def test_the_metric_guide_carries_dimension_weight_and_meaning_only():
+    from ar_kernel.eval.score import metric_guide
+    guide = metric_guide({"causal_fidelity": 4.5})
+    assert len(guide) == 22
+    assert guide["cause_and_effect"]["dimension"] == "physics" and guide["cause_and_effect"]["weight"] == 4.5
+    assert sorted(guide["cause_and_effect"]) == ["dimension", "measures", "weight"]
+    assert guide["frame_aesthetics"]["weight"] == 1.0
+    text = " ".join(g["measures"] for g in guide.values()).lower()
+    assert not any(word in text for word in ("judge", "question", "yes/no", "case", "frames per second"))

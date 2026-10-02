@@ -15,6 +15,69 @@ DIMENSION_METRICS = [
     "scene_adherence", "subject_adherence",
     "visual_plausibility", "causal_fidelity",
 ]
+# What agents are shown instead of the benchmark's own names. Real name -> (alias, dimension alias,
+# what it measures). Applied in memory when a context is built; nothing on disk uses an alias.
+AGENT_METRICS = {
+    "aesthetic_quality": ("frame_aesthetics", "quality", "how good single frames look: composition, colour, light"),
+    "imaging_quality": ("frame_clarity", "quality", "frames free of blur, noise and compression artefacts"),
+    "temporal_flickering": ("flicker_free", "quality", "no flicker between neighbouring frames"),
+    "dynamic_degree": ("motion_amount", "quality", "how much the video moves; a near-static video scores low"),
+    "motion_smoothness": ("smooth_motion", "quality", "motion that is smooth from frame to frame"),
+    "hpsv3_quality": ("human_preference", "quality", "how a human-preference model rates the frames"),
+    "background_consistency": ("background_stability", "consistency", "the background keeps its look over time"),
+    "segment_continuity": ("no_hard_cuts", "consistency", "the video has no abrupt cut"),
+    "perspective_consistency": ("subject_framing_stability", "consistency",
+                                "the followed subject stays at a steady place in the frame"),
+    "subject_consistency": ("subject_stability", "consistency", "the subject keeps its look over time"),
+    "geometric_consistency": ("geometry_stability", "consistency", "the scene's 3D shape agrees between frames"),
+    "photometric_consistency": ("appearance_stability", "consistency",
+                                "the same surface keeps its colour and light between frames"),
+    "spatial_consistency": ("revisit_match", "consistency",
+                            "a place looks the same when the camera comes back to it"),
+    "gated_spatial_consistency": ("revisit_match_strict", "consistency",
+                                  "the same, counted less when the view barely changed on the way"),
+    "navigation_trajectory": ("camera_path_accuracy", "control", "the camera follows the commanded moves"),
+    "event_edit_adherence": ("follows_event_instruction", "control",
+                             "an instructed event happens in the scene, fully and with the right details"),
+    "subject_action_adherence": ("follows_subject_action", "control",
+                                 "the subject does an instructed action, fully and naturally"),
+    "perspective_switch_adherence": ("follows_viewpoint_change", "control",
+                                     "an instructed change of viewpoint happens and ends in a valid view"),
+    "scene_adherence": ("scene_matches_description", "description", "the scene matches its text"),
+    "subject_adherence": ("subject_matches_description", "description", "the subject matches its text"),
+    "visual_plausibility": ("looks_plausible", "physics", "the video looks physically plausible"),
+    "causal_fidelity": ("cause_and_effect", "physics", "objects and characters obey physics and cause and effect"),
+}
+AGENT_DIMENSIONS = {"interaction": "control", "setting": "description", "physical": "physics"}
+AGENT_AXES = {"interaction_type": "instruction_kind", "perspective": "viewpoint"}
+AGENT_GROUPS = {"navigation": "camera_move", "event_edit": "event", "perspective_switch": "viewpoint_change"}
+
+
+def agent_metrics(metrics: dict) -> dict:
+    return {AGENT_METRICS[name][0]: value for name, value in metrics.items()}
+
+
+def _agent_dimensions(dimensions: dict) -> dict:
+    return {AGENT_DIMENSIONS.get(name, name): value for name, value in dimensions.items()}
+
+
+def agent_aggregates(aggregates: dict | None) -> dict | None:
+    """`aggregates()` as an agent sees it: every metric, dimension, group axis and group renamed."""
+    if not aggregates:
+        return None
+    return {"metrics": agent_metrics(aggregates.get("metrics") or {}),
+            "dimensions": _agent_dimensions(aggregates.get("dimensions") or {}),
+            "groups": {AGENT_AXES.get(axis, axis): {AGENT_GROUPS.get(name, name): _agent_dimensions(dims)
+                                                    for name, dims in groups.items()}
+                       for axis, groups in (aggregates.get("strata") or {}).items()}}
+
+
+def metric_guide(weights: dict | None) -> dict:
+    """What each metric measures and how much it weighs in the score. Nothing about how it is judged."""
+    return {alias: {"dimension": dimension, "weight": float((weights or {}).get(name, 1.0)), "measures": measures}
+            for name, (alias, dimension, measures) in AGENT_METRICS.items()}
+
+
 # _megasam_tmp: MegaSAM scratch, which WBench now writes beside its output rather than
 # inside WBench; a killed run leaves ~1 GB per in-flight case there.
 REGENERABLE = ("da3_cache", "megasam", "masks", "_navi_videos_tmp", "_megasam_tmp")
