@@ -634,3 +634,15 @@ def test_error_tool_outputs_are_marked_in_chats(run_dir):
     marked = [i["title"] for i in items if i["kind"] == "tool_error"]
     assert marked == ["⚠ Tool error: run_command", "⚠ Tool error: nope", "⚠ Tool error: data_query"]
     assert any(i["kind"] == "tool_output" and i["text"] == "fine" for i in items)
+
+
+def test_tools_offered_show_each_tools_parameters():
+    from panel.chat import tool_lines
+    tools = [{"type": "function", "function": {"name": "data_query", "description": "Search the pool.", "parameters": {
+        "type": "object", "required": ["limit"], "properties": {
+            "limit": {"type": "integer"},
+            "camera_motion": {"anyOf": [{"enum": ["moving", "static"], "type": "string"}, {"type": "null"}]},
+            "clip_ids": {"type": "array", "items": {"type": "string"}}}}}},
+        {"type": "function", "function": {"name": "bare"}}]
+    assert tool_lines(tools) == ("- data_query(limit: integer, camera_motion?: moving | static, clip_ids?: [string]): "
+                                 "Search the pool.\n- bare(): ")

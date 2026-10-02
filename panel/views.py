@@ -9,7 +9,7 @@ import threading
 import time
 from pathlib import Path
 
-from .chat import (chains, chat_items, infer_role, message_items, request_messages, request_tools,
+from .chat import (chains, chat_items, infer_role, message_items, request_messages, request_tools, tool_lines,
                    response_message, segments, text_of)
 from .events import EventLog, event_row, filter_events
 from .runfiles import RunFiles, fmt_ts, loads
@@ -158,7 +158,7 @@ def trace_detail(run: Run, seq: int) -> dict | None:
         tools = request_tools(payload)
         if tools:
             chat.append({"kind": "tools", "title": f"Tools offered ({len(tools)})",
-                         "text": "\n".join((t.get("function") or {}).get("name", "?") for t in tools)})
+                         "text": tool_lines(tools)})
     elif event.get("type") == "llm.response":
         reply = response_message(payload)
         chat = message_items(reply, names) if reply else []

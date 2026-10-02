@@ -72,6 +72,29 @@ def request_tools(payload: dict | None) -> list[dict]:
     return list(((payload or {}).get("body") or {}).get("tools") or [])
 
 
+def _type(schema: dict) -> str:
+    if "enum" in schema:
+        return " | ".join(map(str, schema["enum"]))
+    if "anyOf" in schema:
+        return " | ".join(_type(s) for s in schema["anyOf"] if s.get("type") != "null")
+    if schema.get("type") == "array":
+        return f"[{_type(schema.get('items') or {})}]"
+    return str(schema.get("type", "any"))
+
+
+def tool_lines(tools: list[dict]) -> str:
+    """Each offered tool as the model saw it: its parameters (optional ones marked ?) and its description."""
+    lines = []
+    for tool in tools:
+        f = tool.get("function") or {}
+        schema = f.get("parameters") or {}
+        required = set(schema.get("required") or [])
+        params = ", ".join(f"{name}{'' if name in required else '?'}: {_type(p)}"
+                           for name, p in (schema.get("properties") or {}).items())
+        lines.append(f"- {f.get('name', '?')}({params}): {f.get('description', '')}")
+    return "\n".join(lines)
+
+
 def response_message(payload: dict | None) -> dict | None:
     choices = ((payload or {}).get("body") or {}).get("choices") or []
     return choices[0].get("message") if choices else None
@@ -203,9 +226,7 @@ def chat_items(chain: list[Segment], load: Load, awaiting: bool) -> list[dict]:
         if k == 0:
             tools = request_tools(load(base.request))
             if tools:
-                lines = [f"- {(t.get('function') or {}).get('name', '?')}: "
-                         f"{(t.get('function') or {}).get('description', '')}" for t in tools]
-                items.append(item("tools", f"Tools offered ({len(tools)})", "\n".join(lines)))
+                items.append(item("tools", f"Tools offered ({len(tools)})", tool_lines(tools)))
             system_at = next((i for i, m in enumerate(messages) if m.get("role") == "system"), None)
             if system_at is not None:           # the system prompt leads the chat
                 items.insert(0, item("system", "System prompt", text_of(messages[system_at].get("content"))))
