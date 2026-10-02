@@ -402,3 +402,18 @@ def test_the_gateway_censors_tool_results_before_forwarding_and_recording(tmp_pa
     assert _post(TestClient(app), caller.token, body, "/v1/chat/completions").status_code == 200
     assert seen[0]["messages"][1]["content"] == "3 clips ok."
     assert not _telemetry_contains(tmp_path, rec, "WBench")
+
+
+def test_an_error_body_sent_with_http_200_is_retried_like_its_code(make):
+    def handler(request):                     # a router in front of the provider answers 200 with the provider's error
+        if len(seen) < 3:
+            return httpx.Response(200, json={"error": {"code": 502, "message": "Provider returned an empty response"}})
+        return _ok(request)
+    client, caller, _, seen = make(handler=handler)
+    r = _post(client, caller.token, {"model": "gpt-x", "input": "hi"})
+    assert r.status_code == 200 and "error" not in r.json() and len(seen) == 3
+
+
+def test_a_persistent_error_body_sent_with_http_200_is_returned_as_its_code(make):
+    client, caller, _, seen = make(handler=lambda request: httpx.Response(200, json={"error": {"code": 502, "message": "empty"}}))
+    assert _post(client, caller.token, {"model": "gpt-x", "input": "hi"}).status_code == 502 and len(seen) == 4

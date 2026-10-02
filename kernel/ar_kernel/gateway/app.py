@@ -113,6 +113,10 @@ class Upstream:
                         payload = {"error": {"message": f"upstream returned HTTP {status} with a "
                                                         f"non-JSON body", "body": r.text}}
                         status = status if status >= 400 else 502   # never pass garbage on as success
+                    error = payload.get("error") if isinstance(payload, dict) else None
+                    if status < 400 and isinstance(error, dict):    # a router's 200 around the provider's error
+                        code = error.get("code")
+                        status = code if isinstance(code, int) and 400 <= code <= 599 else 502
                 except httpx.HTTPError as exc:
                     status, payload = 599, {"error": f"{type(exc).__name__}: {exc}"}
                 if status not in RETRYABLE and status != 599:
