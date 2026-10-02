@@ -163,8 +163,8 @@ class Ingestor:
                                 reports=reports)
 
         caption_json = json.loads(caption.read_text(encoding="utf-8"))
-        texts = [caption_json.get("caption"),
-                 *[s.get("prompt") for s in caption_json.get("segments") or [] if isinstance(s, dict)]]
+        segments = caption_json.get("segments") if isinstance(caption_json.get("segments"), list) else []
+        texts = [caption_json.get("caption"), *[s.get("prompt") for s in segments if isinstance(s, dict)]]
         verdict = self.leakage.check(video)
         excluded = ("image" if verdict.rejected else
                     "source" if blocked(self.cfg, json.dumps(candidate.provenance)) else

@@ -44,7 +44,7 @@ EDIT_KERNEL_TOOLS = {"ask", "read_skill"}
 COMPONENTS = {
     "tools": "agent/tools.py -- the agent's own tools and the adapter for kernel tools (the kernel's tools and "
              "skills themselves are fixed)",
-    "orchestration": "agent/orchestration.py -- the roles, their tools, the plan and question loop, the plan "
+    "orchestration": "agent/orchestration.py -- the roles, their tools, the plan and replan loop, the plan "
                      "and result schemas",
     "briefing": "agent/briefing.py -- what each role is told first, built from the kernel's context",
     "harness": "agent/harness.py -- the single-agent inner loop: ReAct graph, tool execution, auto-compaction",

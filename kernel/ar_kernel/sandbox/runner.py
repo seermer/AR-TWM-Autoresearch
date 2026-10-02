@@ -31,6 +31,8 @@ class Mounts:
     # node id -> node dir of each finished node, mounted read-only at /nodes/<id>. Its eval/ is hidden:
     # per-case outputs would let an agent fit the proxy cases.
     nodes: dict[str, Path] = field(default_factory=dict)
+    # edit_self: also hide the contexts earlier data phases received, which hold scores.
+    hide_scores: bool = False
     # The agent code that runs, mounted read-only at /code, when it is not the tree at /agent
     # (edit_self: the parent's code edits the tree).
     code: Path | None = None
@@ -135,8 +137,12 @@ def _docker_args(image, name, mounts: Mounts, command, env, cpus, memory_gb, net
         base_env["AR_CODE_DIR"] = "/code"
     for node, path in mounts.nodes.items():
         args += ["-v", f"{path}:/nodes/{node}:ro"]
-        if (Path(path) / "eval").is_dir():
-            args += ["--tmpfs", f"/nodes/{node}/eval:ro,size=4k"]
+        hidden = [Path(path) / "eval"]
+        if mounts.hide_scores:
+            hidden += sorted(Path(path).glob("attempts/improve_recipe-*/context"))
+        for directory in hidden:
+            if directory.is_dir():
+                args += ["--tmpfs", f"/nodes/{node}/{directory.relative_to(path)}:ro,size=4k"]
     for key, value in {**base_env, **env}.items():
         args += ["-e", f"{key}={value}"]
     return args + [image, *command]

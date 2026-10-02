@@ -156,7 +156,7 @@ class Loop:
         hits = audit(self.cfg, self.ctx.recorder, node, phase, attempt)
         if hits:
             self.ctx.recorder.event("isolation.audit", node=node, phase=phase, attempt=attempt, payload={"hits": hits})
-            raise Quarantined("; ".join(hits)[:2000])
+            raise Quarantined(f"the model wrote {', '.join(hits)}")
 
     # -- the run -----------------------------------------------------------------------------
     def run(self) -> str:
@@ -247,6 +247,9 @@ class Loop:
             status, error = "quarantined", f"quarantined: {exc}"
         except Exception as exc:                                  # noqa: BLE001
             status, error = "crashed", f"{type(exc).__name__}: {exc}"
+            hits = audit(self.cfg, self.ctx.recorder, child)      # a phase that raised was not audited
+            if hits:
+                status, error = "quarantined", f"quarantined: the model wrote {', '.join(hits)}"
         except BaseException:                                     # ForceStop / KeyboardInterrupt
             status = None                                         # left running: interrupted on resume
             raise

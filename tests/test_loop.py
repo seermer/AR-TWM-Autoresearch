@@ -312,6 +312,21 @@ def test_a_phase_that_reaches_for_the_evaluation_set_quarantines_the_node(make_l
     loop.phases.edit_self = reaching_edit
     loop.run()
     n1 = NodeStore(loop.ctx.conn).get("n1")
-    assert n1["status"] == "quarantined" and n1["error"] == "quarantined: run_command names wbench"
+    assert n1["status"] == "quarantined" and n1["error"] == "quarantined: the model wrote wbench"
     assert [r[0] for r in script.retries] == ["edit_self"]              # one attempt, no retry, no data phase
     assert any(e["type"] == "isolation.audit" for e in loop.ctx.recorder.read_events("n1"))
+
+
+def test_a_phase_that_crashes_after_reaching_for_the_evaluation_set_is_still_quarantined(make_loop):
+    run, make = make_loop
+    script = Script(run, score=[0.7, 0.9])
+    loop = make(script)
+
+    def crashing_edit(env, *, node, attempt, **kw):
+        message = {"role": "assistant", "content": "I will fetch WBench."}
+        loop.ctx.recorder.event("llm.response", node=node, phase="edit_self", attempt=attempt, conversation_id="c",
+                                payload={"body": {"choices": [{"message": message}]}})
+        raise RuntimeError("docker died")
+    loop.phases.edit_self = crashing_edit
+    loop.run()
+    assert NodeStore(loop.ctx.conn).get("n1")["status"] == "quarantined"

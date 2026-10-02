@@ -271,3 +271,12 @@ def test_a_caption_with_odd_segments_does_not_break_the_text_check(tmp_path):
     c.caption.write_text(json.dumps({"caption": "A bright room.", "segments": ["not an object", None]}))
     [result] = ing.ingest([c], node_id="n1")          # the format checker's verdict stands, whatever it is
     assert result.reasons != [EXCLUDED_CLIP]
+
+
+@pytest.mark.parametrize("segments", [5, True, "text"])
+def test_segments_that_are_not_a_list_do_not_break_the_batch(tmp_path, segments):
+    ing = _ingestor(tmp_path)
+    c = _candidate(tmp_path)
+    c.caption.write_text(json.dumps({"caption": "A bright room.", "segments": segments}))
+    [result] = ing.ingest([c], node_id="n1")
+    assert result.reasons != [EXCLUDED_CLIP]

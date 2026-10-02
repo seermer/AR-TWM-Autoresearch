@@ -16,9 +16,19 @@ EXCLUDED_CLIP = ("this clip is on the kernel's exclusion list and cannot be used
 EXCLUDED_PROMPT = "this prompt is on the kernel's exclusion list. Write a different one."
 
 
+@lru_cache(maxsize=None)
+def _matcher(names: tuple[str, ...]) -> re.Pattern:
+    """Any of `names`, in any case, not preceded by a letter or digit: `run_<name>` matches,
+    a longer word that merely ends in the name (DrawBench) does not."""
+    return re.compile(r"(?<![a-z0-9])(?:" + "|".join(map(re.escape, names)) + ")", re.IGNORECASE)
+
+
+def _found(names, text: str) -> list[str]:
+    return [m.lower() for m in _matcher(tuple(names)).findall(text)] if names else []
+
+
 def blocked(cfg, text: str | None) -> bool:
-    text = (text or "").lower()
-    return any(name.lower() in text for name in cfg.get("isolation.blocked_names") or [])
+    return bool(_found(cfg.get("isolation.blocked_names") or [], text or ""))
 
 
 def strings(value):
@@ -55,9 +65,7 @@ def copies_held_out(cfg, *texts) -> bool:
 
 def scrub(value, names: list[str]):
     if isinstance(value, str):
-        for name in names:
-            value = re.sub(re.escape(name), SCRUBBED, value, flags=re.IGNORECASE)
-        return value
+        return _matcher(tuple(names)).sub(SCRUBBED, value) if names else value
     if isinstance(value, dict):
         return {key: scrub(item, names) for key, item in value.items()}
     if isinstance(value, list):
@@ -85,22 +93,17 @@ def censor_tool_results(body: dict, names: list[str]) -> dict:
     return out
 
 
-def audit(cfg, recorder, node: str, phase: str, attempt: int) -> list[str]:
-    """What the model wrote in one attempt that names an audit pattern: its reasoning, its replies and
-    every tool-call argument (commands, files written through tools, queries, plans). One line per
-    place and pattern; empty when clean. Tool results are not read here: the gateway censors them."""
-    patterns = [p.lower() for p in cfg.get("isolation.audit_patterns") or []]
-    hits = set()
+def audit(cfg, recorder, node: str, phase: str | None = None, attempt: int | None = None) -> list[str]:
+    """The audit patterns the model itself wrote in one attempt (or, without phase and attempt, anywhere
+    in the node): every string of every model response, whatever its shape, so reasoning, replies and
+    tool-call arguments (commands, files written through tools, queries, plans) are all read. Empty when
+    clean. Tool results are not read here: the gateway censors them before the model sees them."""
+    patterns = cfg.get("isolation.audit_patterns") or []
+    hits: set[str] = set()
     for e in recorder.read_events(node):
-        if e.get("type") != "llm.response" or e.get("phase") != phase or e.get("attempt") != attempt or e.get("tool"):
+        if e.get("type") != "llm.response" or e.get("tool"):
             continue
-        for choice in (_payload(recorder, e).get("body") or {}).get("choices") or []:
-            message = choice.get("message") or {}
-            written = [("reply", message.get("content")),
-                       ("reasoning", message.get("reasoning") or message.get("reasoning_content")),
-                       *[((call.get("function") or {}).get("name"), (call.get("function") or {}).get("arguments"))
-                         for call in message.get("tool_calls") or []]]
-            for where, text in written:
-                text = json.dumps(text).lower() if not isinstance(text, str) else text.lower()
-                hits |= {f"{where} names {p}" for p in patterns if p in text}
+        if phase is not None and (e.get("phase") != phase or e.get("attempt") != attempt):
+            continue
+        hits.update(_found(patterns, " ".join(strings(_payload(recorder, e).get("body")))))
     return sorted(hits)

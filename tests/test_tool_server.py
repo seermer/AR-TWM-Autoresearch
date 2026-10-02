@@ -131,3 +131,20 @@ def test_tool_results_and_errors_have_blocked_names_replaced(tmp_path):
         asyncio.run(kit.call(ctx, "t", {}, fail))
     errors = [rec.load_payload(e["payload"]) for e in rec.read_events("n1") if e["type"] == "tool.error"]
     assert "run_wbench" in errors[0]["error"]                 # telemetry keeps the real text
+
+
+def test_an_edit_self_caller_gets_only_the_tools_of_its_phase(tmp_path):
+    rec = Recorder(tmp_path / "run")
+    reg = TokenRegistry(rec)
+    kit = ToolKit(reg, rec)
+
+    def ctx_for(phase):
+        caller = reg.issue(node="n1", phase=phase, attempt=1, workspace_host=tmp_path, staging_host=tmp_path)
+        request = type("R", (), {"headers": {"authorization": f"Bearer {caller.token}"}})()
+        return type("C", (), {"request_context": type("RC", (), {"request": request})()})()
+    edit, data = ctx_for("edit_self"), ctx_for("improve_recipe")
+    assert asyncio.run(kit.call(data, "data_query", {}, lambda c: "clips")) == "clips"
+    assert asyncio.run(kit.call(edit, "read_skill", {}, lambda c: "text")) == "text"
+    assert asyncio.run(kit.call(edit, "ask", {}, lambda c: "answer")) == "answer"
+    with pytest.raises(ToolError, match="not available in edit_self"):
+        asyncio.run(kit.call(edit, "data_query", {}, lambda c: "clips"))

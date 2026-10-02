@@ -13,6 +13,7 @@ from .archive.clips import ClipStore
 from .archive.nodes import NOT_SHOWN, NodeStore
 from .config import run_config_path
 from .eval.score import agent_aggregates, agent_metrics, metric_guide
+from .isolation import scrub
 from .process_digest import process_digest
 from .tools.data_tools import clip_record, dataset_stats, pool_clips, scores_by_clip
 from .train.recipe import RECIPE_RULES, TUNABLE_KEYS
@@ -129,11 +130,14 @@ def build_recipe_context(*, cfg, conn, run_dir: Path, repo, node_id: str, parent
         n_gpus=n_gpus, tools=list(tools))
 
 
-def write_bundle(ctx, dest: Path) -> Path:
+def write_bundle(ctx, dest: Path, censor: list[str] = ()) -> Path:
+    """`censor`: names replaced in everything written. The context carries raw log tails and tool error
+    texts, and it reaches the model as a user message, which the gateway does not censor."""
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
+    data = scrub(ctx.model_dump(mode="json"), list(censor))
     path = dest / "context.json"
-    path.write_text(ctx.model_dump_json(indent=1))
-    if ctx.retry:
-        (dest / "retry.json").write_text(json.dumps(ctx.retry, indent=1))
+    path.write_text(json.dumps(data, indent=1))
+    if data.get("retry"):
+        (dest / "retry.json").write_text(json.dumps(data["retry"], indent=1))
     return path

@@ -16,6 +16,7 @@ from .archive.clips import ClipStore
 from .archive.commits import CommitStore
 from .archive.nodes import NOT_SHOWN, NodeStore
 from .context_bundle import build_edit_context, build_recipe_context, write_bundle
+from .isolation import censor_names, scrub
 from .liveness import Liveness, tree_mark
 from .sandbox.image import ImageBuildError, ensure_image
 from .sandbox.runner import Mounts, RunResult, container_name, diff, run_container, snapshot
@@ -111,7 +112,7 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
     elif result_file.is_dir():
         shutil.rmtree(result_file)
     (Path(env.run_dir) / "store").mkdir(exist_ok=True)
-    write_bundle(ctx, dirs["context"])
+    write_bundle(ctx, dirs["context"], censor_names(env.cfg))
     reqs = running / "agent" / "requirements.txt"
     try:
         reqs_text = reqs.read_text(encoding="utf-8") if reqs.exists() else ""
@@ -143,7 +144,7 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
             mounts=Mounts(agent=dirs["agent"], workspace=dirs["workspace"], staging=dirs["staging"],
                           context=dirs["context"], store=Path(env.run_dir) / "store",
                           contract=env.cfg.repo_root / "contract", sockets=env.socket_dir,
-                          agent_readonly=agent_readonly, nodes=nodes,
+                          agent_readonly=agent_readonly, nodes=nodes, hide_scores=phase == "edit_self",
                           code=running if runner_commit is not None else None),
             command=["python", "-m", "ar_contract.run", phase],
             env={"AR_TOKEN": caller.token, "AR_DEFAULT_MODEL": env.default_model, "AR_NODE": node,
@@ -254,8 +255,8 @@ def smoke_contexts(env: PhaseEnv, *, conn, node: str, parent_id: str, nodes_rema
                   max_attempts=1, retry=None, nodes_remaining=nodes_remaining, dry_run=True)
     recipe = build_recipe_context(cfg=env.cfg, node_id=node, n_gpus=len(env.gpus), tools=_recipe_tools(env),
                                   **common)
-    return {"edit_self": build_edit_context(**common).model_dump(mode="json"),
-            "improve_recipe": recipe.model_dump(mode="json")}
+    return scrub({"edit_self": build_edit_context(**common).model_dump(mode="json"),
+                  "improve_recipe": recipe.model_dump(mode="json")}, censor_names(env.cfg))
 
 
 def run_improve_recipe(env: PhaseEnv, *, conn, node: str, parent_id: str, agent_commit: str, attempt: int,

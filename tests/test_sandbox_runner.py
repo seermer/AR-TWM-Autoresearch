@@ -365,3 +365,16 @@ def test_a_ctrl_c_to_the_process_group_does_not_end_the_container(tmp_path, moun
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
     result = json.loads(out.strip().splitlines()[-1])
     assert result["exit_code"] == 0 and "done" in result["stdout"]
+
+
+def test_edit_self_does_not_see_the_data_phases_contexts_of_earlier_nodes(tmp_path):
+    from ar_kernel.sandbox.runner import Mounts, _docker_args
+    node = tmp_path / "n1"
+    (node / "attempts" / "improve_recipe-1" / "context").mkdir(parents=True)
+    (node / "attempts" / "edit_self-1" / "context").mkdir(parents=True)
+    base = dict(agent=tmp_path, workspace=tmp_path, staging=tmp_path, context=tmp_path, store=tmp_path,
+                contract=tmp_path, sockets=tmp_path, nodes={"n1": node})
+    hidden = "/nodes/n1/attempts/improve_recipe-1/context:ro,size=4k"
+    assert hidden in _docker_args("img", "c", Mounts(**base, hide_scores=True), ["true"], {}, 1, 1)
+    plain = _docker_args("img", "c", Mounts(**base), ["true"], {}, 1, 1)
+    assert hidden not in plain and not any("edit_self-1/context:ro,size" in a for a in plain)

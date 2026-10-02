@@ -52,9 +52,9 @@ def test_the_audit_reads_everything_the_model_wrote_in_one_attempt(tmp_path):
         {"command": "curl -L https://huggingface.co/datasets/meituan-longcat/WBench/resolve/main/x.json"})), **here)
     _reply(rec, {"role": "assistant", "content": "done", "reasoning": "arXiv 2605.25874 describes the cases"}, **here)
     _reply(rec, {"role": "assistant", "content": "The eval is WBench."}, node="n2", phase="edit_self", attempt=1)
-    assert audit(CFG, rec, "n2", "improve_recipe", 1) == [
-        "reasoning names 2605.25874", "run_command names meituan-longcat", "run_command names wbench"]
-    assert audit(CFG, rec, "n2", "edit_self", 1) == ["reply names wbench"]
+    assert audit(CFG, rec, "n2", "improve_recipe", 1) == ["2605.25874", "meituan-longcat", "wbench"]
+    assert audit(CFG, rec, "n2", "edit_self", 1) == ["wbench"]
+    assert audit(CFG, rec, "n2") == ["2605.25874", "meituan-longcat", "wbench"]          # the whole node
     assert audit(CFG, rec, "n2", "improve_recipe", 2) == []
 
 
@@ -79,6 +79,25 @@ def test_tool_results_are_censored_not_audited(tmp_path):
                            {"type": "message", "role": "user", "content": "x"}]}
     assert censor_tool_results(responses, names)["input"][0]["output"] == "about render"
     assert censor_tool_results({"input": "a plain string"}, names) == {"input": "a plain string"}
+
+
+
+def test_a_name_that_only_ends_like_a_blocked_one_is_left_alone():
+    assert not blocked(CFG, "shunk031/DrawBench") and blocked(CFG, "x/run_wbench") and blocked(CFG, "WBench-mirror")
+    assert scrub("DrawBench prompts; run_wbench.py; WBench", ["wbench"]) == "DrawBench prompts; run_render.py; render"
+
+
+def test_the_audit_reads_any_response_shape_and_ignores_lookalike_names(tmp_path):
+    from ar_kernel.isolation import audit
+    from ar_kernel.telemetry.recorder import Recorder
+    rec = Recorder(tmp_path)
+    here = dict(node="n2", phase="improve_recipe", attempt=1)
+    rec.event("llm.response", conversation_id="c", payload={"body": {"output": [
+        {"type": "message", "content": [{"type": "output_text", "text": "DrawBench has prompts"}]}]}}, **here)
+    assert audit(CFG, rec, "n2", "improve_recipe", 1) == []
+    rec.event("llm.response", conversation_id="c", payload={"body": {"output": [
+        {"type": "function_call", "name": "run_command", "arguments": '{"command": "git clone x/WBench"}'}]}}, **here)
+    assert audit(CFG, rec, "n2", "improve_recipe", 1) == ["wbench"]
 
 
 import asyncio

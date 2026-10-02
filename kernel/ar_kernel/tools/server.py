@@ -43,6 +43,9 @@ def build_tool_app(mcp: MCPServer):
     )
 
 
+EDIT_SELF_TOOLS = {"ask", "read_skill"}       # edit_self improves the agent: no data tools, no scores
+
+
 class ToolKit:
     def __init__(self, registry, recorder, scrub_names: list[str] = ()) -> None:
         self.registry = registry
@@ -55,6 +58,8 @@ class ToolKit:
         caller = self.registry.lookup(bearer(header))
         if caller is None:
             raise ToolError("unknown or revoked token")
+        if caller.phase == "edit_self" and name not in EDIT_SELF_TOOLS:
+            raise ToolError(f"{name} is not available in edit_self")
         base = dict(node=caller.node, phase=caller.phase, attempt=caller.attempt, component="tools")
         span = self.recorder.event("tool.call", payload={"tool": name, "args": args}, tool=name, **base)
         started = time.monotonic()

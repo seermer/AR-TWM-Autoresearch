@@ -173,3 +173,14 @@ def test_a_quarantined_node_is_in_no_context_and_its_clips_leave_the_pool(world)
     ctx = build_recipe_context(cfg=CFG, conn=conn, run_dir=run, repo=repo, node_id="n1", parent_id="root",
                                attempt=1, max_attempts=3, retry=None, nodes_remaining=1, n_gpus=4, tools=[])
     assert ctx.clip_pool_size == 1 and [c["clip_id"] for c in ctx.clip_pool] == ["b" * 64]
+
+
+def test_the_written_bundle_has_blocked_names_replaced(world, tmp_path):
+    conn, repo, run = world
+    retry = {"kind": "train", "log_tail": "Traceback ... scripts/tools/run_wbench.py line 3"}
+    ctx = build_edit_context(conn=conn, run_dir=run, repo=repo, parent_id="root", attempt=2, max_attempts=3,
+                             retry=retry, nodes_remaining=9)
+    write_bundle(ctx, tmp_path / "ctx", ["wbench"])
+    for name in ("context.json", "retry.json"):
+        text = (tmp_path / "ctx" / name).read_text()
+        assert "wbench" not in text.lower() and "run_render.py" in text
