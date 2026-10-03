@@ -64,7 +64,7 @@ def test_edit_file_refuses_non_utf8_files_and_leaves_them_untouched(tmp_path):
     tools = {t.name: t for t in make_file_tools(str(tmp_path))}
     assert "caf" in tools["read_file"].invoke({"path": "c.txt"})     # reading replaces bad bytes
     with pytest.raises(ValueError, match="not UTF-8"):
-        tools["edit_file"].invoke({"path": "c.txt", "old": "caption", "new": "title"})
+        tools["edit_file"].invoke({"path": "c.txt", "old_string": "caption", "new_string": "title"})
     assert (tmp_path / "c.txt").read_bytes() == raw
 
 
@@ -268,7 +268,12 @@ def test_engineers_get_what_they_act_on_and_not_the_history():
                             [{"plan": {"hypothesis": "h"}}])
     assert "## Recipe" in text and "## Metrics" in text and "too few clips" in text
     assert "## Lineage" not in text and "## Archive" not in text
-    assert "  - harness: agent/harness.py" in coder_context({"harness": "agent/harness.py"})
+    from ar_contract.models import EditContext
+    ctx = EditContext(nodes_remaining=1, attempt=1, max_attempts=3, folders={"/agent": "the agent code you change"})
+    coder = coder_context(ctx, {"harness": "agent/harness.py"})
+    assert "  - harness: agent/harness.py" in coder and "## Folders\n\n- `/agent`: the agent code you change" in coder
+    assert "## Folders\n\n- `/workspace/staging`: a separate mount" in engineer_context(
+        _recipe_ctx(folders={"/workspace/staging": "a separate mount"}), None)
 
 
 def test_brief_marks_a_cut_and_points_to_the_full_context(monkeypatch):
@@ -368,20 +373,27 @@ def _scripts():
         [_call("request_replan", {"report": "downloads are disabled; the pool has clips"})],
         [_call("submit_plan", {**PLAN, "hypothesis": "pool clips suffice"})],                    # planner
         [_call("submit_data_and_recipe", {"data_commit": C0, "notes": "pool clips", "rationale": "fits the data",
+                                          "recipe": {"optimizer.max_steps": 100, "optimizer.lr": 1e-5}})],
+        [_call("submit_plan", {**PLAN, "hypothesis": "pool clips suffice, trained for longer"})],   # planner: reviews
+        [_call("submit_data_and_recipe", {"data_commit": C0, "notes": "pool clips, 200 steps", "rationale": "fits the data",
                                           "recipe": {"optimizer.max_steps": 200.4, "optimizer.lr": 1e-5}})],
+        [_call("accept_result", {"reason": "the commit holds the pool clips and trains for 200 steps"})],
     ]
     edit = [
         [_call("read_file", {"path": "agent/prompts/planner.md"}),       # planning may try things out ...
          _call("run_command", {"command": "echo junk >> agent/prompts/coder.md && touch agent/stray.py"})],
+        [_call("accept_result", {"reason": "nothing to do"})],          # refused: no result yet
         [_call("submit_edit_plan", {**EDIT_PLAN, "problem": ""})],       # invalid: no problem
         [_call("submit_edit_plan", EDIT_PLAN)],
-        [_call("edit_file", {"path": "agent/entry.py", "old": "def edit_self(ctx: EditContext)",
-                             "new": "def edit_self(ctx: EditContext, extra)"})],       # coder: breaks the self-test
+        [_call("edit_file", {"path": "agent/entry.py", "old_string": "def edit_self(ctx: EditContext)",
+                             "new_string": "def edit_self(ctx: EditContext, extra)"})],       # coder: breaks the self-test
         [_call("submit_edit", {"summary": "too early"})],
-        [_call("edit_file", {"path": "agent/entry.py", "old": "def edit_self(ctx: EditContext, extra)",
-                             "new": "def edit_self(ctx: EditContext)"})],
-        [_call("edit_file", {"path": "agent/briefing.py", "old": "SIBLINGS_SHOWN = 10", "new": "SIBLINGS_SHOWN = 8"})],
+        [_call("edit_file", {"path": "agent/entry.py", "old_string": "def edit_self(ctx: EditContext, extra)",
+                             "new_string": "def edit_self(ctx: EditContext)"})],
+        [_call("edit_file", {"path": "agent/briefing.py", "old_string": "SIBLINGS_SHOWN = 10",
+                             "new_string": "SIBLINGS_SHOWN = 8"})],
         [_call("submit_edit", {"summary": "The briefing now shows eight siblings."})],
+        [_call("accept_result", {"reason": "briefing.py shows eight siblings and the self-test passes"})],
     ]
     return {"recipe": recipe, "edit": edit}
 
@@ -528,8 +540,12 @@ def test_improve_recipe_full_flow(kernel, tmp_path):
     assert any(t.startswith("<engineer_report>\ndownloads are disabled") for t in tasks)      # back to the planner
     assert any(t.startswith("The planner revised the plan.") and "pool clips suffice" in t for t in tasks)
     rounds = json.loads((tmp_path / "ws" / "plans.json").read_text())
-    assert [r["plan"]["hypothesis"] for r in rounds] == ["more walking clips", "pool clips suffice"]
+    assert [r["plan"]["hypothesis"] for r in rounds] == ["more walking clips", "pool clips suffice",
+                                                         "pool clips suffice, trained for longer"]
     assert rounds[0]["report"].startswith("downloads are disabled") and "report" not in rounds[1]
+    # the planner is shown each result: it had the second plan redone, then accepted the third
+    assert [r.get("result", {}).get("notes") for r in rounds] == [None, "pool clips", "pool clips, 200 steps"]
+    assert any(t.startswith("<engineer_result>") and '"notes": "pool clips"' in t and "accept_result" in t for t in tasks)
     assert "pool clips suffice" in body["result"]["rationale"]                  # the final plan
     planner_tools = _tools_of(rec, "n-recipe", "# Mission\nYou choose the one data idea")
     assert {"hf_search", "data_query", "ask", "read_skill", "read_file", "run_command", "arxiv_search"} <= planner_tools
@@ -541,7 +557,8 @@ def test_improve_recipe_full_flow(kernel, tmp_path):
     chats = _panel_chats(rec, "n-recipe", "improve_recipe")
     assert [role for role, _ in chats] == ["planner", "data_engineer"]
     planner_users = [i["text"] for i in chats[0][1] if i["kind"] == "user"]
-    assert planner_users[0].startswith("<context>") and planner_users[-1].startswith("<engineer_report>")
+    assert planner_users[0].startswith("<context>") and planner_users[1].startswith("<engineer_report>")
+    assert planner_users[-1].startswith("<engineer_result>")
     engineer_users = [i["text"] for i in chats[1][1] if i["kind"] == "user"]
     assert engineer_users[0].startswith("<plan>") and engineer_users[-1].startswith("The planner revised the plan.")
 
@@ -558,6 +575,8 @@ def test_edit_self_plans_then_edits(kernel, tmp_path):
     assert list((tmp_path / "ws" / "tool_output").glob("run_command-*.log"))
     [round_] = json.loads((tmp_path / "ws" / "plans.json").read_text())
     assert round_["plan"] == EDIT_PLAN and "report" not in round_
+    assert round_["result"] == {"summary": "The briefing now shows eight siblings."}
+    assert any("There is no result to accept yet" in o for o in _tool_outputs(rec, "n-edit"))
     outputs = _tool_outputs(rec, "n-edit")
     assert any("Error invoking tool 'submit_edit_plan'" in o and "problem" in o for o in outputs)
     assert any("The self-test failed" in o and "exactly one parameter" in o for o in outputs)   # submit refused
@@ -609,7 +628,7 @@ def test_edit_file_parallel_calls_do_not_lose_edits(tmp_path):
     tools = {t.name: t for t in make_file_tools(str(tmp_path))}
     for _ in range(200):
         (tmp_path / "p.md").write_text("alpha beta")
-        threads = [threading.Thread(target=tools["edit_file"].invoke, args=({"path": "p.md", "old": o, "new": n},))
+        threads = [threading.Thread(target=tools["edit_file"].invoke, args=({"path": "p.md", "old_string": o, "new_string": n},))
                    for o, n in (("alpha", "A"), ("beta", "B"))]
         [t.start() for t in threads]
         [t.join() for t in threads]

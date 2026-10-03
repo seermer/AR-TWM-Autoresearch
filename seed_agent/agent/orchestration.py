@@ -3,9 +3,9 @@
 A role = a system prompt and a tool list, run on the harness. It returns its result by calling a
 submit tool; one that stops without submitting gets one reminder.
 Both phases are a planner and an engineer. The planner submits a plan that states intent; the engineer
-carries it out, then either finishes the phase or reports back with request_replan for a new plan, up to
-MAX_ROUNDS plans per phase. Each role keeps its conversation throughout. Every plan and report is
-recorded in plans.json. A planner has the engineer's file and shell tools, but what it
+carries it out, then either submits its result or reports back with request_replan for a new plan. The
+planner is shown a submitted result and accepts it or revises the plan, up to MAX_ROUNDS plans per phase.
+Each role keeps its conversation throughout. Every plan, report and result is recorded in plans.json. A planner has the engineer's file and shell tools, but what it
 changes on disk while planning is undone, and its kernel tools only read.
 - improve_recipe: planner -> data engineer, who builds the data commit and writes the recipe
   (recipe_check must pass before the submission is accepted).
@@ -38,6 +38,9 @@ PLAN_FIELD_CHARS = 4000                       # a safety cap: plans that state i
 REMIND = ("You stopped without calling {tools}. Finish the task, then call {tools} with the result. "
           "The work is only recorded through {tools}.")
 REPLAN = "Revise the plan. The engineer carries out the plan you submit next."
+REVIEW = ("The engineer finished. Check the result against your plan by looking at what was built, not only at "
+          "this summary. If it tests the plan, call accept_result. If it falls short in a way the engineer can "
+          "fix, submit a revised plan that says what to change: the work so far stays.")
 PLANNING_KERNEL_TOOLS = {"hf_search", "hf_list_files", "data_query", "ask", "read_skill"}    # read-only
 EDIT_KERNEL_TOOLS = {"ask", "read_skill"}
 
@@ -126,30 +129,50 @@ def replan_tool(rounds: list) -> tuple:
                        "The normal step when what you found changes what should be done.", Replan, check)
 
 
+class Accept(BaseModel):
+    reason: str = Field(min_length=1, description="in a sentence, what in the result shows that it tests the plan")
+
+
+def accept_tool(done) -> tuple:
+    """The planner's way to end the phase, once the engineer has submitted a result."""
+    async def check(_) -> None:
+        if done.value is None:
+            raise ToolException("There is no result to accept yet. Submit a plan.")
+    return submit_tool("accept_result", "Accept the engineer's result as the outcome of this phase.", Accept, check)
+
+
 @dataclass
 class Team:
     planner: Role
     plan: object                  # the submit boxes
+    accept: object
     engineer: Role
     done: object
     replan: object
-    rounds: list                  # every plan, with the engineer's report when it asked for a new one
+    rounds: list                  # every plan, with the engineer's report or result
 
 
 async def plan_and_engineer(team: Team, *, task: str, show, engineer_context: str) -> None:
-    """Plan, carry out, and replan when the engineer asks, until the engineer finishes. Every round is
-    appended to team.rounds and saved."""
+    """Plan and carry out. The planner plans again when the engineer asks, or when it is shown the engineer's
+    result and wants it changed; the phase ends when the planner accepts a result or the plans are used up.
+    Every round is appended to team.rounds and saved."""
     while True:
-        await team.planner.run(task)
+        if await team.planner.run(task) is team.accept:
+            return
         team.rounds.append({"plan": team.plan.value.model_dump()})
         save(team.rounds)
         work = show(team.plan.value)
         work = f"The planner revised the plan.\n\n{work}" if team.engineer.messages else f"{work}\n\n{engineer_context}"
         if await team.engineer.run(work) is team.done:
-            return
-        team.rounds[-1]["report"] = team.replan.value.report
-        save(team.rounds)
-        task = f"{block('engineer_report', team.replan.value.report)}\n\n{REPLAN}"
+            team.rounds[-1]["result"] = team.done.value.model_dump()
+            save(team.rounds)
+            if len(team.rounds) >= MAX_ROUNDS:
+                return
+            task = f"{block('engineer_result', team.done.value.model_dump_json(indent=2))}\n\n{REVIEW}"
+        else:
+            team.rounds[-1]["report"] = team.replan.value.report
+            save(team.rounds)
+            task = f"{block('engineer_report', team.replan.value.report)}\n\n{REPLAN}"
 
 
 def check_roles() -> None:
@@ -200,14 +223,15 @@ def recipe_team(ctx: RecipeContext | None, session, ktools: list) -> Team:
 
     rounds: list[dict] = []
     plan_tool, plan = submit_tool("submit_plan", "Submit the data plan for this node.", DataPlan)
-    planner = Role("planner", [plan_tool, *[t for t in ktools if t.name in PLANNING_KERNEL_TOOLS],
-                               *local_tools(WORKSPACE, papers=True)], [plan], discard=(WORKSPACE,))
     done_tool, done = submit_tool("submit_data_and_recipe", "Submit the data commit and the recipe to train on. "
                                   "It is accepted only if recipe_check passes.", DataAndRecipe, recipe_passes)
+    accept_t, accept = accept_tool(done)
+    planner = Role("planner", [plan_tool, accept_t, *[t for t in ktools if t.name in PLANNING_KERNEL_TOOLS],
+                               *local_tools(WORKSPACE, papers=True)], [plan, accept], discard=(WORKSPACE,))
     replan_t, replan = replan_tool(rounds)
     engineer = Role("data_engineer", [*ktools, *local_tools(WORKSPACE, papers=True), snap_timed_prompts,
                                       done_tool, replan_t], [done, replan])
-    return Team(planner, plan, engineer, done, replan, rounds)
+    return Team(planner, plan, accept, engineer, done, replan, rounds)
 
 
 async def run_task(ctx: RecipeContext) -> RecipeResult:
@@ -275,13 +299,14 @@ def edit_team(ktools: list) -> Team:
     rounds: list[dict] = []
     kernel = [t for t in ktools if t.name in EDIT_KERNEL_TOOLS]
     plan_tool, plan = submit_tool("submit_edit_plan", "Submit the edit plan.", EditPlan)
-    planner = Role("edit_planner", [plan_tool, *kernel, *local_tools(AGENT_ROOT, papers=False)], [plan],
-                   discard=(AGENT_ROOT, WORKSPACE))
     done_tool, done = submit_tool("submit_edit", "Submit the summary of the change you made. It is accepted "
                                   "only if the self-test passes.", EditSummary, selftest_passes)
+    accept_t, accept = accept_tool(done)
+    planner = Role("edit_planner", [plan_tool, accept_t, *kernel, *local_tools(AGENT_ROOT, papers=False)],
+                   [plan, accept], discard=(AGENT_ROOT, WORKSPACE))
     replan_t, replan = replan_tool(rounds)
     engineer = Role("coder", [*kernel, *local_tools(AGENT_ROOT, papers=False), done_tool, replan_t], [done, replan])
-    return Team(planner, plan, engineer, done, replan, rounds)
+    return Team(planner, plan, accept, engineer, done, replan, rounds)
 
 
 async def run_meta(ctx: EditContext) -> EditResult:
@@ -291,5 +316,5 @@ async def run_meta(ctx: EditContext) -> EditResult:
         if ctx.dry_run:
             return EditResult(summary=f"dry run: roles and the first message built, model said {await ping()!r}")
         await plan_and_engineer(team, task=task, show=lambda p: block("edit_plan", p.model_dump_json(indent=2)),
-                                engineer_context=brief(coder_context(COMPONENTS)))
+                                engineer_context=brief(coder_context(ctx, COMPONENTS)))
     return EditResult(summary=team.done.value.summary)

@@ -9,7 +9,7 @@ CONTEXT_WINDOW = int(os.environ.get("AR_CONTEXT_WINDOW", "1000000"))   # the mod
 COMPACT_AT = float(os.environ.get("AR_COMPACT_AT", "0.6"))           # auto-compact threshold
 AGENT_ROOT = os.environ.get("AR_AGENT_DIR", "/agent")
 WORKSPACE = os.environ.get("AR_WORKSPACE", "/workspace")
-MAX_ROUNDS = 4               # plans per phase: the first and up to three replans the engineer asks for
+MAX_ROUNDS = 4               # plans per phase: the first and up to three more (asked for, or after a review)
 BRIEF_CHARS = 400_000        # safety cap on the context digest handed to a role; its own caps keep it under ~350,000
 
 

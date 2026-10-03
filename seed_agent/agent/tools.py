@@ -117,8 +117,9 @@ def make_file_tools(root: str) -> list:
         return f"wrote {len(content)} chars to {path}"
 
     @tool
-    def edit_file(path: str, old: str, new: str) -> str:
-        """Replace one exact occurrence of `old` with `new` in a text file. `old` must appear exactly once."""
+    def edit_file(path: str, old_string: str, new_string: str) -> str:
+        """Replace one exact occurrence of `old_string` with `new_string` in a text file. `old_string` must
+        appear exactly once."""
         target = resolve_inside(root, path)
         with _lock_for(target):     # parallel edits of one file are applied one after the other
             try:        # strict: writing back text with replaced undecodable bytes would corrupt the file
@@ -126,7 +127,7 @@ def make_file_tools(root: str) -> list:
             except UnicodeDecodeError as exc:
                 raise ValueError(f"{path} is not UTF-8 text (byte {exc.start}); "
                                  f"change it with run_command instead") from None
-            _write_atomic(target, replace_once(text, old, new))
+            _write_atomic(target, replace_once(text, old_string, new_string))
         return f"edited {path}"
 
     @tool

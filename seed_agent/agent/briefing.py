@@ -56,6 +56,17 @@ def retry_section(retry: dict | None, previous_plans: list | None) -> str:
     return "\n\n".join(parts)
 
 
+def folders_section(folders: dict) -> str:
+    return "## Folders\n\n" + "\n".join(f"- `{path}`: {what}" for path, what in folders.items()) if folders else ""
+
+
+def _pool(ctx) -> str:
+    """The clip pool in one line: how many clips, and from which nodes and sources."""
+    parts = [f"{name}: " + ", ".join(f"{key} {n}" for key, n in (ctx.clip_pool_stats.get(by) or {}).items())
+             for name, by in (("ingested by", "by_node"), ("sources", "by_source")) if ctx.clip_pool_stats.get(by)]
+    return f"- Clip pool: {ctx.clip_pool_size} clips in the archive" + (f" ({'; '.join(parts)})" if parts else "")
+
+
 def components_section(components: dict) -> str:
     return "- Components of this agent:\n" + "\n".join(f"  - {k}: {v}" for k, v in components.items())
 
@@ -223,8 +234,9 @@ def _node_and_recipe(ctx, previous_plans: list | None) -> list[str]:
         "## This node\n\n" + "\n".join([
             f"- Training GPUs: {ctx.n_gpus}",
             f"- Parent data commit: {ctx.parent_data_commit or 'none (the parent is the root)'}",
-            f"- Clip pool: {ctx.clip_pool_size} clips in the archive",
+            _pool(ctx),
             f"- Kernel tools: {', '.join(ctx.tools)}"]),
+        folders_section(ctx.folders),
         retry_section(ctx.retry, previous_plans),
         "## Recipe\n\nTunable keys, with the base recipe's and the parent's values:\n\n"
         + table(["key", "type", "min", "max", "base", "parent", "meaning"], keys)
@@ -253,12 +265,14 @@ def edit_context(ctx, components: dict, previous_plans: list | None) -> str:
     return "\n\n".join(s for s in [
         POINTER,
         f"## This node\n\n- Nodes left in the run after this one: {ctx.nodes_remaining}\n" + components_section(components),
+        folders_section(ctx.folders),
         retry_section(ctx.retry, previous_plans),
         status_section(ctx.archive),
         siblings_section(ctx.siblings, edit_node, scores=False),
         lineage_section(ctx.lineage, edit_node, scores=False)] if s)
 
 
-def coder_context(components: dict) -> str:
+def coder_context(ctx, components: dict) -> str:
     """What the coder gets with the plan."""
-    return f"{POINTER}\n\n## This agent\n\n{components_section(components)}"
+    return "\n\n".join(s for s in [POINTER, f"## This agent\n\n{components_section(components)}",
+                                    folders_section(ctx.folders)] if s)
