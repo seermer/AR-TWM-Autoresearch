@@ -1,3 +1,4 @@
+from conftest import job_result
 import os
 import threading
 import time
@@ -65,7 +66,7 @@ def test_submit_returns_immediately_and_wait_collects_the_result(env):
     job_id = q.submit(a, "sleepy", {"steps": 3})
     assert time.monotonic() - started < 0.5
     out = q.wait(a, job_id, 30)
-    assert out["state"] == "done" and out["result"] == {"clip": "/workspace/staging/fake.mp4"}
+    assert out["state"] == "done" and job_result(out) == {"clip": "/workspace/staging/fake.mp4"}
     assert out["progress"] == {"step": 3}
 
 

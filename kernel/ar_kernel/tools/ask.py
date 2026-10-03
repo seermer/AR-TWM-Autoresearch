@@ -16,6 +16,7 @@ from mcp.server.mcpserver import Context
 from PIL import Image
 from pydantic import Field
 
+from ..gateway.app import upstream_error
 from .captioner import clip_host_path
 from .context import PathError
 from .server import ToolError
@@ -86,8 +87,23 @@ class Ask:
         if status != 200 or not answer:
             with self._lock:                        # a failed call costs no images
                 self._used[caller.token] -= len(images)
-            raise ToolError(f"the model call failed (HTTP {status}): {str(payload)[:2000]}")
+            raise ToolError(f"the model gave no answer: {no_answer(status, payload)}")
         return {"answer": answer, "images_left": self.per_phase - self._used[caller.token]}
+
+
+def no_answer(status: int, payload) -> str:
+    """Why, in one line: never the raw response, which holds the model's reasoning."""
+    error = upstream_error(payload)
+    if error or status != 200:
+        return f"HTTP {status}: {str((error or {}).get('message') or payload)[:300]}. Ask again."
+    try:
+        reason = payload["choices"][0].get("finish_reason")
+    except (KeyError, IndexError, TypeError, AttributeError):
+        reason = None
+    if reason == "length":
+        return ("it used up its output before answering. Ask for less in one question: fewer images, fewer "
+                "rows per image, or a shorter answer.")
+    return f"an empty reply (finish_reason {reason!r}). Ask again."
 
 
 class MockAsk:

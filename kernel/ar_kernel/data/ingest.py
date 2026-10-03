@@ -156,10 +156,21 @@ class Ingestor:
         finally:
             shutil.rmtree(probe_root, ignore_errors=True)
 
+        def named(text: str) -> str:
+            """The checker's message about the candidate's files, without the kernel's own paths."""
+            for kind, name in (("videos/c.mp4", "the video"), ("captions/c.json", "the caption file"),
+                               ("poses/c.npz", "the pose file")):
+                text = text.replace(str(probe_root / kind), name)
+            if "shorter than one training window" in text:
+                text += (f" ({info.frames} frames at {info.fps:.2f} fps are fewer than a window's frames once "
+                         "resampled to 24 fps: write the clip at exactly 24 fps)")
+            return text.replace(str(probe_root), "the clip")
+
         formats = [key for key, report in reports.items() if report["ok"]]
-        warnings = sorted({w for report in reports.values() for w in report["warnings"]})
+        warnings = sorted({named(w) for report in reports.values() for w in report["warnings"]})
         if not formats:
-            return self._reject(candidate, node_id, sorted({e for report in reports.values() for e in report["errors"]}),
+            return self._reject(candidate, node_id,
+                                sorted({named(e) for report in reports.values() for e in report["errors"]}),
                                 reports=reports)
 
         caption_json = json.loads(caption.read_text(encoding="utf-8"))

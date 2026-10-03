@@ -4,6 +4,7 @@ submit checks, finish (crop/probe, CPU), the real produce with a fake worker, pl
 gpu smoke. And rollout_ltx25 (LTX-2.5 distilled/dev): submit checks, the host-RAM worker rule,
 finish (audio strip/probe, CPU), the real produce with a fake worker, plus one real gpu smoke
 per enabled variant."""
+from conftest import job_result
 import copy
 import json
 import threading
@@ -236,7 +237,7 @@ def test_limits_come_from_the_generator_config_block(tmp_path):
     rec = Recorder(tmp_path / "run")
     b = AlayaWorldBackend(REAL, tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
     a = REAL.get("generators.alayaworld")
-    assert (b.max_items, b.timeout_s, b.max_turns) == (a["max_items"], a["timeout_s"], a["max_turns"])
+    assert (b.timeout_s, b.max_turns) == (a["timeout_s"], a["max_turns"])
 
 
 # ---- finish: trim to the per_chunk grid, poses, segments ----
@@ -363,7 +364,7 @@ def test_finished_candidate_passes_the_real_ingestor_as_per_chunk(tmp_path):
 def run_job(q, caller, items, **params):
     out = q.wait(caller, submit(q, caller, items, **params)["job_id"], 120)
     assert out["state"] == "done", out
-    return out["id"], {i["index"]: i for i in out["result"]["items"]}
+    return out["id"], {i["index"]: i for i in job_result(out)["items"]}
 
 
 def test_produce_renders_and_publishes_candidates(env):
@@ -605,7 +606,7 @@ def test_real_alayaworld_rollout(tmp_path, variant):
         img = _wait(q, caller, q.backends["generate_images"].submit(
             q, caller, {"items": [{"prompt": HIKER, "seed": 3}]})["job_id"])
         assert img["state"] == "done", img.get("error")
-        hiker = img["result"]["items"][0]["image"]
+        hiker = job_result(img)["items"][0]["image"]
         items = [
             {"image": "street.png", "viewpoint": "first_person",
              "scene_prompt": "A rainy city street lined with parked cars and trees, wet asphalt reflecting "
@@ -630,7 +631,7 @@ def test_real_alayaworld_rollout(tmp_path, variant):
             stop.set()
         wall = time.monotonic() - t0
         assert out["state"] == "done", out.get("error")
-        by = {i["index"]: i for i in out["result"]["items"]}
+        by = {i["index"]: i for i in job_result(out)["items"]}
         assert all("candidate" in by[i] for i in (0, 1)), by
         cands = [by[i]["candidate"] for i in (0, 1)]
         ann = _wait(q, caller, q.backends["annotate_camera"].submit(
@@ -642,7 +643,7 @@ def test_real_alayaworld_rollout(tmp_path, variant):
     rows, failures = [], []
     for i, c in enumerate(cands):
         assert "pose" not in c and "camera_motion" not in c, c
-        a = ann["result"]["items"][i]
+        a = job_result(ann)["items"][i]
         assert "error" not in a, a
         with np.load(host(a["pose"])) as z:
             vigeo = z["cam_c2w"]
@@ -677,8 +678,8 @@ def test_real_alayaworld_rollout(tmp_path, variant):
         if not (res.accepted and "video_timed_prompts_camera:per_chunk" in res.formats):
             failures.append(f"{i}: ingest {res.reasons}")
     print(json.dumps({"variant": variant, "gpus": gpus, "wall_s": round(wall, 1), "peak_mib": peak,
-                      "gpu_memory_mib": out["result"]["gpu_memory_mib"], "rows": rows}, indent=1))
-    assert out["result"]["gpu_memory_released"] is True
+                      "gpu_memory_mib": job_result(out)["gpu_memory_mib"], "rows": rows}, indent=1))
+    assert job_result(out)["gpu_memory_released"] is True
     assert not failures, failures
 
 
@@ -723,10 +724,10 @@ def test_real_alayaworld_rollout_of_a_node(tmp_path, variant):
             out = _wait(q, caller, q.backends["rollout_alayaworld"].submit(
                 q, caller, args if node is None else {**args, "node": node})["job_id"])
             assert out["state"] == "done", out.get("error")
-            [got] = out["result"]["items"]
+            [got] = job_result(out)["items"]
             assert "candidate" in got, got
             assert got["candidate"]["provenance"]["generator"] == f"alayaworld-{variant}" + (f"@{node}" if node else "")
-            assert out["result"]["gpu_memory_released"] is True
+            assert job_result(out)["gpu_memory_released"] is True
             assert not (run_dir / "jobs" / out["id"] / "eval").exists()
             video = staging / Path(got["candidate"]["video"]).relative_to("/workspace/staging")
             frames[node] = np.frombuffer(subprocess.run(
@@ -771,7 +772,7 @@ def wan_env(tmp_path, monkeypatch):
 def run_wan(q, caller, items, **params):
     out = q.wait(caller, q.backends["rollout_wan22"].submit(q, caller, {"items": items, **params})["job_id"], 120)
     assert out["state"] == "done", out
-    return out["id"], {i["index"]: i for i in out["result"]["items"]}
+    return out["id"], {i["index"]: i for i in job_result(out)["items"]}
 
 
 @pytest.mark.parametrize("frames, match", [
@@ -804,7 +805,7 @@ def test_wan_limits_come_from_the_generator_config_block(tmp_path):
     rec = Recorder(tmp_path / "run")
     b = Wan22Backend(REAL, tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
     w = REAL.get("generators.wan22")
-    assert (b.max_items, b.timeout_s) == (w["max_items"], w["timeout_s"])
+    assert b.timeout_s == w["timeout_s"]
 
 
 def test_wan_produces_and_publishes_a_cropped_candidate_with_no_pose_or_camera_motion(wan_env):
@@ -988,7 +989,7 @@ def test_real_wan22_rollout(tmp_path):
             q, caller, {"items": [{"prompt": "a red barn in an open field, photorealistic", "seed": 9},
                                   {"prompt": "a cup of coffee on a wooden table, photorealistic", "seed": 10}]})["job_id"])
         assert img["state"] == "done", img.get("error")
-        frames = [i["image"] for i in img["result"]["items"]]
+        frames = [i["image"] for i in job_result(img)["items"]]
         items = [
             {"prompt": "A slow walk through a sunlit forest path, camera steady.", "seed": 1},
             {"prompt": "Ocean waves gently rolling onto a quiet beach at sunset.", "seed": 2},
@@ -999,7 +1000,7 @@ def test_real_wan22_rollout(tmp_path):
         out = _wait(q, caller, q.backends["rollout_wan22"].submit(q, caller, {"items": items})["job_id"])
         wall = time.monotonic() - t0
         assert out["state"] == "done", out.get("error")
-        by = {i["index"]: i for i in out["result"]["items"]}
+        by = {i["index"]: i for i in job_result(out)["items"]}
         print(json.dumps({"wan_wall_s": round(wall, 1), "items": by}, indent=1))
         assert all("candidate" in by[i] for i in range(4)), by
         cands = [by[i]["candidate"] for i in range(4)]
@@ -1021,7 +1022,7 @@ def test_real_wan22_rollout(tmp_path):
         ann = _wait(q, caller, q.backends["annotate_camera"].submit(
             q, caller, {"items": [{"video": cands[0]["video"]}]})["job_id"])
         assert ann["state"] == "done", ann.get("error")
-        a = ann["result"]["items"][0]
+        a = job_result(ann)["items"][0]
         assert "error" not in a, a
         stage = staging / "ingest" / "moving0"
         stage.mkdir(parents=True)
@@ -1033,11 +1034,11 @@ def test_real_wan22_rollout(tmp_path):
                                        license=cands[0]["license"])], node_id="gpu")
         if not (mres.accepted and "video_caption_camera" in mres.formats):
             failures.append(f"moving 0: {mres.reasons}")
-        print(json.dumps({"gpus": gpus, "wall_s": round(wall, 1), "gpu_memory_mib": out["result"]["gpu_memory_mib"],
+        print(json.dumps({"gpus": gpus, "wall_s": round(wall, 1), "gpu_memory_mib": job_result(out)["gpu_memory_mib"],
                           "static_rows": static_rows, "moving_formats": mres.formats}, indent=1))
     finally:
         q.shutdown()
-    assert out["result"]["gpu_memory_released"] is True
+    assert job_result(out)["gpu_memory_released"] is True
     assert not failures, failures
 
 
@@ -1103,7 +1104,7 @@ def ltx_env(tmp_path, monkeypatch):
 def run_ltx(q, caller, items, **params):
     out = q.wait(caller, q.backends["rollout_ltx25"].submit(q, caller, {"items": items, **params})["job_id"], 120)
     assert out["state"] == "done", out
-    return out["id"], {i["index"]: i for i in out["result"]["items"]}
+    return out["id"], {i["index"]: i for i in job_result(out)["items"]}
 
 
 @pytest.mark.parametrize("params, match", [
@@ -1139,7 +1140,7 @@ def test_ltx_limits_come_from_the_generator_config_block(tmp_path):
     rec = Recorder(tmp_path / "run")
     b = Ltx25Backend(REAL, tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
     blk = REAL.get("generators.ltx25")
-    assert (b.max_items, b.timeout_s) == (blk["max_items"], blk["timeout_s"])
+    assert b.timeout_s == blk["timeout_s"]
 
 
 def test_ltx_produces_and_publishes_a_silent_24fps_candidate_with_no_pose_or_camera_motion(ltx_env):
@@ -1342,7 +1343,7 @@ def test_real_ltx25_rollout(tmp_path, variant):
             q, caller, {"items": [{"prompt": "a red barn in an open field, photorealistic", "seed": 9},
                                   {"prompt": "a cup of coffee on a wooden table, photorealistic", "seed": 10}]})["job_id"])
         assert img["state"] == "done", img.get("error")
-        frames = [i["image"] for i in img["result"]["items"]]
+        frames = [i["image"] for i in job_result(img)["items"]]
         items = [{"prompt": "Ocean waves gently rolling onto a quiet beach at sunset, camera steady.", "seed": 2},
                  {"prompt": "The red barn under slowly moving clouds, grass swaying, camera steady.",
                   "image": frames[0], "seed": 3},
@@ -1352,7 +1353,7 @@ def test_real_ltx25_rollout(tmp_path, variant):
         out = _wait(q, caller, q.backends["rollout_ltx25"].submit(q, caller, {"items": items, "variant": variant})["job_id"])
         wall = time.monotonic() - t0
         assert out["state"] == "done", out.get("error")
-        by = {i["index"]: i for i in out["result"]["items"]}
+        by = {i["index"]: i for i in job_result(out)["items"]}
         assert all("candidate" in by[i] for i in range(4)), by
         ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
         rows, failures = [], []
@@ -1370,9 +1371,9 @@ def test_real_ltx25_rollout(tmp_path, variant):
             if not (res.accepted and "video_caption_static" in res.formats):
                 failures.append(f"{i}: {res.reasons}")
         print(json.dumps({"variant": variant, "gpus": gpus, "wall_s": round(wall, 1), "peak_mib": peak,
-                          "gpu_memory_mib": out["result"]["gpu_memory_mib"], "rows": rows}, indent=1))
+                          "gpu_memory_mib": job_result(out)["gpu_memory_mib"], "rows": rows}, indent=1))
     finally:
         stop.set()
         q.shutdown()
-    assert out["result"]["gpu_memory_released"] is True
+    assert job_result(out)["gpu_memory_released"] is True
     assert not failures, failures

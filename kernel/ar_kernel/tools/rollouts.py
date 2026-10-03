@@ -170,7 +170,7 @@ def round_segments(schedule: list[dict], first: int, trim: int, frames: int) -> 
 class AlayaWorldBackend(GpuJob):
     name = tool = "rollout_alayaworld"
     kind = "rollout"
-    config_key = "generators.alayaworld"      # max_items / timeout_s
+    config_key = "generators.alayaworld"      # timeout_s
     file_keys = ("image", "subject_mask")
     max_turns = 9
     description = (
@@ -184,7 +184,7 @@ class AlayaWorldBackend(GpuJob):
         "on candidate.video, then data_ingest it with that pose and camera_motion 'moving' (eligible for "
         "video_timed_prompts_camera:per_chunk). Metadata, not labels: `commanded_camera` (npz of the camera path "
         "the moves commanded, one pose per frame; not what the video shows), `actions` and `turn_segments` "
-        "(frame ranges in the published clip). At most 100 items and 9 turns per item.")
+        "(frame ranges in the published clip). At most 9 turns per item.")
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -400,7 +400,7 @@ class Wan22Backend(GpuJob):
     name = tool = "rollout_wan22"
     kind = "rollout"
     generator = "wan2.2-ti2v-5b"
-    config_key = "generators.wan22"      # max_items / timeout_s
+    config_key = "generators.wan22"      # timeout_s
     file_keys = ("image",)
 
     def __init__(self, *args, **kwargs) -> None:
@@ -468,7 +468,7 @@ class Ltx25Backend(GpuJob):
     pose/camera_motion, like Wan's."""
     name = tool = "rollout_ltx25"
     kind = "rollout"
-    config_key = "generators.ltx25"      # max_items / timeout_s
+    config_key = "generators.ltx25"      # timeout_s
     file_keys = ("image",)
 
     def __init__(self, *args, **kwargs) -> None:

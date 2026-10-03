@@ -172,7 +172,13 @@ def test_a_quarantined_node_is_in_no_context_and_its_clips_leave_the_pool(world)
         assert "n2" not in [n["node_id"] for n in archive_summary(conn, phase)["nodes"]]
     ctx = build_recipe_context(cfg=CFG, conn=conn, run_dir=run, repo=repo, node_id="n1", parent_id="root",
                                attempt=1, max_attempts=3, retry=None, nodes_remaining=1, n_gpus=4, tools=[])
-    assert ctx.clip_pool_size == 1 and [c["clip_id"] for c in ctx.clip_pool] == ["b" * 64]
+    assert ctx.clip_pool_size == 1 and not hasattr(ctx, "clip_pool")      # clips are listed by data_query
+    assert ctx.clip_pool_stats == {"by_node": {"n1": 1}, "by_source": {"derived": 1}, "by_format": {}}
+    assert "/workspace/staging" in ctx.folders and "separate mount" in ctx.folders["/workspace/staging"]
+    nodes = NodeStore(conn)
+    nodes.create("n9", "root", 1), nodes.set_status("n9", "interrupted")
+    for phase in ("edit_self", "improve_recipe"):          # live-10-02 listed the interrupted n1
+        assert "n9" not in [n["node_id"] for n in archive_summary(conn, phase)["nodes"]]
 
 
 def test_the_written_bundle_has_blocked_names_replaced(world, tmp_path):

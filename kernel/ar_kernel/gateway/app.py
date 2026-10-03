@@ -67,6 +67,15 @@ def carries(body: dict, is_part) -> bool:
     return False
 
 
+def upstream_error(payload) -> dict | None:
+    """The error object a router put in a body it sent with HTTP 200: at the top, or inside the first choice."""
+    if not isinstance(payload, dict):
+        return None
+    choices = payload.get("choices")
+    first = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    return next((e for e in (payload.get("error"), first.get("error")) if isinstance(e, dict)), None)
+
+
 class Upstream:
     def __init__(self, base_url: str | None, api_key: str, *, timeout_s: float, retries: int,
                  effort: str | None = None, transport: httpx.AsyncBaseTransport | None = None,
@@ -113,8 +122,8 @@ class Upstream:
                         payload = {"error": {"message": f"upstream returned HTTP {status} with a "
                                                         f"non-JSON body", "body": r.text}}
                         status = status if status >= 400 else 502   # never pass garbage on as success
-                    error = payload.get("error") if isinstance(payload, dict) else None
-                    if status < 400 and isinstance(error, dict):    # a router's 200 around the provider's error
+                    error = upstream_error(payload)
+                    if status < 400 and error:                      # a router's 200 around the provider's error
                         code = error.get("code")
                         status = code if isinstance(code, int) and 400 <= code <= 599 else 502
                 except httpx.HTTPError as exc:

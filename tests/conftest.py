@@ -48,3 +48,23 @@ def _skip_eval_prerequisites(request, monkeypatch):
     import ar_kernel.run as run
     monkeypatch.setattr(run, "preflight_metrics", lambda cfg: list(run.DIMENSION_METRICS))
     monkeypatch.setattr(run, "_uncommitted", lambda repo: False)
+
+
+RESULT_FILES = {}           # container path of a job's result file -> where it is on the host
+
+
+@pytest.fixture(autouse=True)
+def _remember_result_files(monkeypatch):
+    from ar_kernel.tools import jobs
+    real = jobs.publish
+
+    def publish(caller, name, result):
+        path = real(caller, name, result)
+        RESULT_FILES[path] = caller.staging_host / "results" / f"{name}.json"
+        return path
+    monkeypatch.setattr(jobs, "publish", publish)
+
+
+def job_result(view: dict) -> dict:
+    """The full result of a finished job, read from the file job_wait named."""
+    return json.loads(RESULT_FILES[view["result_file"]].read_text(encoding="utf-8"))

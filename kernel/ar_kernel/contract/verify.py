@@ -96,8 +96,8 @@ class _MockData:
                 "rotation": 0, "sar": 1.0, "display_aspect": 736 / 414}
 
     def ingest(self, c, candidates):
-        return [{"accepted": False, "clip_id": None, "formats": [], "warnings": [],
-                 "reasons": ["mock tool server: smoke run"]} for _ in candidates]
+        return {"accepted": 0, "rejected": len(candidates), "warnings": [], "result_file": None,
+                "rejected_for": [{"count": len(candidates), "example": "mock tool server: smoke run"}]}
 
     def query(self, c, filter):
         return {"total": 0, "returned": 0, "clips": []}

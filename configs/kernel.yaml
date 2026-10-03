@@ -91,6 +91,7 @@ captioner:                       # caption_videos GPU job: a local vLLM server, 
   startup_timeout_s: 1200        # model load + warm-up
   clip_timeout_s: 300
   memory_release_timeout_s: 120  # after the server stops, wait up to this long for GPU memory to free
+  keep_warm_s: 300               # the server stays loaded this long after a caption job, for the next one
   extra_args: []                 # more `vllm serve` flags
 gateway:
   model_allowlist: []            # OPENAI_MODEL from the environment is always allowed too
@@ -122,7 +123,6 @@ annotate:                         # annotate_camera GPU job
   repo: third_party/ViGeo         # relative to paths.worldmodel
   checkpoint: third_party/ViGeo/checkpoints/ViGeo1.1
   max_frames: 1200                # longer clips are refused per clip (memory)
-  max_items: 100
   timeout_s: 21600
 images:                           # generate_images GPU job (Z-Image-Turbo first frames)
   enabled: true                   # verified: 8 prompts on 4 GPUs, gpu_memory_released true
@@ -132,7 +132,6 @@ images:                           # generate_images GPU job (Z-Image-Turbo first
   steps: 9
   offload: model                  # from the fit spike: `none` OOMs at 1920x1088 (peaks > 24 GB);
                                    # `model` (enable_model_cpu_offload) fits every allowed size, peak 12.8 GB
-  max_items: 100
   timeout_s: 7200
   license: Apache-2.0
 generators:                       # rollout_* GPU jobs; a variant is enabled only after its smoke
@@ -144,7 +143,6 @@ generators:                       # rollout_* GPU jobs; a variant is enabled onl
     # ingested as per_chunk with its ViGeo pose.
     variants: {dmd4: {enabled: true}, ar30: {enabled: true}}
     max_turns: 9
-    max_items: 100
     timeout_s: 43200
     license: LTX-2 Community License (AlayaWorld is an LTX-2 derivative)
   wan22:
@@ -159,7 +157,6 @@ generators:                       # rollout_* GPU jobs; a variant is enabled onl
     # Fit test (1280x704, 121 frames, 50 steps, 24 GB card): no-offload OOMs in the VAE
     # decode; T5 on GPU is no faster (9:41 vs 9:24 wall). Peak 22.9 GiB allocated: the whole card.
     extra_args: {offload_model: true, t5_cpu: true}
-    max_items: 100
     timeout_s: 43200
     license: Apache-2.0
   ltx25:
@@ -182,7 +179,6 @@ generators:                       # rollout_* GPU jobs; a variant is enabled onl
     workers: null                 # checked at job start; fails only below 1. Optional cap on the GPU count.
     frames: [121, 241]            # [default, max]; 8k+1
     resolutions: [[576, 1024]]    # [height, width], each divisible by 64 (two-stage), 16:9
-    max_items: 100
     timeout_s: 28800              # 8 h. Worst case from measurements: 100 cold 241-frame clips on 4 workers =
                                   # 25 per worker x ~900 s (2x the ~400 s cold 121-frame clip) ~ 6.3 h
     license: LTX-2 Community License

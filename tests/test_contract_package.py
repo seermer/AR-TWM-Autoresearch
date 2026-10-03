@@ -95,6 +95,25 @@ def improve_recipe(ctx):
     assert body["ok"] is False and "boom" in body["error"] and "Traceback" in body["traceback"]
 
 
+def test_a_failure_inside_a_task_group_is_named_not_the_group(env):
+    """live-10-02 n1: the retry was told only 'ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)'."""
+    out = env("""
+import asyncio
+async def edit_self(ctx):
+    async def fail():
+        raise ValueError("the provider returned an empty response")
+    async with asyncio.TaskGroup() as outer:
+        async def inner():
+            async with asyncio.TaskGroup() as group:
+                group.create_task(fail())
+        outer.create_task(inner())
+def improve_recipe(ctx):
+    pass
+""", _edit_ctx())
+    assert main(["edit_self"]) == 1
+    assert json.loads(out.read_text())["error"] == "ValueError: the provider returned an empty response"
+
+
 def test_invalid_result_is_a_schema_failure(env):
     out = env("""
 def edit_self(ctx):

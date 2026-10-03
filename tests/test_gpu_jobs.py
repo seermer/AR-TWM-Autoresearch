@@ -1,4 +1,5 @@
 """GpuJob plumbing with a fake worker (no GPU)."""
+from conftest import job_result
 import asyncio
 import json
 import os
@@ -73,15 +74,14 @@ def test_run_workers_refuses_empty_gpu_groups(env):
                             total=0, cancel=threading.Event(), report=lambda p: None)
 
 
-def test_max_items_and_timeout_come_from_the_backends_config_block(tmp_path):
+def test_the_timeout_comes_from_the_backends_config_block(tmp_path):
     rec = Recorder(tmp_path / "run")
     reg = TokenRegistry(rec)
 
     class ConfiguredJob(FakeJob):
-        config_key = "annotate"        # configs/kernel.yaml: max_items: 100, timeout_s: 21600
+        config_key = "annotate"        # configs/kernel.yaml: timeout_s: 21600
 
     backend = ConfiguredJob(KernelConfig.load(), tmp_path / "run", [0, 1, 4, 5], reg, rec)
-    assert backend.max_items == 100
     assert backend.timeout_s == 21600
     assert FakeJob(KernelConfig.load(), tmp_path / "run", [0, 1, 4, 5], reg, rec).timeout_s is None
 
@@ -91,7 +91,7 @@ def test_items_fan_out_one_worker_per_gpu_and_publish_candidates(env):
     items = [{"src": "a.mp4", "prompt": f"p{i}", "seed": i} for i in range(6)]
     out = q.wait(caller, submit(q, caller, items)["job_id"], 120)
     assert out["state"] == "done", out
-    got = out["result"]["items"]
+    got = job_result(out)["items"]
     assert [g["index"] for g in got] == list(range(6))
     c = got[0]["candidate"]
     job = out["id"]
@@ -103,7 +103,7 @@ def test_items_fan_out_one_worker_per_gpu_and_publish_candidates(env):
     assert c["license"] == "test-license" and "pose" not in c
     assert got[0]["worker"]["gpus"] == "0" and got[1]["worker"]["gpus"] == "1" and got[4]["worker"]["gpus"] == "0"
     assert not (run / "jobs" / job / "in").exists() and not (run / "jobs" / job / "out").exists()
-    assert out["result"]["gpu_memory_released"] is True
+    assert job_result(out)["gpu_memory_released"] is True
 
 
 def test_inputs_hash_depends_on_file_content_not_path(env):
@@ -111,7 +111,7 @@ def test_inputs_hash_depends_on_file_content_not_path(env):
     (ws / "b.mp4").write_bytes((ws / "a.mp4").read_bytes())
     out = q.wait(caller, submit(q, caller, [{"src": "a.mp4", "seed": 1}, {"src": "b.mp4", "seed": 1},
                                            {"src": "a.mp4", "seed": 2}])["job_id"], 120)
-    h = [i["candidate"]["provenance"]["inputs_hash"] for i in out["result"]["items"]]
+    h = [i["candidate"]["provenance"]["inputs_hash"] for i in job_result(out)["items"]]
     assert h[0] == h[1] != h[2]
 
 
@@ -120,7 +120,7 @@ def test_per_item_failure_and_worker_crash_are_item_errors(env):
     items = [{"src": "a.mp4"}, {"src": "a.mp4", "fail": True}, {"src": "a.mp4", "crash": True}, {"src": "a.mp4"}]
     out = q.wait(caller, submit(q, caller, items)["job_id"], 120)
     assert out["state"] == "done"
-    by = {i["index"]: i for i in out["result"]["items"]}
+    by = {i["index"]: i for i in job_result(out)["items"]}
     assert "candidate" in by[0] and "candidate" in by[3]
     assert by[1]["error"] == "boom"
     assert "exit code 3" in by[2]["error"] and "log tail" in by[2]["error"]
@@ -131,7 +131,7 @@ def test_a_truncated_status_file_is_an_item_error_not_a_job_failure(env):
     items = [{"src": "a.mp4"}, {"src": "a.mp4"}, {"src": "a.mp4", "truncated": True}, {"src": "a.mp4"}]
     out = q.wait(caller, submit(q, caller, items)["job_id"], 120)
     assert out["state"] == "done", out
-    by = {i["index"]: i for i in out["result"]["items"]}
+    by = {i["index"]: i for i in job_result(out)["items"]}
     assert "candidate" in by[0] and "candidate" in by[1] and "candidate" in by[3]
     assert "error" in by[2] and "JSONDecodeError" in by[2]["error"]
 
@@ -142,7 +142,7 @@ def test_run_workers_kills_workers_past_its_own_timeout(env):
     job_id = submit(q, caller, [{"src": "a.mp4", "sleep": 60}])["job_id"]
     out = q.wait(caller, job_id, 60)
     assert out["state"] == "done", out
-    assert "timeout" in out["result"]["items"][0]["error"]
+    assert "timeout" in job_result(out)["items"][0]["error"]
 
 
 def test_missing_or_escaping_input_is_refused_at_submit(env):
@@ -162,7 +162,7 @@ def test_a_planted_link_in_staging_fails_the_item_not_the_host(env, tmp_path):
     (staging / "rollouts").mkdir()
     (staging / "rollouts" / job_id).symlink_to(outside)        # swapped in while the job runs
     out = q.wait(caller, job_id, 120)
-    assert "error" in out["result"]["items"][0]
+    assert "error" in job_result(out)["items"][0]
     assert list(outside.iterdir()) == []
 
 
@@ -209,7 +209,7 @@ def test_commanded_camera_is_published_under_its_own_name_not_as_pose(env):
     backend.finish = finish
     out = q.wait(caller, submit(q, caller, [{"src": "a.mp4", "seed": 1}])["job_id"], 120)
     assert out["state"] == "done", out
-    c, job = out["result"]["items"][0]["candidate"], out["id"]
+    c, job = job_result(out)["items"][0]["candidate"], out["id"]
     assert c["commanded_camera"] == f"/workspace/staging/rollouts/{job}/0.commanded_camera.npz"
     assert (staging / "rollouts" / job / "0.commanded_camera.npz").is_file()
     assert "pose" not in c and c["video"] == f"/workspace/staging/rollouts/{job}/0.mp4"
@@ -291,13 +291,13 @@ def test_listed_item_schemas_type_every_field(tmp_path):
     while every schema-typed value came as an int: the schema must type the item fields."""
     tools, _ = _listed_tools(tmp_path)
     for name in ("generate_images", "rollout_wan22", "rollout_ltx25"):
-        item = tools[name].input_schema["properties"]["items"]["items"]
+        item = tools[name].input_schema["properties"]["items"]["anyOf"][0]["items"]
         assert item["properties"]["seed"]["type"] == "integer", name
         assert item["properties"]["prompt"]["type"] == "string", name
         assert set(item["required"]) == {"prompt", "seed"}, name
     for name in ("rollout_wan22", "rollout_ltx25"):
-        assert tools[name].input_schema["properties"]["items"]["items"]["properties"]["image"]["type"] == "string"
-    alaya = tools["rollout_alayaworld"].input_schema["properties"]["items"]["items"]
+        assert tools[name].input_schema["properties"]["items"]["anyOf"][0]["items"]["properties"]["image"]["type"] == "string"
+    alaya = tools["rollout_alayaworld"].input_schema["properties"]["items"]["anyOf"][0]["items"]
     from ar_kernel.tools.rollouts import VIEWPOINTS
     assert alaya["properties"]["viewpoint"]["enum"] == list(VIEWPOINTS)
     assert set(alaya["required"]) == {"image", "viewpoint", "scene_prompt", "turns"}

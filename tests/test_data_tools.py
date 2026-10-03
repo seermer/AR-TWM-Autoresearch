@@ -1,5 +1,7 @@
 import subprocess
+import json
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -41,8 +43,17 @@ def env(tmp_path_factory):
                       "caption": f"/workspace/staging/c{i}/c.json",
                       "pose": f"/workspace/staging/c{i}/p.npz",
                       "camera_motion": "moving", "provenance": PROV})
-    results = tools.ingest(caller, cands)
+    (ws / "cands.json").write_text(json.dumps(cands[2:]))        # a list may also come from a file
+    results = _rows(caller, tools.ingest(caller, cands[:2])) + _rows(caller, tools.ingest(caller, "cands.json"))
     return tools, caller, results, run
+
+
+def _rows(caller, out: dict) -> list[dict]:
+    """The per-candidate rows of a data_ingest result: they are in its result file."""
+    assert out["result_file"].startswith("/workspace/staging/results/data_ingest-")
+    rows = json.loads((caller.staging_host / "results" / Path(out["result_file"]).name).read_text())
+    assert (out["accepted"], out["rejected"]) == (sum(r["accepted"] for r in rows), sum(not r["accepted"] for r in rows))
+    return rows
 
 
 def test_ingest_accepts_staged_candidates_by_container_path(env):
@@ -64,6 +75,32 @@ def test_ingest_rejects_a_malformed_candidate_as_a_tool_error(env):
     with pytest.raises(ToolError, match="provenance"):
         tools.ingest(caller, [{"video": "/workspace/staging/x.mp4",
                                "caption": "/workspace/staging/x.json", "camera_motion": "moving"}])
+
+
+def test_every_bad_candidate_is_named_in_one_refusal(env):
+    tools, caller, _, _ = env
+    with pytest.raises(ToolError) as refused:
+        tools.ingest(caller, [{"video": "/workspace/staging/no1.mp4", "caption": "/workspace/staging/no1.json",
+                               "camera_motion": "moving", "provenance": PROV},
+                              {"video": "/workspace/staging/no2.mp4", "camera_motion": "moving", "provenance": PROV}])
+    text = str(refused.value)
+    assert "candidate 0: video /workspace/staging/no1.mp4 does not exist" in text
+    assert "candidate 1: caption is required" in text and "nothing was submitted" in text
+
+
+def test_rejections_are_summarised_with_counts_and_commit_takes_clip_ids_from_a_file(env):
+    tools, caller, results, _ = env
+    for name in ("r1", "r2"):
+        (caller.staging_host / f"{name}.mp4").write_bytes(b"x"), (caller.staging_host / f"{name}.json").write_text("{}")
+    out = tools.ingest(caller, [{"video": f"/workspace/staging/{n}.mp4", "caption": f"/workspace/staging/{n}.json",
+                                 "camera_motion": "sideways", "provenance": PROV} for n in ("r1", "r2")])
+    assert (out["accepted"], out["rejected"]) == (0, 2)
+    assert out["rejected_for"] == [{"count": 2, "example": "camera_motion must be moving or static, got 'sideways'"}]
+    (caller.workspace_host / "ids.txt").write_text("\n".join(r["clip_id"] for r in results))
+    done = tools.commit(caller, None, {"from_file": {"format": "video_caption_camera", "weight": 1.0,
+                                                    "clips": "ids.txt"}}, "ids from a file")
+    assert done["datasets"]["from_file"]["clips"] == 4
+    assert tools.query(caller, {"clip_ids": "/workspace/ids.txt"})["total"] == 4
 
 
 def test_probe_reports_display_geometry(env):
@@ -202,7 +239,7 @@ def test_leakage_checker_is_built_once_across_concurrent_ingests(tmp_path, monke
     def ingest(motion):
         cand = {"video": "/workspace/staging/v.mp4", "caption": "/workspace/staging/c.json",
                 "camera_motion": motion, "provenance": PROV}
-        results.extend(tools.ingest(caller, [cand]))
+        results.extend(_rows(caller, tools.ingest(caller, [cand])))
     results = []
     threads = [threading.Thread(target=ingest, args=(m,)) for m in ("sideways", "upways")]
     for t in threads:

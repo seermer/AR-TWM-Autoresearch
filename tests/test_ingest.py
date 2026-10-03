@@ -280,3 +280,18 @@ def test_segments_that_are_not_a_list_do_not_break_the_batch(tmp_path, segments)
     c.caption.write_text(json.dumps({"caption": "A bright room.", "segments": segments}))
     [result] = ing.ingest([c], node_id="n1")
     assert result.reasons != [EXCLUDED_CLIP]
+
+
+def test_reasons_and_warnings_name_the_candidates_files_not_the_kernels_paths(tmp_path):
+    """live-10-02: every message carried the kernel's temp path (runs/<run>/tmp/probe_<hex>/captions/c.json)."""
+    ing = _ingestor(tmp_path)
+    short = _candidate(tmp_path, "short", seconds=1.0)
+    timed = _candidate(tmp_path, "timed", seconds=4.0)
+    write_caption(timed.caption, segments=[{"time_range_s": [0.0, 1.0], "prompt": "walk"},
+                                           {"time_range_s": [1.0, 4.0], "prompt": "turn"}])
+    rejected, accepted = ing.ingest([short, timed], node_id="n1")
+    texts = [*rejected.reasons, *accepted.warnings]
+    assert accepted.accepted and accepted.warnings and not rejected.accepted
+    assert not any(str(tmp_path) in t or "probe_" in t for t in texts), texts
+    [reason] = [r for r in rejected.reasons if "shorter than one training window" in r]
+    assert reason.startswith("the video:") and "30 frames at 30.00 fps" in reason and "exactly 24 fps" in reason

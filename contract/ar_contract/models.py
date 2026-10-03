@@ -15,6 +15,7 @@ class _Ctx(BaseModel):
     attempt: int
     max_attempts: int
     retry: dict[str, Any] | None = None          # the failed attempt's report, when retrying
+    folders: dict[str, str] = Field(default_factory=dict)              # container path -> what it is for
     dry_run: bool = False
 
 
@@ -24,8 +25,8 @@ class EditContext(_Ctx):
 
 class RecipeContext(_Ctx):
     workspace: str = "/workspace"
-    clip_pool: list[dict[str, Any]] = Field(default_factory=list)   # the most recent clips
     clip_pool_size: int = 0                                         # all clips in the archive
+    clip_pool_stats: dict[str, Any] = Field(default_factory=dict)   # clips per ingesting node, source, format
     parent_data_commit: str | None = None
     parent_recipe: dict[str, Any] = Field(default_factory=dict)
     base_recipe: dict[str, Any] = Field(default_factory=dict)

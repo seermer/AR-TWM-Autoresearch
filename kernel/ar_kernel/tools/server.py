@@ -3,8 +3,11 @@ every kernel tool."""
 from __future__ import annotations
 
 import asyncio
+import json
+import tempfile
 import time
 import traceback
+from pathlib import Path
 from typing import Any, Callable
 
 from mcp.server.mcpserver import Context, MCPServer
@@ -12,7 +15,7 @@ from mcp.server.mcpserver.exceptions import ToolError as _MCPToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
 from ..isolation import scrub
-from .context import bearer
+from .context import STAGING, WORKSPACE, PathError, bearer, to_host
 
 
 class ToolError(_MCPToolError):
@@ -24,6 +27,56 @@ class ToolError(_MCPToolError):
     generic "Error executing tool <name>" (see `Tool.run`), which would hide
     the message this class exists to deliver.
     """
+
+
+FROM_FILE = ("or the path of a file under /workspace that holds the list: a .json file with a JSON array, or "
+             "any other file with one item per line (a JSON value, or the bare text of the line)")
+SHOWN = 20                  # bad items named in one refusal, and errors listed in one summary
+
+
+def listed(caller, value, what: str) -> list:
+    """A list argument: the list itself, or the file under /workspace that holds it (FROM_FILE)."""
+    if not isinstance(value, str):
+        return list(value or [])
+    try:
+        host = to_host(caller, value if value.startswith("/") else str(WORKSPACE / value))
+        text = host.read_text(encoding="utf-8")
+    except (PathError, OSError, UnicodeDecodeError) as exc:
+        raise ToolError(f"{what}: cannot read the list file {value}: {exc}") from exc
+    if host.suffix == ".json":
+        try:
+            items = json.loads(text)
+        except ValueError as exc:
+            raise ToolError(f"{what}: {value} is not valid JSON: {exc}") from exc
+        if not isinstance(items, list):
+            raise ToolError(f"{what}: {value} holds a JSON {type(items).__name__}, not an array")
+        return items
+    items = []
+    for line in filter(None, map(str.strip, text.splitlines())):
+        try:
+            items.append(json.loads(line))
+        except ValueError:
+            items.append(line)
+    return items
+
+
+def refuse(errors: list[str]) -> None:
+    """Refuse a call for every bad item at once, so one corrected call can follow."""
+    if errors:
+        more = f"\n... and {len(errors) - SHOWN} more" if len(errors) > SHOWN else ""
+        raise ToolError(f"{len(errors)} bad item(s), nothing was submitted:\n" + "\n".join(errors[:SHOWN]) + more)
+
+
+def publish(caller, name: str, result) -> str:
+    """Write a tool's full result to /workspace/staging/results/<name>.json; returns that path. Results
+    go to a file, never into the conversation: a role reads them with a script, it does not retype them."""
+    from .hf_tools import move_into            # imports this module
+    with tempfile.NamedTemporaryFile("w", dir=caller.staging_host, suffix=".tmp", delete=False,
+                                     encoding="utf-8") as handle:
+        json.dump(result, handle, ensure_ascii=False, indent=1)
+    rel = f"results/{name}.json"
+    move_into(Path(handle.name), caller.staging_host, rel)
+    return str(STAGING / rel)
 
 
 def new_mcp() -> MCPServer:

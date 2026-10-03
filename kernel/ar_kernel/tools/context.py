@@ -88,10 +88,12 @@ def to_host(caller: Caller, container_path: str) -> Path:
     elif path == WORKSPACE or WORKSPACE in path.parents:
         base, root = caller.workspace_host, WORKSPACE
     else:
-        raise PathError(f"{container_path} is outside /workspace")
+        raise PathError(f"{container_path} is outside /workspace: kernel tools read only files under /workspace, "
+                        "so copy the file there first")
     host = (base / path.relative_to(root)).resolve()
     if not host.is_relative_to(base.resolve()):
-        raise PathError(f"{container_path} escapes its mount")
+        raise PathError(f"{container_path} escapes its mount: kernel tools do not follow a symbolic link (or '..') "
+                        "out of /workspace or /workspace/staging, so copy or hard-link the file instead")
     return host
 
 

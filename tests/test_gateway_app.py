@@ -417,3 +417,15 @@ def test_an_error_body_sent_with_http_200_is_retried_like_its_code(make):
 def test_a_persistent_error_body_sent_with_http_200_is_returned_as_its_code(make):
     client, caller, _, seen = make(handler=lambda request: httpx.Response(200, json={"error": {"code": 502, "message": "empty"}}))
     assert _post(client, caller.token, {"model": "gpt-x", "input": "hi"}).status_code == 502 and len(seen) == 4
+
+
+def test_an_error_inside_the_choice_sent_with_http_200_is_retried_too(make):
+    """live-10-02 n2: HTTP 200, choices[0].finish_reason 'error', choices[0].error.code 502."""
+    def handler(request):
+        if len(seen) < 2:
+            return httpx.Response(200, json={"choices": [{"finish_reason": "error", "message": {"content": None},
+                                                          "error": {"code": 502, "message": "Network connection lost."}}]})
+        return _ok(request)
+    client, caller, _, seen = make(handler=handler)
+    r = _post(client, caller.token, {"model": "gpt-x", "input": "hi"})
+    assert r.status_code == 200 and len(seen) == 2

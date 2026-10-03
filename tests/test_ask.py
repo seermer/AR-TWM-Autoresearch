@@ -167,3 +167,21 @@ def test_live_ask_over_the_tool_socket(tmp_path):
     answer = image.structured_content["answer"].lower()
     assert all(word in answer for word in ("red", "blue", "square", "circle"))
     assert image.structured_content["images_left"] == REAL.get("ask.max_images_per_phase") - 1
+
+
+def test_a_reply_cut_off_before_the_answer_says_so_without_the_models_reasoning(make):
+    """live-10-02 n2: the failure put 2,000 characters of raw response, reasoning included, in front of the agent."""
+    cut = {"choices": [{"finish_reason": "length", "message": {"content": None, "reasoning": "SECRET THOUGHTS " * 50}}]}
+    ask, caller, _, _ = make(handler=lambda request: httpx.Response(200, json=cut))
+    with pytest.raises(ToolError) as failed:
+        ask.ask(caller, "describe 40 rows", [])
+    assert "used up its output before answering" in str(failed.value) and "SECRET" not in str(failed.value)
+
+
+def test_a_provider_error_inside_the_choice_is_retried_and_then_named_briefly(make):
+    lost = {"choices": [{"finish_reason": "error", "message": {"content": None, "reasoning": "SECRET"},
+                         "error": {"code": 502, "message": "Network connection lost."}}]}
+    ask, caller, seen, _ = make(handler=lambda request: httpx.Response(200, json=lost))
+    with pytest.raises(ToolError) as failed:
+        ask.ask(caller, "q", [])
+    assert len(seen) == 4 and "Network connection lost." in str(failed.value) and "SECRET" not in str(failed.value)

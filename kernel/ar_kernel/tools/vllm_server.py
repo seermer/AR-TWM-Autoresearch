@@ -100,6 +100,10 @@ class VllmServer:
     def base_url(self) -> str:
         return f"http://127.0.0.1:{self.port}"
 
+    @property
+    def alive(self) -> bool:
+        return bool(self._thread and self._thread.is_alive())
+
     def _serve(self) -> None:
         try:
             self._exit.append(run_cancellable(

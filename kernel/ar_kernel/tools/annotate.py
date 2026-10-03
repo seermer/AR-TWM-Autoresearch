@@ -16,14 +16,13 @@ BRIDGE = Path(__file__).resolve().parents[1] / "bridges" / "vigeo_poses.py"
 class AnnotateBackend(GpuJob):
     name = tool = "annotate_camera"
     kind = "annotation"
-    config_key = "annotate"             # max_items / timeout_s
+    config_key = "annotate"             # timeout_s
     file_keys = ("video",)
     description = ("Estimate per-frame camera poses for video clips (ViGeo). A GPU job: returns {job_id} at "
                    "once; collect with job_wait. `paths`: mp4 files under /workspace. Each result item gives "
                    "`pose`: an npz in /workspace/staging/annotations/<job_id>/ holding cam_c2w [N,4,4] "
                    "(N = the clip's frame count, OpenCV camera-to-world, first frame identity) and pixel "
-                   "`intrinsics`; pass it as `pose` to data_ingest with camera_motion 'moving'. Batch many clips "
-                   "per call: at most 100 items (`annotate.max_items`) per job, so split larger batches.")
+                   "`intrinsics`; pass it as `pose` to data_ingest with camera_motion 'moving'.")
 
     def check_args(self, args):
         for item in args["items"]:

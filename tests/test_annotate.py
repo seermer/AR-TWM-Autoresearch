@@ -1,4 +1,5 @@
 """annotate_camera: the real backend with a fake subprocess worker, plus one real ViGeo gpu test."""
+from conftest import job_result
 import copy
 import json
 import os
@@ -55,7 +56,7 @@ def env(tmp_path, monkeypatch):
 def run(q, caller, items):
     out = q.wait(caller, q.backends["annotate_camera"].submit(q, caller, {"items": items})["job_id"], 120)
     assert out["state"] == "done", out
-    return out["id"], {i["index"]: i for i in out["result"]["items"]}
+    return out["id"], {i["index"]: i for i in job_result(out)["items"]}
 
 
 def test_pose_is_published_and_names_the_agents_clip(env):
@@ -104,7 +105,7 @@ def test_non_mp4_is_refused_at_submit(env):
 def test_limits_come_from_the_annotate_config_block(tmp_path):
     rec = Recorder(tmp_path / "run")
     b = AnnotateBackend(REAL, tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
-    assert (b.max_items, b.timeout_s) == (REAL.get("annotate.max_items"), REAL.get("annotate.timeout_s"))
+    assert b.timeout_s == REAL.get("annotate.timeout_s")
 
 
 def test_build_gpu_backends_includes_annotate_only_when_enabled(tmp_path):
@@ -175,7 +176,7 @@ def test_real_vigeo_matches_the_example_poses(tmp_path):
     assert out["state"] == "done", out["error"]
     ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
     rows, failures = [], []
-    for item in out["result"]["items"]:
+    for item in job_result(out)["items"]:
         c = clips[item["index"]]
         assert "error" not in item, item
         pose = staging / Path(item["pose"]).relative_to("/workspace/staging")
@@ -209,7 +210,7 @@ def test_real_vigeo_matches_the_example_poses(tmp_path):
             failures.append(f"{c}: ATE {ate:.1%} of path >= 10%")
         if f_err and max(abs(e) for e in f_err) >= 0.15:
             failures.append(f"{c}: focal error {f_err} >= 15%")
-    print(json.dumps({"gpus": gpus, "clips": rows, "gpu_memory_mib": out["result"]["gpu_memory_mib"],
-                      "gpu_memory_released": out["result"]["gpu_memory_released"]}, indent=1))
-    assert out["result"]["gpu_memory_released"] is True
+    print(json.dumps({"gpus": gpus, "clips": rows, "gpu_memory_mib": job_result(out)["gpu_memory_mib"],
+                      "gpu_memory_released": job_result(out)["gpu_memory_released"]}, indent=1))
+    assert job_result(out)["gpu_memory_released"] is True
     assert not failures, failures

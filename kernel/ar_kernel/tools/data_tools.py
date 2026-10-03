@@ -22,7 +22,8 @@ from ..data.probe import probe_video
 from ..train.gate import Gate
 from .context import PathError, to_host
 from .gpu_jobs import items_schema
-from .server import ToolError
+from ..process_digest import _shape
+from .server import FROM_FILE, SHOWN, ToolError, listed, publish, refuse
 
 QUERY_LIMIT = 100           # clips per page: a clip record is about 1,200 characters
 
@@ -54,31 +55,47 @@ class DataTools:
                 "duration": info.duration, "rotation": info.rotation, "sar": info.sar,
                 "display_aspect": info.display_aspect}
 
-    def ingest(self, caller, candidates: list[dict]) -> list[dict]:
-        built = []
+    def ingest(self, caller, candidates) -> dict:
+        candidates = listed(caller, candidates, "candidates")
+        built, errors = [], []
         for i, c in enumerate(candidates):
-            if not c.get("provenance"):
-                raise ToolError(f"candidate {i}: provenance is required")
-            for key in ("video", "caption", "camera_motion"):
-                if not c.get(key):
-                    raise ToolError(f"candidate {i}: {key} is required")
-            host = {key: self._host(caller, c[key]) for key in ("video", "caption", "pose") if c.get(key)}
-            for key, path in host.items():
-                if not path.is_file():           # container paths only: host paths never reach the agent
-                    raise ToolError(f"candidate {i}: {key} {c[key]} does not exist (data_ingest moves each "
-                                    "staged file into the archive, so an already ingested file is gone)")
+            if not isinstance(c, dict):
+                errors.append(f"candidate {i}: not an object: {str(c)[:80]!r}")
+                continue
+            missing = [key for key in ("video", "caption", "camera_motion", "provenance") if not c.get(key)]
+            if missing:
+                errors.append(f"candidate {i}: {', '.join(missing)} is required")
+                continue
+            host = {}
+            for key in ("video", "caption", "pose"):
+                if c.get(key):
+                    try:
+                        host[key] = to_host(caller, c[key])
+                    except PathError as exc:
+                        errors.append(f"candidate {i}: {key}: {exc}")
+                        continue
+                    if not host[key].is_file():      # container paths only: host paths never reach the agent
+                        errors.append(f"candidate {i}: {key} {c[key]} does not exist (data_ingest moves each "
+                                      "staged file into the archive, so an already ingested file is gone)")
+            if errors:
+                continue
             built.append(Candidate(
                 video=host["video"], caption=host["caption"], pose=host.get("pose"),
                 camera_motion=c["camera_motion"], provenance=c["provenance"],
                 license=c.get("license"), derived_from=list(c.get("derived_from") or [])))
+        refuse(errors)
         conn = open_db(self.run_dir)
         try:
             ingestor = Ingestor(self.cfg, self.run_dir, conn, self.recorder, self._leakage_checker())
             results = ingestor.ingest(built, node_id=caller.node)
         finally:
             conn.close()
-        return [{"accepted": r.accepted, "clip_id": r.clip_id, "formats": r.formats,
-                 "warnings": r.warnings, "reasons": r.reasons} for r in results]
+        rows = [{"index": i, "video": c["video"], "accepted": r.accepted, "clip_id": r.clip_id, "formats": r.formats,
+                 "warnings": r.warnings, "reasons": r.reasons} for i, (c, r) in enumerate(zip(candidates, results))]
+        return {"accepted": sum(r["accepted"] for r in rows), "rejected": sum(not r["accepted"] for r in rows),
+                "rejected_for": _counted(r for row in rows if not row["accepted"] for r in row["reasons"]),
+                "warnings": _counted(w for row in rows for w in row["warnings"]),
+                "result_file": publish(caller, f"data_ingest-{uuid.uuid4().hex[:8]}", rows)}
 
     def query(self, caller, filter: dict) -> dict:
         conn = open_db(self.run_dir)
@@ -88,7 +105,7 @@ class DataTools:
         finally:
             conn.close()
         fmt, motion = filter.get("format"), filter.get("camera_motion")
-        wanted = set(filter.get("clip_ids") or [])
+        wanted = set(listed(caller, filter.get("clip_ids"), "clip_ids"))
         out = []
         for clip in clips:
             if fmt and not any(f == fmt or f.startswith(fmt + ":") for f in clip["formats"]):
@@ -105,6 +122,8 @@ class DataTools:
         return {"total": len(out), "returned": len(page), "clips": page}
 
     def commit(self, caller, parent: str | None, datasets: dict, message: str) -> dict:
+        datasets = {name: {**d, "clips": listed(caller, d.get("clips"), f"{name}.clips")} if isinstance(d, dict) else d
+                    for name, d in datasets.items()}
         conn = open_db(self.run_dir)
         try:
             store = CommitStore(conn, BlobStore(self.run_dir, conn), ClipStore(conn))
@@ -135,6 +154,15 @@ class DataTools:
             conn.close()
             shutil.rmtree(scratch, ignore_errors=True)
         return {"ok": result.ok, "failures": result.failures}
+
+
+def _counted(texts) -> list[dict]:
+    """The distinct messages (paths and numbers taken out), most frequent first, with one example each."""
+    shapes: dict[str, list] = {}
+    for text in texts:
+        shapes.setdefault(_shape(text), []).append(text)
+    return [{"count": len(found), "example": found[0]}
+            for found in sorted(shapes.values(), key=len, reverse=True)[:SHOWN]]
 
 
 def _parent_commit(conn, node_id: str) -> str | None:
@@ -206,7 +234,7 @@ def scores_by_clip(conn) -> dict[str, list[float]]:
 
 _FORMATS = "video_caption_camera, video_timed_prompts_camera (prompt_mode per_chunk or segment), video_caption_static"
 _STAGED = "absolute container path under /workspace/staging/"
-Candidates = Annotated[list[dict[str, Any]], items_schema("the clips to ingest, one candidate each", {
+Candidates = Annotated[list[dict[str, Any]] | str, items_schema("the clips to ingest, one candidate each", {
     "video": {"type": "string", "description": f"the mp4: {_STAGED}"},
     "caption": {"type": "string", "description": f"the caption JSON file (not the text): {_STAGED}. It holds "
                                                  "{\"caption\": str} and, for timed prompts, \"segments\""},
@@ -232,10 +260,12 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
 
     @mcp.tool(name="data_ingest", description="Ingest staged candidates into the run's clip pool. The formats "
               "a clip must meet are in skill data_formats. Ingest MOVES each staged file into the archive: copy "
-              "it first if you still need it. Returns, per candidate, accepted + clip_id + eligible formats + "
-              "warnings, or rejected + reasons. Read the reasons and change the candidate; a clip the kernel "
-              "excludes cannot be made acceptable.")
-    async def data_ingest(candidates: Candidates, ctx: Context) -> list[dict]:
+              "it first if you still need it. Send every candidate in one call. Returns how many were accepted "
+              "and rejected, the rejection reasons and warnings with counts, and `result_file`: a JSON array "
+              "under /workspace/staging/results/ with, per candidate, index, video, accepted, clip_id, formats, "
+              "warnings and reasons. Take the clip ids from that file with a script. Read the reasons and change "
+              "the candidate; a clip the kernel excludes cannot be made acceptable.")
+    async def data_ingest(candidates: Candidates, ctx: Context) -> dict:
         return await kit.call(ctx, "data_ingest", {"candidates": candidates},
                               lambda c: tools.ingest(c, candidates))
 
@@ -247,7 +277,7 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
             format: Annotated[str | None, Field(description="keep clips eligible for this format, e.g. "
                               "'video_caption_camera' or 'video_timed_prompts_camera:per_chunk'")] = None,
             camera_motion: Annotated[Literal["moving", "static"] | None, Field(description="keep clips with this camera motion")] = None,
-            clip_ids: Annotated[list[str] | None, Field(description="keep only these clip ids")] = None,
+            clip_ids: Annotated[list[str] | str | None, Field(description=f"keep only these clip ids, {FROM_FILE}")] = None,
             ingested_by: Annotated[str | None, Field(description="keep clips this node ingested, e.g. the id of the node being built")] = None,
             limit: Annotated[int, Field(description="clips per page")] = QUERY_LIMIT,
             offset: Annotated[int, Field(description="skip this many matches")] = 0) -> dict:
@@ -259,8 +289,8 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
     @mcp.tool(name="data_commit", description="Create an immutable data commit: the training set of this node.")
     async def data_commit(
             parent: Annotated[str | None, Field(description="the commit this one follows (the parent node's data commit), or null")],
-            datasets: Annotated[dict[str, Any], Field(description="{name: {format, prompt_mode, weight, clips: "
-                                f"[clip_id]}}}}. format is one of: {_FORMATS}. Set prompt_mode only for "
+            datasets: Annotated[dict[str, Any], Field(description="{name: {format, prompt_mode, weight, clips}}. "
+                                f"clips is a list of clip ids, {FROM_FILE}. format is one of: {_FORMATS}. Set prompt_mode only for "
                                 "video_timed_prompts_camera; omit it otherwise. weight is the dataset's sampling "
                                 "weight. Each dataset needs at least as many clips as training GPUs")],
             message: Annotated[str, Field(description="what this commit contains")],

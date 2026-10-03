@@ -1,5 +1,6 @@
 """generate_images: the real backend with a fake subprocess worker, plus one real
 Z-Image-Turbo gpu test."""
+from conftest import job_result
 import copy
 import threading
 from pathlib import Path
@@ -46,7 +47,7 @@ def env(tmp_path, monkeypatch):
 def run(q, caller, args):
     out = q.wait(caller, q.backends["generate_images"].submit(q, caller, args)["job_id"], 120)
     assert out["state"] == "done", out
-    return out["id"], {i["index"]: i for i in out["result"]["items"]}
+    return out["id"], {i["index"]: i for i in job_result(out)["items"]}
 
 
 def _open(staging, item):
@@ -116,7 +117,7 @@ def test_workers_get_the_images_config_and_one_gpu_each(env):
 def test_limits_come_from_the_images_config_block(tmp_path):
     rec = Recorder(tmp_path / "run")
     b = ImageBackend(REAL, tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
-    assert (b.max_items, b.timeout_s) == (REAL.get("images.max_items"), REAL.get("images.timeout_s"))
+    assert b.timeout_s == REAL.get("images.timeout_s")
 
 
 def test_build_gpu_backends_includes_images_only_when_enabled(tmp_path):
@@ -153,10 +154,10 @@ def test_real_zimage_generates_plausible_images(tmp_path):
     finally:
         q.shutdown()
     assert out["state"] == "done", out.get("error")
-    for item in out["result"]["items"]:
+    for item in job_result(out)["items"]:
         assert "error" not in item, item
         with Image.open(staging / Path(item["image"]).relative_to("/workspace/staging")) as im:
             assert im.size == (1280, 720)
-    assert out["result"]["gpu_memory_released"] is True
-    print({"gpus": gpus, "gpu_memory_mib": out["result"]["gpu_memory_mib"],
-          "seconds": [i["worker"].get("seconds") for i in out["result"]["items"]]})
+    assert job_result(out)["gpu_memory_released"] is True
+    print({"gpus": gpus, "gpu_memory_mib": job_result(out)["gpu_memory_mib"],
+          "seconds": [i["worker"].get("seconds") for i in job_result(out)["items"]]})

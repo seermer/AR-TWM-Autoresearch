@@ -42,7 +42,10 @@ def main(argv: list[str] | None = None) -> int:
             value = value.model_dump()
         result = RESULT_MODELS[kind].model_validate(value)
     except Exception as exc:                  # noqa: BLE001 -- every failure becomes a result
-        _write(workspace, {"ok": False, "error": f"{type(exc).__name__}: {exc}",
+        cause = exc                           # a task group wraps the one failure that matters: name that one
+        while isinstance(cause, BaseExceptionGroup) and len(cause.exceptions) == 1:
+            cause = cause.exceptions[0]
+        _write(workspace, {"ok": False, "error": f"{type(cause).__name__}: {cause}",
                            "traceback": traceback.format_exc()})
         return 1
     _write(workspace, {"ok": True, "result": result.model_dump()})

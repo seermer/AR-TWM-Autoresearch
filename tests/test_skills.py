@@ -55,6 +55,6 @@ def test_every_kernel_tool_argument_is_described(tmp_path):
     for name, tool in tools.items():
         for arg, schema in tool.input_schema["properties"].items():
             assert schema.get("description"), f"{name}.{arg} has no description"
-    candidate = tools["data_ingest"].input_schema["properties"]["candidates"]["items"]
+    candidate = tools["data_ingest"].input_schema["properties"]["candidates"]["anyOf"][0]["items"]
     assert set(candidate["required"]) == {"video", "caption", "camera_motion", "provenance"}
     assert all(p.get("description") for p in candidate["properties"].values())

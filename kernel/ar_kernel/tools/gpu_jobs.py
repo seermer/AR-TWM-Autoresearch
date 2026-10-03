@@ -27,7 +27,7 @@ from .captioner import clip_host_path, container_path, stage_clip
 from .context import STAGING, PathError
 from .hf_tools import move_into
 from .jobs import run_cancellable
-from .server import ToolError
+from .server import FROM_FILE, ToolError, listed, refuse
 from .vllm_server import gpu_memory_mib, wait_gpu_release
 
 
@@ -35,8 +35,10 @@ def items_schema(description: str, properties: dict, required: list[str]) -> Wit
     """The listed JSON schema of an `items` list. Only the schema: the values still reach the tool
     as plain dicts and each backend's check_args validates them, so a bad value is a recorded
     tool.error rather than a failure inside the MCP layer."""
-    return WithJsonSchema({"type": "array", "description": description, "items": {"type": "object", "properties": properties,
-                                                      "required": required, "additionalProperties": False}})
+    return WithJsonSchema({"description": f"{description}, {FROM_FILE}", "anyOf": [
+        {"type": "array", "items": {"type": "object", "properties": properties, "required": required,
+                                    "additionalProperties": False}},
+        {"type": "string"}]})
 
 
 def _str(description: str) -> dict:
@@ -45,10 +47,10 @@ def _str(description: str) -> dict:
 
 _SEED = {"type": "integer", "description": "random seed; the same item and seed give the same output"}
 _FRAME = _str("first frame: an image file under /workspace (any size; it is cropped and resized)")
-ImageItems = Annotated[list[dict[str, Any]], items_schema(
+ImageItems = Annotated[list[dict[str, Any]] | str, items_schema(
     "the images to make, one item each",
     {"prompt": _str("what the image shows"), "seed": _SEED}, ["prompt", "seed"])]
-ClipItems = Annotated[list[dict[str, Any]], items_schema(
+ClipItems = Annotated[list[dict[str, Any]] | str, items_schema(
     "the clips to render, one item each",
     {"prompt": _str("what the clip shows"), "image": _FRAME, "seed": _SEED}, ["prompt", "seed"])]
 _TURN = {"type": "object", "additionalProperties": False, "required": ["action"], "properties": {
@@ -58,7 +60,7 @@ _TURN = {"type": "object", "additionalProperties": False, "required": ["action"]
     "subject_action": _str("something the subject does during this turn"),
     "viewpoint_change": _str("a change of viewpoint during this turn: 'fp_to_tp', 'tp_to_fp', 'fp_to_scope', "
                              "or 'tp_to_tp: <the new view>'")}}
-WorldItems = Annotated[list[dict[str, Any]], items_schema(
+WorldItems = Annotated[list[dict[str, Any]] | str, items_schema(
     "the clips to render, one item each",
     {"image": _str("first frame: an image file under /workspace (.jpg, .png, ...; any size)"),
      "viewpoint": {"type": "string", "enum": ["first_person", "third_person"],     # rollouts.VIEWPOINTS
@@ -104,11 +106,10 @@ def split_gpus(gpus: list[int], per_worker: int, workers: int | None) -> list[li
 class GpuJob:
     """Base JobQueue backend. Subclasses set name/tool, kind ("rollout" | "annotation" | "image"),
     generator (provenance name), license, file_keys (item fields naming workspace files),
-    optionally config_key (the kernel.yaml block, `self.block`, whose max_items, timeout_s and
-    license override the class defaults) and implement check_args, produce and finish."""
+    optionally config_key (the kernel.yaml block, `self.block`, whose timeout_s and license override
+    the class defaults) and implement check_args, produce and finish. A job takes any number of items."""
     name = tool = kind = generator = license = description = config_key = ""
     file_keys: tuple[str, ...] = ()
-    max_items = 16
     timeout_s: float | None = None   # per-job wall-clock cap enforced by run_workers; None = no cap
 
     def __init__(self, cfg, run_dir: Path, gpus: list[int], registry, recorder,
@@ -116,17 +117,17 @@ class GpuJob:
         self.cfg, self.run_dir, self.gpus = cfg, Path(run_dir), list(gpus)
         self.registry, self.recorder, self.gpu_memory = registry, recorder, gpu_memory
         self.block = (cfg.get(self.config_key) if self.config_key else None) or {}
-        self.max_items = int(self.block.get("max_items", self.max_items))
         self.timeout_s = self.block.get("timeout_s", self.timeout_s)
         self.license = self.block.get("license", self.license)
 
     # ---- submit (tool call; fast; ToolError goes back to the agent) ----
     def submit(self, q, caller, args: dict) -> dict:
-        items = args.get("items") or []
+        items = listed(caller, args.get("items"), "items")
         if not items:
             raise ToolError("items is empty")
-        if len(items) > self.max_items:
-            raise ToolError(f"at most {self.max_items} items per job")
+        bad = [n for n, item in enumerate(items) if not isinstance(item, dict)]
+        refuse([f"item {n}: not an object: {str(items[n])[:80]!r}" for n in bad])
+        args = {**args, "items": items}
         self.check_args(args)
         for n, item in enumerate(items):
             if copies_held_out(self.cfg, *strings(item)):       # before a GPU is scheduled
@@ -134,16 +135,18 @@ class GpuJob:
                                     attempt=caller.attempt, component="tools", tool=self.name,
                                     payload={"item": n})
                 raise ToolError(f"item {n}: {EXCLUDED_PROMPT}")
+        errors = []
         for n, item in enumerate(items):
             for key in self.file_keys:
                 if isinstance(item.get(key), str):
                     try:
                         clip_host_path(caller, item[key])
                     except PathError as exc:
-                        raise ToolError(f"item {n}: {key}: {exc}") from exc
+                        errors.append(f"item {n}: {key}: {exc}")
                     item = {**item, key: container_path(item[key])}
             items[n] = item
-        return {"job_id": q.submit(caller, self.name, {**args, "items": items})}
+        refuse(errors)
+        return {"job_id": q.submit(caller, self.name, args)}
 
     def check_args(self, args: dict) -> None:
         raise NotImplementedError
@@ -315,6 +318,18 @@ class GpuJob:
         return codes, missing
 
 
+JOB_NOTE = (" One call is one job: send every item in it, however many (jobs run one at a time, so many small "
+            "jobs only wait on each other). The finished job's full result is written to a file under "
+            "/workspace/staging/results/; job_wait returns that path with a summary. Read the file with a "
+            "script: never copy results by hand.")
+
+
+def job_description(backend) -> str:
+    limit = getattr(backend, "timeout_s", None)
+    stop = f" A job is stopped after {limit / 3600:g} h; items not finished by then are item errors." if limit else ""
+    return backend.description + JOB_NOTE + stop
+
+
 def register_gpu_tools(mcp, kit, q) -> None:
     """Registers each GPU data tool whose backend is on the queue. Disabled tools/variants are
     simply absent (disabled variants are omitted from tool schemas)."""
@@ -326,15 +341,16 @@ def register_gpu_tools(mcp, kit, q) -> None:
         return kit.call(ctx, name, args, lambda c: b[name].submit(q, c, dict(args)))
 
     if "annotate_camera" in b:
-        @mcp.tool(name="annotate_camera", description=b["annotate_camera"].description)
+        @mcp.tool(name="annotate_camera", description=job_description(b["annotate_camera"]))
         async def annotate_camera(
-                paths: Annotated[list[str], Field(description="mp4 files under /workspace, at most 1200 frames each")],
+                paths: Annotated[list[str] | str, Field(description="mp4 files under /workspace, at most 1200 frames "
+                                                        f"each, {FROM_FILE}")],
                 ctx: Context) -> dict[str, Any]:
-            return await kit.call(ctx, "annotate_camera", {"paths": paths},
-                                  lambda c: b["annotate_camera"].submit(q, c, {"items": [{"video": p} for p in paths]}))
+            return await kit.call(ctx, "annotate_camera", {"paths": paths}, lambda c: b["annotate_camera"].submit(
+                q, c, {"items": [{"video": p} for p in listed(c, paths, "paths")]}))
 
     if "rollout_alayaworld" in b:
-        @mcp.tool(name="rollout_alayaworld", description=b["rollout_alayaworld"].description)
+        @mcp.tool(name="rollout_alayaworld", description=job_description(b["rollout_alayaworld"]))
         async def rollout_alayaworld(
                 items: WorldItems, ctx: Context,
                 variant: Annotated[str | None, Field(description="sampler; default the first one listed above")] = None,
@@ -346,7 +362,7 @@ def register_gpu_tools(mcp, kit, q) -> None:
                                 rounds_per_turn=rounds_per_turn, seed=seed, node=node)
 
     if "generate_images" in b:
-        @mcp.tool(name="generate_images", description=b["generate_images"].description)
+        @mcp.tool(name="generate_images", description=job_description(b["generate_images"]))
         async def generate_images(
                 items: ImageItems, ctx: Context,
                 width: Annotated[int | None, Field(description="multiple of 16 in 256..1920, default 1280")] = None,
@@ -355,7 +371,7 @@ def register_gpu_tools(mcp, kit, q) -> None:
             return await submit(ctx, "generate_images", items=items, width=width, height=height)
 
     if "rollout_wan22" in b:
-        @mcp.tool(name="rollout_wan22", description=b["rollout_wan22"].description)
+        @mcp.tool(name="rollout_wan22", description=job_description(b["rollout_wan22"]))
         async def rollout_wan22(
                 items: ClipItems, ctx: Context,
                 frames: Annotated[int | None, Field(description="4k+1 frames at 24 fps; one value for the job")] = None,
@@ -363,7 +379,7 @@ def register_gpu_tools(mcp, kit, q) -> None:
             return await submit(ctx, "rollout_wan22", items=items, frames=frames)
 
     if "rollout_ltx25" in b:
-        @mcp.tool(name="rollout_ltx25", description=b["rollout_ltx25"].description)
+        @mcp.tool(name="rollout_ltx25", description=job_description(b["rollout_ltx25"]))
         async def rollout_ltx25(
                 items: ClipItems, ctx: Context,
                 variant: Annotated[str | None, Field(description="default the first one listed above")] = None,
