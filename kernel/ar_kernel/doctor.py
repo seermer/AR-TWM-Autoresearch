@@ -38,11 +38,11 @@ WBENCH_WEIGHTS = {
 }
 
 
-def _broken_links(root: Path, skip: Path | None = None) -> list[tuple[Path, str]]:
-    """(link, target) for every dangling symlink under `root`, except those under `skip`."""
+def _broken_links(root: Path, skip: tuple[Path, ...] = ()) -> list[tuple[Path, str]]:
+    """(link, target) for every dangling symlink under `root`, except those under a `skip` folder."""
     out = []
     for link in sorted(Path(root).rglob("*")):
-        if skip is not None and skip in link.parents:
+        if any(folder in link.parents for folder in skip):
             continue
         try:
             if link.is_symlink() and not link.exists():
@@ -100,8 +100,9 @@ def _siblings(cfg: KernelConfig) -> list[Finding]:
 def _symlinks(cfg: KernelConfig) -> list[Finding]:
     """Broken links are the concrete way a move has broken this tree before. The package cache
     under `.cache/` is skipped: conda's extracted packages hold relative links whose targets exist
-    only once a package is linked into an env."""
-    skip = Path(cfg.repo_root) / ".cache"
+    only once a package is linked into an env. Runs are skipped too: agents leave links in their
+    workspaces that point at container paths."""
+    skip = (Path(cfg.repo_root) / ".cache", cfg.runs_dir, Path(cfg.repo_root) / ".obsolete_runs")
     out = [Finding("fail", "symlink", f"broken: {link} -> {target} "
                                       f"(typical after moving the tree; re-run the tool that creates it)")
            for root in (cfg.wbench, cfg.worldmodel, cfg.repo_root) for link, target in _broken_links(root, skip)]

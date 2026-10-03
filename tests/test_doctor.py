@@ -171,3 +171,13 @@ def test_dangling_links_in_the_package_cache_are_not_reported(tmp_path):
     os.symlink("../bin/ld", str(pkgs / "ld"))                       # dangling by design
     cfg = KernelConfig.load(root / "configs" / "kernel.yaml")
     assert _levels(run_checks(cfg), "symlink") == {"ok"}
+
+
+def test_links_an_agent_left_in_a_run_are_not_tree_problems(tmp_path):
+    """live-10-02: 943 'broken' links, all made by agents in their workspaces and pointing at container paths."""
+    from ar_kernel.doctor import _broken_links
+    for folder in ("runs/r1/nodes/n1/workspace", ".obsolete_runs/r0", "weights"):
+        (tmp_path / folder).mkdir(parents=True)
+        (tmp_path / folder / "link.mp4").symlink_to("/workspace/work/clips/a.mp4")
+    found = _broken_links(tmp_path, (tmp_path / "runs", tmp_path / ".obsolete_runs"))
+    assert [link for link, _ in found] == [tmp_path / "weights" / "link.mp4"]
