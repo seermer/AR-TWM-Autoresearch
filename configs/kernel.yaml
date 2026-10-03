@@ -7,6 +7,8 @@ paths:
 gpus:
   default: "0,1,2,3"
   min_count: 4
+  free_below_mib: 512            # a kernel GPU job an agent asked for is refused while a GPU holds more than
+                                 # this (the agent container sees the same GPUs; a display server uses less)
 retries:
   edit_self: 3
   improve_recipe: 3

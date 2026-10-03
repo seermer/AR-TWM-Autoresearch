@@ -74,8 +74,10 @@ class JobQueue:
     so an agent that disappears never keeps holding the GPUs.
     """
 
-    def __init__(self, recorder, gpu_lock: threading.Lock, wait_cap_s: float) -> None:
+    def __init__(self, recorder, gpu_lock: threading.Lock, wait_cap_s: float,
+                 require_free: Callable[[], None] = lambda: None) -> None:
         self.recorder, self.gpu_lock, self.wait_cap_s = recorder, gpu_lock, float(wait_cap_s)
+        self.require_free = require_free          # raises when the GPUs are in use: the job then fails
         self._backends: dict[str, JobBackend] = {}
         self._jobs: dict[str, Job] = {}
         self._cancel: dict[str, threading.Event] = {}
@@ -202,6 +204,7 @@ class JobQueue:
                     job.state, job.started = "running", time.time()
                     self._cond.notify_all()
                 try:
+                    self.require_free()
                     result = self._backends[job.backend].run(job, cancel, report)
                     final = "cancelled" if cancel.is_set() else "done"
                 except Exception as exc:                  # noqa: BLE001 -- a job failure, not a crash

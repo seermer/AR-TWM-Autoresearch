@@ -290,3 +290,24 @@ def test_a_short_or_ambiguous_prefix_is_refused(env):
     if twin:                                          # 8 hex characters: a clash is very unlikely
         with pytest.raises(ToolError, match="matches 2 jobs"):
             q.status(a, twin)
+
+
+def test_a_job_fails_without_running_while_the_gpus_are_in_use(tmp_path):
+    """The agent's container sees the run's GPUs: a job that starts beside its processes would run out of memory."""
+    rec, busy = Recorder(tmp_path), [True]
+
+    def require_free():
+        if busy[0]:
+            raise RuntimeError("the GPUs are not free: GPU 0 has 3200 MiB in use")
+    q = JobQueue(rec, threading.Lock(), wait_cap_s=5.0, require_free=require_free)
+    q.register(SleepyBackend())
+    a = TokenRegistry(rec).issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=tmp_path,
+                                 staging_host=tmp_path)
+    try:
+        out = q.wait(a, q.submit(a, "sleepy", {"steps": 1}), 30)
+        assert out["state"] == "failed" and "GPU 0 has 3200 MiB in use" in out["error"]
+        assert out["progress"] == {} and not q.gpu_lock.locked()
+        busy[0] = False
+        assert q.wait(a, q.submit(a, "sleepy", {"steps": 1}), 30)["state"] == "done"
+    finally:
+        q.shutdown()

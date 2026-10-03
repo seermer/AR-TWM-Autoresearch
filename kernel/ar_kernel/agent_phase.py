@@ -152,7 +152,7 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
                  "AR_CONTEXT_WINDOW": str(env.cfg.get("agents.context_window_tokens")),
                  "AR_COMPACT_AT": str(env.cfg.get("agents.compact_at"))},
             cpus=env.cfg.get("sandbox.cpus"), memory_gb=env.cfg.get("sandbox.memory_gb"),
-            network=env.cfg.get("sandbox.network"),
+            network=env.cfg.get("sandbox.network"), gpus=env.gpus,
             timeout_s=4 * soft,                 # hard cap
             liveness=liveness,
             recorder=env.recorder, node=node, phase=phase, attempt=attempt)

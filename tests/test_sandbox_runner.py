@@ -54,6 +54,16 @@ def test_finished_nodes_are_mounted_read_only_with_eval_hidden(tmp_path):
     assert "/nodes/n1/eval:ro,size=4k" in args and not any(a.startswith("/nodes/root/eval") for a in args)
 
 
+def test_the_run_gpus_reach_the_container_through_the_nvidia_runtime(tmp_path):
+    from ar_kernel.sandbox.runner import _docker_args
+    m = Mounts(agent=tmp_path, workspace=tmp_path, staging=tmp_path, context=tmp_path, store=tmp_path,
+               contract=tmp_path, sockets=tmp_path)
+    args = _docker_args("img", "c", m, ["true"], {}, 1, 1, gpus=[0, 2, 5])
+    assert args[args.index("--runtime") + 1] == "nvidia" and "NVIDIA_VISIBLE_DEVICES=0,2,5" in args
+    plain = _docker_args("img", "c", m, ["true"], {}, 1, 1)
+    assert "--runtime" not in plain and not any("NVIDIA" in a for a in plain)
+
+
 def test_separate_running_code_is_mounted_read_only_and_named_in_the_env(tmp_path):
     from ar_kernel.sandbox.runner import _docker_args
     m = Mounts(agent=tmp_path, workspace=tmp_path, staging=tmp_path, context=tmp_path, store=tmp_path,
@@ -378,3 +388,17 @@ def test_edit_self_does_not_see_the_data_phases_contexts_of_earlier_nodes(tmp_pa
     assert hidden in _docker_args("img", "c", Mounts(**base, hide_scores=True), ["true"], {}, 1, 1)
     plain = _docker_args("img", "c", Mounts(**base), ["true"], {}, 1, 1)
     assert hidden not in plain and not any("edit_self-1/context:ro,size" in a for a in plain)
+
+
+@pytest.mark.gpu
+def test_torch_in_the_container_computes_on_exactly_the_passed_gpus(tmp_path, mounts):
+    """Run with the GPUs to pass in AR_TEST_GPUS (default 0,1,2,3)."""
+    import os
+    gpus = [int(g) for g in os.environ.get("AR_TEST_GPUS", "0,1,2,3").split(",")]
+    res = run_container(image=ensure_image(CFG, ""), name=container_name("t", "n1", "gpu", 1), mounts=mounts,
+                        command=["python", "-c", "import torch; n = torch.cuda.device_count(); "
+                                 "print(n, sum(torch.ones(3, device=f'cuda:{i}').sum().item() for i in range(n)))"],
+                        env={}, cpus=2, memory_gb=8, timeout_s=300, recorder=Recorder(tmp_path / "run"),
+                        node="n1", phase="gpu", attempt=1, gpus=gpus)
+    assert res.exit_code == 0, res.stderr
+    assert res.stdout.split() == [str(len(gpus)), str(3.0 * len(gpus))]

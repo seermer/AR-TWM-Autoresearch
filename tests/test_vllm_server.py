@@ -82,3 +82,11 @@ def test_a_server_that_is_never_ready_times_out(tmp_path):
             s.start(3)
     finally:
         s.stop()
+
+
+def test_gpus_holding_more_than_the_limit_are_named_and_a_display_server_is_let_through():
+    from ar_kernel.tools.vllm_server import require_free_gpus
+    require_free_gpus([0, 1], 512, gpu_memory=lambda gpus: {0: 9, 1: 300})          # e.g. Xorg
+    require_free_gpus([0, 1], 512, gpu_memory=lambda gpus: None)                    # unreadable: not refused
+    with pytest.raises(RuntimeError, match=r"GPU 1 has 3200 MiB in use \(limit 512 MiB\).*nvidia-smi"):
+        require_free_gpus([0, 1], 512, gpu_memory=lambda gpus: {0: 9, 1: 3200})

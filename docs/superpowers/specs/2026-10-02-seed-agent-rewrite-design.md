@@ -209,6 +209,9 @@ characters in one phase were hand-typed paths, clip ids and captions. Decided an
 - **A job takes any number of items.** The per-job item cap is gone; the job timeout stays.
 - **No GPU tool stays loaded after its job.** A warm caption server was built and removed the same day:
   the agent container now sees the run's GPUs, so the kernel holds them only while a job runs.
+- **The agent container is a PyTorch CUDA image with the run's GPUs** (NVIDIA container runtime, the
+  run's own device list, so 2, 4 or 8 GPUs work alike). A kernel GPU job or `recipe_check` an agent
+  asked for fails while a GPU holds more than `gpus.free_below_mib`.
 - **The planner reviews the engineer's result** in both phases: `accept_result` or a revised plan,
   within the plans-per-phase limit. Engineers had never reported back on their own.
 - **The first message says what each folder is for** (`folders` in the context, kernel-owned).

@@ -29,9 +29,10 @@ QUERY_LIMIT = 100           # clips per page: a clip record is about 1,200 chara
 
 
 class DataTools:
-    def __init__(self, cfg, run_dir: Path, recorder, gpus: list[int], gpu_lock: threading.Lock) -> None:
+    def __init__(self, cfg, run_dir: Path, recorder, gpus: list[int], gpu_lock: threading.Lock,
+                 require_free=lambda: None) -> None:
         self.cfg, self.run_dir, self.recorder = cfg, Path(run_dir), recorder
-        self.gpus, self.gpu_lock = list(gpus), gpu_lock
+        self.gpus, self.gpu_lock, self.require_free = list(gpus), gpu_lock, require_free
         self._leakage: LeakageChecker | None = None
         self._leakage_lock = threading.Lock()
 
@@ -153,6 +154,10 @@ class DataTools:
                 raise ToolError(f"unknown data commit {data_commit!r}") from exc
             parent_commit = _parent_commit(conn, caller.node)
             with self.gpu_lock:          # the describe step is a GPU job
+                try:
+                    self.require_free()
+                except RuntimeError as exc:
+                    raise ToolError(str(exc)) from exc
                 result = Gate(self.cfg, store, self.recorder).check(
                     recipe, data_commit, parent_commit, caller.node, scratch, self.run_dir, self.gpus)
         finally:

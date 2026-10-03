@@ -29,6 +29,17 @@ def gpu_memory_mib(gpus: list[int]) -> dict[int, int] | None:
     return {g: used[g] for g in gpus if g in used}
 
 
+def require_free_gpus(gpus: list[int], limit_mib: int, gpu_memory=gpu_memory_mib) -> None:
+    """Raise when a GPU holds more than `limit_mib`: the agent's container sees the same GPUs, and a
+    kernel job that starts beside the agent's own processes runs out of memory."""
+    busy = {g: used for g, used in (gpu_memory(gpus) or {}).items() if used > limit_mib}
+    if busy:
+        raise RuntimeError(
+            "the GPUs are not free: " + ", ".join(f"GPU {g} has {used} MiB in use" for g, used in busy.items())
+            + f" (limit {limit_mib} MiB). A kernel GPU job needs them empty: stop your own processes that "
+              "hold GPU memory (`nvidia-smi` lists them), then call again.")
+
+
 def wait_gpu_release(gpu_memory, gpus: list[int], before: dict | None,
                      timeout_s: float) -> tuple[dict | None, bool | None]:
     """Wait until every GPU is back within RELEASE_SLACK_MIB of its pre-job memory; returns
