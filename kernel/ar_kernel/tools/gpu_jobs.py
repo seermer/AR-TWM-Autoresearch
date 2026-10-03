@@ -343,8 +343,7 @@ def register_gpu_tools(mcp, kit, q) -> None:
     if "annotate_camera" in b:
         @mcp.tool(name="annotate_camera", description=job_description(b["annotate_camera"]))
         async def annotate_camera(
-                paths: Annotated[list[str] | str, Field(description="mp4 files under /workspace, at most 1200 frames "
-                                                        f"each, {FROM_FILE}")],
+                paths: Annotated[list[str] | str, Field(description=f"mp4 files under /workspace, {FROM_FILE}")],
                 ctx: Context) -> dict[str, Any]:
             return await kit.call(ctx, "annotate_camera", {"paths": paths}, lambda c: b["annotate_camera"].submit(
                 q, c, {"items": [{"video": p} for p in listed(c, paths, "paths")]}))

@@ -104,31 +104,6 @@ def test_read_file_shows_a_small_head_of_a_large_file_and_reads_line_ranges(tmp_
     assert read.invoke({"path": "big.txt", "offset": 10, "limit": 2}) == "[lines 11-12 of 20000]\nline 10\nline 11\n"
 
 
-def test_discarded_changes_restores_the_tree_but_keeps_logs(tmp_path):
-    from agent.tools import KEEP_BYTES, discarded_changes
-    (tmp_path / "keep").mkdir()
-    (tmp_path / "keep" / "a.txt").write_text("old")
-    (tmp_path / "gone.txt").write_text("deleted, then back")
-    (tmp_path / "link").symlink_to("keep/a.txt")
-    (tmp_path / "big.bin").write_bytes(b"0" * (KEEP_BYTES + 1))
-    with discarded_changes(str(tmp_path), keep=(str(tmp_path / "tool_output"),)):
-        (tmp_path / "keep" / "a.txt").write_text("new")
-        (tmp_path / "gone.txt").unlink()
-        (tmp_path / "link").unlink()
-        (tmp_path / "new" / "deep").mkdir(parents=True)
-        (tmp_path / "new" / "deep" / "x.txt").write_text("x")
-        (tmp_path / "keep" / "y.txt").write_text("y")
-        (tmp_path / "big.bin").write_bytes(b"1")
-        (tmp_path / "tool_output").mkdir()
-        (tmp_path / "tool_output" / "cmd.log").write_text("log")
-    assert (tmp_path / "keep" / "a.txt").read_text() == "old"
-    assert (tmp_path / "gone.txt").read_text() == "deleted, then back"
-    assert (tmp_path / "link").is_symlink() and (tmp_path / "link").read_text() == "old"
-    assert not (tmp_path / "new").exists() and not (tmp_path / "keep" / "y.txt").exists()
-    assert (tmp_path / "big.bin").read_bytes() == b"1"          # too large to keep a copy of
-    assert (tmp_path / "tool_output" / "cmd.log").read_text() == "log"
-
-
 def test_run_command_timeout_kills_what_the_shell_started(tmp_path, monkeypatch):
     import time
     from agent.tools import make_file_tools
@@ -271,7 +246,7 @@ def test_engineers_get_what_they_act_on_and_not_the_history():
     from ar_contract.models import EditContext
     ctx = EditContext(nodes_remaining=1, attempt=1, max_attempts=3, folders={"/agent": "the agent code you change"})
     coder = coder_context(ctx, {"harness": "agent/harness.py"})
-    assert "  - harness: agent/harness.py" in coder and "## Folders\n\n- `/agent`: the agent code you change" in coder
+    assert "  - harness: agent/harness.py" in coder and "## Folders\n\n- `/agent`: the agent code you change\n- `/workspace/scratch`: throwaway" in coder
     assert "## Folders\n\n- `/workspace/staging`: a separate mount" in engineer_context(
         _recipe_ctx(folders={"/workspace/staging": "a separate mount"}), None)
 
@@ -381,7 +356,7 @@ def _scripts():
     ]
     edit = [
         [_call("read_file", {"path": "agent/prompts/planner.md"}),       # planning may try things out ...
-         _call("run_command", {"command": "echo junk >> agent/prompts/coder.md && touch agent/stray.py"})],
+         _call("run_command", {"command": "ls $AR_WORKSPACE/scratch && touch $AR_WORKSPACE/scratch/notes.txt"})],
         [_call("accept_result", {"reason": "nothing to do"})],          # refused: no result yet
         [_call("submit_edit_plan", {**EDIT_PLAN, "problem": ""})],       # invalid: no problem
         [_call("submit_edit_plan", EDIT_PLAN)],
@@ -569,9 +544,8 @@ def test_edit_self_plans_then_edits(kernel, tmp_path):
     assert proc.returncode == 0 and body["ok"], (body, proc.stderr[-2000:])
     assert body["result"]["summary"] == "The briefing now shows eight siblings."      # the coder's own words
     assert "SIBLINGS_SHOWN = 8" in (agent / "agent" / "briefing.py").read_text()
-    # ... but what the planner changed is undone before the coder starts; its command log stays
-    assert (agent / "agent" / "prompts" / "coder.md").read_text() == (SEED / "agent" / "prompts" / "coder.md").read_text()
-    assert not (agent / "agent" / "stray.py").exists()
+    # every role has a scratch folder, emptied when its turn ends; its command log stays
+    assert not (tmp_path / "ws" / "scratch").exists()
     assert list((tmp_path / "ws" / "tool_output").glob("run_command-*.log"))
     [round_] = json.loads((tmp_path / "ws" / "plans.json").read_text())
     assert round_["plan"] == EDIT_PLAN and "report" not in round_

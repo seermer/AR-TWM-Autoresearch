@@ -214,6 +214,9 @@ characters in one phase were hand-typed paths, clip ids and captions. Decided an
   asked for fails while a GPU holds more than `gpus.free_below_mib`.
 - **`edit_self` sees the same node files as `improve_recipe`** (user decision 2026-10-03): scores are in
   the files under `/nodes`, never stated in a prompt or the edit context. Only `eval/` stays hidden.
+- **No undo of planner changes** (user decision 2026-10-03): the workspace snapshot is gone. The planner
+  prompts say to change nothing outside `/workspace/scratch`; every role gets that folder, it is in the
+  folder map, and it is emptied when the role's turn ends.
 - **The planner reviews the engineer's result** in both phases: `accept_result` or a revised plan,
   within the plans-per-phase limit. Engineers had never reported back on their own.
 - **The first message says what each folder is for** (`folders` in the context, kernel-owned).

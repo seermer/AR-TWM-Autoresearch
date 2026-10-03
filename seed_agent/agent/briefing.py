@@ -56,8 +56,13 @@ def retry_section(retry: dict | None, previous_plans: list | None) -> str:
     return "\n\n".join(parts)
 
 
+SCRATCH_NOTE = "throwaway files of the role that is working; emptied when its turn ends"      # orchestration.Role
+
+
 def folders_section(folders: dict) -> str:
-    return "## Folders\n\n" + "\n".join(f"- `{path}`: {what}" for path, what in folders.items()) if folders else ""
+    """What each folder is for: the kernel's map, plus this agent's own scratch folder."""
+    folders = {**folders, "/workspace/scratch": SCRATCH_NOTE}
+    return "## Folders\n\n" + "\n".join(f"- `{path}`: {what}" for path, what in folders.items())
 
 
 def _pool(ctx) -> str:

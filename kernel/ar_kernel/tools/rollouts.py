@@ -172,7 +172,6 @@ class AlayaWorldBackend(GpuJob):
     kind = "rollout"
     config_key = "generators.alayaworld"      # timeout_s
     file_keys = ("image", "subject_mask")
-    max_turns = 9
     description = (
         "Render clips with AlayaWorld itself: the released model that every node fine-tunes, or with `node` a "
         "scored node's fine-tune. A GPU job: returns {job_id} at once; collect with job_wait. Each item is a "
@@ -184,13 +183,14 @@ class AlayaWorldBackend(GpuJob):
         "on candidate.video, then data_ingest it with that pose and camera_motion 'moving' (eligible for "
         "video_timed_prompts_camera:per_chunk). Metadata, not labels: `commanded_camera` (npz of the camera path "
         "the moves commanded, one pose per frame; not what the video shows), `actions` and `turn_segments` "
-        "(frame ranges in the published clip). At most 9 turns per item.")
+        "(frame ranges in the published clip). At most {max_turns} turns per item.")
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.max_turns = int(self.block.get("max_turns", self.max_turns))
+        self.max_turns = int(self.block["max_turns"])
         variants = "; ".join(f"'{v}': {VARIANT_TEXT[v]}" for v in self.enabled_variants())
-        self.description = self.description.replace("{variants}", variants)   # disabled variants omitted
+        self.description = (self.description.replace("{variants}", variants)    # disabled variants omitted
+                            .replace("{max_turns}", str(self.max_turns)))
 
     def enabled_variants(self) -> list[str]:
         return enabled_variants(self.block, VARIANTS)

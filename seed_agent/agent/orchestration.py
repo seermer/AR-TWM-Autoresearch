@@ -5,8 +5,8 @@ submit tool; one that stops without submitting gets one reminder.
 Both phases are a planner and an engineer. The planner submits a plan that states intent; the engineer
 carries it out, then either submits its result or reports back with request_replan for a new plan. The
 planner is shown a submitted result and accepts it or revises the plan, up to MAX_ROUNDS plans per phase.
-Each role keeps its conversation throughout. Every plan, report and result is recorded in plans.json. A planner has the engineer's file and shell tools, but what it
-changes on disk while planning is undone, and its kernel tools only read.
+Each role keeps its conversation throughout. Every plan, report and result is recorded in plans.json. A planner has the engineer's file and shell tools and is
+told to change nothing outside /workspace/scratch, which is emptied after every role's turn; its kernel tools only read.
 - improve_recipe: planner -> data engineer, who builds the data commit and writes the recipe
   (recipe_check must pass before the submission is accepted).
 - edit_self: edit planner -> coder (the self-test must pass before the submission is accepted).
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ast
 import json
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -29,9 +30,10 @@ from pydantic import BaseModel, Field
 from .entry import AGENT_ROOT, BRIEF_CHARS, COMPACT_AT, CONTEXT_WINDOW, MAX_ROUNDS, MODEL, WORKSPACE
 from .briefing import coder_context, edit_context, engineer_context, recipe_context
 from .harness import build_react_agent
-from .tools import discarded_changes, kernel_tools, local_tools, result_text, snap_timed_prompts, submit_tool
+from .tools import kernel_tools, local_tools, result_text, snap_timed_prompts, submit_tool
 
 AGENT_PKG = Path(__file__).resolve().parent
+SCRATCH = Path(WORKSPACE) / "scratch"         # every role's throwaway files; emptied when its turn ends
 RECORD = Path(WORKSPACE) / "plans.json"       # every plan and report; carried to a retry with the workspace
 PLAN_FIELD_CHARS = 4000                       # a safety cap: plans that state intent stay well under it, ones that
                                               # dictate file contents (5,800 characters and up) do not fit
@@ -79,9 +81,8 @@ def brief(text: str) -> str:
 class Role:
     """One role on the harness. Its conversation continues across calls to run()."""
 
-    def __init__(self, name: str, tools: list, submissions: list, discard: tuple[str, ...] = ()) -> None:
+    def __init__(self, name: str, tools: list, submissions: list) -> None:
         self.submissions = submissions            # the boxes of its submit tools
-        self.discard = discard                    # dirs whose changes are undone after each run (planners)
         self.messages: list = []
         model = chat_model(MODEL)
         model.bind_tools(tools)                   # a broken tool schema fails here, not at the first call
@@ -96,12 +97,15 @@ class Role:
         for box in self.submissions:
             box.value = None
         names = " or ".join(box.name for box in self.submissions)
-        with discarded_changes(*self.discard, keep=(str(Path(WORKSPACE) / "tool_output"),)):
+        SCRATCH.mkdir(parents=True, exist_ok=True)
+        try:
             for message in (task, REMIND.format(tools=names)):
                 state = await self.agent.ainvoke({"messages": [*self.messages, HumanMessage(content=message)]})
                 self.messages = state["messages"]
                 if self._submitted() is not None:
                     return self._submitted()
+        finally:
+            shutil.rmtree(SCRATCH, ignore_errors=True)
         raise RuntimeError(f"the role finished without calling {names}")
 
 
@@ -227,7 +231,7 @@ def recipe_team(ctx: RecipeContext | None, session, ktools: list) -> Team:
                                   "It is accepted only if recipe_check passes.", DataAndRecipe, recipe_passes)
     accept_t, accept = accept_tool(done)
     planner = Role("planner", [plan_tool, accept_t, *[t for t in ktools if t.name in PLANNING_KERNEL_TOOLS],
-                               *local_tools(WORKSPACE, papers=True)], [plan, accept], discard=(WORKSPACE,))
+                               *local_tools(WORKSPACE, papers=True)], [plan, accept])
     replan_t, replan = replan_tool(rounds)
     engineer = Role("data_engineer", [*ktools, *local_tools(WORKSPACE, papers=True), snap_timed_prompts,
                                       done_tool, replan_t], [done, replan])
@@ -303,7 +307,7 @@ def edit_team(ktools: list) -> Team:
                                   "only if the self-test passes.", EditSummary, selftest_passes)
     accept_t, accept = accept_tool(done)
     planner = Role("edit_planner", [plan_tool, accept_t, *kernel, *local_tools(AGENT_ROOT, papers=False)],
-                   [plan, accept], discard=(AGENT_ROOT, WORKSPACE))
+                   [plan, accept])
     replan_t, replan = replan_tool(rounds)
     engineer = Role("coder", [*kernel, *local_tools(AGENT_ROOT, papers=False), done_tool, replan_t], [done, replan])
     return Team(planner, plan, accept, engineer, done, replan, rounds)

@@ -19,10 +19,14 @@ class AnnotateBackend(GpuJob):
     config_key = "annotate"             # timeout_s
     file_keys = ("video",)
     description = ("Estimate per-frame camera poses for video clips (ViGeo). A GPU job: returns {job_id} at "
-                   "once; collect with job_wait. `paths`: mp4 files under /workspace. Each result item gives "
+                   "once; collect with job_wait. `paths`: mp4 files under /workspace, at most {max_frames} frames each. Each result item gives "
                    "`pose`: an npz in /workspace/staging/annotations/<job_id>/ holding cam_c2w [N,4,4] "
                    "(N = the clip's frame count, OpenCV camera-to-world, first frame identity) and pixel "
                    "`intrinsics`; pass it as `pose` to data_ingest with camera_motion 'moving'.")
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.description = self.description.replace("{max_frames}", str(self.block["max_frames"]))
 
     def check_args(self, args):
         for item in args["items"]:
