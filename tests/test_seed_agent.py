@@ -48,6 +48,13 @@ def test_file_tools_accept_paths_inside(tmp_path):
     assert resolve_inside(str(tmp_path), "a/b.txt") == tmp_path / "a" / "b.txt"
 
 
+def test_file_tools_accept_the_workspace_from_another_root(tmp_path, monkeypatch):
+    from agent.tools import resolve_inside
+    monkeypatch.setenv("AR_WORKSPACE", str(tmp_path / "ws"))
+    target = str(tmp_path / "ws" / "scratch" / "x.py")
+    assert resolve_inside(str(tmp_path / "agent"), target) == Path(target)
+
+
 def test_edit_file_needs_exactly_one_match():
     from agent.tools import replace_once
     assert replace_once("a b a", "b", "c") == "a c a"

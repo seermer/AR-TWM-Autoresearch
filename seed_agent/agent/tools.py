@@ -37,10 +37,11 @@ def resolve_read(root: str, path: str) -> Path:
 
 
 def resolve_inside(root: str, path: str) -> Path:
-    base = Path(root).resolve()
-    target = (base / path).resolve()
-    if not target.is_relative_to(base):
-        raise ValueError(f"{path} is outside {root}")
+    """Writes go under root or under the workspace, which holds every role's scratch folder."""
+    workspace = os.environ.get("AR_WORKSPACE", "/workspace")
+    target = (Path(root).resolve() / path).resolve()
+    if not any(target.is_relative_to(Path(base).resolve()) for base in (root, workspace)):
+        raise ValueError(f"{path} is outside {root} and {workspace}")
     return target
 
 
@@ -106,7 +107,7 @@ def make_file_tools(root: str) -> list:
 
     @tool
     def write_file(path: str, content: str) -> str:
-        """Create or overwrite a text file (path relative to the tool root)."""
+        """Create or overwrite a text file (relative to the tool root, or absolute under it or under /workspace)."""
         target = resolve_inside(root, path)
         target.parent.mkdir(parents=True, exist_ok=True)
         with _lock_for(target):
