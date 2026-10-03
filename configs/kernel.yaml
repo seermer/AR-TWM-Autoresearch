@@ -91,7 +91,6 @@ captioner:                       # caption_videos GPU job: a local vLLM server, 
   startup_timeout_s: 1200        # model load + warm-up
   clip_timeout_s: 300
   memory_release_timeout_s: 120  # after the server stops, wait up to this long for GPU memory to free
-  keep_warm_s: 300               # the server stays loaded this long after a caption job, for the next one
   extra_args: []                 # more `vllm serve` flags
 gateway:
   model_allowlist: []            # OPENAI_MODEL from the environment is always allowed too

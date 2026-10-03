@@ -26,13 +26,9 @@ _DEFAULT_POLL_S = 1.0
 # still-running kill sequence gets cut off when the process (its daemon thread
 # included) exits.
 _SHUTDOWN_JOIN_S = _DEFAULT_POLL_S + KILL_GRACE_SECONDS + KILL_FORCE_GRACE_SECONDS + 5
-_RELEASE = ""               # queued to wake the worker so that it frees a backend it keeps warm
 
 
 class JobBackend(Protocol):
-    """A backend may stay `warm` after a job (a loaded model server): the worker then keeps the GPU lock,
-    runs the next job at once if it is for the same backend, and otherwise calls `release()` first, as it
-    does after `keep_warm_s` without a job and when a phase ends."""
     name: str
     tool: str
 
@@ -161,8 +157,7 @@ class JobQueue:
             live = [j for j in self._jobs.values() if j.token == token and j.state not in _TERMINAL]
             for job in live:
                 self._cancel_locked(job)
-        self._todo.put(_RELEASE)          # the phase is over: nothing may stay loaded on the GPUs
-        return len(live)
+            return len(live)
 
     def _cancel_locked(self, job: Job) -> None:
         self._cancel[job.id].set()
@@ -184,42 +179,21 @@ class JobQueue:
             )
 
     def _loop(self) -> None:
-        warm = None                       # a backend still loaded on the GPUs: the GPU lock stays held
-
-        def cool() -> None:
-            nonlocal warm
-            if warm is not None:
-                try:
-                    warm.release()
-                finally:
-                    warm = None
-                    self.gpu_lock.release()
-
         while True:
-            try:
-                job_id = self._todo.get(timeout=warm.keep_warm_s if warm else None)
-            except queue.Empty:
-                job_id = _RELEASE
-            if not job_id:
-                cool()
-                if job_id is None:
-                    return
-                continue
+            job_id = self._todo.get()
+            if job_id is None:
+                return
             with self._cond:
                 job = self._jobs[job_id]
-            backend, cancel = self._backends[job.backend], self._cancel[job_id]
-            if warm is not backend:
-                cool()
+            cancel = self._cancel[job_id]
 
             def report(progress: dict, _job=job) -> None:
                 with self._cond:
                     _job.progress = dict(progress)
                     self._cond.notify_all()
 
-            if warm is None:
-                self.gpu_lock.acquire()
-            result, final, error, tb = None, "cancelled", None, None
-            try:
+            result, error, tb = None, None, None
+            with self.gpu_lock:
                 # Running starts once the GPUs are held, so gpu_seconds excludes the lock
                 # wait; a job cancelled before or during that wait is already final.
                 with self._cond:
@@ -228,16 +202,10 @@ class JobQueue:
                     job.state, job.started = "running", time.time()
                     self._cond.notify_all()
                 try:
-                    result = backend.run(job, cancel, report)
+                    result = self._backends[job.backend].run(job, cancel, report)
                     final = "cancelled" if cancel.is_set() else "done"
                 except Exception as exc:                  # noqa: BLE001 -- a job failure, not a crash
                     final, error, tb = "failed", f"{type(exc).__name__}: {exc}", traceback.format_exc()
-            finally:
-                if getattr(backend, "warm", False):
-                    warm = backend
-                else:
-                    warm = None
-                    self.gpu_lock.release()
             result_file = summary = None
             if result is not None:
                 summary = summarise(result)

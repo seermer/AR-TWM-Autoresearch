@@ -1,8 +1,8 @@
 """caption_videos: caption clips with a local video model, as a GPU job.
 
-A job starts `vllm serve` (the `captioner` config) on the node's GPUs unless the last caption job left
-it loaded, and sends every clip file to it through the OpenAI-compatible endpoint. The kernel sends the
-video; no video bytes pass through the agent or the paid agent model.
+Each job starts `vllm serve` (the `captioner` config) on the node's GPUs, sends every clip
+file to it through the OpenAI-compatible endpoint, and always stops it again. The kernel
+sends the video; no video bytes pass through the agent or the paid agent model.
 """
 from __future__ import annotations
 
@@ -70,65 +70,25 @@ def stage_clip(caller, path: str, dst: Path) -> None:
 
 class CaptionBackend:
     """JobQueue backend for caption_videos. Args: {"paths": [container paths], "prompt": str}.
-    Result: {"clips": {path: {"caption"} | {"error"}}, "load_s"} (load_s is None when the server was
-    already loaded). The server stays loaded after a job (`warm`), so the next caption job starts at once;
-    the queue calls `release()` before another kind of job, after `keep_warm_s` idle and at phase end."""
+    Result: {"clips": {path: {"caption"} | {"error"}}, "load_s", "gpu_memory_mib", "gpu_memory_released"}."""
     name = tool = TOOL
 
     def __init__(self, cfg, run_dir: Path, gpus: list[int], registry, recorder,
                  gpu_memory=gpu_memory_mib, poll_s: float = 2.0) -> None:
         self.cfg, self.run_dir, self.gpus = cfg, Path(run_dir), list(gpus)
         self.registry, self.recorder, self.gpu_memory, self.poll_s = registry, recorder, gpu_memory, poll_s
-        self.keep_warm_s = float(cfg.get("captioner.keep_warm_s"))
-        self.media = self.run_dir / "jobs" / "caption_media"     # the only directory the server may read
-        self._server, self._before, self._node = None, None, "run"
 
     def server_command(self, port: int, media_dir: Path) -> list[str]:
         return serve_command(self.cfg.get("captioner"), self.gpus, port, "captioner", media_dir)
-
-    @property
-    def warm(self) -> bool:
-        return self._server is not None
-
-    def _start(self, job, cancel) -> float | None:
-        c = self.cfg.get("captioner")
-        work = self.run_dir / "jobs" / job.id
-        self._before, self._node = self.gpu_memory(self.gpus), job.node
-        port = free_port()
-        self._server = VllmServer(c["env"], self.server_command(port, self.media), self.gpus, port, cwd=work, log_path=work / "vllm.log", recorder=self.recorder, node=job.node,
-                                  phase=TOOL, poll_s=self.poll_s, label="caption server")
-        load_s = self._server.start(float(c["startup_timeout_s"]), cancel)
-        if load_s is not None:
-            self.recorder.event("caption.server_ready", node=job.node, component="tools", job_id=job.id,
-                                load_s=load_s, payload={"gpus": self.gpus, "model": c["model"]})
-        return load_s
-
-    def release(self, reason: str = "released") -> None:
-        """Stop the server and wait for its GPU memory to come back."""
-        server, self._server = self._server, None
-        if server is None:
-            return
-        exit_code = server.stop()
-        # run_cancellable reports every stop we make as a cancel (-15, subproc.cancelled);
-        # this event says why the server stopped.
-        self.recorder.event("caption.server_stopped", node=self._node, component="tools", reason=reason,
-                            exit_code=exit_code)
-        # A cancel may be part of JobQueue.shutdown, whose join deadline a full wait would overrun.
-        timeout = float(self.cfg.get("captioner.memory_release_timeout_s"))
-        after, released = wait_gpu_release(self.gpu_memory, self.gpus, self._before,
-                                           min(timeout, 5.0) if reason == "cancelled" else timeout)
-        if released is False:
-            self.recorder.event("caption.gpu_not_released", node=self._node, component="tools",
-                                payload={"before": self._before, "after": after})
 
     def run(self, job, cancel: threading.Event, report) -> dict:
         c = self.cfg.get("captioner")
         caller = self.registry.lookup(job.token)
         if caller is None:
             raise RuntimeError("the phase that submitted this job has ended")
-        media = self.media / job.id
+        work = self.run_dir / "jobs" / job.id
+        media = work / "media"                    # the only directory the server may read
         media.mkdir(parents=True)
-        (self.run_dir / "jobs" / job.id).mkdir(parents=True, exist_ok=True)
         clips: dict[str, Path] = {}
         results: dict[str, dict] = {}
         for i, path in enumerate(job.args["paths"]):
@@ -138,43 +98,73 @@ class CaptionBackend:
                 clips[path] = dst
             except (PathError, OSError) as exc:
                 results[path] = {"error": str(exc)}
-        load_s, outcome = None, "failed"
+
+        if not clips:
+            return {"clips": results, "load_s": None, "gpu_memory_mib": None, "gpu_memory_released": None}
+        port = free_port()
+        before = self.gpu_memory(self.gpus)
+        peak = dict(before or {})
+
+        def sample() -> None:
+            now = self.gpu_memory(self.gpus) or {}
+            for g, used in now.items():
+                peak[g] = max(peak.get(g, 0), used)
+
+        server = VllmServer(c["env"], self.server_command(port, media), self.gpus, port, cwd=work,
+                            log_path=work / "vllm.log", recorder=self.recorder, node=job.node,
+                            phase=TOOL, poll_s=self.poll_s, label="caption server")
+        base, load_s, outcome = server.base_url, None, "failed"
         try:
-            if clips and (self._server is None or not self._server.alive):
-                self.release("died")
-                load_s = self._start(job, cancel)
-            if clips and not cancel.is_set():
-                base = self._server.base_url
-                with httpx.Client(timeout=float(c["clip_timeout_s"]), trust_env=False) as http:
-                    # Up to max_num_seqs requests at once, so the server batches them; each clip
-                    # still gets its own event, and results keep the submitted order.
-                    done_lock, captioned = threading.Lock(), [0]
+            load_s = server.start(float(c["startup_timeout_s"]), cancel, on_poll=sample)
+            with httpx.Client(timeout=float(c["clip_timeout_s"]), trust_env=False) as http:
+                if load_s is not None:
+                    self.recorder.event("caption.server_ready", node=job.node, component="tools",
+                                        job_id=job.id, load_s=load_s,
+                                        payload={"gpus": self.gpus, "model": c["model"]})
+                # Up to max_num_seqs requests at once, so the server batches them; each clip
+                # still gets its own event, and results keep the submitted order.
+                done_lock, captioned = threading.Lock(), [0]
 
-                    def one(path: str, file: Path) -> None:
-                        if cancel.is_set():
-                            return
-                        t0 = time.monotonic()
-                        recorded = self._caption(http, base, file, job.args["prompt"], c)
-                        result = {k: v for k, v in recorded.items() if k != "reasoning"}   # the agent gets the caption
-                        latency = time.monotonic() - t0
-                        with done_lock:
-                            results[path] = result
-                            captioned[0] += 1
-                            self.recorder.event("caption.clip", node=job.node, component="tools", job_id=job.id,
-                                                latency_s=latency, ok="caption" in result,
-                                                payload={"path": path, **recorded})
-                            report({"captioned": captioned[0], "total": len(clips)})
+                def one(path: str, file: Path) -> None:
+                    if cancel.is_set():
+                        return
+                    t0 = time.monotonic()
+                    recorded = self._caption(http, base, file, job.args["prompt"], c)
+                    result = {k: v for k, v in recorded.items() if k != "reasoning"}   # the agent gets the caption
+                    latency = time.monotonic() - t0
+                    with done_lock:
+                        results[path] = result
+                        sample()
+                        captioned[0] += 1
+                        self.recorder.event("caption.clip", node=job.node, component="tools", job_id=job.id,
+                                            latency_s=latency, ok="caption" in result,
+                                            payload={"path": path, **recorded})
+                        report({"captioned": captioned[0], "total": len(clips)})
 
-                    with ThreadPoolExecutor(max_workers=max(1, min(int(c["max_num_seqs"]), len(clips)))) as pool:
-                        for f in [pool.submit(one, path, file) for path, file in clips.items()]:
-                            f.result()
+                with ThreadPoolExecutor(max_workers=max(1, min(int(c["max_num_seqs"]), len(clips)))) as pool:
+                    for f in [pool.submit(one, path, file) for path, file in clips.items()]:
+                        f.result()
             outcome = "done"
         finally:
+            exit_code = server.stop()
             shutil.rmtree(media, ignore_errors=True)
-            if cancel.is_set() or outcome != "done":
-                self.release("cancelled" if cancel.is_set() else outcome)
+            # run_cancellable reports every stop we make as a cancel (-15, subproc.cancelled);
+            # this event says why the server stopped.
+            self.recorder.event("caption.server_stopped", node=job.node, component="tools", job_id=job.id,
+                                reason="cancelled" if cancel.is_set() else outcome,
+                                exit_code=exit_code)
+        # A cancelled job may be part of JobQueue.shutdown, whose join deadline a full wait would
+        # overrun.
+        timeout = float(c["memory_release_timeout_s"])
+        after, released = wait_gpu_release(self.gpu_memory, self.gpus, before,
+                                           min(timeout, 5.0) if cancel.is_set() else timeout)
+        if released is False:
+            self.recorder.event("caption.gpu_not_released", node=job.node, component="tools",
+                                job_id=job.id, payload={"before": before, "after": after})
         results = {p: results[p] for p in job.args["paths"] if p in results}     # the submitted order
-        return {"clips": results, "load_s": load_s}
+        return {"clips": results, "load_s": load_s,
+                "gpu_memory_mib": {"before": before, "peak": peak or None, "after": after},
+                "gpu_memory_released": released}
 
     def _caption(self, http: httpx.Client, base: str, file: Path, prompt: str, c: dict) -> dict:
         # No max_tokens: the model reasons first, and a cap could cut the caption off.
@@ -219,8 +209,7 @@ def register_caption_tool(mcp, kit, q) -> None:
     CaptionBackend, or a fake in smoke runs)."""
     @mcp.tool(name=TOOL, description="Caption video clips with the kernel's local video model, which sees the "
               "whole clip. A GPU job: returns {job_id} at once; collect it with job_wait. Loading the model takes "
-              "minutes, then seconds per clip; the model stays loaded for a few minutes after a job, so a caption "
-              "job that follows another starts at once. Send every clip of one prompt in one call. The finished "
+              "minutes for every job, then seconds per clip, so send every clip of one prompt in one call. The finished "
               "job's result file (job_wait gives its path) holds `clips`: each path mapped to {caption} or "
               "{error}. Captions are text only: for data_ingest, write {\"caption\": \"<text>\"} to a JSON file "
               "under /workspace/staging/ with a script that reads the result file.")

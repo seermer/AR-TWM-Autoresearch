@@ -24,7 +24,7 @@ REAL = KernelConfig.load()
 
 def fake_cfg(**over) -> KernelConfig:
     c = {**REAL.get("captioner"), "env": "autoresearcher", "startup_timeout_s": 60, "clip_timeout_s": 10,
-         "memory_release_timeout_s": 2, "keep_warm_s": 60, **over}
+         "memory_release_timeout_s": 2, **over}
     return KernelConfig(raw={"captioner": c}, repo_root=REAL.repo_root)
 
 
@@ -67,7 +67,7 @@ def _pid_gone(run_dir: Path, job_id: str) -> bool:
     return False
 
 
-def test_batch_success_captions_every_clip_and_shutdown_stops_the_server(make, tmp_path):
+def test_batch_success_captions_every_clip_then_stops_the_server(make, tmp_path):
     q, caller, rec, ws, staging = make()
     (ws / "clips" / "a.mp4").write_bytes(b"x" * 10)
     (staging / "b.mp4").write_bytes(b"y" * 20)
@@ -79,71 +79,21 @@ def test_batch_success_captions_every_clip_and_shutdown_stops_the_server(make, t
     assert clips == {
         "/workspace/clips/a.mp4": {"caption": "Describe the camera motion. [10 bytes, tp=4, gpus=0,1,4,5]"},
         "/workspace/staging/b.mp4": {"caption": "Describe the camera motion. [20 bytes, tp=4, gpus=0,1,4,5]"}}
-    assert job_result(out)["load_s"] > 0
+    assert job_result(out)["load_s"] > 0 and job_result(out)["gpu_memory_released"] is True
     assert out["summary"] == {"items": 2, "failed": 0, "errors": []}
     assert out["result_file"] == f"/workspace/staging/results/caption_videos-{job}.json"
     assert out["progress"] == {"captioned": 2, "total": 2}
     run = tmp_path / "run"
-    assert not (run / "jobs" / "caption_media" / job).exists()          # the job's clips are gone again
+    assert _pid_gone(run, job) and not (run / "jobs" / job / "media").exists()
     argv = json.loads((run / "jobs" / job / "fake_vllm.argv.json").read_text())
-    assert argv[argv.index("--allowed-local-media-path") + 1] == str(run / "jobs" / "caption_media")
+    assert argv[argv.index("--allowed-local-media-path") + 1] == str(run / "jobs" / job / "media")
     assert argv[argv.index("--host") + 1] == "127.0.0.1"
-    q.shutdown()
-    assert _pid_gone(run, job)
     events = rec.read_events("n1")
     assert [(e["reason"], e["exit_code"]) for e in events if e["type"] == "caption.server_stopped"] == \
-        [("released", -15)]
+        [("done", -15)]
     assert [e["ok"] for e in events if e["type"] == "caption.clip"] == [True, True]
     assert all(e["latency_s"] >= 0 for e in events if e["type"] == "caption.clip")
     assert any(e["type"] == "caption.server_ready" for e in events)
-
-
-def _unlocked(q) -> bool:
-    deadline = time.monotonic() + 10
-    while q.gpu_lock.locked() and time.monotonic() < deadline:
-        time.sleep(0.1)
-    return not q.gpu_lock.locked()
-
-
-def test_a_caption_job_that_follows_another_reuses_the_loaded_server(make, tmp_path):
-    """n3 of live-10-02 ran 10 caption jobs, each paying a 72-300 s model load."""
-    q, caller, rec, ws, _ = make()
-    (ws / "a.mp4").write_bytes(b"x")
-    first = q.wait(caller, submit(q, caller, ["a.mp4"], "One.")["job_id"], 120)
-    second = q.wait(caller, submit(q, caller, ["a.mp4"], "Two.")["job_id"], 120)
-    assert job_result(first)["load_s"] > 0 and job_result(second)["load_s"] is None
-    assert "Two." in job_result(second)["clips"]["/workspace/a.mp4"]["caption"]
-    assert not (tmp_path / "run" / "jobs" / second["id"] / "fake_vllm.pid").exists()     # no second server
-    assert len([e for e in rec.read_events("n1") if e["type"] == "caption.server_ready"]) == 1
-
-
-def test_the_server_is_released_before_another_kind_of_job_and_when_the_phase_ends(make, tmp_path):
-    q, caller, rec, ws, _ = make()
-    held = []
-
-    class Other:
-        name = tool = "other"
-
-        def run(self, job, cancel, report):
-            held.append(_pid_gone(tmp_path / "run", first["id"]))       # the caption server is gone by now
-            return {"items": []}
-    q.register(Other())
-    (ws / "a.mp4").write_bytes(b"x")
-    first = q.wait(caller, submit(q, caller, ["a.mp4"], "One.")["job_id"], 120)
-    assert q.gpu_lock.locked()                                           # warm: the GPUs stay taken
-    assert q.wait(caller, q.submit(caller, "other", {}), 120)["state"] == "done" and held == [True]
-    third = q.wait(caller, submit(q, caller, ["a.mp4"], "Three.")["job_id"], 120)
-    assert job_result(third)["load_s"] > 0                               # loaded again
-    q.cancel_for_token(caller.token)                                     # what a phase end does
-    assert _pid_gone(tmp_path / "run", third["id"])
-    assert _unlocked(q)
-
-
-def test_an_idle_server_is_released_after_keep_warm_s(make, tmp_path):
-    q, caller, _, ws, _ = make(fake_cfg(keep_warm_s=1))
-    (ws / "a.mp4").write_bytes(b"x")
-    out = q.wait(caller, submit(q, caller, ["a.mp4"], "One.")["job_id"], 120)
-    assert _pid_gone(tmp_path / "run", out["id"]) and _unlocked(q)
 
 
 def test_every_bad_path_is_named_in_one_refusal_and_paths_may_come_from_a_file(make):
@@ -421,7 +371,8 @@ def test_real_model_captions_two_example_clips(tmp_path):
     assert out["state"] == "done", out["error"]
     clips = job_result(out)["clips"]
     assert all(len(v.get("caption", "")) > 20 for v in clips.values()), clips
-    assert again["state"] == "done" and job_result(again)["load_s"] is None       # the loaded server was reused
+    assert job_result(out)["gpu_memory_released"] is True
+    assert again["state"] == "done"
     assert "caption" in job_result(again)["clips"]["/workspace/staging/cam.mp4"]
     events = [e["type"] for e in rec.read_events("gpu")]
-    assert events.count("caption.server_ready") == 1 and "caption.gpu_not_released" not in events
+    assert "caption.gpu_not_released" not in events

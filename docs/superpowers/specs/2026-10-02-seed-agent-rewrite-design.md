@@ -207,8 +207,8 @@ characters in one phase were hand-typed paths, clip ids and captions. Decided an
 - **One refusal names every bad item**: the first few in the message, all of them in a file under
   `/workspace/staging/results/`, so a script can drop them and call again.
 - **A job takes any number of items.** The per-job item cap is gone; the job timeout stays.
-- **The caption server stays loaded** after a caption job (`captioner.keep_warm_s`), holding the GPU
-  lock, until another kind of job, the idle limit or the end of the phase.
+- **No GPU tool stays loaded after its job.** A warm caption server was built and removed the same day:
+  the agent container now sees the run's GPUs, so the kernel holds them only while a job runs.
 - **The planner reviews the engineer's result** in both phases: `accept_result` or a revised plan,
   within the plans-per-phase limit. Engineers had never reported back on their own.
 - **The first message says what each folder is for** (`folders` in the context, kernel-owned).
