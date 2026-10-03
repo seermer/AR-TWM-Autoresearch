@@ -92,6 +92,11 @@ class DataTools:
             conn.close()
         rows = [{"index": i, "video": c["video"], "accepted": r.accepted, "clip_id": r.clip_id, "formats": r.formats,
                  "warnings": r.warnings, "reasons": r.reasons} for i, (c, r) in enumerate(zip(candidates, results))]
+        # the panel's ingest table: one row per candidate, with what the agent staged
+        self.recorder.event("ingest.result", node=caller.node, phase=caller.phase, attempt=caller.attempt,
+                            component="tools", payload={"rows": [
+                                {**row, **{key: c.get(key) for key in ("caption", "pose", "camera_motion")}}
+                                for row, c in zip(rows, candidates)]})
         return {"accepted": sum(r["accepted"] for r in rows), "rejected": sum(not r["accepted"] for r in rows),
                 "rejected_for": _counted(r for row in rows if not row["accepted"] for r in row["reasons"]),
                 "warnings": _counted(w for row in rows for w in row["warnings"]),

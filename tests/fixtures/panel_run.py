@@ -200,10 +200,16 @@ def make_run(base: Path, name: str = "r1") -> Path:
     rec.event("ingest.accepted", node="n1", phase="ingest", payload={"candidate": cand1, "clip_id": "clip1",
                                                                     "formats": ["video_caption_camera"], "warnings": []})
     rec.event("ingest.rejected", node="n1", phase="ingest", payload={"candidate": cand2, "reasons": ["aspect 4:3"]})
+    rec.event("ingest.result", node="n1", phase="improve_recipe", attempt=1, component="tools", payload={"rows": [
+        {"index": 0, "video": "/workspace/staging/work/v1.mp4", "caption": "/workspace/staging/work/v1.json",
+         "camera_motion": "moving", "accepted": True, "clip_id": "clip1", "formats": ["video_caption_camera"],
+         "warnings": [], "reasons": []},
+        {"index": 1, "video": "/workspace/staging/work/v2.mp4", "caption": "/workspace/staging/work/v2.json",
+         "camera_motion": "static", "accepted": False, "clip_id": None, "formats": [], "warnings": [],
+         "reasons": ["aspect 4:3"]}]})
     rec.event("tool.result", node="n1", phase="improve_recipe", attempt=1, component="tools", tool="data_ingest",
-              parent_span_id=span, duration_s=2.0, payload={"tool": "data_ingest", "result": [
-                  {"accepted": True, "clip_id": "clip1", "formats": ["video_caption_camera"], "warnings": [], "reasons": []},
-                  {"accepted": False, "clip_id": None, "formats": [], "warnings": [], "reasons": ["aspect 4:3"]}]})
+              parent_span_id=span, duration_s=2.0, payload={"tool": "data_ingest", "result": {
+                  "accepted": 1, "rejected": 1, "result_file": "/workspace/staging/results/data_ingest-1.json"}})
     rec.event("gate.failed", node="n1", phase="gate", payload={"failures": ["resolution 1x1 is not allowed"], "recipe": {}})
     rec.event("phase.end", node="n1", phase="improve_recipe", attempt=1)
     rec.event("gate.passed", node="n1", phase="gate", payload={"failures": [], "recipe": {}})

@@ -80,28 +80,18 @@ def leakage_index(run: Run) -> dict[str, dict]:
 
 
 def ingest_calls(run: Run, node_id: str) -> list[dict]:
-    """One row per candidate: the data_ingest call lists the candidates and its result has
-    one entry per candidate, in order."""
-    events = run.log.events(files=[node_id])
-    done = {e.get("parent_span_id"): e for e in events
-            if e.get("type") in ("tool.result", "tool.error") and e.get("tool") == "data_ingest"}
+    """One row per candidate of every data_ingest call: the kernel records them as `ingest.result`."""
     rows = []
-    for e in events:
-        if e.get("type") != "tool.call" or e.get("tool") != "data_ingest":
+    for e in run.log.events(files=[node_id]):
+        if e.get("type") != "ingest.result":
             continue
-        candidates = ((run.log.payload(e.get("payload")) or {}).get("args") or {}).get("candidates") or []
-        end = done.get(e.get("span_id"))
-        body = (run.log.payload(end.get("payload")) or {}) if end else {}
-        results = body.get("result") if end and end.get("type") == "tool.result" else None
-        error = body.get("error") if end and end.get("type") == "tool.error" else None
-        for i, c in enumerate(candidates):
-            r = results[i] if isinstance(results, list) and i < len(results) else {}
-            outcome = "accepted" if r.get("accepted") else "rejected" if r else "error" if error else "pending"
-            video = c.get("video") or ""
+        for r in (run.log.payload(e.get("payload")) or {}).get("rows") or []:
+            video = r.get("video") or ""
             rows.append({"time": fmt_ts(e["ts_wall"]), "phase": e.get("phase"), "attempt": e.get("attempt"),
-                         "video": video, "caption": c.get("caption"), "pose": c.get("pose"),
-                         "camera_motion": c.get("camera_motion"), "outcome": outcome, "clip_id": r.get("clip_id"),
-                         "reasons": "; ".join(r.get("reasons") or []) or (error or ""),
+                         "video": video, "caption": r.get("caption"), "pose": r.get("pose"),
+                         "camera_motion": r.get("camera_motion"),
+                         "outcome": "accepted" if r.get("accepted") else "rejected", "clip_id": r.get("clip_id"),
+                         "reasons": "; ".join(r.get("reasons") or []),
                          "host_video": run.files.host_path(node_id, e.get("phase"), e.get("attempt"), video)})
     return rows
 
