@@ -142,9 +142,9 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
         result = env.runner(
             image=image, name=container_name(env.run_id, node, phase, attempt),
             mounts=Mounts(agent=dirs["agent"], workspace=dirs["workspace"], staging=dirs["staging"],
-                          context=dirs["context"], store=Path(env.run_dir) / "store",
+                          context=dirs["context"],
                           contract=env.cfg.repo_root / "contract", sockets=env.socket_dir,
-                          agent_readonly=agent_readonly, nodes=nodes, hide_scores=phase == "edit_self",
+                          agent_readonly=agent_readonly, nodes=nodes,
                           code=running if runner_commit is not None else None),
             command=["python", "-m", "ar_contract.run", phase],
             env={"AR_TOKEN": caller.token, "AR_DEFAULT_MODEL": env.default_model, "AR_NODE": node,

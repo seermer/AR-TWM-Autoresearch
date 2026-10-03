@@ -7,6 +7,7 @@ moved, every navigation case failed, the tool exited 0 anyway, and the run
 produced a report silently missing five metrics.
 """
 import os
+import subprocess
 
 import pytest
 import yaml
@@ -23,7 +24,7 @@ def _tree(tmp_path, *, worldmodel="../WorldModel", wbench="../WBench"):
     (tmp_path / "WBench").mkdir()
     (root / "configs" / "kernel.yaml").write_text(yaml.safe_dump({
         "paths": {"worldmodel": worldmodel, "wbench": wbench, "runs_dir": "runs"},
-        "gpus": {"default": "0,1,2,3", "min_count": 4},
+        "gpus": {"default": "0,1,2,3", "min_count": 4, "free_below_mib": 512},
     }))
     return root
 
@@ -181,3 +182,18 @@ def test_links_an_agent_left_in_a_run_are_not_tree_problems(tmp_path):
         (tmp_path / folder / "link.mp4").symlink_to("/workspace/work/clips/a.mp4")
     found = _broken_links(tmp_path, (tmp_path / "runs", tmp_path / ".obsolete_runs"))
     assert [link for link, _ in found] == [tmp_path / "weights" / "link.mp4"]
+
+
+def test_a_missing_nvidia_runtime_and_busy_gpus_are_failures(monkeypatch):
+    from ar_kernel import doctor
+    cfg = KernelConfig.load()
+    monkeypatch.setattr(doctor.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, '{"runc":{}}', ""))
+    monkeypatch.setattr(doctor, "require_free_gpus", lambda gpus, limit: (_ for _ in ()).throw(
+        RuntimeError("the GPUs are not free: GPU 1 has 3200 MiB in use (limit 512 MiB). A kernel GPU job needs")))
+    found = {f.check: f for f in doctor._gpus(cfg)}
+    assert found["docker.nvidia"].level == "fail" and "nvidia-container-toolkit" in found["docker.nvidia"].detail
+    assert found["gpus.free"].level == "fail" and found["gpus.free"].detail.endswith("(limit 512 MiB).")
+    monkeypatch.setattr(doctor.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, '{"nvidia":{}}', ""))
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr(doctor, "require_free_gpus", lambda gpus, limit: None)
+    assert {f.level for f in doctor._gpus(cfg)} == {"ok"}

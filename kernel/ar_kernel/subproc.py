@@ -39,19 +39,16 @@ def project_env(name: str, root: Path | None = None) -> Path | None:
 
 
 def conda_command(env: str, args: list[str]) -> list[str]:
-    """`conda run` argv for `env`. A value containing "/" is a conda-prefix path (`-p`,
-    repo-relative unless absolute). A plain name runs the project env `.envs/<name>` when there is
-    one -- so config keeps saying `alayaworld` and the env still lives inside the project -- and
-    otherwise a named env of the conda installation (`-n`), as on a machine that has not been
-    moved into `.envs` yet."""
+    """`conda run` argv for `env`: a conda-prefix path when it contains "/" (repo-relative unless
+    absolute), otherwise the project env `.envs/<name>`."""
     if "/" in env:
         path = Path(env)
         path = path if path.is_absolute() else REPO_ROOT / path
-        return ["conda", "run", "--no-capture-output", "-p", str(path), *args]
-    local = project_env(env)
-    if local:
-        return ["conda", "run", "--no-capture-output", "-p", str(local), *args]
-    return ["conda", "run", "--no-capture-output", "-n", env, *args]
+    else:
+        path = project_env(env)
+        if path is None:
+            raise FileNotFoundError(f"no conda env {env!r} in {REPO_ROOT / '.envs'}")
+    return ["conda", "run", "--no-capture-output", "-p", str(path), *args]
 
 
 def proc_start_time(pid: int) -> str | None:

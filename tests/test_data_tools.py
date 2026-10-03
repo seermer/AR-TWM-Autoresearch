@@ -257,3 +257,18 @@ def test_ingesting_an_already_ingested_file_names_the_container_path(env):
         tools.ingest(caller, [{"video": "/workspace/staging/c0/v.mp4", "caption": "/workspace/staging/c0/c.json",
                                "camera_motion": "moving", "provenance": PROV}])
     assert str(run) not in str(exc.value)
+
+
+def test_a_path_that_is_not_text_or_not_staged_is_that_candidates_error(env):
+    """A caption given as the object itself crashed the call; a file outside staging was named by its host path."""
+    tools, caller, _, _ = env
+    (caller.workspace_host / "loose.mp4").write_bytes(b"x"), (caller.staging_host / "a.mp4").write_bytes(b"x")
+    with pytest.raises(ToolError) as refused:
+        tools.ingest(caller, [{"video": "/workspace/staging/a.mp4", "caption": {"caption": "a room"},
+                               "camera_motion": "static", "provenance": PROV},
+                              {"video": "/workspace/loose.mp4", "caption": "/workspace/staging/a.json",
+                               "camera_motion": "static", "provenance": PROV}])
+    text = str(refused.value)
+    assert "item 0: caption must be the path of a file" in text
+    assert "item 1: video /workspace/loose.mp4 is not under /workspace/staging" in text
+    assert str(caller.workspace_host) not in text

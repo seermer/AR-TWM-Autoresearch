@@ -117,10 +117,17 @@ def test_stop_leaves_no_live_threads_and_no_sockets(live):
 
 def test_tool_results_and_errors_have_blocked_names_replaced(tmp_path):
     rec = Recorder(tmp_path / "run")
-    reg = TokenRegistry(rec)
-    kit = ToolKit(reg, rec, scrub_names=["wbench"])
+    reg = TokenRegistry(rec, scrub_names=["wbench"])
+    kit = ToolKit(reg, rec)
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=tmp_path,
                        staging_host=tmp_path)
+    from ar_kernel.tools.server import publish, refuse
+    publish(caller, "job", {"items": [{"error": "worker log: [run_wbench] died"}]})       # files are scrubbed too
+    assert "run_render" in (tmp_path / "results" / "job.json").read_text()
+    with pytest.raises(ToolError):
+        refuse(caller, "t", ["a"], {0: "WBench case"})
+    assert not [p for p in (tmp_path / "results").iterdir() if "wbench" in p.read_text().lower()]
+    assert not list(tmp_path.glob("*.tmp"))
     request = type("R", (), {"headers": {"authorization": f"Bearer {caller.token}"}})()
     ctx = type("C", (), {"request_context": type("RC", (), {"request": request})()})()
 

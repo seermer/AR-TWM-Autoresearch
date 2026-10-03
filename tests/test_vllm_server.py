@@ -90,3 +90,14 @@ def test_gpus_holding_more_than_the_limit_are_named_and_a_display_server_is_let_
     require_free_gpus([0, 1], 512, gpu_memory=lambda gpus: None)                    # unreadable: not refused
     with pytest.raises(RuntimeError, match=r"GPU 1 has 3200 MiB in use \(limit 512 MiB\).*nvidia-smi"):
         require_free_gpus([0, 1], 512, gpu_memory=lambda gpus: {0: 9, 1: 3200})
+
+
+def test_the_free_check_waits_with_backoff_for_a_job_that_is_still_giving_memory_back():
+    from ar_kernel.tools.vllm_server import FREE_WAITS_S, require_free_gpus
+    readings, slept = iter([9000, 4000, 600, 20]), []
+    require_free_gpus([0], 512, gpu_memory=lambda gpus: {0: next(readings)}, waits=FREE_WAITS_S, sleep=slept.append)
+    assert slept == [4, 8, 16]
+    slept.clear()
+    with pytest.raises(RuntimeError, match="GPU 0 has 9000 MiB"):
+        require_free_gpus([0], 512, gpu_memory=lambda gpus: {0: 9000}, waits=FREE_WAITS_S, sleep=slept.append)
+    assert slept == [4, 8, 16, 32, 64]                 # 124 s in all, then the refusal

@@ -22,7 +22,7 @@ from .tools.hf_tools import HfTools, register_hf_tools
 from .tools.jobs import JobQueue, register_job_tools
 from .tools.server import ToolKit, build_tool_app, new_mcp
 from .tools.skills import register_skill_tool
-from .tools.vllm_server import require_free_gpus
+from .tools.vllm_server import FREE_WAITS_S, require_free_gpus
 
 
 @dataclass
@@ -58,14 +58,14 @@ class RunKit:
 def build_run_kit(cfg, run_dir: Path, gpus: list[int], recorder, environ) -> RunKit:
     budget = Budget.from_config(cfg)
     budget.load(run_dir)
-    registry = TokenRegistry(recorder)
+    registry = TokenRegistry(recorder, cfg.get("isolation.blocked_names") or [])
     gpu_lock = threading.Lock()
     def require_free() -> None:
-        require_free_gpus(gpus, int(cfg.get("gpus.free_below_mib")))
+        require_free_gpus(gpus, int(cfg.get("gpus.free_below_mib")), waits=FREE_WAITS_S)
     queue = JobQueue(recorder, gpu_lock, wait_cap_s=float(cfg.get("tools.job_wait_max_s")), require_free=require_free)
     for backend in build_gpu_backends(cfg, run_dir, gpus, registry, recorder):
         queue.register(backend)
-    kit, mcp = ToolKit(registry, recorder, cfg.get("isolation.blocked_names") or []), new_mcp()
+    kit, mcp = ToolKit(registry, recorder), new_mcp()
     register_data_tools(mcp, kit, DataTools(cfg, run_dir, recorder, gpus, gpu_lock, require_free))
     register_hf_tools(mcp, kit, HfTools(cfg, Path(run_dir) / "hf_tmp"))
     register_job_tools(mcp, kit, queue)

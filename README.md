@@ -13,7 +13,7 @@ Every step ends with a check; do not continue if it fails.
 | CUDA toolkit | `nvcc --version` works and says 12.x (usually `/usr/local/cuda-12.8`) |
 | RAM | 128 GB minimum, 256 GB recommended |
 | Disk | 700 GB free on one disk (downloads about 460 GB) |
-| Software | `conda` (Miniforge), `git`, `ffmpeg`, `docker` (your user can run `docker ps` without `sudo`) |
+| Software | `conda` (Miniforge), `git`, `ffmpeg`, `docker` (your user can run `docker ps` without `sudo`) with `nvidia-container-toolkit` (agent containers use the GPUs) |
 | Accounts | GitHub (SSH key), Hugging Face, an LLM API key (see step 3) |
 
 Check:

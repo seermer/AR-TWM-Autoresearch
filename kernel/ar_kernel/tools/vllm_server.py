@@ -29,10 +29,18 @@ def gpu_memory_mib(gpus: list[int]) -> dict[int, int] | None:
     return {g: used[g] for g in gpus if g in used}
 
 
-def require_free_gpus(gpus: list[int], limit_mib: int, gpu_memory=gpu_memory_mib) -> None:
-    """Raise when a GPU holds more than `limit_mib`: the agent's container sees the same GPUs, and a
-    kernel job that starts beside the agent's own processes runs out of memory."""
-    busy = {g: used for g, used in (gpu_memory(gpus) or {}).items() if used > limit_mib}
+FREE_WAITS_S = (4, 8, 16, 32, 64)        # before a job: a job that just ended may still be giving memory back
+
+
+def require_free_gpus(gpus: list[int], limit_mib: int, gpu_memory=gpu_memory_mib, waits=(), sleep=time.sleep) -> None:
+    """Raise when a GPU holds more than `limit_mib`, checking again after each of `waits` seconds: the
+    agent's container sees the same GPUs, and a kernel job that starts beside the agent's own processes
+    runs out of memory."""
+    for wait in (*waits, None):
+        busy = {g: used for g, used in (gpu_memory(gpus) or {}).items() if used > limit_mib}
+        if not busy or wait is None:
+            break
+        sleep(wait)
     if busy:
         raise RuntimeError(
             "the GPUs are not free: " + ", ".join(f"GPU {g} has {used} MiB in use" for g, used in busy.items())

@@ -79,9 +79,12 @@ def publish(caller, name: str, result) -> str:
     from .hf_tools import move_into            # imports this module
     with tempfile.NamedTemporaryFile("w", dir=caller.staging_host, suffix=".tmp", delete=False,
                                      encoding="utf-8") as handle:
-        json.dump(result, handle, ensure_ascii=False, indent=1)
+        json.dump(scrub(result, caller.scrub_names), handle, ensure_ascii=False, indent=1)
     rel = f"results/{name}.json"
-    move_into(Path(handle.name), caller.staging_host, rel)
+    try:
+        move_into(Path(handle.name), caller.staging_host, rel)
+    finally:
+        Path(handle.name).unlink(missing_ok=True)
     return str(STAGING / rel)
 
 
@@ -102,14 +105,13 @@ def build_tool_app(mcp: MCPServer):
     )
 
 
-EDIT_SELF_TOOLS = {"ask", "read_skill"}       # edit_self improves the agent: no data tools, no scores
+EDIT_SELF_TOOLS = {"ask", "read_skill"}       # edit_self improves the agent: no data tools
 
 
 class ToolKit:
-    def __init__(self, registry, recorder, scrub_names: list[str] = ()) -> None:
+    def __init__(self, registry, recorder) -> None:
         self.registry = registry
         self.recorder = recorder
-        self.scrub_names = list(scrub_names)      # replaced in everything a tool returns to an agent
 
     async def call(self, ctx: Context, name: str, args: dict, fn: Callable[[Any], Any]) -> Any:
         request = getattr(ctx.request_context, "request", None)
@@ -128,14 +130,14 @@ class ToolKit:
             self.recorder.event("tool.error", parent_span_id=span, tool=name,
                                  duration_s=time.monotonic() - started,
                                  payload={"tool": name, "error": str(exc)}, **base)
-            raise ToolError(scrub(str(exc), self.scrub_names)) from None
+            raise ToolError(scrub(str(exc), caller.scrub_names)) from None
         except Exception as exc:                          # noqa: BLE001 -- contain kernel bugs
             self.recorder.event("tool.error", parent_span_id=span, tool=name,
                                  duration_s=time.monotonic() - started,
                                  payload={"tool": name, "error": f"{type(exc).__name__}: {exc}",
                                           "traceback": traceback.format_exc()}, **base)
-            raise ToolError(scrub(f"{type(exc).__name__}: {exc}", self.scrub_names)) from exc
+            raise ToolError(scrub(f"{type(exc).__name__}: {exc}", caller.scrub_names)) from exc
         self.recorder.event("tool.result", parent_span_id=span, tool=name,
                              duration_s=time.monotonic() - started,
                              payload={"tool": name, "result": result}, **base)
-        return scrub(result, self.scrub_names)
+        return scrub(result, caller.scrub_names)

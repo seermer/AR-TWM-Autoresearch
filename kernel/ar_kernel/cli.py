@@ -1,6 +1,5 @@
 from __future__ import annotations
 import argparse, json, os, shutil, signal, sys, time, traceback
-from pathlib import Path
 
 from .archive.nodes import NodeStore
 from .config import KernelConfig, load_dotenv, resolve_gpus

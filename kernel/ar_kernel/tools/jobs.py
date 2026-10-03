@@ -215,7 +215,7 @@ class JobQueue:
                 try:
                     result_file = publish(job.caller, f"{job.backend}-{job.id}", result)
                 except OSError as exc:                    # the phase ended and took its staging with it
-                    error = f"the result could not be written: {type(exc).__name__}: {exc}"
+                    final, error = "failed", f"the result could not be written: {type(exc).__name__}: {exc}"
             with self._cond:
                 job.state, job.error, job.finished = final, error, time.time()
                 job.result_file, job.summary = result_file, summary
@@ -244,11 +244,11 @@ def register_job_tools(mcp, kit, q: JobQueue) -> None:
     async def job_status(job_id: Annotated[str, Field(description="the job_id a GPU tool returned (its first 8 characters are enough)")], ctx: Context) -> dict[str, Any]:
         return await kit.call(ctx, "job_status", {"job_id": job_id}, lambda c: q.status(c, job_id))
 
-    @mcp.tool(name="job_wait", description="Wait for a GPU job, at most 300 s per call; returns "
+    @mcp.tool(name="job_wait", description=f"Wait for a GPU job, at most {q.wait_cap_s:.0f} s per call; returns "
               "state 'running' if it has not finished: call again to keep waiting. A finished job gives "
               "`result_file` and `summary` as job_status does.")
     async def job_wait(job_id: Annotated[str, Field(description="the job_id a GPU tool returned (its first 8 characters are enough)")], ctx: Context,
-                       timeout_s: Annotated[float, Field(description="seconds to wait, at most 300; call again if the job is still running")] = 300) -> dict[str, Any]:
+                       timeout_s: Annotated[float, Field(description="seconds to wait; call again if the job is still running")] = q.wait_cap_s) -> dict[str, Any]:
         return await kit.call(ctx, "job_wait", {"job_id": job_id, "timeout_s": timeout_s},
                               lambda c: q.wait(c, job_id, timeout_s))
 

@@ -210,8 +210,10 @@ characters in one phase were hand-typed paths, clip ids and captions. Decided an
 - **No GPU tool stays loaded after its job.** A warm caption server was built and removed the same day:
   the agent container now sees the run's GPUs, so the kernel holds them only while a job runs.
 - **The agent container is a PyTorch CUDA image with the run's GPUs** (NVIDIA container runtime, the
-  run's own device list, so 2, 4 or 8 GPUs work alike). A kernel GPU job or `recipe_check` an agent
+  run's own device list, so 4 or 8 GPUs work alike; 4 is the minimum). A kernel GPU job or `recipe_check` an agent
   asked for fails while a GPU holds more than `gpus.free_below_mib`.
+- **`edit_self` sees the same node files as `improve_recipe`** (user decision 2026-10-03): scores are in
+  the files under `/nodes`, never stated in a prompt or the edit context. Only `eval/` stays hidden.
 - **The planner reviews the engineer's result** in both phases: `accept_result` or a revised plan,
   within the plans-per-phase limit. Engineers had never reported back on their own.
 - **The first message says what each folder is for** (`folders` in the context, kernel-owned).

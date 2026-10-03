@@ -29,11 +29,12 @@ class Caller:
     workspace_host: Path
     staging_host: Path
     mock_script: str | None = None
+    scrub_names: tuple[str, ...] = ()      # replaced in everything a kernel tool gives this caller
 
 
 class TokenRegistry:
-    def __init__(self, recorder) -> None:
-        self._recorder = recorder
+    def __init__(self, recorder, scrub_names=()) -> None:
+        self._recorder, self._scrub_names = recorder, tuple(scrub_names)
         self._by_token: dict[str, Caller] = {}
         self._lock = threading.Lock()
         self._on_revoke: list[Callable[[str], None]] = []
@@ -43,7 +44,7 @@ class TokenRegistry:
         token = "ar-" + secrets.token_urlsafe(32)
         self._recorder.add_redaction(token)
         caller = Caller(token, node, phase, attempt, Path(workspace_host), Path(staging_host),
-                        mock_script)
+                        mock_script, self._scrub_names)
         with self._lock:
             self._by_token[token] = caller
         return caller

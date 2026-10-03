@@ -113,6 +113,9 @@ class _MockHf:
     def search(self, c, query, kind="dataset", limit=20):
         return []
 
+    def list_files(self, c, repo, revision, pattern="*", limit=200, offset=0):
+        return {"repo": repo, "revision": revision, "matching_files": 0, "files": []}
+
     def download(self, c, repo, revision, patterns, max_bytes=None):
         raise ToolError("mock tool server: downloads are disabled during a smoke run")
 
@@ -229,7 +232,7 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
         try:
             result = runner(image=report.image, name=container_name(run_id, node, "contract", attempt),
                             mounts=Mounts(agent=code, workspace=ws, staging=staging, context=ctx_dir,
-                                          store=Path(run_dir) / "store", contract=cfg.repo_root / "contract",
+                                          contract=cfg.repo_root / "contract",
                                           sockets=harness.socket_dir, agent_readonly=True),
                             command=command, env={"AR_TOKEN": caller.token, "AR_DEFAULT_MODEL": MOCK_MODEL,
                                                   "AR_CONTEXT_WINDOW": str(cfg.get("agents.context_window_tokens")),

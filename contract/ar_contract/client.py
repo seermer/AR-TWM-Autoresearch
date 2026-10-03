@@ -78,7 +78,7 @@ def chat_model(model: str | None = None, **kwargs) -> ReasoningChatOpenAI:
     """A LangChain chat model bound to the gateway (Chat Completions, non-streaming).
 
     Both clients go over the socket: without an explicit sync client, a sync invoke()
-    would try TCP localhost:80 and fail inside the network-less container. Reasoning effort
+    would try TCP localhost:80 and fail inside the container. Reasoning effort
     is not set here: the gateway enforces OPENAI_EFFORT."""
     sock = os.path.join(socket_dir(), "gateway.sock")
     return ReasoningChatOpenAI(model=model or default_model(), base_url="http://localhost/v1",

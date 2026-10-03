@@ -24,15 +24,12 @@ class Mounts:
     workspace: Path
     staging: Path
     context: Path
-    store: Path
     contract: Path
     sockets: Path
     agent_readonly: bool = False
     # node id -> node dir of each finished node, mounted read-only at /nodes/<id>. Its eval/ is hidden:
     # per-case outputs would let an agent fit the proxy cases.
     nodes: dict[str, Path] = field(default_factory=dict)
-    # edit_self: also hide the contexts earlier data phases received, which hold scores.
-    hide_scores: bool = False
     # The agent code that runs, mounted read-only at /code, when it is not the tree at /agent
     # (edit_self: the parent's code edits the tree).
     code: Path | None = None
@@ -125,28 +122,23 @@ def _docker_args(image, name, mounts: Mounts, command, env, cpus, memory_gb, net
             "--network", network, "--user", f"{os.getuid()}:{os.getgid()}",
             "--read-only", "--tmpfs", "/tmp:rw,size=4g",
             "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "4096",
-            "--cpus", str(cpus), "--memory", f"{memory_gb}g",
+            "--cpus", str(cpus), "--memory", f"{memory_gb}g", "--shm-size", f"{memory_gb}g",
             "-v", f"{mounts.agent}:/agent:{'ro' if mounts.agent_readonly else 'rw'}",
             "-v", f"{mounts.workspace}:/workspace:rw",
             "-v", f"{mounts.staging}:/workspace/staging:rw",
             "-v", f"{mounts.context}:/context:ro",
-            "-v", f"{mounts.store}:/store:ro",
             "-v", f"{mounts.contract}:/ar_contract:ro",
             "-v", f"{mounts.sockets}:/run/ar:ro"]   # connect works; deleting a socket does not
     if gpus:                                        # the NVIDIA container runtime exposes exactly these
         args += ["--runtime", "nvidia"]
-        base_env["NVIDIA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpus)
+    base_env["NVIDIA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpus) or "void"
     if mounts.code is not None:
         args += ["-v", f"{mounts.code}:/code:ro"]
         base_env["AR_CODE_DIR"] = "/code"
     for node, path in mounts.nodes.items():
         args += ["-v", f"{path}:/nodes/{node}:ro"]
-        hidden = [Path(path) / "eval"]
-        if mounts.hide_scores:
-            hidden += sorted(Path(path).glob("attempts/improve_recipe-*/context"))
-        for directory in hidden:
-            if directory.is_dir():
-                args += ["--tmpfs", f"/nodes/{node}/{directory.relative_to(path)}:ro,size=4k"]
+        if (Path(path) / "eval").is_dir():
+            args += ["--tmpfs", f"/nodes/{node}/eval:ro,size=4k"]
     for key, value in {**base_env, **env}.items():
         args += ["-e", f"{key}={value}"]
     return args + [image, *command]

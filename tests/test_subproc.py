@@ -20,10 +20,12 @@ from ar_kernel.telemetry.recorder import Recorder
 ENV = "autoresearcher"
 
 
-def test_conda_command_by_name_uses_dash_n_when_there_is_no_project_env(tmp_path, monkeypatch):
+def test_conda_command_refuses_an_env_that_is_not_in_the_project(tmp_path, monkeypatch):
+    (tmp_path / ".envs" / "half-made").mkdir(parents=True)          # no conda-meta: not an env
     monkeypatch.setattr("ar_kernel.subproc.REPO_ROOT", tmp_path)
-    assert conda_command("autoresearcher", ["python", "-c", "1"]) == \
-        ["conda", "run", "--no-capture-output", "-n", "autoresearcher", "python", "-c", "1"]
+    for name in ("autoresearcher", "half-made"):
+        with pytest.raises(FileNotFoundError, match="no conda env"):
+            conda_command(name, ["python", "-c", "1"])
 
 
 def test_conda_command_by_name_prefers_the_project_env(tmp_path, monkeypatch):
@@ -31,12 +33,6 @@ def test_conda_command_by_name_prefers_the_project_env(tmp_path, monkeypatch):
     monkeypatch.setattr("ar_kernel.subproc.REPO_ROOT", tmp_path)
     assert conda_command("alayaworld", ["x"]) == \
         ["conda", "run", "--no-capture-output", "-p", str(tmp_path / ".envs" / "alayaworld"), "x"]
-
-
-def test_conda_command_ignores_a_project_folder_that_is_not_a_conda_env(tmp_path, monkeypatch):
-    (tmp_path / ".envs" / "half-made").mkdir(parents=True)          # no conda-meta: not an env
-    monkeypatch.setattr("ar_kernel.subproc.REPO_ROOT", tmp_path)
-    assert conda_command("half-made", ["x"])[3:5] == ["-n", "half-made"]
 
 
 def test_conda_command_with_a_slash_is_a_repo_relative_prefix():

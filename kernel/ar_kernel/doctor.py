@@ -8,8 +8,9 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import KernelConfig
+from .config import KernelConfig, resolve_gpus
 from .subproc import project_env
+from .tools.vllm_server import require_free_gpus
 
 ENVS = ("alayaworld", "wbench-main", "wbench-vp", "autoresearcher")
 
@@ -144,6 +145,27 @@ def _tools() -> list[Finding]:
             for t in ("ffprobe", "ffmpeg", "conda", "git")]
 
 
+def _gpus(cfg: KernelConfig) -> list[Finding]:
+    """Agent containers get the run's GPUs through docker's NVIDIA runtime, and a kernel GPU job an agent
+    asks for is refused while a GPU is in use."""
+    try:
+        runtimes = subprocess.run(["docker", "info", "--format", "{{json .Runtimes}}"], capture_output=True,
+                                  text=True, timeout=60).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        runtimes = f"{type(exc).__name__}: {exc}"
+    if '"nvidia"' in runtimes and shutil.which("nvidia-container-runtime"):
+        out = [Finding("ok", "docker.nvidia", "runtime present")]
+    else:
+        out = [Finding("fail", "docker.nvidia", "docker has no working `nvidia` runtime: install "
+                                                "nvidia-container-toolkit and run `nvidia-ctk runtime configure`")]
+    try:
+        require_free_gpus(resolve_gpus(cfg, os.environ), int(cfg.get("gpus.free_below_mib")))
+        out.append(Finding("ok", "gpus.free", "the run's GPUs are free"))
+    except RuntimeError as exc:
+        out.append(Finding("fail", "gpus.free", str(exc).split(" A kernel GPU job")[0]))
+    return out
+
+
 def _dotenv(cfg: KernelConfig) -> list[Finding]:
     out = []
     for repo in (cfg.repo_root, cfg.worldmodel, cfg.wbench):
@@ -186,6 +208,7 @@ def run_checks(cfg: KernelConfig | None = None) -> list[Finding]:
     findings += _rel_paths(cfg)
     findings += _siblings(cfg)
     findings += _tools()
+    findings += _gpus(cfg)
     findings += _envs(cfg)
     findings += _prefix_envs(cfg)
     findings += _dotenv(cfg)

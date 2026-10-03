@@ -205,7 +205,7 @@ def register_hf_tools(mcp, kit, tools: HfTools) -> None:
             revision: Annotated[str, Field(description="branch, tag or commit; the result pins it to a commit")],
             patterns: Annotated[list[str], Field(description="fnmatch patterns or exact paths of the files to fetch")],
             ctx: Context,
-            max_bytes: Annotated[int | None, Field(description="refuse if the matching files total more than this; the kernel's own cap is 20 GiB per call")] = None) -> dict[str, Any]:
+            max_bytes: Annotated[int | None, Field(description="refuse if the matching files total more than this; the kernel has its own cap per call")] = None) -> dict[str, Any]:
         return await kit.call(ctx, "hf_download",
                               {"repo": repo, "revision": revision, "patterns": patterns,
                                "max_bytes": max_bytes},

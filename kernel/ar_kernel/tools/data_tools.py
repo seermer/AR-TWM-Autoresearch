@@ -70,12 +70,17 @@ class DataTools:
             host = {}
             for key in ("video", "caption", "pose"):
                 if c.get(key):
+                    if not isinstance(c[key], str):
+                        bad.setdefault(i, f"{key} must be the path of a file")      # the first problem of a candidate
+                        continue
                     try:
                         host[key] = to_host(caller, c[key])
                     except PathError as exc:
-                        bad.setdefault(i, f"{key}: {exc}")      # the first problem of a candidate
+                        bad.setdefault(i, f"{key}: {exc}")
                         continue
-                    if not host[key].is_file():      # container paths only: host paths never reach the agent
+                    if not host[key].is_relative_to(caller.staging_host):
+                        bad.setdefault(i, f"{key} {c[key]} is not under /workspace/staging: copy or move it there")
+                    elif not host[key].is_file():      # container paths only: host paths never reach the agent
                         bad.setdefault(i, f"{key} {c[key]} does not exist (data_ingest moves each staged file "
                                          "into the archive, so an already ingested file is gone)")
             if bad:

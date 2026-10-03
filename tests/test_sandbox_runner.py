@@ -47,7 +47,7 @@ def test_finished_nodes_are_mounted_read_only_with_eval_hidden(tmp_path):
     n1, root = tmp_path / "n1", tmp_path / "root"
     (n1 / "eval").mkdir(parents=True)
     root.mkdir()
-    m = Mounts(agent=tmp_path, workspace=tmp_path, staging=tmp_path, context=tmp_path, store=tmp_path,
+    m = Mounts(agent=tmp_path, workspace=tmp_path, staging=tmp_path, context=tmp_path,
                contract=tmp_path, sockets=tmp_path, nodes={"n1": n1, "root": root})
     args = _docker_args("img", "c", m, ["true"], {}, 1, 1)
     assert f"{n1}:/nodes/n1:ro" in args and f"{root}:/nodes/root:ro" in args
@@ -56,17 +56,17 @@ def test_finished_nodes_are_mounted_read_only_with_eval_hidden(tmp_path):
 
 def test_the_run_gpus_reach_the_container_through_the_nvidia_runtime(tmp_path):
     from ar_kernel.sandbox.runner import _docker_args
-    m = Mounts(agent=tmp_path, workspace=tmp_path, staging=tmp_path, context=tmp_path, store=tmp_path,
+    m = Mounts(agent=tmp_path, workspace=tmp_path, staging=tmp_path, context=tmp_path,
                contract=tmp_path, sockets=tmp_path)
     args = _docker_args("img", "c", m, ["true"], {}, 1, 1, gpus=[0, 2, 5])
     assert args[args.index("--runtime") + 1] == "nvidia" and "NVIDIA_VISIBLE_DEVICES=0,2,5" in args
     plain = _docker_args("img", "c", m, ["true"], {}, 1, 1)
-    assert "--runtime" not in plain and not any("NVIDIA" in a for a in plain)
+    assert "--runtime" not in plain and "NVIDIA_VISIBLE_DEVICES=void" in plain
 
 
 def test_separate_running_code_is_mounted_read_only_and_named_in_the_env(tmp_path):
     from ar_kernel.sandbox.runner import _docker_args
-    m = Mounts(agent=tmp_path, workspace=tmp_path, staging=tmp_path, context=tmp_path, store=tmp_path,
+    m = Mounts(agent=tmp_path, workspace=tmp_path, staging=tmp_path, context=tmp_path,
                contract=tmp_path, sockets=tmp_path, code=tmp_path / "code")
     args = _docker_args("img", "c", m, ["true"], {}, 1, 1)
     assert f"{tmp_path / 'code'}:/code:ro" in args and "AR_CODE_DIR=/code" in args
@@ -87,14 +87,13 @@ def test_snapshot_diff_reports_changes(tmp_path):
 
 @pytest.fixture
 def mounts(tmp_path):
-    dirs = {k: tmp_path / k for k in ("agent", "workspace", "context", "store", "sockets")}
+    dirs = {k: tmp_path / k for k in ("agent", "workspace", "context", "sockets")}
     for d in dirs.values():
         d.mkdir()
     staging = dirs["workspace"] / "staging"
     staging.mkdir()
-    (dirs["store"] / "blob.bin").write_bytes(b"x")
     return Mounts(agent=dirs["agent"], workspace=dirs["workspace"], staging=staging,
-                  context=dirs["context"], store=dirs["store"],
+                  context=dirs["context"],
                   contract=CFG.repo_root / "contract", sockets=dirs["sockets"])
 
 
@@ -156,7 +155,7 @@ def test_failed_launch_is_still_removed_and_only_the_recorded_argv_is_redacted(t
 def test_isolation_holds_from_inside(tmp_path, mounts):
     """With network `none` (contract containers; agent phases use `sandbox.network`,
     bridge by default): no internet, no host services, no kernel/WorldModel/WBench/.env,
-    no writes to /store or /context; files written are owned by the host user. The socket dir is
+    no writes to /context; files written are owned by the host user. The socket dir is
     mounted read-only: the gateway socket cannot be deleted, but connecting to it still works.
 
     The host paths checked below are derived from KernelConfig (project/repo
@@ -174,7 +173,7 @@ s = socket.socket(); s.settimeout(2)
 try: out["host_ssh"] = "open" if s.connect_ex(("172.17.0.1", 22)) == 0 else "closed"
 except OSError: out["host_ssh"] = "unreachable"
 out["visible"] = [p for p in host_paths if os.path.exists(p)]
-for target in ("/store/new.bin", "/context/new.json", "/etc/new"):
+for target in ("/context/new.json", "/etc/new"):
     try: open(target, "w").write("x"); out[target] = "writable"
     except OSError: out[target] = "denied"
 try: os.remove("/run/ar/gateway.sock"); out["sock_rm"] = "removed"
@@ -204,7 +203,7 @@ print(json.dumps(out))
     assert out["internet"] == "blocked"
     assert out["host_ssh"] in ("closed", "unreachable")
     assert out["visible"] == []
-    assert out["/store/new.bin"] == out["/context/new.json"] == out["/etc/new"] == "denied"
+    assert out["/context/new.json"] == out["/etc/new"] == "denied"
     assert out["sock_rm"] == "denied" and out["sock_reply"] == "hello"
     assert (mounts.sockets / "gateway.sock").exists()
     server.close()
@@ -377,17 +376,16 @@ def test_a_ctrl_c_to_the_process_group_does_not_end_the_container(tmp_path, moun
     assert result["exit_code"] == 0 and "done" in result["stdout"]
 
 
-def test_edit_self_does_not_see_the_data_phases_contexts_of_earlier_nodes(tmp_path):
+def test_every_phase_sees_the_same_node_files_and_only_eval_is_hidden(tmp_path):
+    """edit_self reads what improve_recipe reads (2026-10-03): only prompts and tools differ."""
     from ar_kernel.sandbox.runner import Mounts, _docker_args
     node = tmp_path / "n1"
-    (node / "attempts" / "improve_recipe-1" / "context").mkdir(parents=True)
-    (node / "attempts" / "edit_self-1" / "context").mkdir(parents=True)
-    base = dict(agent=tmp_path, workspace=tmp_path, staging=tmp_path, context=tmp_path, store=tmp_path,
-                contract=tmp_path, sockets=tmp_path, nodes={"n1": node})
-    hidden = "/nodes/n1/attempts/improve_recipe-1/context:ro,size=4k"
-    assert hidden in _docker_args("img", "c", Mounts(**base, hide_scores=True), ["true"], {}, 1, 1)
-    plain = _docker_args("img", "c", Mounts(**base), ["true"], {}, 1, 1)
-    assert hidden not in plain and not any("edit_self-1/context:ro,size" in a for a in plain)
+    for folder in ("eval", "attempts/improve_recipe-1/context", "contract/attempt-1"):
+        (node / folder).mkdir(parents=True)
+    args = _docker_args("img", "c", Mounts(agent=tmp_path, workspace=tmp_path, staging=tmp_path, context=tmp_path,
+                                           contract=tmp_path, sockets=tmp_path, nodes={"n1": node}), ["true"], {}, 1, 1)
+    assert [a for a in args if a.startswith("/nodes/")] == ["/nodes/n1/eval:ro,size=4k"]
+    assert "NVIDIA_VISIBLE_DEVICES=void" in args and not any(":/store" in a for a in args)
 
 
 @pytest.mark.gpu

@@ -5,7 +5,7 @@ from ar_kernel.sandbox.runner import Mounts, _docker_args
 
 def _args(**kw):
     m = Mounts(agent=Path("/a"), workspace=Path("/w"), staging=Path("/s"), context=Path("/c"),
-               store=Path("/st"), contract=Path("/k"), sockets=Path("/so"), agent_readonly=False)
+               contract=Path("/k"), sockets=Path("/so"), agent_readonly=False)
     return _docker_args("img", "name", m, ["true"], {}, 1, 1, **kw)
 
 
