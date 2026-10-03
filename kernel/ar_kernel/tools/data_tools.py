@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import threading
 import uuid
@@ -171,11 +172,15 @@ class DataTools:
         return {"ok": result.ok, "failures": result.failures}
 
 
+_VARIES = re.compile(r"'[^']*'|\"[^\"]*\"|\d+(?:\.\d+)?")      # quoted text and numbers of one message
+
+
 def _counted(texts) -> list[dict]:
-    """The distinct messages (paths and numbers taken out), most frequent first, with one example each."""
+    """The distinct messages (paths, quoted text and numbers taken out), most frequent first, with one
+    example each."""
     shapes: dict[str, list] = {}
     for text in texts:
-        shapes.setdefault(_shape(text), []).append(text)
+        shapes.setdefault(_VARIES.sub("#", _shape(text)), []).append(text)
     return [{"count": len(found), "example": found[0]}
             for found in sorted(shapes.values(), key=len, reverse=True)[:SHOWN]]
 

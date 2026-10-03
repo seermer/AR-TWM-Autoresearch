@@ -272,3 +272,10 @@ def test_a_path_that_is_not_text_or_not_staged_is_that_candidates_error(env):
     assert "item 0: caption must be the path of a file" in text
     assert "item 1: video /workspace/loose.mp4 is not under /workspace/staging" in text
     assert str(caller.workspace_host) not in text
+
+
+def test_messages_that_differ_in_quoted_text_and_numbers_count_as_one():
+    from ar_kernel.tools.data_tools import _counted
+    texts = [f"the caption file: segment {t!r} lasts {d} s < one window (2.375 s), so segment mode never trains on it"
+             for t, d in (("A person reaches", 1.04), ("The knife chops", 1.33))] + ["fps 12.0 is below 24"]
+    assert [row["count"] for row in _counted(texts)] == [2, 1]
