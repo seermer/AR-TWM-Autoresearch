@@ -56,7 +56,7 @@ TOOL_ERROR = "Error: {error}\n Please fix your mistakes."   # ToolNode's handle_
 TOOL_BLOCK_TYPES = {"text", "image_url", "image", "json", "search_result", "custom_tool_call_output",
                     "document", "file"}
 
-# chars. A safety cap: the result of a 100-item GPU job is 50,000 to 160,000.
+# chars. A safety cap: kernel tools write large results to files and return a summary.
 TOOL_RESULT_LIMIT, TOOL_RESULT_SHOWN = 200_000, 20_000
 CHARS_PER_TOKEN = 4          # no tokenizer offline (tiktoken downloads its encodings)
 # An image costs a bounded number of vision tokens however long its base64 is, so it is

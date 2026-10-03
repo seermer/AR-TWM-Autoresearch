@@ -194,3 +194,23 @@ checked: a self-edit may restructure a prompt.
 - Plan fields are length-capped.
 - No seed unit-test suite for the agent: the contract's dry run already exercises the wiring, and the
   run showed no coder reluctance (planners never asked for code changes).
+
+## Amendments from run `live-10-02` (2026-10-03)
+
+Two nodes showed that roles moved lists and results by typing them: 323,000 of 569,000 tool-argument
+characters in one phase were hand-typed paths, clip ids and captions. Decided and built:
+
+- **Lists come from files.** Every list argument of a kernel tool (paths, items, candidates, clip ids)
+  is the list or the path of a file under `/workspace` holding it (`.json` array, or one item per line).
+- **Results go to files.** A finished GPU job and `data_ingest` write the full result to
+  `/workspace/staging/results/`; the caller gets the path and a summary (counts, first errors).
+- **One refusal names every bad item**, so one corrected call can follow.
+- **A job takes any number of items.** The per-job item cap is gone; the job timeout stays.
+- **The caption server stays loaded** after a caption job (`captioner.keep_warm_s`), holding the GPU
+  lock, until another kind of job, the idle limit or the end of the phase.
+- **The planner reviews the engineer's result** in both phases: `accept_result` or a revised plan,
+  within the plans-per-phase limit. Engineers had never reported back on their own.
+- **The first message says what each folder is for** (`folders` in the context, kernel-owned).
+- The context carries clip-pool counts, not clip records (`data_query` lists clips).
+- The gateway retries a provider error sent with HTTP 200, at the top of the body or inside the choice.
+- Kernel tools still read only `/workspace`; a file under `/nodes` is copied in first.
