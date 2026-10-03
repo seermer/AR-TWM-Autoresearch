@@ -204,13 +204,13 @@ def submit(q, caller, paths, prompt: str) -> dict:
         raise ToolError("paths is empty")
     if not prompt.strip():
         raise ToolError("prompt is empty")
-    errors = []
+    bad = {}
     for n, path in enumerate(paths):
         try:
             clip_host_path(caller, str(path))
         except PathError as exc:
-            errors.append(f"item {n}: {exc}")
-    refuse(errors)
+            bad[n] = str(exc)
+    refuse(caller, TOOL, paths, bad)
     return {"job_id": q.submit(caller, TOOL, {"paths": [container_path(str(p)) for p in paths], "prompt": prompt})}
 
 

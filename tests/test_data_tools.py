@@ -84,8 +84,9 @@ def test_every_bad_candidate_is_named_in_one_refusal(env):
                                "camera_motion": "moving", "provenance": PROV},
                               {"video": "/workspace/staging/no2.mp4", "camera_motion": "moving", "provenance": PROV}])
     text = str(refused.value)
-    assert "candidate 0: video /workspace/staging/no1.mp4 does not exist" in text
-    assert "candidate 1: caption is required" in text and "nothing was submitted" in text
+    assert "item 0: video /workspace/staging/no1.mp4 does not exist" in text
+    assert "item 1: caption is required" in text and "nothing was submitted" in text
+    assert "/workspace/staging/results/data_ingest-refused-" in text
 
 
 def test_rejections_are_summarised_with_counts_and_commit_takes_clip_ids_from_a_file(env):

@@ -57,14 +57,14 @@ class DataTools:
 
     def ingest(self, caller, candidates) -> dict:
         candidates = listed(caller, candidates, "candidates")
-        built, errors = [], []
+        built, bad = [], {}
         for i, c in enumerate(candidates):
             if not isinstance(c, dict):
-                errors.append(f"candidate {i}: not an object: {str(c)[:80]!r}")
+                bad[i] = "not an object"
                 continue
             missing = [key for key in ("video", "caption", "camera_motion", "provenance") if not c.get(key)]
             if missing:
-                errors.append(f"candidate {i}: {', '.join(missing)} is required")
+                bad[i] = f"{', '.join(missing)} is required"
                 continue
             host = {}
             for key in ("video", "caption", "pose"):
@@ -72,18 +72,18 @@ class DataTools:
                     try:
                         host[key] = to_host(caller, c[key])
                     except PathError as exc:
-                        errors.append(f"candidate {i}: {key}: {exc}")
+                        bad.setdefault(i, f"{key}: {exc}")      # the first problem of a candidate
                         continue
                     if not host[key].is_file():      # container paths only: host paths never reach the agent
-                        errors.append(f"candidate {i}: {key} {c[key]} does not exist (data_ingest moves each "
-                                      "staged file into the archive, so an already ingested file is gone)")
-            if errors:
+                        bad.setdefault(i, f"{key} {c[key]} does not exist (data_ingest moves each staged file "
+                                         "into the archive, so an already ingested file is gone)")
+            if bad:
                 continue
             built.append(Candidate(
                 video=host["video"], caption=host["caption"], pose=host.get("pose"),
                 camera_motion=c["camera_motion"], provenance=c["provenance"],
                 license=c.get("license"), derived_from=list(c.get("derived_from") or [])))
-        refuse(errors)
+        refuse(caller, "data_ingest", candidates, bad)
         conn = open_db(self.run_dir)
         try:
             ingestor = Ingestor(self.cfg, self.run_dir, conn, self.recorder, self._leakage_checker())

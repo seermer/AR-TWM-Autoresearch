@@ -125,8 +125,8 @@ class GpuJob:
         items = listed(caller, args.get("items"), "items")
         if not items:
             raise ToolError("items is empty")
-        bad = [n for n, item in enumerate(items) if not isinstance(item, dict)]
-        refuse([f"item {n}: not an object: {str(items[n])[:80]!r}" for n in bad])
+        refuse(caller, self.name, items, {n: "not an object" for n, item in enumerate(items)
+                                          if not isinstance(item, dict)})
         args = {**args, "items": items}
         self.check_args(args)
         for n, item in enumerate(items):
@@ -135,17 +135,17 @@ class GpuJob:
                                     attempt=caller.attempt, component="tools", tool=self.name,
                                     payload={"item": n})
                 raise ToolError(f"item {n}: {EXCLUDED_PROMPT}")
-        errors = []
+        bad = {}
         for n, item in enumerate(items):
             for key in self.file_keys:
                 if isinstance(item.get(key), str):
                     try:
                         clip_host_path(caller, item[key])
                     except PathError as exc:
-                        errors.append(f"item {n}: {key}: {exc}")
+                        bad.setdefault(n, f"{key}: {exc}")
                     item = {**item, key: container_path(item[key])}
             items[n] = item
-        refuse(errors)
+        refuse(caller, self.name, items, bad)
         return {"job_id": q.submit(caller, self.name, args)}
 
     def check_args(self, args: dict) -> None:

@@ -204,7 +204,8 @@ characters in one phase were hand-typed paths, clip ids and captions. Decided an
   is the list or the path of a file under `/workspace` holding it (`.json` array, or one item per line).
 - **Results go to files.** A finished GPU job and `data_ingest` write the full result to
   `/workspace/staging/results/`; the caller gets the path and a summary (counts, first errors).
-- **One refusal names every bad item**, so one corrected call can follow.
+- **One refusal names every bad item**: the first few in the message, all of them in a file under
+  `/workspace/staging/results/`, so a script can drop them and call again.
 - **A job takes any number of items.** The per-job item cap is gone; the job timeout stays.
 - **The caption server stays loaded** after a caption job (`captioner.keep_warm_s`), holding the GPU
   lock, until another kind of job, the idle limit or the end of the phase.

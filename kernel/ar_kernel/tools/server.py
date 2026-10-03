@@ -7,6 +7,7 @@ import json
 import tempfile
 import time
 import traceback
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -31,7 +32,7 @@ class ToolError(_MCPToolError):
 
 FROM_FILE = ("or the path of a file under /workspace that holds the list: a .json file with a JSON array, or "
              "any other file with one item per line (a JSON value, or the bare text of the line)")
-SHOWN = 20                  # bad items named in one refusal, and errors listed in one summary
+SHOWN = 5                   # bad items named in a refusal, and errors listed in a summary: the rest are in the file
 
 
 def listed(caller, value, what: str) -> list:
@@ -60,11 +61,16 @@ def listed(caller, value, what: str) -> list:
     return items
 
 
-def refuse(errors: list[str]) -> None:
-    """Refuse a call for every bad item at once, so one corrected call can follow."""
-    if errors:
-        more = f"\n... and {len(errors) - SHOWN} more" if len(errors) > SHOWN else ""
-        raise ToolError(f"{len(errors)} bad item(s), nothing was submitted:\n" + "\n".join(errors[:SHOWN]) + more)
+def refuse(caller, tool: str, items: list, bad: dict[int, str]) -> None:
+    """Refuse a call for every bad item at once (`bad`: index -> error). The message shows the first few;
+    all of them go to a file, as a result does, so a script can drop them from the list and call again."""
+    if not bad:
+        return
+    rows = [{"index": n, "item": items[n], "error": error} for n, error in sorted(bad.items())]
+    path = publish(caller, f"{tool}-refused-{uuid.uuid4().hex[:8]}", rows)
+    first = "\n".join(f"item {row['index']}: {row['error']}" for row in rows[:SHOWN])
+    raise ToolError(f"{len(rows)} of {len(items)} items are bad and nothing was submitted. Every bad item, with "
+                    f"its index and error, is in {path}. The first {min(SHOWN, len(rows))}:\n{first}")
 
 
 def publish(caller, name: str, result) -> str:

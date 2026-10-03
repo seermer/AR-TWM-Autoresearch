@@ -152,8 +152,19 @@ def test_every_bad_path_is_named_in_one_refusal_and_paths_may_come_from_a_file(m
     (ws / "a.mp4").write_bytes(b"x")
     with pytest.raises(ToolError) as refused:
         submit(q, caller, ["a.mp4", "missing1.mp4", "missing2.mp4"], "Caption.")
-    assert "2 bad item(s)" in str(refused.value)
-    assert "item 1: missing1.mp4 is not a file" in str(refused.value) and "item 2" in str(refused.value)
+    text = str(refused.value)
+    assert "2 of 3 items are bad and nothing was submitted" in text and "item 1: missing1.mp4 is not a file" in text
+    [file] = (caller.staging_host / "results").glob("caption_videos-refused-*.json")
+    assert f"/workspace/staging/results/{file.name}" in text                 # every bad item is in the file
+    assert json.loads(file.read_text()) == [
+        {"index": 1, "item": "missing1.mp4", "error": "missing1.mp4 is not a file"},
+        {"index": 2, "item": "missing2.mp4", "error": "missing2.mp4 is not a file"}]
+    many = [f"gone{i}.mp4" for i in range(500)]
+    with pytest.raises(ToolError) as refused:
+        submit(q, caller, many, "Caption.")
+    assert "500 of 500" in str(refused.value) and len(str(refused.value)) < 1500      # short, however many
+    newest = max((caller.staging_host / "results").glob("caption_videos-refused-*.json"), key=lambda p: p.stat().st_mtime)
+    assert len(json.loads(newest.read_text())) == 500
     (ws / "paths.txt").write_text("a.mp4\n/workspace/a.mp4\n")
     (ws / "paths.json").write_text(json.dumps(["a.mp4"]))
     out = q.wait(caller, submit(q, caller, "paths.txt", "Caption.")["job_id"], 120)
