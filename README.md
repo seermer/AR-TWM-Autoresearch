@@ -165,7 +165,7 @@ Check: the last line says `[Precache] done` and `ls ../WorldModel/cache/text_emb
 
 ```bash
 ar doctor                       # must end with "0 failed"
-docker run --rm python:3.12-slim true && echo docker ok
+docker run --rm hello-world >/dev/null && echo docker ok
 nvidia-smi --query-gpu=index,memory.used --format=csv     # every GPU near 0 MiB
 pytest tests -q                 # optional: unit tests, no GPU needed, about 12 minutes
 ```

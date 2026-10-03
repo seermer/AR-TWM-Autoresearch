@@ -41,7 +41,7 @@ def test_built_image_has_the_runtime_stack_and_no_network_needed():
     tag = ensure_image(CFG, "")
     out = subprocess.run(
         ["docker", "run", "--rm", "--network", "none", tag, "python", "-c",
-         "import mcp, httpx, httpx2, langgraph, langchain_core, langchain_openai, cv2, numpy, PIL; "
+         "import mcp, httpx, httpx2, langgraph, langchain_core, langchain_openai, cv2, numpy, PIL, torch, torchvision; "
          "from langgraph.types import Send; print('ok')"],
         capture_output=True, text=True, timeout=300)
     assert out.returncode == 0, out.stderr
