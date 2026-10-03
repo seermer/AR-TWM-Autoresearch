@@ -400,6 +400,8 @@ def test_real_model_captions_two_example_clips(tmp_path):
         out = q.wait(caller, job, 300)
         while out["state"] not in ("done", "failed", "cancelled"):
             out = q.wait(caller, job, 300)
+        (ws / "paths.txt").write_text("/workspace/staging/cam.mp4\n")          # a second job, its list from a file
+        again = q.wait(caller, submit(q, caller, "paths.txt", "Name the place in three words.")["job_id"], 300)
     finally:
         q.shutdown()
     latencies = [e["latency_s"] for e in rec.read_events("gpu") if e["type"] == "caption.clip"]
@@ -408,4 +410,7 @@ def test_real_model_captions_two_example_clips(tmp_path):
     assert out["state"] == "done", out["error"]
     clips = job_result(out)["clips"]
     assert all(len(v.get("caption", "")) > 20 for v in clips.values()), clips
-    assert job_result(out)["gpu_memory_released"] is True
+    assert again["state"] == "done" and job_result(again)["load_s"] is None       # the loaded server was reused
+    assert "caption" in job_result(again)["clips"]["/workspace/staging/cam.mp4"]
+    events = [e["type"] for e in rec.read_events("gpu")]
+    assert events.count("caption.server_ready") == 1 and "caption.gpu_not_released" not in events
