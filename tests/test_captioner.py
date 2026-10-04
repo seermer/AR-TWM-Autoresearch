@@ -121,8 +121,8 @@ def test_every_bad_path_is_named_in_one_refusal_and_paths_may_come_from_a_file(m
     assert list(job_result(out)["clips"]) == ["/workspace/a.mp4"]            # the same clip twice is one entry
     out = q.wait(caller, submit(q, caller, "/workspace/paths.json", "Caption.")["job_id"], 120)
     assert out["summary"]["items"] == 1
-    with pytest.raises(ToolError, match="cannot read the list file"):
-        submit(q, caller, "nope.txt", "Caption.")
+    with pytest.raises(ToolError, match="cannot read the list file nope.txt: No such file or directory$"):
+        submit(q, caller, "nope.txt", "Caption.")                            # and no host path
 
 
 def test_a_clip_the_server_rejects_is_a_per_clip_error_not_a_failed_job(make):

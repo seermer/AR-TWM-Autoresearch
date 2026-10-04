@@ -43,7 +43,8 @@ def listed(caller, value, what: str) -> list:
         host = to_host(caller, value if value.startswith("/") else str(WORKSPACE / value))
         text = host.read_text(encoding="utf-8")
     except (PathError, OSError, UnicodeDecodeError) as exc:
-        raise ToolError(f"{what}: cannot read the list file {value}: {exc}") from exc
+        reason = exc.strerror if isinstance(exc, OSError) else exc      # an OSError's text names the host path
+        raise ToolError(f"{what}: cannot read the list file {value}: {reason}") from exc
     if host.suffix == ".json":
         try:
             items = json.loads(text)
