@@ -429,3 +429,15 @@ def test_an_error_inside_the_choice_sent_with_http_200_is_retried_too(make):
     client, caller, _, seen = make(handler=handler)
     r = _post(client, caller.token, {"model": "gpt-x", "input": "hi"})
     assert r.status_code == 200 and len(seen) == 2
+
+
+def test_a_reply_with_no_content_and_no_tool_call_is_retried_too(make):
+    """live-10-03 n2: HTTP 200, finish_reason 'stop', content null, no tool call, twice in one role."""
+    def handler(request):
+        if len(seen) < 2:
+            return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {
+                "role": "assistant", "content": None, "reasoning": "thinking only"}}]})
+        return _ok(request)
+    client, caller, _, seen = make(handler=handler)
+    r = _post(client, caller.token, {"model": "gpt-x", "input": "hi"})
+    assert r.status_code == 200 and len(seen) == 2

@@ -68,12 +68,19 @@ def carries(body: dict, is_part) -> bool:
 
 
 def upstream_error(payload) -> dict | None:
-    """The error object a router put in a body it sent with HTTP 200: at the top, or inside the first choice."""
+    """The error in a body sent with HTTP 200: a router's error object, at the top or inside the first choice,
+    or a first choice whose message has neither content nor a tool call (unless it ran out of output:
+    asking again would run out again)."""
     if not isinstance(payload, dict):
         return None
     choices = payload.get("choices")
     first = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
-    return next((e for e in (payload.get("error"), first.get("error")) if isinstance(e, dict)), None)
+    error = next((e for e in (payload.get("error"), first.get("error")) if isinstance(e, dict)), None)
+    message = first.get("message")
+    if (error is None and isinstance(message, dict) and first.get("finish_reason") != "length"
+            and not (message.get("content") or message.get("tool_calls"))):
+        return {"code": 502, "message": "the model returned an empty reply"}
+    return error
 
 
 class Upstream:
