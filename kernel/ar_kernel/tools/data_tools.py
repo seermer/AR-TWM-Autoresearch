@@ -333,7 +333,8 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
                               lambda c: tools.commit(c, parent, datasets, message))
 
     @mcp.tool(name="recipe_check", description="Run every pre-training check on a recipe and a data commit "
-              "without using up an attempt. Returns ok and the failures. Among the checks: steps_per_epoch = "
+              "without using up an attempt. It uses the GPUs for under a minute, so it is refused while a GPU job "
+              "runs. Returns ok and the failures. Among the checks: steps_per_epoch = "
               "floor(floor(epoch_windows / n_gpus) / optimizer.grad_accum_steps) must be at least 1, and "
               "optimizer.epochs * steps_per_epoch at least optimizer.max_steps, where epoch_windows is the "
               "largest, over the commit's datasets, of ceil(clips / (weight / total_weight)).")
