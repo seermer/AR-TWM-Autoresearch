@@ -387,6 +387,7 @@ def test_produce_renders_and_publishes_candidates(env):
     assert by[0]["candidate"]["actions"] == ["W", "left"]
     assert by[1]["candidate"]["actions"] == ["W+left", "stop"]
     assert len(by[1]["candidate"]["turn_segments"]) == 2
+    assert q.status(caller, job)["progress"] == {"done": 2, "total": 2}
     work = run_dir / "jobs" / job
     wb = json.loads((work / "fake_wbench.json").read_text())
     argv = wb["argv"]

@@ -329,13 +329,14 @@ class AlayaWorldBackend(GpuJob):
             if code != 0:
                 raise RuntimeError(f"prompt precache failed (exit {code}):\n"
                                    f"{file_tail(work / 'precache.log', 2000)}")
+            videos = work / "videos"
             # run_wbench.py sets CUDA_VISIBLE_DEVICES from --gpus itself (PCI order is inherited).
             codes, missing = self.run_workers(env, lambda r, w: [
                 "python", *RUN_WBENCH, "--config", str(config), "--gpus", ",".join(map(str, self.gpus)),
                 "--cases", ",".join(map(str, indices)), "--master-port", str(free_port())],
                 [self.gpus], job=job, work=work, out=out, total=len(items), cancel=cancel, report=report, cwd=wm,
-                deadline=deadline)
-            videos = work / "videos"
+                deadline=deadline,
+                done=lambda: len(items) - len(indices) + len(list(videos.glob("case_*_combined.json"))))
             for i in indices:
                 src = videos / f"case_{i}_combined"
                 if src.with_suffix(".mp4").exists() and src.with_suffix(".json").exists():

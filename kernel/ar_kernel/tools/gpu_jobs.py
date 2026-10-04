@@ -261,8 +261,8 @@ class GpuJob:
     # ---- workers ----
     def run_workers(self, env: str, argv_for: Callable[[int, int], list[str]], groups: list[list[int]], *,
                     job, work: Path, out: Path, total: int, cancel, report, cwd: Path | None = None,
-                    extra_env: dict | None = None,
-                    deadline: float | None = None) -> tuple[list[int | str], dict[int, str]]:
+                    extra_env: dict | None = None, deadline: float | None = None,
+                    done: Callable[[], int] | None = None) -> tuple[list[int | str], dict[int, str]]:
         """One worker per GPU group, in parallel; each handles items with index % world == rank.
         A cancel kills every worker's process group, and so does this backend's own `timeout_s`
         (the deadline is checked in the polling loop, and once passed acts on the workers exactly
@@ -273,8 +273,10 @@ class GpuJob:
         Returns (codes, missing): `missing` maps such an item's index to that error message, for
         `run` to pass into `_collect`. The staged items' indices are read back from
         `work/items.json` (items that failed staging never reach here); `total` is only the
-        progress-report denominator.
+        progress-report denominator, and `done` counts the finished items of a worker that does not
+        write `out/<index>.json` itself.
         """
+        done = done or (lambda: len([p for p in out.glob("*.json") if p.stem.isdigit()]))
         if not groups:
             raise ValueError("run_workers: no GPU groups (check the GPU list, gpus_per_worker and workers)")
         indices = [item["index"] for item in json.loads((work / "items.json").read_text(encoding="utf-8"))]
@@ -302,11 +304,11 @@ class GpuJob:
         while any(t.is_alive() for t in threads):
             if deadline is not None and time.monotonic() > deadline:
                 timed_out.set()
-            report({"done": len([p for p in out.glob("*.json") if p.stem.isdigit()]), "total": total})
+            report({"done": done(), "total": total})
             time.sleep(0.2)             # short poll so a finished job returns promptly
         for t in threads:
             t.join()
-        report({"done": len([p for p in out.glob("*.json") if p.stem.isdigit()]), "total": total})
+        report({"done": done(), "total": total})
         world = len(groups)
         missing: dict[int, str] = {}
         for index in indices:
