@@ -7,7 +7,7 @@ import shutil
 import threading
 import uuid
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypedDict
 
 from mcp.server.mcpserver import Context
 from pydantic import Field
@@ -172,6 +172,14 @@ class DataTools:
         return {"ok": result.ok, "failures": result.failures}
 
 
+class Dataset(TypedDict, total=False):
+    """Typed so that a number reaches the kernel as a number: values in an untyped map arrive as strings."""
+    format: str
+    prompt_mode: str | None
+    weight: float
+    clips: list[str] | str
+
+
 _VARIES = re.compile(r"'[^']*'|\"[^\"]*\"|\d+(?:\.\d+)?")      # quoted text and numbers of one message
 
 
@@ -309,7 +317,7 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
     @mcp.tool(name="data_commit", description="Create an immutable data commit: the training set of this node.")
     async def data_commit(
             parent: Annotated[str | None, Field(description="the commit this one follows (the parent node's data commit), or null")],
-            datasets: Annotated[dict[str, Any], Field(description="{name: {format, prompt_mode, weight, clips}}. "
+            datasets: Annotated[dict[str, Dataset], Field(description="{name: {format, prompt_mode, weight, clips}}. "
                                 f"clips is a list of clip ids, {FROM_FILE}. format is one of: {_FORMATS}. Set prompt_mode only for "
                                 "video_timed_prompts_camera; omit it otherwise. weight is the dataset's sampling "
                                 "weight. Each dataset needs at least as many clips as training GPUs")],
@@ -325,7 +333,7 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
               "optimizer.epochs * steps_per_epoch at least optimizer.max_steps, where epoch_windows is the "
               "largest, over the commit's datasets, of ceil(clips / (weight / total_weight)).")
     async def recipe_check(
-            recipe: Annotated[dict[str, Any], Field(description="a flat {tunable key: value} map, e.g. "
+            recipe: Annotated[dict[str, int | float], Field(description="a flat {tunable key: value} map, e.g. "
                               "{\"optimizer.lr\": 1e-4}, with no wrapper key")],
             data_commit: Annotated[str, Field(description="the commit id data_commit returned")],
             ctx: Context) -> dict:

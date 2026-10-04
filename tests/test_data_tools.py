@@ -279,3 +279,19 @@ def test_messages_that_differ_in_quoted_text_and_numbers_count_as_one():
     texts = [f"the caption file: segment {t!r} lasts {d} s < one window (2.375 s), so segment mode never trains on it"
              for t, d in (("A person reaches", 1.04), ("The knife chops", 1.33))] + ["fps 12.0 is below 24"]
     assert [row["count"] for row in _counted(texts)] == [2, 1]
+
+
+def test_recipe_and_dataset_numbers_are_typed():
+    """A real agent's numbers inside an untyped map arrived as strings ("lora.rank": "64", "weight": "1.0")."""
+    import asyncio
+    from ar_kernel.tools.data_tools import register_data_tools
+    from ar_kernel.tools.server import ToolKit, new_mcp
+    mcp = new_mcp()
+    register_data_tools(mcp, ToolKit(None, None), None)
+    listed = {t.name: t.input_schema for t in asyncio.run(mcp.list_tools())}
+    assert listed["recipe_check"]["properties"]["recipe"]["additionalProperties"] == {
+        "anyOf": [{"type": "integer"}, {"type": "number"}]}
+    assert "number" in json.dumps(listed["data_commit"]["$defs"]["Dataset"]["properties"]["weight"])
+    model = mcp._tool_manager.get_tool("recipe_check").fn_metadata.arg_model
+    assert model.model_validate({"recipe": {"lora.rank": "64", "optimizer.lr": "1e-4", "sample.width": 736},
+                                 "data_commit": "c"}).recipe == {"lora.rank": 64, "optimizer.lr": 1e-4, "sample.width": 736}
