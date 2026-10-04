@@ -203,6 +203,16 @@ def test_recipe_check_reports_gate_failures_without_leaving_a_view(env, monkeypa
     assert leftovers == []
 
 
+def test_recipe_check_is_refused_at_once_while_a_gpu_job_holds_the_gpus(env):
+    tools, caller, results, _ = env
+    commit = tools.commit(caller, None, {"cam": {"format": "video_caption_camera", "prompt_mode": None,
+                                                 "weight": 1.0, "clips": [r["clip_id"] for r in results]}},
+                          "for check")["commit_id"]
+    with tools.gpu_lock, pytest.raises(ToolError, match="a GPU job is running"):
+        tools.recipe_check(caller, {}, commit)
+    assert tools.gpu_lock.acquire(blocking=False)          # and the refusal left the lock alone
+
+
 def test_register_names_are_openai_safe():
     import asyncio
     import re

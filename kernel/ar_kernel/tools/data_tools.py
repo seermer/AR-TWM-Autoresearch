@@ -159,13 +159,18 @@ class DataTools:
             except Exception as exc:
                 raise ToolError(f"unknown data commit {data_commit!r}") from exc
             parent_commit = _parent_commit(conn, caller.node)
-            with self.gpu_lock:          # the describe step is a GPU job
+            if not self.gpu_lock.acquire(blocking=False):       # the describe step is a GPU job
+                raise ToolError("a GPU job is running and the check needs the GPUs for under a minute: "
+                                "call again once your jobs have finished (job_wait).")
+            try:
                 try:
                     self.require_free()
                 except RuntimeError as exc:
                     raise ToolError(str(exc)) from exc
                 result = Gate(self.cfg, store, self.recorder).check(
                     recipe, data_commit, parent_commit, caller.node, scratch, self.run_dir, self.gpus)
+            finally:
+                self.gpu_lock.release()
         finally:
             conn.close()
             shutil.rmtree(scratch, ignore_errors=True)
