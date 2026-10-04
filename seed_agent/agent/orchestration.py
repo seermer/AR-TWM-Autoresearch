@@ -39,7 +39,6 @@ PLAN_FIELD_CHARS = 4000                       # a safety cap: plans that state i
                                               # dictate file contents (5,800 characters and up) do not fit
 REMIND = ("You stopped without calling {tools}. Finish the task, then call {tools} with the result. "
           "The work is only recorded through {tools}.")
-REMINDERS = 5                                 # a model reply with no tool call (often an empty one) ends a turn
 REPLAN = "Revise the plan. The engineer carries out the plan you submit next."
 REVIEW = ("The engineer finished. Check the result against your plan by looking at what was built, not only at "
           "this summary. If it tests the plan, call accept_result. If it falls short in a way the engineer can "
@@ -94,13 +93,13 @@ class Role:
         return next((box for box in self.submissions if box.value is not None), None)
 
     async def run(self, task: str):
-        """Work on `task` until a submit tool is called; returns that tool's box. Reminded when it stops early."""
+        """Work on `task` until a submit tool is called; returns that tool's box. One reminder if it stops early."""
         for box in self.submissions:
             box.value = None
         names = " or ".join(box.name for box in self.submissions)
         SCRATCH.mkdir(parents=True, exist_ok=True)
         try:
-            for message in (task, *[REMIND.format(tools=names)] * REMINDERS):
+            for message in (task, REMIND.format(tools=names)):
                 state = await self.agent.ainvoke({"messages": [*self.messages, HumanMessage(content=message)]})
                 self.messages = state["messages"]
                 if self._submitted() is not None:
