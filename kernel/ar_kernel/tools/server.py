@@ -30,8 +30,8 @@ class ToolError(_MCPToolError):
     """
 
 
-FROM_FILE = ("or the path of a file under /workspace that holds the list: a .json file with a JSON array, or "
-             "any other file with one item per line (a JSON value, or the bare text of the line)")
+FROM_FILE = ("or the path of a file under /workspace that holds the list: a JSON array (always, in a .json "
+             "file), or one item per line (a JSON value, or the bare text of the line)")
 SHOWN = 5                   # bad items named in a refusal, and errors listed in a summary: the rest are in the file
 
 
@@ -45,7 +45,7 @@ def listed(caller, value, what: str) -> list:
     except (PathError, OSError, UnicodeDecodeError) as exc:
         reason = exc.strerror if isinstance(exc, OSError) else exc      # an OSError's text names the host path
         raise ToolError(f"{what}: cannot read the list file {value}: {reason}") from exc
-    if host.suffix == ".json":
+    if host.suffix == ".json" or text.lstrip().startswith("["):
         try:
             items = json.loads(text)
         except ValueError as exc:

@@ -121,6 +121,9 @@ def test_every_bad_path_is_named_in_one_refusal_and_paths_may_come_from_a_file(m
     assert list(job_result(out)["clips"]) == ["/workspace/a.mp4"]            # the same clip twice is one entry
     out = q.wait(caller, submit(q, caller, "/workspace/paths.json", "Caption.")["job_id"], 120)
     assert out["summary"]["items"] == 1
+    (ws / "array.txt").write_text(json.dumps(["a.mp4"], indent=1))           # a JSON array under any name
+    out = q.wait(caller, submit(q, caller, "array.txt", "Caption.")["job_id"], 120)
+    assert list(job_result(out)["clips"]) == ["/workspace/a.mp4"]
     with pytest.raises(ToolError, match="cannot read the list file nope.txt: No such file or directory$"):
         submit(q, caller, "nope.txt", "Caption.")                            # and no host path
 
