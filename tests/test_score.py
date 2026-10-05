@@ -70,6 +70,28 @@ def test_matching_case_counts_score_normally():
     assert abs(score - 0.7) < 1e-9
 
 
+def test_each_half_of_the_navigation_score_is_count_checked():
+    """WBench's navigation_trajectory carries the accuracy count as its n: a case that lost its
+    consistency value changed the mean without changing that n."""
+    from ar_kernel.eval.score import ScoreError, case_counts
+    root = _report(navigation_trajectory=(0.7, 13), navigation_accuracy=(0.8, 13), navigation_consistency=(0.6, 12))
+    expected = case_counts(root, ["navigation_trajectory"])
+    assert expected == {"navigation_trajectory": 13, "navigation_accuracy": 13, "navigation_consistency": 12}
+    node = _report(navigation_trajectory=(0.7, 13), navigation_accuracy=(0.8, 13), navigation_consistency=(0.6, 11))
+    with pytest.raises(ScoreError, match="navigation_consistency 11 vs 12"):
+        score_from_report(node, ["navigation_trajectory"], expected_n=expected)
+    assert score_from_report(root, ["navigation_trajectory"], expected_n=expected)[0] == 0.7
+
+
+def test_the_navigation_aggregate_is_the_mean_of_its_two_means_as_scored():
+    from ar_kernel.eval.score import aggregates
+    report = {"dimensions": {"interaction": ["navigation_trajectory"]}, "per_case": {
+        "a": {"navigation_accuracy": 1.0, "navigation_consistency": 0.0},
+        "b": {"navigation_accuracy": 1.0}}}                     # no consistency value for this case
+    agg = aggregates(CFG, report, [], ["navigation_trajectory"])
+    assert agg["metrics"] == {"navigation_trajectory": 0.5}     # (1.0 + 0.0) / 2, not the per-case mean 0.75
+
+
 def test_metric_without_an_expectation_is_not_count_checked():
     """VLM metrics are absent from the GPU-only reference; no n to compare against."""
     score, _ = score_from_report(_report(scene_adherence=(0.5, 40)), ["scene_adherence"],

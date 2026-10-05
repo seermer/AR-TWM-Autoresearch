@@ -90,6 +90,9 @@ UNIVERSAL_METRICS = (
     "geometric_consistency", "photometric_consistency",
 )
 
+NAV_PARTS = ("navigation_accuracy", "navigation_consistency")
+
+
 class ScoreError(ValueError):
     """The report cannot yield a score comparable with the rest of the run."""
 
@@ -120,14 +123,17 @@ def score_from_report(report: dict, metric_set: list[str], expected_n: dict[str,
     if bad:
         raise ScoreError(f"metric means not finite: {bad}")
     if expected_n:
-        wrong = {m: (full[m].get("n"), expected_n[m]) for m in metric_set
-                 if m in expected_n and full[m].get("n") != expected_n[m]}
+        wrong = {m: (full[m].get("n"), expected_n[m]) for m in (*metric_set, *NAV_PARTS)
+                 if m in expected_n and m in full and full[m].get("n") != expected_n[m]}
         if wrong:
             raise ScoreError("metrics computed over the wrong number of cases (got vs expected): "
                              + ", ".join(f"{m} {got} vs {want}" for m, (got, want) in wrong.items()))
     return weighted_score(per_metric, weights), per_metric
 
-NAV_PARTS = ("navigation_accuracy", "navigation_consistency")
+
+def case_counts(report: dict, metric_set: list[str]) -> dict[str, int]:
+    """The case count behind each scored mean, and behind each half of navigation_trajectory."""
+    return {m: int(report["full"][m]["n"]) for m in (*metric_set, *NAV_PARTS) if m in report["full"]}
 
 
 def _mean(values: list[float]) -> float:
@@ -140,23 +146,22 @@ def aggregates(cfg: KernelConfig, report: dict, case_ids: list[str], metric_set:
     sharing an interaction type, scene category or perspective, the same per-dimension means
     over that group's cases alone.
 
-    navigation_trajectory is the mean of its two components, as in WBench. No case ids
-    leave this function.
+    navigation_trajectory is the mean of its two components' means, as WBench scores it (a case
+    may lack one component, so this is not the mean of per-case means). No case ids leave this
+    function.
     """
-    wanted = set(metric_set)
-    per_case: dict[str, dict[str, float]] = {}
-    for case_id, scores in report["per_case"].items():
-        case = {m: float(v) for m, v in scores.items() if m in wanted}
-        nav = [float(scores[p]) for p in NAV_PARTS if p in scores]
-        if "navigation_trajectory" in wanted and nav:
-            case["navigation_trajectory"] = _mean(nav)
-        per_case[case_id] = case
+    wanted = {*metric_set, *(NAV_PARTS if "navigation_trajectory" in metric_set else ())}
+    per_case = {case_id: {m: float(v) for m, v in scores.items() if m in wanted}
+                for case_id, scores in report["per_case"].items()}
 
     def metric_means(ids) -> dict[str, float]:
         values: dict[str, list[float]] = {}
         for case_id in ids:
             for metric, value in per_case.get(case_id, {}).items():
                 values.setdefault(metric, []).append(value)
+        nav = [_mean(values[p]) for p in NAV_PARTS if p in values]
+        if "navigation_trajectory" in wanted and nav:
+            values["navigation_trajectory"] = nav
         return {m: _mean(values[m]) for m in metric_set if m in values}
 
     def dimension_means(metrics: dict[str, float]) -> dict[str, float]:
