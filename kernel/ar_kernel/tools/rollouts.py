@@ -131,14 +131,13 @@ def checked_repo(cfg, key: str, label: str) -> Path:
     return repo
 
 
-def check_clip_items(items: list[dict]) -> None:
-    """Items of a text/image-to-video job: {'prompt': str, 'image'?: path, 'seed': int}."""
-    for n, item in enumerate(items):
-        if not isinstance(item.get("prompt"), str) or not item["prompt"].strip():
-            raise ToolError(f"item {n}: prompt must be a non-empty string")
-        if item.get("image") is not None and not isinstance(item["image"], str):
-            raise ToolError(f"item {n}: image must be a file path")
-        check_item_seed(n, item)
+def check_clip_item(item: dict) -> None:
+    """An item of a text/image-to-video job: {'prompt': str, 'image'?: path, 'seed': int}."""
+    if not isinstance(item.get("prompt"), str) or not item["prompt"].strip():
+        raise ToolError("prompt must be a non-empty string")
+    if item.get("image") is not None and not isinstance(item["image"], str):
+        raise ToolError("image must be a file path")
+    check_item_seed(item)
 
 
 def check_published(info) -> None:
@@ -209,12 +208,10 @@ class AlayaWorldBackend(GpuJob):
             raise ToolError(f"seed must be an int: got {args['seed']!r}")
         if "node" in args:
             self._node(args["node"])
-        for n, item in enumerate(args["items"]):
-            self._check_item(n, item)
 
-    def _check_item(self, n: int, item: dict) -> None:
+    def check_item(self, item: dict) -> None:
         def bad(msg):
-            raise ToolError(f"item {n}: {msg}")
+            raise ToolError(msg)
         if not str(item.get("image", "")).lower().endswith(IMAGE_EXTS):
             bad(f"image must be an image file ({', '.join(IMAGE_EXTS)}): got {item.get('image')!r}")
         if item.get("viewpoint") not in VIEWPOINTS:
@@ -424,7 +421,8 @@ class Wan22Backend(GpuJob):
         if not (is_int(frames) and 1 < frames <= maximum and frames % 4 == 1):
             raise ToolError(f"frames must be 4k+1 with 1 < frames <= {maximum}: got {frames!r}")
         args["frames"] = frames
-        check_clip_items(args["items"])
+
+    check_item = staticmethod(check_clip_item)
 
     def produce(self, job, items, work, out, cancel, report):
         repo = checked_repo(self.cfg, self.config_key, "Wan2.2")
@@ -510,7 +508,8 @@ class Ltx25Backend(GpuJob):
             raise ToolError(f"height and width must be ints: got {size}")
         if size not in [list(r) for r in self.block["resolutions"]]:
             raise ToolError(f"[height, width] must be one of the resolutions {self.block['resolutions']}: got {size}")
-        check_clip_items(args["items"])
+
+    check_item = staticmethod(check_clip_item)
 
     def worker_groups(self, variant: str, n_items: int) -> list[list[int]]:
         """One GPU per worker; workers = min(GPUs (capped by the config's `workers`), items,

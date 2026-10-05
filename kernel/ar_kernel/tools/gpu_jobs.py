@@ -78,15 +78,15 @@ def is_int(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def check_item_seed(n: int, item: dict) -> None:
+def check_item_seed(item: dict) -> None:
     """An item's `seed` must be an int; integer text ("7") is taken as that int, in place."""
     if "seed" not in item:
-        raise ToolError(f"item {n}: seed is missing; give an int")
+        raise ToolError("seed is missing; give an int")
     seed = item["seed"]
     if isinstance(seed, str) and seed.strip().lstrip("+-").isdigit():
         item["seed"] = seed = int(seed)
     if not is_int(seed):
-        raise ToolError(f"item {n}: seed must be an int: got {seed!r}")
+        raise ToolError(f"seed must be an int: got {seed!r}")
 
 
 def enabled_variants(block: dict, names: tuple[str, ...]) -> list[str]:
@@ -129,14 +129,17 @@ class GpuJob:
                                           if not isinstance(item, dict)})
         args = {**args, "items": items}
         self.check_args(args)
+        bad = {}
         for n, item in enumerate(items):
+            try:
+                self.check_item(item)
+            except ToolError as exc:
+                bad[n] = str(exc)
             if copies_held_out(self.cfg, *strings(item)):       # before a GPU is scheduled
                 self.recorder.event("isolation.refused", node=caller.node, phase=caller.phase,
                                     attempt=caller.attempt, component="tools", tool=self.name,
                                     payload={"item": n})
-                raise ToolError(f"item {n}: {EXCLUDED_PROMPT}")
-        bad = {}
-        for n, item in enumerate(items):
+                bad.setdefault(n, EXCLUDED_PROMPT)
             for key in self.file_keys:
                 if isinstance(item.get(key), str):
                     try:
@@ -149,7 +152,10 @@ class GpuJob:
         return {"job_id": q.submit(caller, self.name, args)}
 
     def check_args(self, args: dict) -> None:
-        raise NotImplementedError
+        """The arguments of the whole job; may fill defaults in. Raises ToolError."""
+
+    def check_item(self, item: dict) -> None:
+        """One item. Raises ToolError with what is wrong: `submit` refuses the call for all bad items at once."""
 
     # ---- run (worker thread, under the GPU lock) ----
     def run(self, job, cancel: threading.Event, report) -> dict:

@@ -36,10 +36,11 @@ class ImageBackend(GpuJob):
         if not (_valid_side(width) and _valid_side(height)):
             raise ToolError(f"width/height must be multiples of 16 in [{_MIN_SIDE}, {_MAX_SIDE}]: "
                             f"got {width}x{height}")
-        for n, item in enumerate(args["items"]):
-            if not item.get("prompt") or not isinstance(item["prompt"], str):
-                raise ToolError(f"item {n}: prompt must be a non-empty string")
-            check_item_seed(n, item)
+
+    def check_item(self, item):
+        if not item.get("prompt") or not isinstance(item["prompt"], str):
+            raise ToolError("prompt must be a non-empty string")
+        check_item_seed(item)
 
     def produce(self, job, items, work, out, cancel, report):
         i = self.block

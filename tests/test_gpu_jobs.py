@@ -313,7 +313,8 @@ def test_listed_item_schemas_type_every_field(tmp_path):
 def test_integer_text_seed_is_taken_as_an_int(tmp_path, name):
     _, backends = _listed_tools(tmp_path)
     args = {"items": [{"prompt": "p", "seed": "7"}, {"prompt": "q", "seed": 8}]}
-    backends[name].check_args(args)
+    for item in args["items"]:
+        backends[name].check_item(item)
     assert [i["seed"] for i in args["items"]] == [7, 8]
 
 
@@ -324,7 +325,7 @@ def test_bad_or_missing_seed_is_refused_clearly(tmp_path, name, seed, match):
     _, backends = _listed_tools(tmp_path)
     item = {"prompt": "p"} if seed is None else {"prompt": "p", "seed": seed}
     with pytest.raises(ToolError, match=match):
-        backends[name].check_args({"items": [item]})
+        backends[name].check_item(item)
 
 
 def test_a_prompt_copied_from_the_evaluation_is_refused_before_the_job_is_queued(tmp_path):
@@ -346,8 +347,12 @@ def test_a_prompt_copied_from_the_evaluation_is_refused_before_the_job_is_queued
             return "job1"
     q = Queue()
     copied = "A hall. Torch sconces on both walls cast flickering orange light."
-    with pytest.raises(ToolError, match="item 1: " + EXCLUDED_PROMPT):
-        backend.submit(q, caller, {"items": [{"prompt": "a quiet beach", "seed": 1}, {"prompt": copied, "seed": 2}]})
+    with pytest.raises(ToolError, match="item 1: " + EXCLUDED_PROMPT) as refused:
+        backend.submit(q, caller, {"items": [{"prompt": "a quiet beach", "seed": 1}, {"prompt": copied, "seed": 2},
+                                             {"prompt": "", "seed": 3}, {"prompt": "a pier"}]})
+    # every bad item in the one refusal, whatever is wrong with each
+    assert "3 of 4 items are bad" in str(refused.value)
+    assert "item 2: prompt must be a non-empty string" in str(refused.value) and "item 3: seed is missing" in str(refused.value)
     assert q.submitted == 0
     assert backend.submit(q, caller, {"items": [{"prompt": "a quiet beach", "seed": 1}]}) == {"job_id": "job1"}
     assert [e["type"] for e in rec.read_events("n1")].count("isolation.refused") == 1

@@ -28,10 +28,9 @@ class AnnotateBackend(GpuJob):
         super().__init__(*args, **kwargs)
         self.description = self.description.replace("{max_frames}", str(self.block["max_frames"]))
 
-    def check_args(self, args):
-        for item in args["items"]:
-            if not str(item.get("video", "")).lower().endswith(".mp4"):
-                raise ToolError(f"{item.get('video')!r} is not an .mp4")
+    def check_item(self, item):
+        if not str(item.get("video", "")).lower().endswith(".mp4"):
+            raise ToolError(f"{item.get('video')!r} is not an .mp4")
 
     def produce(self, job, items, work, out, cancel, report):
         a = self.block
