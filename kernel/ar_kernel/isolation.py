@@ -69,14 +69,43 @@ def copies_held_out(cfg, *texts) -> bool:
     return any(not held.isdisjoint(_runs(text)) for text in texts if isinstance(text, str))
 
 
-def scrub(value, names: list[str]):
+def host_roots(cfg) -> tuple[tuple[str, str], ...]:
+    """(folder on this machine, what an agent reads instead) for the folders a kernel message may name:
+    command lines and log tails quoted in errors hold them. Read from the config and the environment,
+    so nothing here depends on where the project sits; a folder inside another comes first."""
+    folders = {"<host>/" + p.name: p for p in (cfg.repo_root, cfg.worldmodel, cfg.wbench, cfg.runs_dir)}
+    folders["<host>/home"] = Path.home()
+    pairs = {(str(p), shown) for shown, path in folders.items() for p in (path, path.resolve())}
+    return tuple(sorted(pairs, key=lambda pair: -len(pair[0])))
+
+
+def scrub(value, names: list[str], roots=()):
+    """`value` as an agent may read it: without the blocked `names` and without the host folders `roots`."""
     if isinstance(value, str):
+        for root, shown in roots:
+            value = value.replace(root, shown)
         return _matcher(tuple(names)).sub(SCRUBBED, value) if names else value
     if isinstance(value, dict):
-        return {key: scrub(item, names) for key, item in value.items()}
+        return {key: scrub(item, names, roots) for key, item in value.items()}
     if isinstance(value, list):
-        return [scrub(item, names) for item in value]
+        return [scrub(item, names, roots) for item in value]
     return value
+
+
+def scrub_train_files(node_dir: Path, names: list[str], roots) -> None:
+    """Scrub, in place, the training config and logs of a finished node: the trainer wrote this
+    machine's folders into them, and later agents read them under /nodes."""
+    for attempt in (Path(node_dir) / "attempts").glob("improve_recipe-*"):
+        for path in (attempt / "train_config.yaml", attempt / "train" / "train.log",
+                     *(attempt / "train" / "logs").rglob("*.log")):
+            if not path.is_file() or path.is_symlink():
+                continue
+            text = path.read_text(encoding="utf-8", errors="surrogateescape")
+            clean = scrub(text, names, roots)
+            if clean != text:
+                tmp = path.with_name(path.name + ".tmp")
+                tmp.write_text(clean, encoding="utf-8", errors="surrogateescape")
+                tmp.replace(path)
 
 
 def censor_names(cfg) -> list[str]:
@@ -95,7 +124,9 @@ def drop_sentences(value, names: list[str]):
     papers, web pages): no word could stand in for the name there, and the sentence around it is about
     what the agent must not read. A sentence ends at . ! ? a newline or a double quote."""
     if isinstance(value, str):
-        return _MARKED.sub("", _matcher(tuple(names)).sub(_MARK, value)) if names else value
+        marked = _matcher(tuple(names)).sub(_MARK, value) if names else value
+        # only where a name was found: on a long text without sentence ends the pattern is quadratic
+        return _MARKED.sub("", marked) if _MARK in marked else value
     if isinstance(value, dict):
         return {key: drop_sentences(item, names) for key, item in value.items()}
     if isinstance(value, list):

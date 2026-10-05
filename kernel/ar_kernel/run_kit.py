@@ -11,7 +11,7 @@ from .gateway.app import Upstream, create_gateway_app
 from .gateway.mock import MockBook
 from .gateway.store import CallStore
 from .guards import alert
-from .isolation import censor_names
+from .isolation import censor_names, host_roots
 from .services import RunServices, socket_dir_for
 from .tools.ask import Ask, register_ask_tool
 from .tools.captioner import register_caption_tool
@@ -58,7 +58,7 @@ class RunKit:
 def build_run_kit(cfg, run_dir: Path, gpus: list[int], recorder, environ) -> RunKit:
     budget = Budget.from_config(cfg)
     budget.load(run_dir)
-    registry = TokenRegistry(recorder, cfg.get("isolation.blocked_names") or [])
+    registry = TokenRegistry(recorder, cfg.get("isolation.blocked_names") or [], host_roots(cfg))
     gpu_lock = threading.Lock()
     def require_free() -> None:
         require_free_gpus(gpus, int(cfg.get("gpus.free_below_mib")), waits=FREE_WAITS_S)

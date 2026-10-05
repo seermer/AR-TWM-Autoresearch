@@ -34,6 +34,25 @@ def test_scrub_replaces_names_in_nested_values():
     assert out == {"log": ["[run_render] 4 items", 3], "ok": True}
 
 
+def test_scrub_removes_this_machines_folders_wherever_the_project_sits(tmp_path, monkeypatch):
+    """ffprobe's command line in a rejection, a log tail in a gate failure: they name kernel files by host
+    path. The folders come from the config and the environment, never from a fixed path."""
+    from ar_kernel.isolation import host_roots
+    raw = {**CFG.raw, "paths": {**CFG.raw["paths"], "worldmodel": str(tmp_path / "elsewhere" / "WM"),
+                                "runs_dir": "runs"}}
+    moved = KernelConfig(raw=raw, repo_root=tmp_path / "proj" / "AR")
+    monkeypatch.setenv("HOME", str(tmp_path / "home" / "someone"))
+    roots = host_roots(moved)
+    text = (f"ffprobe {tmp_path}/proj/AR/runs/r1/quarantine/ab/video.mp4; cwd {tmp_path}/elsewhere/WM/tools; "
+            f"cache {tmp_path}/home/someone/.cache/hf; code {tmp_path}/proj/AR/kernel/x.py")
+    assert scrub({"tail": [text]}, ["wbench"], roots) == {"tail": [
+        "ffprobe <host>/runs/r1/quarantine/ab/video.mp4; cwd <host>/WM/tools; cache <host>/home/.cache/hf; "
+        "code <host>/AR/kernel/x.py"]}
+    assert str(tmp_path) not in json.dumps(scrub(text, [], roots))
+    assert scrub(text, []) == text                                      # no folders given, nothing replaced
+
+
+
 def _reply(rec, message, **where):
     rec.event("llm.response", conversation_id="c", payload={"body": {"choices": [{"message": message}]}}, **where)
 
@@ -195,3 +214,30 @@ def test_boilerplate_shared_by_several_evaluation_prompts_is_not_a_copy():
     assert not copies_held_out(CFG, "First-person view at eye level from the sidewalk.")
     assert not copies_held_out(CFG, "Third-person view from behind and slightly above the hiker.")
     assert copies_held_out(CFG, CASE["environment_prompt"])               # a whole prompt still is
+
+
+def test_text_without_a_blocked_name_or_a_sentence_end_is_passed_through_at_once():
+    """A 100,000-character line (base64, one row of numbers) took 20 s per model request."""
+    import time
+    from ar_kernel.isolation import drop_sentences
+    text, started = "ab12" * 50_000, time.monotonic()
+    assert drop_sentences(text, ["wbench"]) == text
+    assert time.monotonic() - started < 2
+
+
+def test_a_finished_nodes_training_config_and_logs_are_scrubbed_in_place(tmp_path):
+    from ar_kernel.isolation import host_roots, scrub_train_files
+    cfg = KernelConfig(raw=CFG.raw, repo_root=tmp_path / "proj" / "AR")
+    attempt = tmp_path / "proj" / "AR" / "runs" / "r" / "nodes" / "n1" / "attempts" / "improve_recipe-2"
+    (attempt / "train" / "logs" / "train_config").mkdir(parents=True)
+    files = [attempt / "train_config.yaml", attempt / "train" / "train.log",
+             attempt / "train" / "logs" / "train_config" / "train_node0.log"]
+    for f in files:
+        f.write_text(f"config: {attempt}/train_config.yaml\n[Train] step=1 loss=0.5\n")
+    (attempt / "train" / "untouched.bin").write_bytes(b"\xff" + str(attempt).encode())
+    scrub_train_files(attempt.parents[1], ["wbench"], host_roots(cfg))
+    for f in files:
+        assert f.read_text() == ("config: <host>/runs/r/nodes/n1/attempts/improve_recipe-2/train_config.yaml\n"
+                                 "[Train] step=1 loss=0.5\n")
+    assert (attempt / "train" / "untouched.bin").read_bytes().startswith(b"\xff")
+    assert not list(attempt.rglob("*.tmp"))

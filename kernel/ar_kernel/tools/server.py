@@ -73,7 +73,7 @@ def publish(caller, name: str, result) -> str:
     from .hf_tools import move_into            # imports this module
     with tempfile.NamedTemporaryFile("w", dir=caller.staging_host, suffix=".tmp", delete=False,
                                      encoding="utf-8") as handle:
-        json.dump(scrub(result, caller.scrub_names), handle, ensure_ascii=False, indent=1)
+        json.dump(scrub(result, caller.scrub_names, caller.host_roots), handle, ensure_ascii=False, indent=1)
     rel = f"results/{name}.json"
     try:
         move_into(Path(handle.name), caller.staging_host, rel)
@@ -124,14 +124,14 @@ class ToolKit:
             self.recorder.event("tool.error", parent_span_id=span, tool=name,
                                  duration_s=time.monotonic() - started,
                                  payload={"tool": name, "error": str(exc)}, **base)
-            raise ToolError(scrub(str(exc), caller.scrub_names)) from None
+            raise ToolError(scrub(str(exc), caller.scrub_names, caller.host_roots)) from None
         except Exception as exc:                          # noqa: BLE001 -- contain kernel bugs
             self.recorder.event("tool.error", parent_span_id=span, tool=name,
                                  duration_s=time.monotonic() - started,
                                  payload={"tool": name, "error": f"{type(exc).__name__}: {exc}",
                                           "traceback": traceback.format_exc()}, **base)
-            raise ToolError(scrub(f"{type(exc).__name__}: {exc}", caller.scrub_names)) from exc
+            raise ToolError(scrub(f"{type(exc).__name__}: {exc}", caller.scrub_names, caller.host_roots)) from exc
         self.recorder.event("tool.result", parent_span_id=span, tool=name,
                              duration_s=time.monotonic() - started,
                              payload={"tool": name, "result": result}, **base)
-        return scrub(result, caller.scrub_names)
+        return scrub(result, caller.scrub_names, caller.host_roots)

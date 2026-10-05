@@ -16,7 +16,7 @@ from .archive.clips import ClipStore
 from .archive.commits import CommitStore
 from .archive.nodes import NOT_SHOWN, NodeStore
 from .context_bundle import build_edit_context, build_recipe_context, write_bundle
-from .isolation import scrub
+from .isolation import host_roots, scrub
 from .liveness import Liveness, tree_mark
 from .sandbox.image import ImageBuildError, ensure_image
 from .sandbox.runner import Mounts, RunResult, container_name, diff, run_container, snapshot
@@ -112,7 +112,7 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
     elif result_file.is_dir():
         shutil.rmtree(result_file)
     (Path(env.run_dir) / "store").mkdir(exist_ok=True)
-    write_bundle(ctx, dirs["context"], env.cfg.get("isolation.blocked_names") or [])
+    write_bundle(ctx, dirs["context"], env.cfg.get("isolation.blocked_names") or [], host_roots(env.cfg))
     reqs = running / "agent" / "requirements.txt"
     try:
         reqs_text = reqs.read_text(encoding="utf-8") if reqs.exists() else ""
@@ -132,6 +132,7 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
         soft = float(env.cfg.get(f"timeouts.{phase}_s"))
         liveness = Liveness.from_config(env.cfg, soft, signals=[
             lambda: tree_mark(dirs["workspace"], dirs["staging"]),          # workspace changes
+            lambda: tree_mark(Path(env.run_dir) / "hf_tmp"),                 # a download in progress
             lambda: tree_mark(env.recorder.events_path(node)),               # gateway + tool calls
             lambda: env.queue.active_for_token(caller.token) and time.monotonic()])  # own GPU jobs
         # /workspace/staging is mounted from its own host directory, so it is snapshotted separately.
@@ -256,7 +257,8 @@ def smoke_contexts(env: PhaseEnv, *, conn, node: str, parent_id: str, nodes_rema
     recipe = build_recipe_context(cfg=env.cfg, node_id=node, n_gpus=len(env.gpus), tools=_recipe_tools(env),
                                   **common)
     return scrub({"edit_self": build_edit_context(**common).model_dump(mode="json"),
-                  "improve_recipe": recipe.model_dump(mode="json")}, env.cfg.get("isolation.blocked_names") or [])
+                  "improve_recipe": recipe.model_dump(mode="json")},
+                 env.cfg.get("isolation.blocked_names") or [], host_roots(env.cfg))
 
 
 def run_improve_recipe(env: PhaseEnv, *, conn, node: str, parent_id: str, agent_commit: str, attempt: int,
