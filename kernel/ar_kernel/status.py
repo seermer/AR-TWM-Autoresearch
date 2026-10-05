@@ -74,7 +74,13 @@ def format_status(d: dict) -> str:
     lines.append(f"spend: {usd}, {spend['tokens']} tokens, {spend['calls']} calls; cap: {cap}")
     done = sum(1 for n in d["nodes"] if n["parent_id"] is not None and n["status"] != "interrupted")
     lines.append(f"nodes: {done} of {d['max_nodes']}; best: {d['best']}")
+    children: dict[str | None, list[dict]] = {}
     for n in d["nodes"]:
+        children.setdefault(n["parent_id"], []).append(n)
+    todo = children.get(None, [])[::-1]
+    while todo:                                 # depth first: a node is listed under its own parent
+        n = todo.pop()
+        todo += children.get(n["node_id"], [])[::-1]
         score = "-" if n["score"] is None else f"{n['score']:.4f}"
         p = "" if n["P"] is None else f" P={n['P']:.2f}"
         err = f"  ! {n['error'][:120]}" if n["error"] else ""

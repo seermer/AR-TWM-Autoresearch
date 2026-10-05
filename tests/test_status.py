@@ -34,6 +34,18 @@ def test_status_is_plain_json(tmp_path):
     assert "nodes: 1 of 5" in text                              # interrupted n2 is not counted
 
 
+def test_a_node_is_listed_under_its_own_parent():
+    """live-10-03 listed n4, a child of n2, below n3 at n3's child indent."""
+    node = lambda i, parent, depth: {"node_id": i, "parent_id": parent, "depth": depth, "status": "scored",
+                                     "score": 0.5, "P": None, "error": None}
+    d = {"run_id": "r", "judge": None, "loop_pid": None, "state": None, "max_nodes": 5, "best": None, "alerts": [],
+         "spend": {"usd": None, "max_usd": None, "tokens": 0, "calls": 0},
+         "nodes": [node("root", None, 0), node("n1", "root", 1), node("n2", "n1", 2), node("n3", "root", 1),
+                   node("n4", "n2", 3)]}
+    listed = [line.split()[0] for line in format_status(d).splitlines() if line.startswith("  ")]
+    assert listed == ["root", "n1", "n2", "n4", "n3"]
+
+
 def test_status_skips_a_torn_trailing_event_line(tmp_path):
     (tmp_path / "config").mkdir()
     (tmp_path / "config" / "kernel.yaml").write_text("selection: {decay: 0.5, prior_weight: 1.0, subtree_share: 0.3,"
