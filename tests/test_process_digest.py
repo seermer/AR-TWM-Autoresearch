@@ -100,7 +100,7 @@ def test_ask_calls_are_not_conversations_turns_or_compactions(tmp_path):
     assert process_digest(tmp_path, "n1")["roles"] == [
         {"phase": "improve_recipe", "role": "conversation", "conversations": 1, "turns": 1, "compactions": 0}]
     write_transcripts(tmp_path, "n1")
-    assert len(list((tmp_path / "nodes" / "n1" / "transcripts").rglob("*.md"))) == 1
+    assert len(list((tmp_path / "nodes" / "n1" / "transcripts").rglob("*.jsonl"))) == 1
 
 
 def test_roles_tools_jobs_ingest_and_rounds(tmp_path):

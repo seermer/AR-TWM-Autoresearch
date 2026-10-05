@@ -4,7 +4,7 @@ from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.transcripts import write_transcripts
 
 
-def test_one_readable_file_per_conversation_named_by_its_submit_tool(tmp_path):
+def test_one_file_per_conversation_named_by_its_submit_tool_with_a_message_per_line(tmp_path):
     rec = Recorder(tmp_path)
     tools = [{"function": {"name": "read_file"}}, {"function": {"name": "submit_plan"}}]
     messages = [{"role": "system", "content": "# Role\nplan"}, {"role": "user", "content": "<context>x</context>"},
@@ -18,15 +18,12 @@ def test_one_readable_file_per_conversation_named_by_its_submit_tool(tmp_path):
     rec.event("llm.request", node="n1", phase="contract", attempt=1, conversation_id="c2",
               payload={"body": {"messages": [{"role": "user", "content": "ping"}]}})
     write_transcripts(tmp_path, "n1")
-    [path] = (tmp_path / "nodes" / "n1" / "transcripts").rglob("*.md")
-    assert path.relative_to(tmp_path / "nodes" / "n1" / "transcripts").as_posix() == "improve_recipe-1/01-plan.md"
-    text = path.read_text()
-    for part in ("# Role\nplan", "### reasoning\n\nthink", "### tool call: read_file", "## tool result: read_file\n\nfile text",
-                 "all done"):
-        assert part in text
-    turns = json.loads(path.with_suffix(".json").read_text())                # the same conversation, for a script
+    [path] = [p for p in (tmp_path / "nodes" / "n1" / "transcripts").rglob("*") if p.is_file()]      # one format only
+    assert path.relative_to(tmp_path / "nodes" / "n1" / "transcripts").as_posix() == "improve_recipe-1/01-plan.jsonl"
+    turns = [json.loads(line) for line in path.read_text().splitlines()]
     assert [m["role"] for m in turns] == ["system", "user", "assistant", "tool", "assistant"]
-    assert turns[2]["tool_calls"][0]["function"]["name"] == "read_file" and turns[4]["content"] == "all done"
+    assert turns[2]["reasoning"] == "think" and turns[2]["tool_calls"][0]["function"]["name"] == "read_file"
+    assert turns[3] == {"role": "tool", "tool_call_id": "t1", "content": "file text"} and turns[4]["content"] == "all done"
 
 
 def test_missing_telemetry_writes_nothing_and_does_not_raise(tmp_path):
