@@ -54,13 +54,17 @@ class CommitStore:
                 raise CommitError(f"{name}: clip listed more than once: {dupes}; "
                                   f"use the dataset weight to upsample instead")
             key = fmt if mode is None else f"{fmt}:{mode}"
+            wrong = []
             for clip_id in clip_ids:
                 try:
                     clip = self.clips.get(clip_id)
                 except KeyError:
                     raise CommitError(f"{name}: unknown clip {clip_id}") from None
                 if key not in clip["formats"]:
-                    raise CommitError(f"{name}: clip {clip_id[:12]} is not eligible for {key}")
+                    wrong.append(f"{clip_id} (eligible for {', '.join(clip['formats'])})")
+            if wrong:
+                raise CommitError(f"{name}: {len(wrong)} of {len(clip_ids)} clips are not eligible for {key}: "
+                                  + "; ".join(wrong[:5]) + ("; ..." if len(wrong) > 5 else ""))
             if weight > 0 and clip_ids:
                 usable += 1
             normalized[name] = {"format": fmt, "prompt_mode": mode, "weight": weight,

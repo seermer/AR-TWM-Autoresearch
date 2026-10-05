@@ -39,9 +39,12 @@ def test_clip_ingested_by_another_branch_is_selectable(store):
 
 def test_ineligible_format_is_rejected(store):
     cs, ids, _ = store
-    with pytest.raises(CommitError, match="not eligible"):
+    with pytest.raises(CommitError) as refused:
         cs.commit(None, {"static": {"format": "video_caption_static", "prompt_mode": None,
                                     "weight": 1.0, "clips": ids}}, "bad", node_id="n1")
+    # every clip by its whole id (what data_query takes), with the formats it can be committed as
+    assert f"{len(ids)} of {len(ids)} clips are not eligible for video_caption_static" in str(refused.value)
+    assert all(f"{i} (eligible for video_caption_camera" in str(refused.value) for i in ids[:5])
 
 def test_prompt_mode_rules_are_enforced(store):
     cs, ids, _ = store
