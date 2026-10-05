@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib, os, shutil, sqlite3, time
+import hashlib, os, shutil, sqlite3, time, uuid
 from pathlib import Path
 
 KINDS = {"video": ".mp4", "caption": ".json", "pose": ".npz"}
@@ -55,7 +55,7 @@ class BlobStore:
         return hexdigest
 
     def _install(self, path: Path, target: Path) -> None:
-        tmp = target.with_name(f"{target.name}.tmp.{os.getpid()}")
+        tmp = target.with_name(f"{target.name}.tmp.{uuid.uuid4().hex}")     # two calls may store the same bytes
         # shutil.move renames on one filesystem and copies across (EXDEV); either
         # way the bytes land under a temp name first.
         shutil.move(str(path), str(tmp))
