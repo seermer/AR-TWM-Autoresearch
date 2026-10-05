@@ -145,8 +145,32 @@ def test_a_checker_crash_rejects_only_its_candidate(tmp_path, monkeypatch):
     monkeypatch.setattr(ingest, "check_clip_formats", flaky)
     ing = _ingestor(tmp_path)
     results = ing.ingest([_candidate(tmp_path, "a"), _candidate(tmp_path, "b", seconds=5.0)], node_id="n1")
-    assert not results[0].accepted and "checker bridge failed" in results[0].reasons[0]
-    assert results[1].accepted
+    [crashed] = [r for r in results if not r.accepted]         # the checks run at the same time: either one
+    assert "checker bridge failed" in crashed.reasons[0]
+
+
+def test_clips_are_checked_several_at_a_time(tmp_path, monkeypatch):
+    import threading
+    from ar_kernel.data import ingest
+    real, together = ingest.check_clip_formats, threading.Barrier(2, timeout=60)
+
+    def both_inside(*args, **kwargs):
+        together.wait()                 # times out, and fails the test, unless two checks overlap
+        return real(*args, **kwargs)
+    monkeypatch.setattr(ingest, "check_clip_formats", both_inside)
+    results = _ingestor(tmp_path).ingest(
+        [_candidate(tmp_path, "a"), _candidate(tmp_path, "b", seconds=5.0)], node_id="n1")
+    assert [r.accepted for r in results] == [True, True]
+
+
+def test_an_unexpected_error_gives_every_candidates_files_back(tmp_path, monkeypatch):
+    ing = _ingestor(tmp_path)
+    monkeypatch.setattr(ing.blobs, "put", lambda path, kind: (_ for _ in ()).throw(OSError("disk full")))
+    cands = [_candidate(tmp_path, "a"), _candidate(tmp_path, "b", seconds=5.0)]
+    with pytest.raises(OSError, match="disk full"):
+        ing.ingest(cands, node_id="n1")
+    assert all(c.video.exists() and c.caption.exists() and c.pose.exists() for c in cands)
+    assert not [p for p in (tmp_path / "quarantine").rglob("*") if p.is_file()]
 
 
 def test_rejected_candidate_files_are_returned_to_staging(tmp_path):
@@ -200,8 +224,8 @@ def test_every_ingest_event_names_its_candidate(tmp_path):
     assert ("ingest.leakage", str(good.video)) in named and ("ingest.accepted", str(good.video)) in named
     assert ("ingest.rejected", str(wide.video)) in named and ("ingest.rejected", str(bare.video)) in named
     assert len(named) == 4
-    first = ing.recorder.load_payload(events[0]["payload"])["candidate"]
-    assert first == {"video": str(good.video), "caption": str(good.caption), "pose": str(good.pose)}
+    [accepted] = [ing.recorder.load_payload(e["payload"])["candidate"] for e in events if e["type"] == "ingest.accepted"]
+    assert accepted == {"video": str(good.video), "caption": str(good.caption), "pose": str(good.pose)}
 
 
 def _path(n=120, step=0.02):

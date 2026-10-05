@@ -1,5 +1,6 @@
 from __future__ import annotations
 import hashlib, json, shutil, subprocess, uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -65,9 +66,23 @@ class Ingestor:
         self.leakage = leakage or LeakageChecker(cfg)
         self.base_recipe = run_config_path(cfg, run_dir, "base_recipe.yaml")
         self.tolerance = float(cfg.get("ingest.aspect_tolerance"))
+        self.workers = int(cfg.get("ingest.workers"))
 
     def ingest(self, candidates: list[Candidate], node_id: str) -> list[IngestResult]:
-        return [self._one(c, node_id) for c in candidates]
+        """A clip's checks are subprocesses, so `ingest.workers` clips are checked at a time; the archive
+        is then written one clip at a time, in order."""
+        with ThreadPoolExecutor(self.workers) as pool:
+            checks = [pool.submit(self._check, c, node_id) for c in candidates]
+        results = []
+        try:
+            for candidate, check in zip(candidates, checks):
+                result, held, facts = check.result()
+                results.append(result or self._store(candidate, held, facts, node_id))
+        finally:
+            for candidate, check in zip(candidates, checks):
+                if not check.exception():
+                    self._give_back(candidate, check.result()[1])
+        return results
 
     def _outside_staging(self, path: Path) -> bool:
         """Only staged files may be ingested: store/ and other nodes' views are under the run
@@ -84,7 +99,16 @@ class Ingestor:
         self._event(candidate, "ingest.rejected", node_id, {"reasons": reasons, **payload})
         return IngestResult(accepted=False, reasons=reasons)
 
-    def _one(self, candidate: Candidate, node_id: str) -> IngestResult:
+    def _give_back(self, candidate: Candidate, held: dict[str, Path]) -> None:
+        """Anything the archive did not take goes back where the agent staged it."""
+        for key, qpath in held.items():
+            if qpath.exists():
+                _move(qpath, _free_path(Path(getattr(candidate, key))))
+        for qdir in {qpath.parent for qpath in held.values()}:
+            shutil.rmtree(qdir, ignore_errors=True)
+
+    def _check(self, candidate: Candidate, node_id: str) -> tuple[IngestResult | None, dict[str, Path], dict | None]:
+        """(the rejection or None, the quarantined files, what `_store` records of a clip that passed)."""
         reasons: list[str] = []
         if not candidate.provenance:
             reasons.append("provenance is required")
@@ -102,7 +126,7 @@ class Ingestor:
                     f"{label} path {path} is outside the staging directory "
                     f"{self.run_dir / 'staging'}; ingest only accepts files staged there")
         if reasons:
-            return self._reject(candidate, node_id, reasons)
+            return self._reject(candidate, node_id, reasons), {}, None
 
         # Quarantine before ANY check, so every check and the store act on the same bytes (the
         # agent keeps running and could swap a staged file). quarantine/ is kernel-private.
@@ -111,23 +135,18 @@ class Ingestor:
         qdir.mkdir(parents=True)
         held = {k: _move(v, qdir / f"{k}{Path(v).suffix}") for k, v in staged.items() if v is not None}
         try:
-            try:
-                result = self._check_and_store(candidate, held, node_id)
-            except (subprocess.CalledProcessError, ValueError, IndexError, KeyError, CheckerError) as exc:
-                # A file ffprobe, decoding or the checker bridge cannot handle: record a rejection
-                # and carry on with the batch instead of failing the whole call.
-                result = self._reject(candidate, node_id, [
-                    f"could not read the candidate video: {type(exc).__name__}: {exc}"[:500]])
-        finally:
-            # Anything not consumed by the store goes back where the agent staged it.
-            for key, qpath in held.items():
-                if qpath.exists():
-                    _move(qpath, _free_path(Path(staged[key])))
-            shutil.rmtree(qdir, ignore_errors=True)
-        return result
+            checked = self._check_files(candidate, held, node_id)
+        except (subprocess.CalledProcessError, ValueError, IndexError, KeyError, CheckerError) as exc:
+            # A file ffprobe, decoding or the checker bridge cannot handle: record a rejection
+            # and carry on with the batch instead of failing the whole call.
+            checked = self._reject(candidate, node_id, [
+                f"could not read the candidate video: {type(exc).__name__}: {exc}"[:500]])
+        except BaseException:
+            self._give_back(candidate, held)
+            raise
+        return (checked, held, None) if isinstance(checked, IngestResult) else (None, held, checked)
 
-    def _check_and_store(self, candidate: Candidate, held: dict[str, Path],
-                         node_id: str) -> IngestResult:
+    def _check_files(self, candidate: Candidate, held: dict[str, Path], node_id: str) -> IngestResult | dict:
         video, caption, pose = held["video"], held["caption"], held.get("pose")
         info = probe_video(video)
         if info.rotation:
@@ -193,24 +212,28 @@ class Ingestor:
                 jump = pose_jump(arrays["cam_c2w"])
             if jump:
                 warnings.append(jump)
-        video_digest = self.blobs.put(video, "video")
-        caption_digest = self.blobs.put(caption, "caption")
-        pose_digest = self.blobs.put(pose, "pose") if pose else None
+        return {"metadata": {"frames": info.frames, "fps": info.fps, "width": info.width,
+                             "height": info.height, "duration": info.duration,
+                             "has_segments": has_segments, "has_intrinsics": has_intrinsics},
+                "formats": formats, "warnings": warnings}
+
+    def _store(self, candidate: Candidate, held: dict[str, Path], facts: dict, node_id: str) -> IngestResult:
+        video_digest = self.blobs.put(held["video"], "video")
+        caption_digest = self.blobs.put(held["caption"], "caption")
+        pose_digest = self.blobs.put(held["pose"], "pose") if "pose" in held else None
         clip_id = hashlib.sha256(json.dumps(
             {"video": video_digest, "caption": caption_digest, "pose": pose_digest,
              "camera_motion": candidate.camera_motion}, sort_keys=True).encode()).hexdigest()
         self.clips.add({
             "clip_id": clip_id, "video_digest": video_digest, "caption_digest": caption_digest,
-            "pose_digest": pose_digest, "camera_motion": candidate.camera_motion,
-            "metadata": {"frames": info.frames, "fps": info.fps, "width": info.width,
-                         "height": info.height, "duration": info.duration,
-                         "has_segments": has_segments, "has_intrinsics": has_intrinsics},
-            "formats": formats, "warnings": warnings, "provenance": candidate.provenance,
+            "pose_digest": pose_digest, "camera_motion": candidate.camera_motion, **facts,
+            "provenance": candidate.provenance,
             "license": candidate.license, "derived_from": candidate.derived_from,
             "ingested_by": node_id,
         })
-        self._event(candidate, "ingest.accepted", node_id, {"clip_id": clip_id, "formats": formats, "warnings": warnings})
-        return IngestResult(accepted=True, clip_id=clip_id, formats=formats, warnings=warnings)
+        self._event(candidate, "ingest.accepted", node_id,
+                    {"clip_id": clip_id, "formats": facts["formats"], "warnings": facts["warnings"]})
+        return IngestResult(accepted=True, clip_id=clip_id, formats=facts["formats"], warnings=facts["warnings"])
 
 
 def _move(src: Path, dst: Path) -> Path:

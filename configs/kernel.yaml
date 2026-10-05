@@ -33,6 +33,7 @@ selection:                       # continuous softmax parent selection (user dec
   epsilon: 0.2                    # this share of probability is spread uniformly over all candidates
 ingest:
   aspect_tolerance: 0.02
+  workers: 8                      # clips checked at a time (each check is a few CPU subprocesses)
 leakage:
   phash_max_distance: 4
   min_ncc: 0.95
