@@ -2,6 +2,7 @@
 agents can read them under /nodes/<node>/transcripts. Built from the gateway's telemetry."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from .process_digest import AGENT_PHASES, _payload, _text, role_of
@@ -30,8 +31,10 @@ def render(messages: list[dict]) -> str:
 
 
 def write_transcripts(run_dir: Path, node_id: str) -> None:
-    """One markdown file per conversation, in start order, under nodes/<node>/transcripts/<phase>-<attempt>/.
-    A compacted conversation continues in the next file. Never raises: transcripts are a convenience."""
+    """One markdown file per conversation, in start order, under nodes/<node>/transcripts/<phase>-<attempt>/,
+    and beside it the same messages as JSON: a tool result that quotes another transcript makes the
+    markdown ambiguous to a script. A compacted conversation continues in the next file. Never raises:
+    transcripts are a convenience."""
     try:
         rec = Recorder(run_dir)
         convs: dict[str, dict] = {}
@@ -54,5 +57,6 @@ def write_transcripts(run_dir: Path, node_id: str) -> None:
             path = out / conv["dir"] / f"{i:02d}-{role_of(body)}.md"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(render(messages), encoding="utf-8")
+            path.with_suffix(".json").write_text(json.dumps(messages, ensure_ascii=False), encoding="utf-8")
     except Exception:                                   # noqa: BLE001 -- never fail a node over transcripts
         pass

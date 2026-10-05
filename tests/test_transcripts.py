@@ -1,3 +1,5 @@
+import json
+
 from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.transcripts import write_transcripts
 
@@ -22,6 +24,9 @@ def test_one_readable_file_per_conversation_named_by_its_submit_tool(tmp_path):
     for part in ("# Role\nplan", "### reasoning\n\nthink", "### tool call: read_file", "## tool result: read_file\n\nfile text",
                  "all done"):
         assert part in text
+    turns = json.loads(path.with_suffix(".json").read_text())                # the same conversation, for a script
+    assert [m["role"] for m in turns] == ["system", "user", "assistant", "tool", "assistant"]
+    assert turns[2]["tool_calls"][0]["function"]["name"] == "read_file" and turns[4]["content"] == "all done"
 
 
 def test_missing_telemetry_writes_nothing_and_does_not_raise(tmp_path):
