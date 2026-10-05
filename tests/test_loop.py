@@ -330,3 +330,36 @@ def test_a_phase_that_crashes_after_reaching_for_the_evaluation_set_is_still_qua
     loop.phases.edit_self = crashing_edit
     loop.run()
     assert NodeStore(loop.ctx.conn).get("n1")["status"] == "quarantined"
+
+
+def test_saving_a_root_another_run_already_saved_keeps_the_first(tmp_path):
+    from ar_kernel.loop import save_root
+    eval_dir, cache = tmp_path / "eval", tmp_path / "cache" / "key"
+    eval_dir.mkdir()
+    (eval_dir / "aggregates.json").write_text("{}")
+    cache.parent.mkdir()
+    save_root(cache, eval_dir, {"m": 0.5}, {"m": 4}, "first")
+    save_root(cache, eval_dir, {"m": 0.6}, {"m": 4}, "second")           # raised: the cache folder exists
+    assert json.loads((cache / "root.json").read_text())["run_id"] == "first"
+    assert not cache.with_name("key.tmp").exists()
+
+
+def test_the_root_key_follows_what_changes_the_roots_score():
+    """A root scored under other judge settings was reused silently against children judged with the new ones."""
+    from types import SimpleNamespace
+    from ar_kernel.config import KernelConfig
+    from ar_kernel.eval.judge import Judge
+    from ar_kernel.run import root_key
+    real = KernelConfig.load()
+    ctx = SimpleNamespace(metric_set=["m"], case_ids=["1"], versions={"worldmodel_sha": "a", "wbench_sha": "b"},
+                          judge=Judge("local", "model", None))
+    changed = lambda **raw: KernelConfig(raw={**real.raw, **raw}, repo_root=real.repo_root)
+    key = root_key(ctx, real)
+    assert root_key(ctx, changed()) == key
+    assert root_key(ctx, changed(eval={**real.raw["eval"], "judge": {"max_images": 8}})) != key
+    assert root_key(ctx, changed(captioner={**real.raw["captioner"], "max_model_len": 4096})) != key
+    # what does not change the root's metric means leaves the key alone
+    assert root_key(ctx, changed(eval={**real.raw["eval"], "score_weights": {}})) == key
+    assert root_key(ctx, changed(captioner={**real.raw["captioner"], "startup_timeout_s": 5})) == key
+    api = SimpleNamespace(**{**vars(ctx), "judge": Judge("api", "model", "http://x")})
+    assert root_key(api, changed(captioner={**real.raw["captioner"], "max_model_len": 4096})) == root_key(api, real)

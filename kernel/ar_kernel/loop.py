@@ -22,7 +22,7 @@ from .archive.commits import CommitStore
 from .archive.nodes import NodeStore, run_rel
 from .contract.verify import verify_contract
 from .guards import alert
-from .isolation import audit
+from .isolation import audit, host_roots, scrub_train_files
 from .eval.score import weighted_score
 from .run import record_root_counts, root_key, score_node
 from .selection import select_parent, selection_seed, update_values
@@ -41,7 +41,10 @@ def save_root(cache: Path, eval_dir: Path, metrics: dict, expected_n: dict, run_
     (tmp / "root.json").write_text(json.dumps({
         "metrics": metrics, "expected_n": expected_n, "run_id": run_id,
         "aggregates": json.loads((eval_dir / "aggregates.json").read_text())}, indent=1))
-    tmp.rename(cache)
+    if (cache / "root.json").exists():          # another run with the same key saved its root meanwhile
+        shutil.rmtree(tmp)
+    else:
+        tmp.rename(cache)
 
 
 def _submitted(result: dict) -> dict:
@@ -185,7 +188,7 @@ class Loop:
             self.repo.init(self.cfg.repo_root / "seed_agent")
         self.nodes.set_fields("root", agent_commit=commit)
         self._state("root", "eval")
-        cache = self.root_cache / root_key(self.ctx) if self.root_cache else None
+        cache = self.root_cache / root_key(self.ctx, self.cfg) if self.root_cache else None
         if cache is not None and (cache / "root.json").exists():
             self._reuse_root(cache)
             return
@@ -381,6 +384,7 @@ class Loop:
         for raw in (Path(self.ctx.run_dir) / "staging" / node).glob("*/hf"):
             shutil.rmtree(raw, ignore_errors=True)
         write_transcripts(self.ctx.run_dir, node)
+        scrub_train_files(self._node_dir(node), self.cfg.get("isolation.blocked_names") or [], host_roots(self.cfg))
         self.ctx.recorder.event("node.end", payload={"node": node, "status": status, "error": error},
                                 child=node, status=status)
         self._state(None, "idle")

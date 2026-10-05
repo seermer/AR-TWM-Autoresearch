@@ -13,7 +13,8 @@ from .config import SNAPSHOT_FILES, KernelConfig, resolve_gpus
 from .eval.judge import Judge, resolve_judge
 from .eval.lora import concat_eval_lora
 from .eval.render import build_render_config, render_proxy
-from .eval.score import DIMENSION_METRICS, UNIVERSAL_METRICS, aggregates, cleanup_eval, score_from_report
+from .eval.score import (DIMENSION_METRICS, UNIVERSAL_METRICS, aggregates, case_counts, cleanup_eval,
+                         score_from_report)
 from .eval.wbench import run_wbench_phases
 from .telemetry.recorder import Recorder
 
@@ -130,11 +131,20 @@ def record_root_counts(ctx: RunContext, expected_n: dict) -> None:
     os.replace(tmp, path)
 
 
-def root_key(ctx: RunContext) -> str:
-    """What the root's score depends on: the same key means the same unedited model, cases, metrics
-    and judge, so a root scored by any earlier run can be reused."""
+def root_key(ctx: RunContext, cfg: KernelConfig) -> str:
+    """What the root's score depends on: the same key means the same unedited model, cases, metrics,
+    judge, judge settings and kernel eval code, so a root scored by any earlier run can be reused.
+    The score weights are left out: a reused root's metric means are weighed by the reusing run."""
+    local = ctx.judge is not None and ctx.judge.kind == "local"
+    eval_code = hashlib.sha256(b"".join(
+        p.read_bytes() for p in sorted((Path(__file__).parent / "eval").glob("*.py")))).hexdigest()
     fields = {"metric_set": ctx.metric_set, "case_ids": ctx.case_ids,
               "judge": [ctx.judge.kind, ctx.judge.model] if ctx.judge else None,
+              "judge_settings": cfg.get("eval.judge"), "vp_weights": cfg.get("eval.vp_weights"),
+              # a local judge is the captioner's server: how it is served decides what it sees
+              "local_judge": {k: v for k, v in cfg.get("captioner").items()
+                              if not k.endswith("timeout_s")} if local else None,
+              "eval_code": eval_code,
               "versions": {k: ctx.versions.get(k) for k in ("worldmodel_sha", "wbench_sha")}}
     return hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()[:16]
 
@@ -207,7 +217,7 @@ def score_node(cfg: KernelConfig, ctx: RunContext, node_id: str, checkpoint: Pat
         raise
     cleanup()
     return score, {"metrics": per_metric, "aggregates": agg, "report": report,
-                   "counts": {m: int(report["full"][m]["n"]) for m in ctx.metric_set}}
+                   "counts": case_counts(report, ctx.metric_set)}
 
 
 def rescore_node(cfg: KernelConfig, run_id: str, node_id: str, env: Mapping[str, str]) -> tuple[float, Path]:
