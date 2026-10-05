@@ -82,8 +82,7 @@ class DataTools:
                     if not host[key].is_relative_to(caller.staging_host):
                         bad.setdefault(i, f"{key} {c[key]} is not under /workspace/staging: copy or move it there")
                     elif not host[key].is_file():      # container paths only: host paths never reach the agent
-                        bad.setdefault(i, f"{key} {c[key]} does not exist (data_ingest moves each staged file "
-                                         "into the archive, so an already ingested file is gone)")
+                        bad.setdefault(i, f"{key} {c[key]} does not exist")
             if bad:
                 continue
             built.append(Candidate(
@@ -294,8 +293,8 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
         return await kit.call(ctx, "video_probe", {"path": path}, lambda c: tools.probe(c, path))
 
     @mcp.tool(name="data_ingest", description="Ingest staged candidates into the run's clip pool. The formats "
-              "a clip must meet are in skill data_formats. Ingest MOVES each staged file into the archive: copy "
-              "it first if you still need it. Send every candidate in one call. Returns how many were accepted "
+              "a clip must meet are in skill data_formats. Ingest copies each staged file into the archive and "
+              "leaves yours where it is. Send every candidate in one call. Returns how many were accepted "
               "and rejected, the rejection reasons and warnings with counts, and `result_file`: a JSON array "
               "under /workspace/staging/results/ with, per candidate, index, video, accepted, clip_id, formats, "
               "warnings and reasons. Take the clip ids from that file with a script. Read the reasons and change "

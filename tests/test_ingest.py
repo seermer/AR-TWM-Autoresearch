@@ -19,13 +19,42 @@ def _candidate(tmp_path, name="c1", seconds=4.0, fps=30, width=736, height=414, 
     return Candidate(video=video, caption=caption, pose=pose,
                      camera_motion="moving" if moving else "static", provenance=PROV)
 
-def test_accepted_clip_records_formats_and_moves_blobs(tmp_path):
+def test_accepted_clip_records_formats_and_stores_its_own_copy(tmp_path):
     ing = _ingestor(tmp_path)
-    [result] = ing.ingest([_candidate(tmp_path)], node_id="n1")
+    cand = _candidate(tmp_path)
+    (cand.video.parent / "keep.mp4").hardlink_to(cand.video)        # the agent keeps a second name for the file
+    original = cand.video.read_bytes()
+    [result] = ing.ingest([cand], node_id="n1")
     assert result.accepted and "video_caption_camera" in result.formats
     clip = ing.clips.get(result.clip_id)
     assert clip["camera_motion"] == "moving" and clip["ingested_by"] == "n1"
-    assert not (tmp_path / "staging" / "c1" / "v.mp4").exists()
+    # the staged files are left alone, and the stored clip is no longer the agent's file
+    assert cand.video.exists() and cand.caption.exists() and cand.pose.exists()
+    (cand.video.parent / "keep.mp4").write_bytes(b"rewritten after every check passed")
+    blob = ing.blobs.path(clip["video_digest"], "video")
+    assert blob.read_bytes() == original and blob.stat().st_nlink == 1
+    assert not list((tmp_path / "quarantine").iterdir())
+
+
+def test_a_staged_folder_swapped_for_a_link_reaches_nothing_outside_staging(tmp_path, tmp_path_factory):
+    """The agent's container runs while the kernel checks: it can rename the folder it staged and put
+    a link to a host folder in its place. The kernel then read, and on a rejection wrote, through it."""
+    ing = _ingestor(tmp_path)
+    cand = _candidate(tmp_path, "d")
+    outside = tmp_path_factory.mktemp("host")
+    for f in (cand.video, cand.caption, cand.pose):
+        (outside / f.name).write_bytes(f.read_bytes())
+    before = {p.name: p.read_bytes() for p in outside.iterdir()}
+    cand.video.parent.rename(tmp_path / "staging" / "d.real")
+    (tmp_path / "staging" / "d").symlink_to(outside)                 # staging/d/v.mp4 is now a host file
+    # swapped after the up-front path check: the copy into quarantine refuses the file it opened
+    with pytest.raises(OSError, match="changed while it was being read"):
+        ing._take(cand.video, tmp_path / "taken.mp4")
+    # swapped before it: the candidate is rejected
+    [result] = ing.ingest([cand], node_id="n1")
+    assert not result.accepted and "outside the staging directory" in result.reasons[0]
+    assert {p.name: p.read_bytes() for p in outside.iterdir()} == before      # nothing written or removed there
+    assert not ing.clips.all() and not (tmp_path / "taken.mp4").exists()
 
 def test_duplicate_content_yields_the_same_clip_id(tmp_path):
     ing = _ingestor(tmp_path)
@@ -63,9 +92,6 @@ def test_static_candidate_with_poses_is_rejected(tmp_path):
     assert result.accepted is False and any("static" in r for r in result.reasons)
 
 def test_candidate_outside_run_dir_is_rejected(tmp_path, tmp_path_factory):
-    # BlobStore.put() moves/consumes its source file; ingest must refuse anything it does not
-    # own rather than silently deleting it (this is what consumed WorldModel's real
-    # example clips before the guard existed).
     ing = _ingestor(tmp_path)
     outside = tmp_path_factory.mktemp("outside")
     video = make_mp4(outside / "v.mp4")
@@ -149,6 +175,24 @@ def test_a_checker_crash_rejects_only_its_candidate(tmp_path, monkeypatch):
     assert "checker bridge failed" in crashed.reasons[0]
 
 
+def test_a_clip_whose_frames_cannot_be_extracted_is_rejected_alone(tmp_path, monkeypatch):
+    """ffmpeg exits 0 without writing a frame when a clip's stated duration is longer than what
+    decodes: opening the missing frame raised FileNotFoundError out of the whole call."""
+    ing = _ingestor(tmp_path)
+    real = ing.leakage.check
+
+    def no_frame(video):
+        if video.stat().st_size == short:
+            raise FileNotFoundError(2, "No such file or directory", "/tmp/x/frame.png")
+        return real(video)
+    cands = [_candidate(tmp_path, "a"), _candidate(tmp_path, "b", seconds=5.0)]
+    short = cands[0].video.stat().st_size
+    monkeypatch.setattr(ing.leakage, "check", no_frame)
+    first, second = ing.ingest(cands, node_id="n1")
+    assert not first.accepted and "could not read the candidate video" in first.reasons[0]
+    assert second.accepted and cands[0].video.exists()
+
+
 def test_clips_are_checked_several_at_a_time(tmp_path, monkeypatch):
     import threading
     from ar_kernel.data import ingest
@@ -173,15 +217,14 @@ def test_an_unexpected_error_gives_every_candidates_files_back(tmp_path, monkeyp
     assert not [p for p in (tmp_path / "quarantine").rglob("*") if p.is_file()]
 
 
-def test_rejected_candidate_files_are_returned_to_staging(tmp_path):
-    """Quarantine is only for the duration of the checks; a rejected candidate's
-    files go back where the agent staged them so it can inspect or fix them."""
+def test_a_rejected_candidates_files_stay_where_they_were_staged(tmp_path):
     ing = _ingestor(tmp_path)
     cand = _candidate(tmp_path, "narrow", width=640, height=480)
+    before = cand.video.read_bytes()
     result = ing.ingest([cand], node_id="n1")[0]
     assert not result.accepted
-    assert cand.video.exists() and cand.caption.exists()
-    assert not [p for p in (tmp_path / "quarantine").rglob("*") if p.is_file()]
+    assert cand.video.read_bytes() == before and cand.caption.exists()
+    assert not list((tmp_path / "quarantine").iterdir())
 
 
 def test_rotated_clip_is_rejected_with_a_fix_hint(tmp_path):

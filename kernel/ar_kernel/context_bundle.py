@@ -37,7 +37,7 @@ FOLDERS = {
                       "/nodes/<this node>/attempts/",
         "/workspace/staging": "what goes to and comes from kernel tools: downloads (hf/), GPU job outputs "
                               "(annotations/, rollouts/, images/), result files (results/) and the candidates "
-                              "you stage for data_ingest, which moves them away. A separate mount: a hard link "
+                              "you stage for data_ingest, which copies them into the archive. A separate mount: a hard link "
                               "between it and the rest of /workspace fails, so copy or move. Not kept for later "
                               "nodes",
         "/agent": "read-only: this agent's code",
@@ -164,12 +164,12 @@ def build_recipe_context(*, cfg, conn, run_dir: Path, repo, node_id: str, parent
         n_gpus=n_gpus, tools=list(tools))
 
 
-def write_bundle(ctx, dest: Path, censor: list[str] = ()) -> Path:
-    """`censor`: names replaced in everything written. The context carries raw log tails and tool error
+def write_bundle(ctx, dest: Path, censor: list[str] = (), roots=()) -> Path:
+    """`censor`: names replaced in everything written, as are the host folders `roots`. The context carries raw log tails and tool error
     texts, and it reaches the model as a user message, which the gateway does not censor."""
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
-    data = scrub(ctx.model_dump(mode="json"), list(censor))
+    data = scrub(ctx.model_dump(mode="json"), list(censor), roots)
     path = dest / "context.json"
     path.write_text(json.dumps(data, indent=1))
     if data.get("retry"):

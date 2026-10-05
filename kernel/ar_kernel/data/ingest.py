@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib, json, shutil, subprocess, uuid
+import hashlib, json, os, shutil, stat, subprocess, uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -70,7 +70,8 @@ class Ingestor:
 
     def ingest(self, candidates: list[Candidate], node_id: str) -> list[IngestResult]:
         """A clip's checks are subprocesses, so `ingest.workers` clips are checked at a time; the archive
-        is then written one clip at a time, in order."""
+        is then written one clip at a time, in order. The kernel works on its own copy of each staged
+        file and never writes or deletes in staging, which the agent owns and can relink meanwhile."""
         with ThreadPoolExecutor(self.workers) as pool:
             checks = [pool.submit(self._check, c, node_id) for c in candidates]
         results = []
@@ -79,15 +80,28 @@ class Ingestor:
                 result, held, facts = check.result()
                 results.append(result or self._store(candidate, held, facts, node_id))
         finally:
-            for candidate, check in zip(candidates, checks):
+            for check in checks:
                 if not check.exception():
-                    self._give_back(candidate, check.result()[1])
+                    _discard(check.result()[1])
         return results
 
     def _outside_staging(self, path: Path) -> bool:
-        """Only staged files may be ingested: store/ and other nodes' views are under the run
-        dir too, and ingesting consumes the source file."""
+        """Only staged files may be ingested: store/ and other nodes' views are under the run dir too."""
         return not Path(path).resolve().is_relative_to((self.run_dir / "staging").resolve())
+
+    def _take(self, src: Path, dst: Path) -> Path:
+        """Copy the staged file to `dst` without trusting its path between check and use: the file is
+        opened without following a link, and the open file must be a regular file that still lies in
+        staging (a directory on the path may have been swapped for a link to a host folder). A copy,
+        never a rename: the agent may hold a hard link to the staged file and rewrite it later."""
+        fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)      # NONBLOCK: a swapped-in FIFO
+        with open(fd, "rb") as fin:
+            real = Path(os.readlink(f"/proc/self/fd/{fd}"))
+            if not stat.S_ISREG(os.fstat(fd).st_mode) or self._outside_staging(real):
+                raise OSError("the staged file changed while it was being read")
+            with open(dst, "wb") as fout:
+                shutil.copyfileobj(fin, fout)
+        return dst
 
     def _event(self, candidate: Candidate, kind: str, node_id: str, payload: dict) -> None:
         """Every ingest event names its candidate by the paths the agent staged."""
@@ -98,14 +112,6 @@ class Ingestor:
     def _reject(self, candidate: Candidate, node_id: str, reasons: list[str], **payload) -> IngestResult:
         self._event(candidate, "ingest.rejected", node_id, {"reasons": reasons, **payload})
         return IngestResult(accepted=False, reasons=reasons)
-
-    def _give_back(self, candidate: Candidate, held: dict[str, Path]) -> None:
-        """Anything the archive did not take goes back where the agent staged it."""
-        for key, qpath in held.items():
-            if qpath.exists():
-                _move(qpath, _free_path(Path(getattr(candidate, key))))
-        for qdir in {qpath.parent for qpath in held.values()}:
-            shutil.rmtree(qdir, ignore_errors=True)
 
     def _check(self, candidate: Candidate, node_id: str) -> tuple[IngestResult | None, dict[str, Path], dict | None]:
         """(the rejection or None, the quarantined files, what `_store` records of a clip that passed)."""
@@ -118,7 +124,6 @@ class Ingestor:
             reasons.append("static clips must not carry poses (video_caption_static uses identity poses)")
         if candidate.camera_motion == "moving" and candidate.pose is None:
             reasons.append("moving clips need poses/<id>.npz")
-        # BlobStore.put() consumes its source: anything outside staging would be deleted.
         for label, path in (("video", candidate.video), ("caption", candidate.caption),
                             ("pose", candidate.pose)):
             if path is not None and self._outside_staging(path):
@@ -133,16 +138,18 @@ class Ingestor:
         staged = {"video": candidate.video, "caption": candidate.caption, "pose": candidate.pose}
         qdir = self.run_dir / "quarantine" / uuid.uuid4().hex
         qdir.mkdir(parents=True)
-        held = {k: _move(v, qdir / f"{k}{Path(v).suffix}") for k, v in staged.items() if v is not None}
+        held = {k: qdir / f"{k}{Path(v).suffix}" for k, v in staged.items() if v is not None}
         try:
+            for key, qpath in held.items():
+                self._take(staged[key], qpath)
             checked = self._check_files(candidate, held, node_id)
-        except (subprocess.CalledProcessError, ValueError, IndexError, KeyError, CheckerError) as exc:
+        except (subprocess.SubprocessError, OSError, ValueError, IndexError, KeyError, CheckerError) as exc:
             # A file ffprobe, decoding or the checker bridge cannot handle: record a rejection
             # and carry on with the batch instead of failing the whole call.
             checked = self._reject(candidate, node_id, [
                 f"could not read the candidate video: {type(exc).__name__}: {exc}"[:500]])
         except BaseException:
-            self._give_back(candidate, held)
+            _discard(held)
             raise
         return (checked, held, None) if isinstance(checked, IngestResult) else (None, held, checked)
 
@@ -236,16 +243,7 @@ class Ingestor:
         return IngestResult(accepted=True, clip_id=clip_id, formats=facts["formats"], warnings=facts["warnings"])
 
 
-def _move(src: Path, dst: Path) -> Path:
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    return Path(shutil.move(str(src), str(dst)))
-
-
-def _free_path(path: Path) -> Path:
-    """`path`, or a sibling name if the agent has since put something there."""
-    if not path.exists():
-        return path
-    n = 1
-    while (candidate := path.with_name(f"{path.stem}.returned{n}{path.suffix}")).exists():
-        n += 1
-    return candidate
+def _discard(held: dict[str, Path]) -> None:
+    """Remove a candidate's quarantine folder: the archive took what it wanted, the originals are in staging."""
+    for qdir in {qpath.parent for qpath in held.values()}:
+        shutil.rmtree(qdir, ignore_errors=True)

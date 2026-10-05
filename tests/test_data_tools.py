@@ -278,10 +278,15 @@ def test_leakage_checker_is_built_once_across_concurrent_ingests(tmp_path, monke
     assert len(built) == 1
 
 
-def test_ingesting_an_already_ingested_file_names_the_container_path(env):
-    tools, caller, _, run = env
-    with pytest.raises(ToolError, match=r"/workspace/staging/c0/v.mp4 does not exist") as exc:
-        tools.ingest(caller, [{"video": "/workspace/staging/c0/v.mp4", "caption": "/workspace/staging/c0/c.json",
+def test_a_staged_file_stays_and_ingesting_it_again_gives_the_same_clip(env):
+    tools, caller, results, run = env
+    out = tools.ingest(caller, [{"video": "/workspace/staging/c0/v.mp4", "caption": "/workspace/staging/c0/c.json",
+                                 "pose": "/workspace/staging/c0/p.npz", "camera_motion": "moving", "provenance": PROV}])
+    assert out["accepted"] == 1
+    [row] = json.loads((caller.staging_host / "results" / Path(out["result_file"]).name).read_text())
+    assert row["clip_id"] == results[0]["clip_id"]
+    with pytest.raises(ToolError, match=r"/workspace/staging/gone/v.mp4 does not exist") as exc:
+        tools.ingest(caller, [{"video": "/workspace/staging/gone/v.mp4", "caption": "/workspace/staging/c0/c.json",
                                "camera_motion": "moving", "provenance": PROV}])
     assert str(run) not in str(exc.value)
 
