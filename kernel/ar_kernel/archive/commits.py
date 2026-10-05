@@ -14,6 +14,13 @@ VIEW_MARKER = ".ar_view"
 class CommitError(ValueError):
     """The proposed data commit is invalid."""
 
+class BadClips(CommitError):
+    """Clips of one dataset cannot be committed. `bad`: index in `clips` -> what is wrong with that clip."""
+    def __init__(self, dataset: str, clips: list, bad: dict[int, str]) -> None:
+        self.dataset, self.clips, self.bad = dataset, clips, bad
+        first = "; ".join(f"clip {clips[n]}: {error}" for n, error in list(bad.items())[:5])
+        super().__init__(f"{dataset}: {len(bad)} of {len(clips)} clips are bad: {first}")
+
 class CommitStore:
     def __init__(self, conn: sqlite3.Connection, blobs, clips) -> None:
         self.conn = conn
@@ -47,24 +54,27 @@ class CommitStore:
                 # inf/nan used to pass here and then crash steps_per_epoch in the gate.
                 raise CommitError(f"{name}.weight must be finite and >= 0, got {raw_weight!r}")
             clip_ids = list(entry.get("clips") or [])
-            if len(set(clip_ids)) != len(clip_ids):
-                dupes = sorted({c for c in clip_ids if clip_ids.count(c) > 1})
-                # A repeated clip inflates the clip count the gate checks against the
-                # GPU count and silently reweights sampling; weights exist for that.
-                raise CommitError(f"{name}: clip listed more than once: {dupes}; "
-                                  f"use the dataset weight to upsample instead")
             key = fmt if mode is None else f"{fmt}:{mode}"
-            wrong = []
-            for clip_id in clip_ids:
+            bad, seen = {}, set()
+            for n, clip_id in enumerate(clip_ids):
+                if not isinstance(clip_id, str):
+                    bad[n] = "not a clip id"
+                    continue
+                if clip_id in seen:
+                    # A repeated clip inflates the clip count the gate checks against the
+                    # GPU count and silently reweights sampling; weights exist for that.
+                    bad[n] = "listed more than once: use the dataset weight to upsample instead"
+                    continue
+                seen.add(clip_id)
                 try:
                     clip = self.clips.get(clip_id)
                 except KeyError:
-                    raise CommitError(f"{name}: unknown clip {clip_id}") from None
+                    bad[n] = "unknown clip"
+                    continue
                 if key not in clip["formats"]:
-                    wrong.append(f"{clip_id} (eligible for {', '.join(clip['formats'])})")
-            if wrong:
-                raise CommitError(f"{name}: {len(wrong)} of {len(clip_ids)} clips are not eligible for {key}: "
-                                  + "; ".join(wrong[:5]) + ("; ..." if len(wrong) > 5 else ""))
+                    bad[n] = f"not eligible for {key}; it is eligible for {', '.join(clip['formats'])}"
+            if bad:
+                raise BadClips(name, clip_ids, bad)
             if weight > 0 and clip_ids:
                 usable += 1
             normalized[name] = {"format": fmt, "prompt_mode": mode, "weight": weight,

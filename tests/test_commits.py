@@ -1,5 +1,5 @@
 import pytest
-from ar_kernel.archive.commits import CommitStore, CommitError
+from ar_kernel.archive.commits import BadClips, CommitStore, CommitError
 from ar_kernel.archive.db import open_db
 from ar_kernel.config import KernelConfig
 from ar_kernel.data.ingest import Candidate, Ingestor
@@ -39,12 +39,15 @@ def test_clip_ingested_by_another_branch_is_selectable(store):
 
 def test_ineligible_format_is_rejected(store):
     cs, ids, _ = store
-    with pytest.raises(CommitError) as refused:
-        cs.commit(None, {"static": {"format": "video_caption_static", "prompt_mode": None,
-                                    "weight": 1.0, "clips": ids}}, "bad", node_id="n1")
-    # every clip by its whole id (what data_query takes), with the formats it can be committed as
-    assert f"{len(ids)} of {len(ids)} clips are not eligible for video_caption_static" in str(refused.value)
-    assert all(f"{i} (eligible for video_caption_camera" in str(refused.value) for i in ids[:5])
+    with pytest.raises(BadClips) as refused:
+        cs.commit(None, {"static": {"format": "video_caption_static", "prompt_mode": None, "weight": 1.0,
+                                    "clips": [*ids, "nope", ids[0]]}}, "bad", node_id="n1")
+    # every bad clip at once, by its place in the list, with the formats it can be committed as
+    bad = refused.value.bad
+    assert refused.value.dataset == "static" and len(bad) == len(ids) + 2
+    assert bad[0].startswith("not eligible for video_caption_static; it is eligible for video_caption_camera")
+    assert bad[len(ids)] == "unknown clip" and "more than once" in bad[len(ids) + 1]
+    assert f"clip {ids[0]}: not eligible" in str(refused.value)                # the whole id, not a prefix
 
 def test_prompt_mode_rules_are_enforced(store):
     cs, ids, _ = store

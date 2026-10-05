@@ -97,11 +97,11 @@ def test_rejections_are_summarised_with_counts_and_commit_takes_clip_ids_from_a_
                                  "camera_motion": "sideways", "provenance": PROV} for n in ("r1", "r2")])
     assert (out["accepted"], out["rejected"]) == (0, 2)
     assert out["rejected_for"] == [{"count": 2, "example": "camera_motion must be moving or static, got 'sideways'"}]
-    (caller.workspace_host / "ids.txt").write_text("\n".join(r["clip_id"] for r in results))
+    (caller.workspace_host / "ids.json").write_text(json.dumps([r["clip_id"] for r in results]))
     done = tools.commit(caller, None, {"from_file": {"format": "video_caption_camera", "weight": 1.0,
-                                                    "clips": "ids.txt"}}, "ids from a file")
+                                                    "clips": "ids.json"}}, "ids from a file")
     assert done["datasets"]["from_file"]["clips"] == 4
-    assert tools.query(caller, {"clip_ids": "/workspace/ids.txt"})["total"] == 4
+    assert tools.query(caller, {"clip_ids": "/workspace/ids.json"})["total"] == 4
 
 
 def test_probe_reports_display_geometry(env):
@@ -160,6 +160,23 @@ def test_commit_validation_errors_become_tool_errors(env):
     with pytest.raises(ToolError, match="more than once"):
         tools.commit(caller, None, {"cam": {"format": "video_caption_camera", "prompt_mode": None,
                                             "weight": 1.0, "clips": [results[0]["clip_id"]] * 2}}, "dup")
+    with pytest.raises(ToolError, match="weight must be a number"):            # one line, no file: not a list
+        tools.commit(caller, None, {"cam": {"format": "video_caption_camera", "prompt_mode": None,
+                                            "weight": "x", "clips": [results[0]["clip_id"]]}}, "w")
+
+
+def test_every_bad_clip_of_a_commit_is_named_in_one_refusal_with_a_file(env):
+    """n4 of live-10-03 was told a 12-character prefix of one clip id, which data_query could not find."""
+    tools, caller, results, _ = env
+    ids = [r["clip_id"] for r in results]
+    with pytest.raises(ToolError) as refused:
+        tools.commit(caller, None, {"still": {"format": "video_caption_static", "prompt_mode": None, "weight": 1.0,
+                                              "clips": [*ids, "nope"]}}, "bad")
+    text = str(refused.value)
+    assert f"{len(ids) + 1} of {len(ids) + 1} items are bad" in text and "item 0: not eligible" in text
+    [file] = (caller.staging_host / "results").glob("data_commit-still-refused-*.json")
+    rows = json.loads(file.read_text())
+    assert [r["item"] for r in rows] == [*ids, "nope"] and rows[-1]["error"] == "unknown clip"
 
 
 def test_recipe_check_reports_gate_failures_without_leaving_a_view(env, monkeypatch):

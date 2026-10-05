@@ -14,7 +14,7 @@ from pydantic import Field
 
 from ..archive.blobs import BlobStore
 from ..archive.clips import ClipStore
-from ..archive.commits import CommitError, CommitStore
+from ..archive.commits import BadClips, CommitError, CommitStore
 from ..archive.db import open_db
 from ..archive.nodes import NodeStore
 from ..data.ingest import Candidate, Ingestor
@@ -142,6 +142,8 @@ class DataTools:
             try:
                 commit_id = store.commit(parent, datasets, message, node_id=caller.node,
                                          attempt=caller.attempt)
+            except BadClips as exc:
+                refuse(caller, f"data_commit-{exc.dataset}", exc.clips, exc.bad)
             except CommitError as exc:
                 raise ToolError(str(exc)) from exc
             stats = dataset_stats(store.manifest(commit_id), ClipStore(conn).all())
