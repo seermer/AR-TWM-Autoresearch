@@ -115,17 +115,19 @@ def test_every_bad_path_is_named_in_one_refusal_and_paths_may_come_from_a_file(m
     assert "500 of 500" in str(refused.value) and len(str(refused.value)) < 1500      # short, however many
     newest = max((caller.staging_host / "results").glob("caption_videos-refused-*.json"), key=lambda p: p.stat().st_mtime)
     assert len(json.loads(newest.read_text())) == 500
-    (ws / "paths.txt").write_text("a.mp4\n/workspace/a.mp4\n")
-    (ws / "paths.json").write_text(json.dumps(["a.mp4"]))
-    out = q.wait(caller, submit(q, caller, "paths.txt", "Caption.")["job_id"], 120)
-    assert list(job_result(out)["clips"]) == ["/workspace/a.mp4"]            # the same clip twice is one entry
+    (ws / "paths.json").write_text(json.dumps(["a.mp4", "/workspace/a.mp4"]))
     out = q.wait(caller, submit(q, caller, "/workspace/paths.json", "Caption.")["job_id"], 120)
-    assert out["summary"]["items"] == 1
-    (ws / "array.txt").write_text(json.dumps(["a.mp4"], indent=1))           # a JSON array under any name
-    out = q.wait(caller, submit(q, caller, "array.txt", "Caption.")["job_id"], 120)
-    assert list(job_result(out)["clips"]) == ["/workspace/a.mp4"]
-    with pytest.raises(ToolError, match="cannot read the list file nope.txt: No such file or directory$"):
-        submit(q, caller, "nope.txt", "Caption.")                            # and no host path
+    assert list(job_result(out)["clips"]) == ["/workspace/a.mp4"]            # the same clip twice is one entry
+    with pytest.raises(ToolError, match="cannot read the list file nope.json: No such file or directory$"):
+        submit(q, caller, "nope.json", "Caption.")                           # and no host path
+    # a list file is a .json file holding a JSON array, and nothing else
+    (ws / "paths.txt").write_text(json.dumps(["a.mp4"]))
+    (ws / "lines.json").write_text("a.mp4\n")
+    (ws / "object.json").write_text(json.dumps({"paths": ["a.mp4"]}))
+    for name, why in (("paths.txt", "paths.txt is not a .json file"), ("lines.json", "lines.json is not valid JSON"),
+                      ("object.json", "object.json holds a JSON dict, not an array")):
+        with pytest.raises(ToolError, match=why):
+            submit(q, caller, name, "Caption.")
 
 
 def test_a_clip_the_server_rejects_is_a_per_clip_error_not_a_failed_job(make):
@@ -364,8 +366,8 @@ def test_real_model_captions_two_example_clips(tmp_path):
         out = q.wait(caller, job, 300)
         while out["state"] not in ("done", "failed", "cancelled"):
             out = q.wait(caller, job, 300)
-        (ws / "paths.txt").write_text("/workspace/staging/cam.mp4\n")          # a second job, its list from a file
-        again = q.wait(caller, submit(q, caller, "paths.txt", "Name the place in three words.")["job_id"], 300)
+        (ws / "paths.json").write_text('["/workspace/staging/cam.mp4"]')       # a second job, its list from a file
+        again = q.wait(caller, submit(q, caller, "paths.json", "Name the place in three words.")["job_id"], 300)
     finally:
         q.shutdown()
     latencies = [e["latency_s"] for e in rec.read_events("gpu") if e["type"] == "caption.clip"]

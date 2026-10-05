@@ -30,35 +30,28 @@ class ToolError(_MCPToolError):
     """
 
 
-FROM_FILE = ("or the path of a file under /workspace that holds the list: a JSON array (always, in a .json "
-             "file), or one item per line (a JSON value, or the bare text of the line)")
+FROM_FILE = "or the path of a .json file under /workspace that holds the list as a JSON array"
 SHOWN = 5                   # bad items named in a refusal, and errors listed in a summary: the rest are in the file
 
 
 def listed(caller, value, what: str) -> list:
-    """A list argument: the list itself, or the file under /workspace that holds it (FROM_FILE)."""
+    """A list argument: the list itself, or the .json file under /workspace that holds it (FROM_FILE)."""
     if not isinstance(value, str):
         return list(value or [])
+    if not value.endswith(".json"):
+        raise ToolError(f"{what}: {value} is not a .json file: a list comes from a .json file holding a JSON array")
     try:
         host = to_host(caller, value if value.startswith("/") else str(WORKSPACE / value))
         text = host.read_text(encoding="utf-8")
     except (PathError, OSError, UnicodeDecodeError) as exc:
         reason = exc.strerror if isinstance(exc, OSError) else exc      # an OSError's text names the host path
         raise ToolError(f"{what}: cannot read the list file {value}: {reason}") from exc
-    if host.suffix == ".json" or text.lstrip().startswith("["):
-        try:
-            items = json.loads(text)
-        except ValueError as exc:
-            raise ToolError(f"{what}: {value} is not valid JSON: {exc}") from exc
-        if not isinstance(items, list):
-            raise ToolError(f"{what}: {value} holds a JSON {type(items).__name__}, not an array")
-        return items
-    items = []
-    for line in filter(None, map(str.strip, text.splitlines())):
-        try:
-            items.append(json.loads(line))
-        except ValueError:
-            items.append(line)
+    try:
+        items = json.loads(text)
+    except ValueError as exc:
+        raise ToolError(f"{what}: {value} is not valid JSON: {exc}") from exc
+    if not isinstance(items, list):
+        raise ToolError(f"{what}: {value} holds a JSON {type(items).__name__}, not an array")
     return items
 
 
