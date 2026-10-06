@@ -58,7 +58,7 @@ def test_non_tunable_key_is_rejected(gate_env):
 
 def test_resolution_outside_the_allowlist_is_rejected(gate_env):
     gate, commit, tmp_path = gate_env
-    result = gate.check({"sample.height": 544, "sample.width": 960}, commit, None, "n1",
+    result = gate.check({"sample.height": 720, "sample.width": 1280}, commit, None, "n1",
                         tmp_path / "n1", tmp_path, [0, 1, 2, 3])
     assert not result.ok and any("resolution" in f for f in result.failures)
 

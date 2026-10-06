@@ -37,11 +37,11 @@ data:
   sekai_game_jsonl: null
   sekai_game_pose_subdir: null
 sample:
-  # 416x736 instead of 544x960: ~40% fewer tokens. Both divisible by the VAE's 32x
-  # spatial factor; aspect 1.769 vs the checkpoint's 1.778. For 544x960 on a card
-  # with more headroom, change these two values and nothing else.
-  height: 416
-  width: 736
+  # The checkpoint's own resolution. On 4x 24GB cards it peaks at 20.1GB allocated per
+  # rank (416x736: 19.0GB) and a step takes ~30% longer. Both values divisible by the
+  # VAE's 32x spatial factor.
+  height: 544
+  width: 960
   fps: 24.0
   temporal_stride: 8
 layout:
@@ -147,8 +147,8 @@ validation:
         condition_latent_frames: 1
         history_latent_frames: 4
         max_gap_sec: 0.0
-        height: 416
-        width: 736
+        height: 544
+        width: 960
       control: []
       rollout_rounds: 5
       memory_start_round: 1
@@ -229,8 +229,7 @@ runtime:
   # served with ALAYA_SKIP_TEXT_ENCODER=1 because Gemma-3-12B is 24GB in bf16.
   text_embed_cache_dir: cache/text_embed_finetune_video_caption_camera
   precache_text_embeds: false
-  # Null, not the 544x960 dir: the cache is resolution-keyed, and at K=4 a window
-  # has no sliceable tail anyway.
+  # Null: at K=4 a window has no sliceable tail for the latent cache to serve.
   vae_latent_cache_dir: null
   # Falls back to FA2 under ALAYA_USE_FA3=0, which the ViGeo path requires.
   attention_type: flash_attention_3

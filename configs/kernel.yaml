@@ -44,7 +44,7 @@ isolation:                       # keeps the evaluation set out of agents' reach
   audit_patterns: [wbench, meituan-longcat, "2605.25874"]   # the model writing one quarantines the node;
                                  #   the gateway drops the sentence around one in anything else it reads
 train:
-  resolution_allowlist: [[416, 736], [352, 608]]
+  resolution_allowlist: [[544, 960], [416, 736], [352, 608]]   # the base recipe's is the first
   lora_allowlist: [[16, 16], [32, 32], [64, 64]]
 eval:
   proxy_size: 50                 # the run scores the first N cases of configs/proxy_cases.txt
