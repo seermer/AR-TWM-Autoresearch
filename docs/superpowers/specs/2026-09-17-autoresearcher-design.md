@@ -59,9 +59,7 @@ HGM `hgm.py`, `tree.py`, `hgm_utils.py`, `self_improve_step.py`; HyperAgents
 - Changing AlayaWorld architecture, the DMD sampler, WBench code, or WBench cases.
 - Data formats other than the three standard formats.
 - Concurrent node expansion (nodes run strictly one at a time).
-- Using any generator whose license forbids training AlayaWorld on its outputs
-  (e.g. MiniMax-H3, HunyuanVideo-1.5) or whose native output is below 24 fps
-  (e.g. Wan 2.2 A14B at 16 fps).
+- Using any generator whose native output is below 24 fps (e.g. Wan 2.2 A14B at 16 fps).
 
 ---
 
@@ -120,11 +118,6 @@ Both are verified by §16.3 items 9 and 10 before the first real run.
 | `WorldModel/weights/ltx-2.3` | LTX-2.3 base + Gemma text encoder | Training/rendering dependencies |
 | `AutoResearcher/weights/ltx-2.5` | Lightricks LTX-2.5, dev + distilled (LTX-2.x Community License), 24 fps | Video-generation data source |
 | `AutoResearcher/weights/wan2.2-ti2v-5b` | Wan 2.2 TI2V-5B (Apache-2.0), 720p 24 fps | Video-generation data source |
-
-License notes: training AlayaWorld (a Derivative of LTX-2) on LTX-2.5 outputs is permitted
-by the LTX-2.x license (the "train other models" restriction applies to commercial use and
-exempts Derivatives of LTX-2; entities with >= $10M annual revenue need a commercial
-license). Wan 2.2 is Apache-2.0 with no output restrictions.
 
 ### 2.4 Caches
 
