@@ -52,6 +52,7 @@ Job parameters:
 |---|---|---|
 | `items` | the list below, or a `.json` file holding it | required |
 | `frames` | clip length at 24 fps, of the form 17n+5 | 243 (max 243, min 124) |
+| `seed` | not a job parameter: each item carries its own, as in `rollout_ltx25` | |
 
 Item:
 
@@ -60,22 +61,31 @@ Item:
  "turns": [{"prompt": "the camera pushes in slowly along the street"},
            {"prompt": "the camera pans right to face a red door"},
            {"prompt": "the door opens and a white dog runs out"}],
- "image": "first.png",
- "last_image": "last.png",
+ "keyframes": [{"image": "first.png", "frame": 0}, {"image": "last.png", "frame": -1}],
  "seed": 42}
 ```
 
-- `scene_prompt` (string, required) and `turns` (non-empty list of `{"prompt": string}`, at most
-  `generators.h3.max_turns`, default 5) use the same names as `rollout_alayaworld`.
-- `image` (first frame) and `last_image` (last frame) are each optional: neither, either or both.
+- `scene_prompt` (string, required) and `turns` (non-empty list of `{"prompt": string}`) use the
+  same names as `rollout_alayaworld`. The number of turns is limited by the clip length (§3.2).
+- `keyframes` is the same field as in `rollout_ltx25` (§4). H3 accepts only `frame` 0 (first
+  frame) and -1 (last frame), each at most once: neither, either or both. Any other index is
+  refused.
 - `seed` (int, required) has the same meaning as in the other rollout tools.
 - Turn text is free text. The description lists MiniMax's camera vocabulary (push in / pull out,
   pan, truck, tilt, pedestal, arc, tracking, static) so agents phrase moves the way H3 was trained.
 
 ### 3.2 Prompt assembly (kernel)
 
-Turns split the clip evenly: turn k of n starts at `k * (frames / 24) / n` seconds. The kernel
-builds the prompt in MiniMax's base format (`skills/h3-prompt-writing/references/base-en.txt` of
+Turn boundaries sit on the training round grid (frame 25 + 32j, the grid `data_formats` requires
+for `video_timed_prompts_camera:per_chunk`), so a clip is eligible for per_chunk as well as
+segment mode. A clip of `frames` frames holds `R = (frames - 25) // 32` whole rounds. Each of the
+n turns gets `R // n` rounds and the last turn also takes what is left, so turn k (from 0)
+starts at frame `25 + 32 * k * (R // n)` for k >= 1. A turn must last at least 2 rounds
+(2.67 s): segments under 2.375 s are never trained, and the spike showed about half a second of
+timing slack. So 243 frames (R = 6) allow up to 3 turns, with boundaries at 3.708 s and 6.375 s;
+124 frames (R = 3) allow one. More turns than fit is an item error. The clip is not trimmed.
+
+The kernel builds the prompt in MiniMax's base format (`skills/h3-prompt-writing/references/base-en.txt` of
 MiniMax-AI/MiniMax-H3 at d21241f):
 
 ```text
@@ -96,6 +106,11 @@ Alignment line, copied from the guide, with `S.SS` the clip duration to two deci
 | first and last | `How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the 0.00-second mark of the target video; Picture 2 (from Shot 1) aligns with the S.SS-second mark of the target video.` |
 | last only | `How the reference pictures align with the target video — <Picture 1> (from [Shot 1]) aligns with the S.SS-second mark of the target video.` |
 
+The first-and-last line has no angle or square brackets while the other two do. That is how
+MiniMax's guide writes it, in both the rule and the worked example, so it is copied as is. The
+line is prose for the model: the pipeline binds each keyframe itself, by prepending a
+`<Picture i>: ` label and the image's vision block to the prompt, in the order first, last.
+
 The builder is a pure function with unit tests; the assembled prompt is stored in the result.
 
 ### 3.3 Output
@@ -104,9 +119,15 @@ Per item, a `candidate` for `data_ingest`: a silent 960x544, 24 fps mp4, a capti
 (generator `minimax-h3`), and no pose. The caption has one segment per turn:
 
 ```json
-{"caption": "<scene_prompt> <turn 1>",
- "segments": [{"time_range_s": [0.0, 3.375], "prompt": "<scene_prompt> <turn 1>"}, ...]}
+{"caption": "<scene_prompt> <turn 1>. Then <turn 2>. Then <turn 3>.",
+ "segments": [{"time_range_s": [0.0, 3.708], "prompt": "<scene_prompt> <turn 1>"},
+              {"time_range_s": [3.708, 6.375], "prompt": "<scene_prompt> <turn 2>"},
+              {"time_range_s": [6.375, 10.125], "prompt": "<scene_prompt> <turn 3>"}]}
 ```
+
+The caption covers the whole clip, because an ingested clip can also be trained as
+`video_caption_camera`, which reads only `caption`. (`rollout_alayaworld` sets `caption` to its
+first round's prompt; that is left as is.)
 
 Metadata, not labels: `turn_segments` (each turn's text and frame range) and `h3_prompt`.
 The published clip passes the existing checks (24 fps; 960/544 is within 2% of 16:9).
@@ -124,7 +145,8 @@ the other generators (`--items`, `--out`, per-item `<index>.mp4` then `<index>.j
 3. Generate each item; an item failure is an item error.
 
 Text-only items use the pipeline's `t2va` workflow, items with an image the `fl2va` workflow;
-both share the loaded components. `H3Backend(GpuJob)` in `tools/rollouts.py` runs one worker
+both share the loaded components. Keyframe images are staged into the job dir by the same
+`GpuJob` extension LTX uses (§4). `H3Backend(GpuJob)` in `tools/rollouts.py` runs one worker
 that is given every GPU of the run, so it adapts to the machine. The bridge raises if the cards
 cannot hold the text encoder or the transformer.
 
@@ -136,10 +158,9 @@ generators:
     env: .envs/gen-h3
     weights: weights/minimax-h3
     revision: 42ed227ee7df40d41602854ae760620d6eb651fe
-    variants: {base: {enabled: false}}   # true after the smoke run
+    enabled: false                       # true after the smoke run
     frames: [243, 243]                   # [default, max]; 17n+5, min 124
     resolution: [544, 960]               # [height, width]
-    max_turns: 5
     max_items: 30                        # ~10 h at the measured 1,160 s per clip
     gpu0_reserve_gib: 12                 # video VAE + small layers
     timeout_s: 43200
@@ -161,13 +182,14 @@ The item's `image` field is replaced by:
   one entry at frame 0 is today's image-to-video.
 - The bridge passes each entry as `ImageConditioningInput(path, frame, 1.0)`.
 - Which indices LTX accepts is settled by the smoke run; the tool refuses the rest.
-- `GpuJob`'s input staging, which today handles top-level file fields, is extended to the
-  `image` of each keyframe.
-- `prompt` and `seed` are unchanged. Wan keeps its own `image` schema.
+- `GpuJob`'s input staging handles the top-level fields a backend lists in `file_keys`
+  (path check, copy into the job dir). It is extended once to the `image` of each `keyframes`
+  entry, for both LTX and H3.
+- `prompt` and `seed` are unchanged. Wan and AlayaWorld keep their `image` field.
 
 ## 5. Wan disabled
 
-`generators.wan22.variants.ti2v-5b.enabled: false`. `build_gpu_backends` then leaves
+`generators.wan22.enabled: false` (§7.1). `build_gpu_backends` then leaves
 `rollout_wan22` unregistered. `Wan22Backend`, the bridge, `.envs/gen-wan22` and the weights stay.
 Tests that exercise Wan enable it in their own config.
 
@@ -176,10 +198,30 @@ Tests that exercise Wan enable it in their own config.
 - The `variant` argument, `VARIANTS`, `VARIANT_TEXT` and the `{variants}` description text go.
 - `render_config` always applies the AR30 settings; a node's fine-tune is its checkpoint, so the
   rollout tool no longer calls `concat_eval_lora`.
-- Config: `variants: {ar30: {enabled: true}}`. The generator name stays `alayaworld-ar30`.
+- Config: `enabled: true` (§7.1). The generator name stays `alayaworld-ar30`.
 - The evaluation's DMD rendering is untouched.
 
-## 7. Item cap
+## 7. Config shape
+
+### 7.1 Generator switches
+
+The nested `variants: {name: {enabled: bool}}` map goes. No fallback for the old shape.
+
+```yaml
+generators:
+  alayaworld: {enabled: true, ...}
+  wan22:      {enabled: false, ...}
+  h3:         {enabled: false, ...}
+  ltx25:
+    variants: [distilled]     # the enabled ones; the first is the default; empty = tool off
+    peak_rss_gib: 40          # was per variant, with the same value for both
+```
+
+Single-mode generators use `enabled`, as `images` and `annotate` do. LTX lists only its enabled
+variants; `dev` is left out, not listed as disabled. Provenance names are set in code and do not
+change.
+
+### 7.2 Item cap
 
 Each job tool's config block (`captioner`, `annotate`, `images`, `generators.<name>`) accepts
 `max_items`. Absent means no cap, as today. A call with more items is refused whole, with the
