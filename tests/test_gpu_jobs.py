@@ -446,6 +446,7 @@ def keyed(env):
     ([{"image": "a.png", "frame": True}], "each keyframe must be"),
     ([{"image": "a.png", "frame": -2}], "frame must be -1"),
     ([{"image": "a.png", "frame": 0}, {"image": "b.png", "frame": 0}], "repeat"),
+    ([{"image": "a.mp4", "frame": 0}], "must be an image"),
     ([{"image": "../outside.png", "frame": 0}], "keyframes"),
     ([{"image": "missing.png", "frame": 0}], "keyframes"),      # as a missing top-level file is refused today
 ])

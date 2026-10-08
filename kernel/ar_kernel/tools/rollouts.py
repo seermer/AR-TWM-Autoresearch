@@ -29,7 +29,7 @@ from ..archive.db import open_db
 from ..archive.nodes import NodeStore
 from ..data.probe import aspect_ok, probe_video
 from ..subproc import file_tail, free_port, meminfo_gib
-from .gpu_jobs import GpuJob, check_item_seed, check_keyframes, enabled_variants, is_int, split_gpus
+from .gpu_jobs import IMAGE_EXTS, GpuJob, check_item_seed, check_keyframes, enabled_variants, is_int, split_gpus
 from .jobs import run_cancellable
 from .server import ToolError
 
@@ -51,7 +51,6 @@ ACTION_TOKENS = frozenset({
     "look_up", "look_down", "pitch_up", "pitch_down", "yaw_left", "yaw_right", "->", "→", "<-", "←"})
 # Item key of a turn's instruction -> the render script's interaction type.
 TURN_KEYS = {"subject_action": "subject_action", "event": "event_edit", "viewpoint_change": "perspective_switch"}
-IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")                 # alaya/data/wbench.py _IMAGE_EXTS
 VIEWPOINTS = ("first_person", "third_person")
 # The AR teacher without the DMD LoRA, sampled as configs/infer_i2v_camera_ar.yaml does.
 AR30 = {("paths", "dmd_resume"): None, ("validation", "sampling_steps"): 30,

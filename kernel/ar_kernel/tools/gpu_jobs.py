@@ -89,6 +89,9 @@ WorldItems = Annotated[list[dict[str, Any]] | str, items_schema(
     ["image", "viewpoint", "scene_prompt", "turns"])]
 
 
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")                 # alaya/data/wbench.py _IMAGE_EXTS
+
+
 def is_int(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -115,6 +118,8 @@ def check_keyframes(item: dict) -> None:
         if not (isinstance(k, dict) and set(k) == {"image", "frame"} and isinstance(k["image"], str)
                 and is_int(k["frame"])):
             raise ToolError(f"each keyframe must be {{'image': path, 'frame': int}}: got {k!r}")
+        if not k["image"].lower().endswith(IMAGE_EXTS):
+            raise ToolError(f"a keyframe's image must be an image file ({', '.join(IMAGE_EXTS)}): got {k['image']!r}")
         if k["frame"] < -1:
             raise ToolError(f"frame must be -1 (the last frame) or a frame index from 0: got {k['frame']}")
     seen = [k["frame"] for k in frames]
