@@ -193,7 +193,7 @@ def submit(q, caller, paths, prompt: str) -> dict:
     paths = listed(caller, paths, "paths")
     if not paths:
         raise ToolError("paths is empty")
-    cap = getattr(q.backends[TOOL], "max_items", None)
+    cap = getattr(q.backends.get(TOOL), "max_items", None)
     if cap and len(paths) > cap:
         raise ToolError(f"at most {cap} items per job: got {len(paths)}; send the rest in another job")
     if not prompt.strip():
@@ -211,7 +211,7 @@ def submit(q, caller, paths, prompt: str) -> dict:
 def register_caption_tool(mcp, kit, q) -> None:
     """caption_videos queues a job for the queue's `caption_videos` backend (the real
     CaptionBackend, or a fake in smoke runs)."""
-    cap = getattr(q.backends[TOOL], "max_items", None)
+    cap = getattr(q.backends.get(TOOL), "max_items", None)
 
     @mcp.tool(name=TOOL, description="Caption video clips with the kernel's local video model, which sees the "
               "whole clip. A GPU job: returns {job_id} at once; collect it with job_wait. Loading the model takes "
