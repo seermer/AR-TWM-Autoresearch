@@ -87,7 +87,6 @@ WorldItems = Annotated[list[dict[str, Any]] | str, items_schema(
                    "description": "whose eyes the first frame is seen through"},
      "scene_prompt": _str("the scene: place, objects, light"),
      "character_prompt": _str("the subject, if there is one"),
-     "viewpoint_prompt": _str("how the camera sees the scene at the start"),
      "subject_mask": _str("an image under /workspace, white where the subject is in the first frame"),
      "turns": {"type": "array", "items": _TURN,
                "description": "the clip, turn by turn; each turn lasts `rounds_per_turn` rounds"}},

@@ -170,6 +170,16 @@ def test_upstream_429_is_retried_then_succeeds(make):
     assert response_event["attempts"] == 3
 
 
+@pytest.mark.parametrize("status", [401, 402, 403])
+def test_an_upstream_key_or_credit_error_is_retried_like_an_outage(make, status):
+    calls = {"n": 0}
+    def flaky(request):
+        calls["n"] += 1
+        return httpx.Response(status, json={"error": "try later"}) if calls["n"] < 3 else _ok(request)
+    client, caller, *_ = make(handler=flaky)
+    assert _post(client, caller.token, {"model": "gpt-x", "input": "hi"}).status_code == 200 and calls["n"] == 3
+
+
 def test_persistent_upstream_failure_returns_its_status(make):
     client, caller, _, seen = make(handler=lambda r: httpx.Response(503, json={"error": "down"}))
     assert _post(client, caller.token, {"model": "gpt-x", "input": "hi"}).status_code == 503

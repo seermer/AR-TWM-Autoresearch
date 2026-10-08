@@ -102,7 +102,7 @@ class _MockData:
     def query(self, c, filter):
         return {"total": 0, "returned": 0, "clips": []}
 
-    def commit(self, c, parent, datasets, message):
+    def commit(self, c, parent, datasets, message, include=()):
         return {"commit_id": "0" * 64, "datasets": {}}
 
     def recipe_check(self, c, recipe, data_commit):

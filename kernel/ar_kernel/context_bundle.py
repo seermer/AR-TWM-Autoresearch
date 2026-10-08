@@ -76,7 +76,7 @@ def _entry(conn, run_dir: Path, repo, node: dict, parent_commit: str | None, pha
         recipe_path, rationale = _node_file(run_dir, nid, "recipe.yaml"), _node_file(run_dir, nid, "rationale.md")
         return {**entry, "score": node["score"], "metrics": agent_metrics(node["metrics"]),
                 "aggregates": agent_aggregates(_read_json(_node_file(run_dir, nid, "eval/aggregates.json"))),
-                "data": _data_stats(conn, node["data_commit"]),
+                "data_commit": node["data_commit"], "data": _data_stats(conn, node["data_commit"]),
                 "recipe": yaml.safe_load(recipe_path.read_text()) if recipe_path.exists() else None,
                 "rationale": rationale.read_text() if rationale.exists() else None}
     attempts = [{"phase": p, "attempt": a["idx"], "outcome": a["outcome"]}
@@ -114,7 +114,7 @@ def archive_summary(conn, phase: str) -> dict:
         return {"nodes": rows}
     scored = [n for n in nodes if n["status"] == "scored" and n["score"] is not None]
     best = max(scored, key=lambda n: n["score"], default=None)
-    return {"nodes": [{**row, "score": n["score"], "subtree_value": n["subtree_value"]}
+    return {"nodes": [{**row, "score": n["score"], "subtree_value": n["subtree_value"], "data_commit": n["data_commit"]}
                       for row, n in zip(rows, nodes)],
             "n_scored": len(scored),
             "best": {"node_id": best["node_id"], "score": best["score"]} if best else None}

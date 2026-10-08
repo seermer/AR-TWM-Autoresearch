@@ -101,7 +101,7 @@ class Script:
 SCENARIO = dict(contract=[False, True], gate=[False, True],           # n1: both retry loops, then scored
                 edit=[True, True, False, False, False],               # n2: invalid_code (after n1's 2 edits)
                 train=[True, False, False, False],                    # n3: train_failed
-                score=[0.78, 0.80] + [RuntimeError("wbench gpu failed")] * 2)  # root, n1, n4 -> eval_failed (twice)
+                score=[0.78, 0.80] + [RuntimeError("wbench gpu failed")] * 2)  # root, n1, n4 fails twice -> the run stops
 
 
 def build(run: Path, max_nodes: int, script):

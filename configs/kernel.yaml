@@ -74,7 +74,7 @@ tools:
   job_wait_max_s: 300
   hf_download_max_bytes: 21474836480   # 20 GiB per hf.download call
 ask:                             # the ask tool: one stateless question to the agent's model
-  max_images_per_phase: 50       # per phase attempt; a question without images is not limited
+  max_images_per_phase: 100      # per phase attempt, shared by all its roles; a question without images is not limited
   max_images_per_call: 8
   max_image_side: 1024           # px; larger images are downscaled before they are sent
 captioner:                       # caption_videos GPU job: a local vLLM server, never the paid agent model
@@ -105,9 +105,10 @@ captioner:                       # caption_videos GPU job: a local vLLM server, 
 gateway:
   model_allowlist: []            # OPENAI_MODEL from the environment is always allowed too
   upstream_timeout_s: 600
-  upstream_retries: 5            # 429/5xx, exponential backoff 1, 2, 4, ... s
+  upstream_retries: 8            # 401-403/429/5xx, exponential backoff 1, 2, 4, ... s: about 4 minutes in all,
+                                 #   so a short provider fault costs no agent attempt
   outage_error_rate: 0.8         # stop the run (option A, no pause) when an agent attempt fails while at least
-  outage_window_min: 10          #   this share of the LLM calls in this window failed upstream (429/5xx/connection)
+  outage_window_min: 10          #   this share of the LLM calls in this window failed upstream (401-403/429/5xx/connection)
   outage_min_calls: 3            #   and at least this many calls were made in the window
 agents:                          # passed to agent containers as AR_CONTEXT_WINDOW / AR_COMPACT_AT
   context_window_tokens: 1000000 # set to the agent model's context window (deepseek-flash: 1M)

@@ -40,7 +40,8 @@ class Ask:
                 "model sees only `question` and `images`, nothing of your conversation. `images`: at most "
                 f"{self.per_call} image files under /workspace per call (relative paths resolve against "
                 f"/workspace), each downscaled to at most {self.max_side} px on its longer side. At most "
-                f"{self.per_phase} images in this phase; a question without images is not limited. "
+                f"{self.per_phase} images in this phase, shared by every role working in it; a question without images "
+                "is not limited. "
                 "Returns {answer, images_left}.")
 
     def _image(self, caller, path: str) -> dict:

@@ -112,7 +112,7 @@ def test_every_finished_node_is_mounted_but_not_the_one_being_built(world):
 def test_a_data_entry_carries_scores_under_agent_names_and_no_code_or_process(world):
     conn, repo, run = world
     [entry] = lineage(conn, run, repo, "root", "improve_recipe")
-    assert sorted(entry) == ["aggregates", "data", "error", "metrics", "node_id", "rationale", "recipe",
+    assert sorted(entry) == ["aggregates", "data", "data_commit", "error", "metrics", "node_id", "rationale", "recipe",
                              "score", "status"]
     assert entry["score"] == 0.78 and entry["metrics"] == {"frame_aesthetics": 0.78}
     assert entry["aggregates"] == agent_aggregates(AGGREGATES) and "instruction_kind" in entry["aggregates"]["groups"]

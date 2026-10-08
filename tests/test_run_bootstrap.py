@@ -320,3 +320,16 @@ def test_rescoring_a_node_reads_the_run_and_writes_only_under_scores(tmp_path, m
     with pytest.raises(run_mod.RunNotFound):
         run_mod.rescore_node(CFG, "missing", "n1", ENV4)
     assert _tree(ctx.run_dir) == before
+    monkeypatch.setattr(run_mod.Control, "alive_pid", lambda self: 1)      # a loop holds the GPUs
+    with pytest.raises(run_mod.PreflightError, match="a loop is running"):
+        run_mod.rescore_node(CFG, "r", "n1", ENV4)
+
+
+def test_code_changes_names_a_moved_or_dirty_repo(monkeypatch):
+    import ar_kernel.run as run_mod
+    heads = {CFG.worldmodel: "a" * 40, CFG.wbench: "b" * 40, CFG.repo_root: "c" * 40}
+    monkeypatch.setattr(run_mod, "_head", lambda path: heads[path])
+    monkeypatch.setattr(run_mod, "_uncommitted", lambda path: path == CFG.wbench)
+    versions = {"worldmodel_sha": "a" * 40, "wbench_sha": "b" * 40, "kernel_sha": "d" * 40}
+    assert run_mod.code_changes(CFG, versions) == ["wbench has uncommitted changes",
+                                                   "kernel was at dddddddd, is at cccccccc"]

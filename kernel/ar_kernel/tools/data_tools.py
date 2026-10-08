@@ -117,8 +117,16 @@ class DataTools:
             conn.close()
         fmt, motion = filter.get("format"), filter.get("camera_motion")
         wanted = set(listed(caller, filter.get("clip_ids"), "clip_ids"))
+        in_commit = None
+        if filter.get("data_commit"):
+            in_commit = {}                                  # clip id -> the commit's datasets that hold it
+            for name, d in _manifest(self.run_dir, filter["data_commit"])["datasets"].items():
+                for clip_id in d["clips"]:
+                    in_commit.setdefault(clip_id, []).append(name)
         out = []
         for clip in clips:
+            if in_commit is not None and clip["clip_id"] not in in_commit:
+                continue
             if fmt and not any(f == fmt or f.startswith(fmt + ":") for f in clip["formats"]):
                 continue
             if motion and clip["camera_motion"] != motion:
@@ -127,14 +135,22 @@ class DataTools:
                 continue
             if filter.get("ingested_by") and clip.get("ingested_by") != filter["ingested_by"]:
                 continue
-            out.append(clip_record(clip, usage))
+            out.append({**clip_record(clip, usage), **({"datasets": in_commit[clip["clip_id"]]} if in_commit else {})})
         offset, limit = int(filter.get("offset") or 0), int(filter.get("limit") or QUERY_LIMIT)
         page = out[offset:offset + limit]
         return {"total": len(out), "returned": len(page), "clips": page}
 
-    def commit(self, caller, parent: str | None, datasets: dict, message: str) -> dict:
+    def commit(self, caller, parent: str | None, datasets: dict, message: str, include: list[str] = ()) -> dict:
         datasets = {name: {**d, "clips": listed(caller, d.get("clips"), f"{name}.clips")} if isinstance(d, dict) else d
                     for name, d in datasets.items()}
+        inherited: dict[str, dict] = {}
+        for commit_id in include:
+            for name, d in _manifest(self.run_dir, commit_id)["datasets"].items():
+                if name in inherited and inherited[name] != d and name not in datasets:
+                    raise ToolError(f"dataset {name} is in more than one included commit, with different content: "
+                                    "pass it in `datasets` as it should be")
+                inherited[name] = d
+        datasets = {**inherited, **datasets}
         conn = open_db(self.run_dir)
         try:
             store = CommitStore(conn, BlobStore(self.run_dir, conn), ClipStore(conn))
@@ -197,6 +213,17 @@ def _counted(texts) -> list[dict]:
         shapes.setdefault(_VARIES.sub("#", _shape(text)), []).append(text)
     return [{"count": len(found), "example": found[0]}
             for found in sorted(shapes.values(), key=len, reverse=True)[:SHOWN]]
+
+
+def _manifest(run_dir: Path, commit_id: str) -> dict:
+    conn = open_db(run_dir)
+    try:
+        row = conn.execute("SELECT manifest FROM data_commits WHERE commit_id=?", (commit_id,)).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise ToolError(f"unknown data commit {commit_id!r}")
+    return json.loads(row["manifest"])
 
 
 def _parent_commit(conn, node_id: str) -> str | None:
@@ -313,25 +340,32 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
             camera_motion: Annotated[Literal["moving", "static"] | None, Field(description="keep clips with this camera motion")] = None,
             clip_ids: Annotated[list[str] | str | None, Field(description=f"keep only these clip ids, {FROM_FILE}")] = None,
             ingested_by: Annotated[str | None, Field(description="keep clips this node ingested, e.g. the id of the node being built")] = None,
+            data_commit: Annotated[str | None, Field(description="keep the clips of this data commit; each clip then has `datasets`, the commit's datasets that hold it")] = None,
             limit: Annotated[int, Field(description="clips per page")] = QUERY_LIMIT,
             offset: Annotated[int, Field(description="skip this many matches")] = 0) -> dict:
         given = dict(format=format, camera_motion=camera_motion, clip_ids=clip_ids, ingested_by=ingested_by,
-                     limit=limit, offset=offset)
+                     data_commit=data_commit, limit=limit, offset=offset)
         filter = {key: value for key, value in given.items() if value is not None}
         return await kit.call(ctx, "data_query", filter, lambda c: tools.query(c, filter))
 
-    @mcp.tool(name="data_commit", description="Create an immutable data commit: the training set of this node.")
+    @mcp.tool(name="data_commit", description="Create an immutable data commit: the whole training set of this node. "
+              "It holds the datasets of the commits in `include` plus the ones in `datasets`, and nothing else: "
+              "`parent` is recorded as history and brings no data with it.")
     async def data_commit(
-            parent: Annotated[str | None, Field(description="the commit this one follows (the parent node's data commit), or null")],
+            parent: Annotated[str | None, Field(description="the commit this one follows (the parent node's data commit), or null. History only")],
             datasets: Annotated[dict[str, Dataset], Field(description="{name: {format, prompt_mode, weight, clips}}. "
                                 f"clips is a list of clip ids, {FROM_FILE}. format is one of: {_FORMATS}. Set prompt_mode only for "
                                 "video_timed_prompts_camera; omit it otherwise. weight is the dataset's sampling "
                                 "weight. Each dataset needs at least as many clips as training GPUs")],
             message: Annotated[str, Field(description="what this commit contains")],
-            ctx: Context) -> dict:
+            ctx: Context,
+            include: Annotated[list[str] | None, Field(description="data commits of earlier nodes (the parent's, or any "
+                               "other finished node's) whose datasets this commit takes over as they are: name, format, "
+                               "weight and clips. A dataset in `datasets` with the same name replaces the inherited one whole; "
+                               "to stop training on one, pass it with its format and weight 0")] = None) -> dict:
         return await kit.call(ctx, "data_commit",
-                              {"parent": parent, "datasets": datasets, "message": message},
-                              lambda c: tools.commit(c, parent, datasets, message))
+                              {"parent": parent, "datasets": datasets, "message": message, "include": include or []},
+                              lambda c: tools.commit(c, parent, datasets, message, include or []))
 
     @mcp.tool(name="recipe_check", description="Run every pre-training check on a recipe and a data commit "
               "without using up an attempt. It uses the GPUs for under a minute, so it is refused while a GPU job "

@@ -8,7 +8,7 @@ from .doctor import report, run_checks
 from .guards import alert, check_tools_fit, check_visible
 from .loop import Loop
 from .monitor import Monitor
-from .run import PreflightError, RunNotFound, attach_run, bootstrap_run, rescore_node
+from .run import PreflightError, RunNotFound, attach_run, bootstrap_run, code_changes, rescore_node
 from .run_kit import build_run_kit
 from .status import format_status, run_status
 from .subproc import cache_env, proc_running, proc_start_time
@@ -160,6 +160,12 @@ def _run(cfg, args) -> int:
     check_visible(ctx.gpus)
     if args.resume:
         check_tools_fit(run_cfg, ctx.gpus)
+        changed = code_changes(cfg, ctx.versions)
+        if changed:
+            why = ("the code differs from what this run started with, so later nodes are not built and scored "
+                   "like the earlier ones: " + "; ".join(changed))
+            alert(ctx.recorder, "code_changed", why, level="warning")
+            print(f"warning: {why}", file=sys.stderr)
     repo = AgentsRepo(ctx.run_dir / "agents.git", remote=remote, namespace=ctx.run_dir.name,
                       on_push_error=lambda error: alert(ctx.recorder, "git_push_failed", error, level="warning"))
     if args.resume:

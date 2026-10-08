@@ -8,7 +8,7 @@ Every step ends with a check; do not continue if it fails.
 | | |
 |---|---|
 | OS | Linux x86_64 |
-| GPUs | 4 or more NVIDIA 24 GB cards (tested: RTX 4090), all idle |
+| GPUs | 4 NVIDIA 24 GB cards (tested: RTX 4090), all idle. A run uses GPUs in groups of 4: of 6 listed it uses the first 4 |
 | Driver | `nvidia-smi` shows `CUDA Version: 13.2` or higher |
 | CUDA toolkit | `nvcc --version` works and says 12.x (usually `/usr/local/cuda-12.8`) |
 | RAM | 128 GB minimum, 256 GB recommended |
@@ -237,12 +237,13 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 nohup ar run --run-id $RUN --resume >> runs/$RUN.co
 ```
 
 Resume keeps every finished node; a node that was still in progress is dropped and a new one is started.
+If WorldModel, WBench or AutoResearcher changed since the run started, resume prints a warning and records a `code_changed` alert: later nodes are then not built and scored like the earlier ones.
 Do not delete files under `runs/$RUN` by hand.
 
 ## 10. Results
 
 - `ar status --run-id $RUN`: every node with its score and the best one.
-- `ar score-node --run-id $RUN --node <id>`: scores a node of the run again. It reads the run and writes only under `scores/`; besides `ar run` and `ar stop`, no command changes a run.
+- `ar score-node --run-id $RUN --node <id>`: scores a node of the run again. It reads the run and writes only under `scores/`, and is refused while a loop is running (the loop holds the GPUs); besides `ar run` and `ar stop`, no command changes a run.
 - Code of each node: the branches `$RUN/node/<id>` in the GitHub repo from `$REMOTE`.
 - Everything else (logs, conversations, checkpoints, videos): `runs/$RUN/`. Keep this folder; it is the record of the experiment.
 
@@ -252,7 +253,8 @@ Do not delete files under `runs/$RUN` by hand.
 |---|---|
 | `OPENAI_API_KEY is empty` | Fill `.env` (step 3). Run `ar` from `AutoResearcher`. |
 | `run ... exists; use --resume` | Use a new `--run-id`, or add `--resume` to continue it. |
-| `need at least 4 GPUs` / GPU out of memory at start | Set `CUDA_VISIBLE_DEVICES` to 4 or more idle GPUs. Check `nvidia-smi` for other processes. |
+| `need at least 4 GPUs` / GPU out of memory at start | Set `CUDA_VISIBLE_DEVICES` to 4 idle GPUs. Check `nvidia-smi` for other processes. |
+| `eval_failed` alert in `ar status`, and the run stopped | A node's evaluation failed twice in a row, so the run stopped instead of training more nodes. The alert carries the error. Fix it, then `--resume`: that node is dropped and a new one is started. |
 | `enabled tools do not fit GPUs` | A tool needs more GPU memory in total than the run's cards have (`min_total_gpu_gib` in `configs/kernel.yaml`). Give the run more or larger GPUs, or switch that generator off before starting a new run. |
 | `tool_does_not_fit` alert in `ar status`, and the run stopped | A GPU tool found the machine too small while running; the alert names the worker log. Give the run more or larger GPUs, then `--resume`. |
 | `permission denied (publickey)` for the git remote | `ssh-add` your key in the shell that runs `ar`; check with `ssh -T git@github.com`. It shows up as a warning in `ar status`. |

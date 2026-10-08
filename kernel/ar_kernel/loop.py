@@ -240,8 +240,11 @@ class Loop:
             try:
                 score, detail = self._eval(child, checkpoint, resolved)
             except Exception as exc:                              # noqa: BLE001 -- LoRA concat/render/WBench
-                status, error = "eval_failed", f"{type(exc).__name__}: {exc}"
-                return
+                # Twice in a row: the evaluation itself is broken, and every later node would train and fail the same way.
+                why = (f"{child} could not be evaluated, twice ({type(exc).__name__}: {exc}); "
+                       "fix the evaluation, then resume")
+                alert(self.ctx.recorder, "eval_failed", why, node_id=child)
+                raise StopRun(why) from exc
             self._record_score(child, score, detail)
         except StopRun:
             status = None                                         # left running: interrupted on resume

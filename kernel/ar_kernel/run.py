@@ -181,6 +181,18 @@ def attach_run(cfg: KernelConfig, run_id: str, env: Mapping[str, str]) -> RunCon
                       expected_n=meta.get("expected_n", {}), judge=judge)
 
 
+def code_changes(cfg: KernelConfig, versions: dict) -> list[str]:
+    """Each repo whose commit differs from the run's recorded one, or that has uncommitted changes."""
+    out = []
+    for name, path in (("worldmodel", cfg.worldmodel), ("wbench", cfg.wbench), ("kernel", cfg.repo_root)):
+        was, now = versions.get(f"{name}_sha"), _head(path)
+        if was != now:
+            out.append(f"{name} was at {str(was)[:8]}, is at {now[:8]}")
+        if _uncommitted(path):
+            out.append(f"{name} has uncommitted changes")
+    return out
+
+
 def _stored_judge(cfg: KernelConfig, env: Mapping[str, str], meta: dict) -> Judge:
     """The judge the run was created with. Scores from a different judge are not comparable, so
     an environment that would pick another one is refused."""
@@ -242,8 +254,11 @@ def rescore_node(cfg: KernelConfig, run_id: str, node_id: str, env: Mapping[str,
     if not meta_path.exists():
         raise RunNotFound(f"no run {run_id!r} under {cfg.runs_dir}")
     meta = json.loads(meta_path.read_text())
+    running = [d.name for d in sorted(cfg.runs_dir.iterdir()) if Control(d).alive_pid() is not None]
+    if running:
+        raise PreflightError(f"a loop is running ({', '.join(running)}) and holds the GPUs; score a node when it has stopped")
     run_cfg = KernelConfig.for_run(run_dir)
-    conn = open_db_readonly(run_dir, writer_alive=Control(run_dir).alive_pid() is not None)
+    conn = open_db_readonly(run_dir, writer_alive=False)
     try:
         node = NodeStore(conn).get(node_id)
     finally:

@@ -95,8 +95,9 @@ def best_section(archive: dict) -> str:
     return "\n\n".join([
         "## Archive",
         f"{len(nodes)} nodes, {archive.get('n_scored', len(best))} scored. The best {len(best)}:",
-        table(["node", "parent", "depth", "score", "status"],
-              [[n["node_id"], n.get("parent_id"), n.get("depth"), n.get("score"), n.get("status")] for n in best])])
+        table(["node", "parent", "depth", "score", "status", "data commit"],
+              [[n["node_id"], n.get("parent_id"), n.get("depth"), n.get("score"), n.get("status"), n.get("data_commit")]
+               for n in best])])
 
 
 def _score_rows(nodes: list[dict], pick) -> list[list]:
@@ -139,6 +140,7 @@ def data_node(n: dict) -> str:
         lines.append(f"- Hypothesis: {clip(_hypothesis(n['rationale']))}")
     if n.get("data"):
         lines.append(_data(n))
+        lines.append(f"- Data commit: {n.get('data_commit')}")
     if n.get("recipe"):
         lines.append("- Recipe: " + ", ".join(f"{k} {v}" for k, v in n["recipe"].items()))
     return "\n".join(lines)

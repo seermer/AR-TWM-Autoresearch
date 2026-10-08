@@ -280,6 +280,36 @@ def test_replans_stop_at_the_round_limit():
     assert box.value is None
 
 
+def test_a_review_that_never_answers_keeps_the_submitted_result(tmp_path, monkeypatch):
+    from types import SimpleNamespace as NS
+    from agent import orchestration as orch
+    monkeypatch.setattr(orch, "RECORD", tmp_path / "plans.json")
+    plan, accept, done, replan = (NS(value=None, name=n) for n in ("plan", "accept", "done", "replan"))
+    calls = []
+
+    class Planner:
+        async def run(self, task):
+            calls.append(task)
+            if len(calls) == 2:                      # the review turn: no tool call, even when reminded
+                raise orch.NoSubmission("the role finished without calling submit_plan or accept_result")
+            plan.value = NS(model_dump=lambda: {"hypothesis": "h"})
+            return plan
+
+    class Engineer:
+        messages = []
+
+        async def run(self, work):
+            done.value = NS(model_dump=lambda: {"data_commit": "c"}, model_dump_json=lambda indent: "{}")
+            return done
+    team = orch.Team(Planner(), plan, accept, Engineer(), done, replan, [])
+    asyncio.run(orch.plan_and_engineer(team, task="t", show=lambda p: "work", engineer_context="ctx"))
+    assert len(calls) == 2 and team.rounds == [{"plan": {"hypothesis": "h"}, "result": {"data_commit": "c"}}]
+    done.value = None                                # with no result, a silent planner still fails the phase
+    calls.clear(), calls.append("first")
+    with pytest.raises(orch.NoSubmission, match="finished without"):
+        asyncio.run(orch.plan_and_engineer(team, task="t", show=lambda p: "work", engineer_context="ctx"))
+
+
 def test_submit_tool_validates_then_captures():
     from pydantic import ValidationError
     from agent.orchestration import EditPlan

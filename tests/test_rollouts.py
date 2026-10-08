@@ -44,7 +44,7 @@ def small_cfg(env="autoresearcher", enabled=True):
 def first_person(**over):
     return {"image": "frame.png", "viewpoint": "first_person",
             "scene_prompt": "A wet city street at night with neon signs.",
-            "character_prompt": "", "viewpoint_prompt": "First-person view at eye level.",
+            "character_prompt": "",
             "turns": [{"action": "W"}, {"action": "left", "event": "It starts to rain heavily."}], **over}
 
 
@@ -52,7 +52,6 @@ def third_person(**over):
     return {"image": "frame.png", "viewpoint": "third_person", "subject_mask": "mask.png",
             "scene_prompt": "A mountain trail above a valley.",
             "character_prompt": "A hiker in a red jacket.",
-            "viewpoint_prompt": "Third-person view from behind the hiker.",
             "turns": [{"action": "W+left", "subject_action": "The hiker raises a hand and waves."},
                       {"action": "stop", "viewpoint_change": "tp_to_fp"}], **over}
 
@@ -582,14 +581,12 @@ def test_real_alayaworld_rollout(tmp_path):
             {"image": "street.png", "viewpoint": "first_person",
              "scene_prompt": "A rainy city street lined with parked cars and trees, wet asphalt reflecting "
                                    "the grey daylight, apartment blocks in the distance.",
-             "viewpoint_prompt": "First-person view at eye level from the sidewalk.",
              "turns": [{"action": "W", "event": "A red umbrella blows across the street in the wind."},
                        {"action": "left", "subject_action": "A cyclist in a yellow raincoat rides past."}]},
             {"image": hiker, "subject_mask": "hiker_mask.png", "viewpoint": "third_person",
              "scene_prompt": "A narrow dirt trail along a green mountain ridge above a wide valley, "
                                    "distant peaks under a clear afternoon sky.",
              "character_prompt": "A hiker in a bright red jacket and grey backpack.",
-             "viewpoint_prompt": "Third-person view from behind the hiker.",
              "turns": [{"action": "W", "subject_action": "The hiker raises the right arm and waves."},
                        {"action": "right", "event": "Low clouds roll over the ridge."}]},
         ]

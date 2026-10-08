@@ -131,6 +131,27 @@ def test_commit_returns_id_and_per_dataset_stats(env):
     assert stats == {"format": "video_caption_camera", "prompt_mode": None, "weight": 1.0, "clips": 4}
 
 
+def test_a_commit_takes_over_the_datasets_of_included_commits_and_a_query_reads_a_commit_back(env):
+    from ar_kernel.tools.server import ToolError
+    tools, caller, results, _ = env
+    ids = [r["clip_id"] for r in results]
+    cam = {"format": "video_caption_camera", "prompt_mode": None, "weight": 2.0, "clips": ids[:3]}
+    first = tools.commit(caller, None, {"cam": cam}, "three clips")["commit_id"]
+    extra = {"format": "video_caption_camera", "prompt_mode": None, "weight": 1.0, "clips": ids[3:]}
+    second = tools.commit(caller, first, {"extra": extra}, "the parent's data and one clip", include=[first])
+    assert {n: (d["clips"], d["weight"]) for n, d in second["datasets"].items()} == {"cam": (3, 2.0), "extra": (1, 1.0)}
+    replaced = tools.commit(caller, first, {"cam": {**cam, "clips": ids[:2]}}, "one dropped", include=[first])
+    assert replaced["datasets"]["cam"]["clips"] == 2
+    out = tools.query(caller, {"data_commit": second["commit_id"]})
+    assert {c["clip_id"]: c["datasets"] for c in out["clips"]} == {**{i: ["cam"] for i in ids[:3]}, ids[3]: ["extra"]}
+    with pytest.raises(ToolError, match="unknown data commit"):
+        tools.commit(caller, None, {}, "m", include=["f" * 64])
+    with pytest.raises(ToolError, match="unknown data commit"):
+        tools.query(caller, {"data_commit": "f" * 64})
+    with pytest.raises(ToolError, match="more than one included commit"):
+        tools.commit(caller, None, {}, "m", include=[first, replaced["commit_id"]])
+
+
 def test_a_clips_source_is_its_generator_or_repo_and_derived_clips_inherit_it():
     from ar_kernel.tools.data_tools import clip_source, dataset_stats
     clips = [{"clip_id": "a", "provenance": {"kind": "rollout", "generator": "alayaworld-dmd4"}},

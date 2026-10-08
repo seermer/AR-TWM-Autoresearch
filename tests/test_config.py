@@ -15,6 +15,12 @@ def test_gpu_list_uses_env_verbatim_including_gpu5():
     cfg = KernelConfig.load()
     assert resolve_gpus(cfg, {"CUDA_VISIBLE_DEVICES": "0,2,4,5"}) == [0, 2, 4, 5]
 
+def test_gpu_list_keeps_whole_groups_of_four(caplog):
+    cfg = KernelConfig.load()
+    assert resolve_gpus(cfg, {"CUDA_VISIBLE_DEVICES": "0,1,2,3,4,5"}) == [0, 1, 2, 3]
+    assert "[4, 5] are left out" in caplog.text
+    assert resolve_gpus(cfg, {"CUDA_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7"}) == [0, 1, 2, 3, 4, 5, 6, 7]
+
 def test_gpu_list_below_min_count_is_refused():
     cfg = KernelConfig.load()
     with pytest.raises(GpuPolicyError, match="at least 4"):

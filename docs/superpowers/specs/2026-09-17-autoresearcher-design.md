@@ -69,7 +69,7 @@ HGM `hgm.py`, `tree.py`, `hgm_utils.py`, `self_improve_step.py`; HyperAgents
 |---|---|
 | Project root | `/mnt/biometrics/zhantaoy/Projects/Python/Research/y2026/WM-AutoResearch` |
 | Disk | `/mnt/biometrics`, ~2.4 TB free at design time |
-| GPUs | This machine: 6x RTX 4090 (24 GB). **GPU policy (identical for every GPU task: precache, training, rendering, eval, rollouts, camera annotation):** if `CUDA_VISIBLE_DEVICES` is set when the loop starts, the kernel uses exactly that list; if unset it falls back to `gpus.default` from `kernel.yaml`. Any indices are allowed. Fewer than `gpus.min_count` GPUs is refused at run start. Nothing in the kernel assumes a GPU count, index set or card model: the list length flows into the rank count (`train.sh`), `--gpus` for WBench, and the two-GPU slice used for prompt precache; larger or different hardware needs only the config values changed. |
+| GPUs | This machine: 6x RTX 4090 (24 GB). **GPU policy (identical for every GPU task: precache, training, rendering, eval, rollouts, camera annotation):** if `CUDA_VISIBLE_DEVICES` is set when the loop starts, the kernel uses exactly that list; if unset it falls back to `gpus.default` from `kernel.yaml`. Any indices are allowed. Fewer than `gpus.min_count` GPUs is refused at run start. *(2026-10-08, user decision)* GPUs are used in whole groups of `gpus.min_count`: of 6 listed, the first 4 are used and the rest are named in a warning. `ar score-node` is refused while any loop is running. Nothing in the kernel assumes a GPU count, index set or card model: the list length flows into the rank count (`train.sh`), `--gpus` for WBench, and the two-GPU slice used for prompt precache; larger or different hardware needs only the config values changed. |
 | Host RAM | 251 GB |
 | Conda envs (existing) | `alayaworld` (training, rendering, rollouts, data checks), `wbench-main` (WBench metrics), `wbench-vp` (visual plausibility). *(Amended 2026-09-28: they now live in `AutoResearcher/.envs/<name>` like every other env; config names are unchanged, see the next rows.)* |
 | Conda env (new) | `autoresearcher` (Python 3.12): kernel, gateway, tool server *(2026-09-27, Plan 4 as built / user decision: no dashboard, §13.4)* |
@@ -332,6 +332,13 @@ Returns, per candidate, `accepted` + `clip_id` + eligible formats + warnings, or
   (`weight / sum(weights)`). Agents weight a subset by putting it in its own dataset.
 - Agents may create **any number** of commits during `improve_recipe`; the node trains on
   the commit named in its result.
+- *(2026-10-08, user decision)* **Building on earlier commits.** `data.commit` takes `include`: commit ids of
+  any finished node, whose datasets (name, format, prompt_mode, weight, clips) are copied into the new
+  manifest. A dataset passed in the same call replaces an inherited one of the same name; two included
+  commits that disagree on a dataset not passed are refused. The stored manifest stays complete, so a node
+  still trains on exactly one self-contained commit. `data.query` takes `data_commit` and then returns that
+  commit's clips, each with the commit's `datasets` that hold it. Each lineage and sibling entry of the
+  context carries the node's `data_commit` id.
 - **Visibility: an archive-wide pool.** Every node may select from every clip ingested by
   any node of the run, plus the clips it ingests itself, each with full provenance (which
   node ingested it, generator or HF source, license, transform chain, eligible formats) and
@@ -576,7 +583,7 @@ agent/
 **Roles and results.** Each LLM step is a role run on the harness. A role returns its result
 by calling a `submit_<x>` tool whose arguments are validated against a schema; invalid
 arguments come back to the model as a tool error it can fix. A role that stops without
-submitting gets one reminder, then fails the attempt. *(2026-10-01, user decision)* An accepted
+submitting gets one reminder, then fails the attempt. *(2026-10-08, user decision: three reminders, worded for a role that is mid-work; and when the planner's review of a submitted result ends without a tool call, the result stands instead of the phase failing.)* *(2026-10-01, user decision)* An accepted
 submission ends the role's run at once: the submit tools are `return_direct`, and the harness
 ends the graph after a successful `return_direct` result (node `tools_done`, which runs once on
 the merged parallel tool results); a rejected submission still goes back to the model. Before
@@ -767,6 +774,7 @@ conversion, cropping, trimming, captioning, prompt timing) is agent code.
 | `job.status(job_id)` | State of a GPU job (`queued`, `running`, `done`, `failed`, `cancelled`), progress counters, and the result payload when finished. |
 | `job.wait(job_id, timeout_s)` | Blocks up to `min(timeout_s, tools.job_wait_max_s)` and returns the same payload as `job.status`, with `running` on expiry. |
 | `job.cancel(job_id)` | Stops a queued or running GPU job. |
+| `read_skill(name)` | *(2026-10-08, user decision.)* Besides the general notes, one skill per data-source tool (`rollout_*`, `generate_images`, `annotate_camera`, `caption_videos`): a file with `tool:` in its front matter, listed only when that tool is registered in the run, whose text starts with the tool's own description. `training_text` says what text each format and prompt mode trains with; `rollout_alayaworld` says how each round's prompt is built from an item. |
 | `recipe.check(recipe, data_commit)` | Runs gate checks 1–7 without consuming an attempt (materializing a temporary view). |
 
 **GPU tools are asynchronous jobs.** `rollout.*`, `annotate.camera` and `caption.videos` return a `job_id`
@@ -1035,10 +1043,10 @@ built, reads that JSON rather than a new store.)*
 | `improve_recipe` | crash, timeout, invalid result | failed attempt → retry loop 5↔6 |
 | kernel tools | download/rollout/annotation errors | returned to the agent as tool errors |
 | gate | any check fails | retry loop 5↔6 |
-| gateway | upstream 429/5xx | gateway retries with exponential backoff |
+| gateway | upstream 429/5xx *(2026-10-08: and 401-403)* | gateway retries with exponential backoff *(2026-10-08: `gateway.upstream_retries` 8, about 4 minutes; the agent's client never retries)* |
 | precache/train | *(amended 2026-09-27, Plan 4 as built / user decision)* any failure — recipe-caused (CUDA OOM, NaN/inf loss, wall-time cap) or infrastructure (host OOM kill, disk full, NCCL/driver error, text-embed cache miss), including a run that writes a checkpoint but still fails | reported to the agent as a failed attempt (§7.2); back to 5↔6, consuming one attempt; exhausted ⇒ `train_failed` |
-| LoRA concatenation, render, WBench (scoring) | *(amended 2026-09-27, Plan 4 as built / user decision)* any failure | the eval is run once more (`eval_retry` alert); a second failure: node `eval_failed`, alert, loop continues with a new cycle |
-| gateway (provider outage) | *(amended 2026-09-27, Plan 4 as built / user decision, option A)* upstream unavailable: an agent attempt fails while at least `gateway.outage_error_rate` (0.8) of the last `gateway.outage_window_min` (10) minutes' LLM calls, and at least `gateway.outage_min_calls` (3) of them, failed with 429/5xx or connection errors | the run **stops** (a stop, not a pause); `llm_outage` alert; the node in progress is marked `interrupted` on resume and not charged (§14.3); the operator resumes with `ar run --resume` |
+| LoRA concatenation, render, WBench (scoring) | *(amended 2026-09-27, Plan 4 as built / user decision)* any failure | the eval is run once more (`eval_retry` alert); a second failure: node `eval_failed`, alert, loop continues with a new cycle. *(2026-10-08, user decision)* A second failure now **stops the run** with an `eval_failed` alert (a broken evaluation would fail every later node after its training); the node is marked `interrupted` on resume. Only the root can still end `eval_failed`. |
+| gateway (provider outage) | *(amended 2026-09-27, Plan 4 as built / user decision, option A)* upstream unavailable: an agent attempt fails while at least `gateway.outage_error_rate` (0.8) of the last `gateway.outage_window_min` (10) minutes' LLM calls, and at least `gateway.outage_min_calls` (3) of them, failed with 429/5xx or connection errors *(2026-10-08, user decision: 401, 402 and 403 count too, and the gateway retries them like 429/5xx, so a short provider fault costs retries and only a sustained one stops the run)* | the run **stops** (a stop, not a pause); `llm_outage` alert; the node in progress is marked `interrupted` on resume and not charged (§14.3); the operator resumes with `ar run --resume` |
 | budget | *(added 2026-09-27, Plan 4 as built / user decision)* the LLM spend ledger reaches `budget.max_usd` | the run **stops**; the node in progress is marked `interrupted` on resume and not charged (§14.3) |
 | any phase | unexpected kernel exception while the kernel process survives | node marked `crashed`, artifacts kept, loop continues with a new cycle |
 

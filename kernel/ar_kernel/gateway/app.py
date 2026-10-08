@@ -17,7 +17,7 @@ from ..tools.context import bearer
 from .mock import MockBook
 from .store import CallStore
 
-RETRYABLE = {408, 409, 429, 500, 502, 503, 504}
+RETRYABLE = {401, 402, 403, 408, 409, 429, 500, 502, 503, 504}    # 401-403: providers return them in short outages too
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 # Chat content parts and Responses input items that carry video. "file"/"input_file" is only
 # a video part when its mime type or a data: URL inside it says so (an uploaded file_id has

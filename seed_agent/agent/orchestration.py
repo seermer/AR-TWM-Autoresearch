@@ -1,7 +1,7 @@
 """Which roles run, in what order, with which tools and what they are told first.
 
 A role = a system prompt and a tool list, run on the harness. It returns its result by calling a
-submit tool; one that stops without submitting gets one reminder.
+submit tool; one that stops without submitting is reminded, REMINDERS times.
 Both phases are a planner and an engineer. The planner submits a plan that states intent; the engineer
 carries it out, then either submits its result or reports back with request_replan for a new plan. The
 planner is shown a submitted result and accepts it or revises the plan, up to MAX_ROUNDS plans per phase.
@@ -37,8 +37,9 @@ SCRATCH = Path(WORKSPACE) / "scratch"         # every role's throwaway files; em
 RECORD = Path(WORKSPACE) / "plans.json"       # every plan and report; carried to a retry with the workspace
 PLAN_FIELD_CHARS = 4000                       # a safety cap: plans that state intent stay well under it, ones that
                                               # dictate file contents (5,800 characters and up) do not fit
-REMIND = ("You stopped without calling {tools}. Finish the task, then call {tools} with the result. "
-          "The work is only recorded through {tools}.")
+REMIND = ("Your last message made no tool call, which ends your turn. Keep working with the tools; when the "
+          "work is done, call {tools}. Nothing is recorded unless you call {tools}.")
+REMINDERS = 3
 REPLAN = "Revise the plan. The engineer carries out the plan you submit next."
 REVIEW = ("The engineer finished. Check the result against your plan by looking at what was built, not only at "
           "this summary. If it tests the plan, call accept_result. If it falls short in a way the engineer can "
@@ -93,20 +94,24 @@ class Role:
         return next((box for box in self.submissions if box.value is not None), None)
 
     async def run(self, task: str):
-        """Work on `task` until a submit tool is called; returns that tool's box. One reminder if it stops early."""
+        """Work on `task` until a submit tool is called; returns that tool's box. Reminded when it stops early."""
         for box in self.submissions:
             box.value = None
         names = " or ".join(box.name for box in self.submissions)
         SCRATCH.mkdir(parents=True, exist_ok=True)
         try:
-            for message in (task, REMIND.format(tools=names)):
+            for message in (task, *[REMIND.format(tools=names)] * REMINDERS):
                 state = await self.agent.ainvoke({"messages": [*self.messages, HumanMessage(content=message)]})
                 self.messages = state["messages"]
                 if self._submitted() is not None:
                     return self._submitted()
         finally:
             shutil.rmtree(SCRATCH, ignore_errors=True)
-        raise RuntimeError(f"the role finished without calling {names}")
+        raise NoSubmission(f"the role finished without calling {names}")
+
+
+class NoSubmission(RuntimeError):
+    """A role's turn ended without a submit tool call, reminders included."""
 
 
 async def ping() -> str:
@@ -161,7 +166,13 @@ async def plan_and_engineer(team: Team, *, task: str, show, engineer_context: st
     result and wants it changed; the phase ends when the planner accepts a result or the plans are used up.
     Every round is appended to team.rounds and saved."""
     while True:
-        if await team.planner.run(task) is team.accept:
+        try:
+            box = await team.planner.run(task)
+        except NoSubmission:
+            if team.done.value is None:
+                raise
+            return                                   # a review that never answered: the submitted result stands
+        if box is team.accept:
             return
         team.rounds.append({"plan": team.plan.value.model_dump()})
         save(team.rounds)

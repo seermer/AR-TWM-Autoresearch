@@ -75,7 +75,7 @@ def case_json(index: int, item: dict, image_rel: str, mask_rel: str | None) -> d
         interactions += [{"type": kind, "action": t[key], "turn": turn} for key, kind in TURN_KEYS.items() if t.get(key)]
     return {"id": str(index), "environment_prompt": item["scene_prompt"],
             "character_prompt": item.get("character_prompt", ""),
-            "perspective_prompt": item.get("viewpoint_prompt", ""),
+            "perspective_prompt": "",          # camera text: the render removes it before the model sees the prompt
             "settings": {"perspective": item["viewpoint"], "subject": {"type": "unknown", "desc": ""},
                          "tracking_object": None, "initial_image": image_rel, "subject_mask": mask_rel},
             "interactions": interactions, "metric_list": []}
@@ -203,9 +203,8 @@ class AlayaWorldBackend(GpuJob):
             bad(f"viewpoint must be one of {VIEWPOINTS}: got {item.get('viewpoint')!r}")
         if not isinstance(item.get("scene_prompt"), str) or not item["scene_prompt"].strip():
             bad("scene_prompt must be a non-empty string")
-        for key in ("character_prompt", "viewpoint_prompt"):
-            if not isinstance(item.get(key, ""), str):
-                bad(f"{key} must be a string")
+        if not isinstance(item.get("character_prompt", ""), str):
+            bad("character_prompt must be a string")
         mask = item.get("subject_mask")
         if mask is not None and not str(mask).lower().endswith(IMAGE_EXTS):
             bad(f"subject_mask must be an image file ({', '.join(IMAGE_EXTS)}): got {mask!r}")

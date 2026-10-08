@@ -70,10 +70,10 @@ def test_load_twice_does_not_double_count(tmp_path):
 
 def test_error_rate_window():
     b = Budget()
-    for status in (200, 500, 502, 200, 400, 599):     # 400 is the agent's own request; 599 a connection error
+    for status in (200, 500, 502, 200, 400, 599, 401, 404, 402, 403, 200, 422):   # 400: the agent's own request; 599: a connection error
         b.record(status, None)
     rate, n = b.error_rate(300)
-    assert (rate, n) == (0.5, 6)
+    assert (rate, n) == (0.5, 12)
 
 
 def test_string_prices_and_cap_are_numbers():     # YAML loads "2e-6" (no dot) as a string

@@ -90,9 +90,9 @@ class Budget:
             recent = [s for t, s in self._statuses if t >= cutoff]
         if not recent:
             return 0.0, 0
-        # Only upstream unavailability counts (rate limits, server and connection errors, 599 in
-        # Upstream.post): a 400 caused by the agent's own request is not an outage.
-        return sum(s == 429 or s >= 500 for s in recent) / len(recent), len(recent)
+        # Only upstream unavailability counts (a rejected key, spent credits, rate limits, server and
+        # connection errors, 599 in Upstream.post): a 400 caused by the agent's own request is not an outage.
+        return sum(s in (401, 402, 403, 429) or s >= 500 for s in recent) / len(recent), len(recent)
 
     def load(self, run_dir: Path) -> None:
         """Re-count the real calls already recorded for this run (resume and `ar status`). Resets

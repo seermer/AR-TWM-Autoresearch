@@ -131,16 +131,15 @@ def test_a_failed_eval_is_run_once_more(make_loop):
     assert alerts == ["eval_retry"]
 
 
-def test_eval_failing_twice_is_eval_failed_and_the_loop_continues(make_loop):
+def test_eval_failing_twice_stops_the_run(make_loop):
     run, make = make_loop
     loop = make(Script(run, score=[0.7, RuntimeError("wbench gpu failed"), RuntimeError("wbench gpu failed")]),
                 max_nodes=2)
-    loop.run()
+    assert "wbench gpu failed" in loop.run()
     nodes = {n["node_id"]: n for n in NodeStore(loop.ctx.conn).all()}
-    assert nodes["n1"]["status"] == "eval_failed" and "wbench gpu failed" in nodes["n1"]["error"]
-    assert nodes["n2"]["status"] == "scored"
+    assert set(nodes) == {"root", "n1"} and nodes["n1"]["status"] == "running"      # -> interrupted on resume
     kinds = [e["kind"] for e in loop.ctx.recorder.read_events() if e["type"] == "alert"]
-    assert "node_failed" in kinds
+    assert kinds == ["eval_retry", "eval_failed"]
 
 
 def test_unexpected_exception_is_crashed(make_loop):

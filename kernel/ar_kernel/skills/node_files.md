@@ -15,7 +15,7 @@ description: Use when looking into what earlier nodes did: their transcripts, wo
 - `attempts/<phase>-<k>/workspace/`: the files the roles wrote, including `tool_output/` (the full output of commands) and `plans.json` (every plan of the attempt, with the reports that went back to the planner).
 - `attempts/improve_recipe-<k>/train/train.log`: the full training log. Each `[Train] step=` line is one optimizer step with the dataset `source`, `sigma`, `loss`, `grad` and `lr`; its `time=` covers only the last micro-batch of the step. The loss depends mostly on `sigma`, so compare losses at similar sigma.
 - `attempts/improve_recipe-<k>/train_config.yaml`: the full training config that ran.
-- `attempts/improve_recipe-<k>/view/<dataset>/`: the data commit as the trainer saw it: captions and poses per clip.
+- `attempts/improve_recipe-<k>/view/<dataset>/`: the data commit as the trainer saw it: `videos/`, `captions/` and `poses/`, one file per clip, named by clip id.
 - `attempts/<phase>-<k>/context/context.json`: the complete context that attempt received.
 - `contract/attempt-<k>/`: the kernel's checks of the edited code.
 
