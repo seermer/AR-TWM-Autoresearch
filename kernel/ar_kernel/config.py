@@ -10,30 +10,43 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 class GpuPolicyError(ValueError):
     """The GPU list is unusable for this run."""
 
+
+def _merged(base: dict, over: dict) -> dict:
+    return {**base, **{key: _merged(base[key], value) if isinstance(value, dict) and isinstance(base.get(key), dict)
+                       else value for key, value in over.items()}}
+
 @dataclass(frozen=True)
 class KernelConfig:
     raw: dict
     repo_root: Path
+    overlay: Path | None = None
 
     @classmethod
-    def load(cls, path: Path | None = None) -> "KernelConfig":
+    def load(cls, path: Path | None = None, overlay: Path | None = None) -> "KernelConfig":
         """Load kernel.yaml. With an explicit path the repo root is derived from
         it (<root>/configs/kernel.yaml), so a config can be loaded for a checkout
         other than the one this module lives in; relative paths inside it then
-        resolve against that checkout rather than this one."""
+        resolve against that checkout rather than this one. `overlay` is a YAML file
+        holding only the keys that differ; they replace kernel.yaml's."""
         if path is None:
             path, repo_root = REPO_ROOT / "configs" / "kernel.yaml", REPO_ROOT
         else:
             path = Path(path).resolve()
             repo_root = path.parent.parent
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-        return cls(raw=raw, repo_root=repo_root)
+        if overlay is not None:
+            overlay = Path(overlay).resolve()
+            raw = _merged(raw, yaml.safe_load(overlay.read_text(encoding="utf-8")))
+        return cls(raw=raw, repo_root=repo_root, overlay=overlay)
 
     @classmethod
     def for_run(cls, run_dir: Path) -> "KernelConfig":
-        """The run's frozen kernel.yaml (snapshotted at run start), with THIS checkout as
-        the repo root. load(path) would take runs/<id> as the root and break every sibling path."""
+        """The run's frozen kernel.yaml (snapshotted at run start) under its frozen overlay, with THIS
+        checkout as the repo root. load(path) would take runs/<id> as the root and break every sibling path."""
         raw = yaml.safe_load((Path(run_dir) / "config" / "kernel.yaml").read_text(encoding="utf-8"))
+        overlay = Path(run_dir) / "config" / OVERLAY_SNAPSHOT
+        if overlay.exists():
+            raw = _merged(raw, yaml.safe_load(overlay.read_text(encoding="utf-8")))
         return cls(raw=raw, repo_root=REPO_ROOT)
 
     def get(self, dotted: str, default: Any = None) -> Any:
@@ -57,6 +70,15 @@ class KernelConfig:
         return self._path("paths.wbench")
 
     @property
+    def eval_data(self) -> Path:
+        """The scored benchmark: a folder of cases/, images/ and masks/."""
+        return self._path("eval.data")
+
+    @property
+    def eval_cases(self) -> Path:
+        return self._path("eval.cases")
+
+    @property
     def runs_dir(self) -> Path:
         return self._path("paths.runs_dir")
 
@@ -68,7 +90,8 @@ class KernelConfig:
     def scores_dir(self) -> Path:
         return self._path("paths.scores_dir")
 
-SNAPSHOT_FILES = ("kernel.yaml", "base_recipe.yaml", "proxy_cases.txt")
+SNAPSHOT_FILES = ("kernel.yaml", "base_recipe.yaml")
+OVERLAY_SNAPSHOT = "overlay.yaml"
 
 
 def run_config_path(cfg: "KernelConfig", run_dir: Path, name: str) -> Path:

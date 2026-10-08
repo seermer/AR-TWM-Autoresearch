@@ -193,8 +193,21 @@ The loop first measures the starting model (the "root", about 2 hours), then imp
 (about 5-6 hours per node measured on 4 GPUs). The root is measured once: it is kept in `root_cache/`
 and reused by every later run with the same cases, metrics, judge and WorldModel/WBench commits. A run
 scores the first `eval.proxy_size` (50) cases of `configs/proxy_cases.txt`, and the score is a weighted
-mean of the 22 metrics (`eval.score_weights` in `configs/kernel.yaml`). With the local judge the root
-scores `0.507` (measured 2026-10-01).
+mean of the metrics those cases list, all 22 here (`eval.score_weights` in `configs/kernel.yaml`). With
+the local judge the root scores `0.507` (measured 2026-10-01).
+
+To score another benchmark, add `--config <file>` to `ar run`. The file holds only the `kernel.yaml`
+keys that differ, and the run keeps it, so `--resume` takes no `--config`. Two are provided, one per
+skill benchmark in `../SkillWBench`:
+
+| Config | Scores | Cases | Skill metric |
+|---|---|---|---|
+| `configs/rain_start.yaml` | rain starts | 60 | `event_edit_adherence`, half the score |
+| `configs/animal_appears.yaml` | a land animal appears | 60 | `event_edit_adherence`, half the score |
+
+Each sets the benchmark folder (`eval.data`), its case list (`eval.cases`, `eval.proxy_size`), the
+skill's weight, and the sentence agents read as what the skill metric measures (`eval.measures`). The
+other 16 metrics these cases list share the other half; a listed metric missing from an eval fails it.
 
 Run only one loop at a time on a machine.
 

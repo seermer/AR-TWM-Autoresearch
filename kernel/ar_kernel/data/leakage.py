@@ -44,7 +44,7 @@ class LeakageChecker:
         self.min_ncc = float(cfg.get("leakage.min_ncc"))
         self.min_entropy = float(cfg.get("leakage.min_entropy"))
         self.references: list[tuple[str, imagehash.ImageHash, np.ndarray]] = []
-        for path in sorted((cfg.wbench / "data" / "images").glob("case_*.jpg")):
+        for path in sorted((cfg.eval_data / "images").glob("case_*.jpg")):
             image = Image.open(path)
             case_id = path.stem.replace("case_", "")
             self.references.append((case_id, imagehash.phash(image), _grayscale_vector(image)))

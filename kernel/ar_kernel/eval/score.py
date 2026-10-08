@@ -72,10 +72,12 @@ def agent_aggregates(aggregates: dict | None) -> dict | None:
                        for axis, groups in (aggregates.get("strata") or {}).items()}}
 
 
-def metric_guide(weights: dict | None) -> dict:
-    """What each metric measures and how much it weighs in the score. Nothing about how it is judged."""
-    return {alias: {"dimension": dimension, "weight": float((weights or {}).get(name, 1.0)), "measures": measures}
-            for name, (alias, dimension, measures) in AGENT_METRICS.items()}
+def metric_guide(metric_set: list[str], weights: dict | None, measures: dict | None = None) -> dict:
+    """What each scored metric measures and how much it weighs in the score. Nothing about how it is judged.
+    `measures` replaces a metric's built-in text, e.g. to name the one skill a benchmark scores."""
+    return {AGENT_METRICS[name][0]: {"dimension": AGENT_METRICS[name][1], "weight": float((weights or {}).get(name, 1.0)),
+                                     "measures": (measures or {}).get(name, AGENT_METRICS[name][2])}
+            for name in metric_set}
 
 
 # _megasam_tmp: MegaSAM scratch, which WBench now writes beside its output rather than
@@ -172,7 +174,7 @@ def aggregates(cfg: KernelConfig, report: dict, case_ids: list[str], metric_set:
     for case_id in case_ids:
         if not per_case.get(case_id):
             continue
-        case = json.loads((cfg.wbench / "data" / "cases" / f"case_{case_id}.json").read_text())
+        case = json.loads((cfg.eval_data / "cases" / f"case_{case_id}.json").read_text())
         settings = case.get("settings") or {}
         for t in sorted({i.get("type") for i in case.get("interactions") or []}, key=str):
             groups["interaction_type"].setdefault(str(t), []).append(case_id)

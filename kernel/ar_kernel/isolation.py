@@ -65,7 +65,7 @@ def _held_out_runs(cases_dir: Path) -> frozenset:
 def copies_held_out(cfg, *texts) -> bool:
     """A word run survives an added prefix, suffix or a split sentence; a paraphrase or a short
     common phrase does not match, on purpose."""
-    held = _held_out_runs(cfg.wbench / "data" / "cases")
+    held = _held_out_runs(cfg.eval_data / "cases")
     return any(not held.isdisjoint(_runs(text)) for text in texts if isinstance(text, str))
 
 
@@ -74,6 +74,7 @@ def host_roots(cfg) -> tuple[tuple[str, str], ...]:
     command lines and log tails quoted in errors hold them. Read from the config and the environment,
     so nothing here depends on where the project sits; a folder inside another comes first."""
     folders = {"<host>/" + p.name: p for p in (cfg.repo_root, cfg.worldmodel, cfg.wbench, cfg.runs_dir)}
+    folders["<host>/data"] = cfg.eval_data
     folders["<host>/home"] = Path.home()
     pairs = {(str(p), shown) for shown, path in folders.items() for p in (path, path.resolve())}
     return tuple(sorted(pairs, key=lambda pair: -len(pair[0])))

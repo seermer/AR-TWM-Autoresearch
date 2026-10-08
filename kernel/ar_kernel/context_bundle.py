@@ -156,7 +156,8 @@ def build_recipe_context(*, cfg, conn, run_dir: Path, repo, node_id: str, parent
         parent_data_commit=parent["data_commit"],
         parent_recipe=yaml.safe_load(recipe_path.read_text()) if recipe_path.exists() else {},
         base_recipe=base, recipe_guide=recipe_guide(base),
-        metric_guide=metric_guide(cfg.get("eval.score_weights")),
+        metric_guide=metric_guide(NodeStore(conn).get("root")["metric_set"],     # the run's: the root is scored first
+                                  cfg.get("eval.score_weights"), cfg.get("eval.measures")),
         tunable_rules={k: {"type": RECIPE_RULES[k][0], "min": RECIPE_RULES[k][1], "max": RECIPE_RULES[k][2]}
                        for k in sorted(TUNABLE_KEYS)},
         resolution_allowlist=[list(p) for p in cfg.get("train.resolution_allowlist")],

@@ -49,7 +49,10 @@ train:
   resolution_allowlist: [[544, 960], [416, 736], [352, 608]]   # the base recipe's is the first
   lora_allowlist: [[16, 16], [32, 32], [64, 64]]
 eval:
-  proxy_size: 50                 # the run scores the first N cases of configs/proxy_cases.txt
+  data: ../WBench/data           # the scored benchmark: cases/, images/, masks/
+  cases: configs/proxy_cases.txt
+  proxy_size: 50                 # the run scores the first N cases of `cases`
+  # A run scores the metrics its cases list (`metric_list`); one of them missing from an eval fails it.
   # Weight of each metric in a node's score (a metric not listed weighs 1). These four are the
   # instruction-following and causal grades; at 4.5 each they are half the score, the other 18 the rest.
   score_weights:
@@ -57,6 +60,7 @@ eval:
     subject_action_adherence: 4.5
     perspective_switch_adherence: 4.5
     causal_fidelity: 4.5
+  measures: {}                   # metric -> what agents are told it measures, in place of the built-in text
   vp_weights: weights/qwen3vl-a3b-visual-plausibility
   judge:                         # local judge (used when VLM_API_KEY is empty): the captioner's model
     # WBench asks for a 10-token yes/no answer, so the model must not think first.

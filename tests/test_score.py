@@ -209,10 +209,16 @@ def test_agent_aggregates_alias_metrics_dimensions_axes_and_groups():
 
 def test_the_metric_guide_carries_dimension_weight_and_meaning_only():
     from ar_kernel.eval.score import metric_guide
-    guide = metric_guide({"causal_fidelity": 4.5})
+    from ar_kernel.eval.score import DIMENSION_METRICS
+    guide = metric_guide(DIMENSION_METRICS, {"causal_fidelity": 4.5})
     assert len(guide) == 22
     assert guide["cause_and_effect"]["dimension"] == "physics" and guide["cause_and_effect"]["weight"] == 4.5
     assert sorted(guide["cause_and_effect"]) == ["dimension", "measures", "weight"]
     assert guide["frame_aesthetics"]["weight"] == 1.0
     text = " ".join(g["measures"] for g in guide.values()).lower()
     assert not any(word in text for word in ("judge", "question", "yes/no", "case", "frames per second"))
+    skill = metric_guide(["event_edit_adherence", "imaging_quality"], {"event_edit_adherence": 16},
+                         {"event_edit_adherence": "it starts to rain"})
+    assert skill == {"follows_event_instruction": {"dimension": "control", "weight": 16.0, "measures": "it starts to rain"},
+                     "frame_clarity": {"dimension": "quality", "weight": 1.0,
+                                       "measures": "frames free of blur, noise and compression artefacts"}}

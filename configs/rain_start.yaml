@@ -1,0 +1,10 @@
+# `ar run --config configs/rain_start.yaml`: score the rain_start skill benchmark instead of the default cases.
+# Only the keys that differ from kernel.yaml.
+eval:
+  data: ../SkillWBench/rain_start/data
+  cases: configs/rain_start_cases.txt
+  proxy_size: 60
+  score_weights:
+    event_edit_adherence: 16     # the skill: half the score, the 16 other metrics the cases list the rest
+  measures:
+    event_edit_adherence: it starts to rain in the scene when instructed, fully and with the right details

@@ -6,18 +6,47 @@ from ar_kernel.eval.score import DIMENSION_METRICS
 from ar_kernel.run import PreflightError, bootstrap_run, initial_expected_n, preflight_metrics
 
 CFG = KernelConfig.load()
+PROXY = CFG.eval_cases.read_text().strip().split(",")[:CFG.get("eval.proxy_size")]
 
 @pytest.mark.real_preflight
 def test_preflight_fails_when_vp_weights_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(KernelConfig, "wbench", property(lambda self: tmp_path))
     with pytest.raises(PreflightError, match="visual_plausibility"):
-        preflight_metrics(CFG)
+        preflight_metrics(CFG, PROXY)
 
 @pytest.mark.real_preflight
 def test_preflight_passes_with_vp_weights(tmp_path, monkeypatch):
     monkeypatch.setattr(KernelConfig, "wbench", property(lambda self: tmp_path))
     (tmp_path / CFG.get("eval.vp_weights")).mkdir(parents=True)
-    assert preflight_metrics(CFG) == DIMENSION_METRICS
+    assert preflight_metrics(CFG, PROXY) == DIMENSION_METRICS
+
+
+@pytest.mark.real_preflight
+def test_a_skill_benchmark_scores_the_metrics_its_cases_list(tmp_path, monkeypatch):
+    monkeypatch.setattr(KernelConfig, "wbench", property(lambda self: tmp_path))
+    (tmp_path / CFG.get("eval.vp_weights")).mkdir(parents=True)
+    monkeypatch.setattr(KernelConfig, "runs_dir", property(lambda self: tmp_path / "runs"))
+    monkeypatch.setattr("ar_kernel.run.wbench_weight_problems", lambda cfg: [])
+    monkeypatch.setattr("ar_kernel.run._uncommitted", lambda repo: False)
+    cfg = KernelConfig.load(overlay=CFG.repo_root / "configs" / "rain_start.yaml")
+    ctx = bootstrap_run(cfg, run_id="rain", env={"CUDA_VISIBLE_DEVICES": "0,1,2,3"})
+    assert ctx.case_ids == [str(i) for i in range(1001, 1061)]
+    assert len(ctx.metric_set) == 17 and "event_edit_adherence" in ctx.metric_set
+    assert "subject_action_adherence" not in ctx.metric_set
+    frozen = KernelConfig.for_run(ctx.run_dir)                 # a resumed run needs no --config
+    assert frozen.eval_data == cfg.eval_data and frozen.get("eval.score_weights.event_edit_adherence") == 16
+    assert frozen.get("eval.score_weights.causal_fidelity") == 4.5      # keys the overlay leaves out are kept
+
+
+@pytest.mark.real_preflight
+def test_a_metric_the_kernel_does_not_know_is_refused(tmp_path, monkeypatch):
+    (tmp_path / "cases").mkdir()
+    (tmp_path / "cases" / "case_1.json").write_text(json.dumps({"metric_list": ["aesthetic_quality", "new_metric"]}))
+    monkeypatch.setattr(KernelConfig, "eval_data", property(lambda self: tmp_path))
+    monkeypatch.setattr(KernelConfig, "wbench", property(lambda self: tmp_path))
+    (tmp_path / CFG.get("eval.vp_weights")).mkdir(parents=True)
+    with pytest.raises(PreflightError, match="new_metric"):
+        preflight_metrics(CFG, ["1"])
 
 def test_bootstrap_creates_run_layout_and_records_versions(tmp_path, monkeypatch):
     monkeypatch.setattr(KernelConfig, "runs_dir", property(lambda self: tmp_path))

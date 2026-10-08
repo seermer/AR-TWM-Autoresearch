@@ -9,7 +9,7 @@ from .archive.db import open_db, open_db_readonly
 from .archive.nodes import NodeStore
 from .control import Control
 from .doctor import wbench_weight_problems
-from .config import SNAPSHOT_FILES, KernelConfig, resolve_gpus
+from .config import OVERLAY_SNAPSHOT, SNAPSHOT_FILES, KernelConfig, resolve_gpus
 from .eval.judge import Judge, resolve_judge
 from .eval.lora import concat_eval_lora
 from .eval.render import build_render_config, render_proxy
@@ -30,13 +30,20 @@ class RunContext:
     expected_n: dict = field(default_factory=dict)   # metric -> case count on the proxy
     judge: Judge | None = None                       # who answers the VLM metrics
 
-def preflight_metrics(cfg: KernelConfig) -> list[str]:
-    """The run's metric set (always all 22); PreflightError when it cannot be computed."""
+def _cases(cfg: KernelConfig, case_ids: list[str]) -> list[dict]:
+    return [json.loads((cfg.eval_data / "cases" / f"case_{i}.json").read_text()) for i in case_ids]
+
+
+def preflight_metrics(cfg: KernelConfig, case_ids: list[str]) -> list[str]:
+    """The run's metric set: every metric its cases list; PreflightError when it cannot be computed."""
     vp_weights = cfg.wbench / cfg.get("eval.vp_weights")
     if not vp_weights.exists():
-        raise PreflightError("the full metric set cannot be computed:\n  "
+        raise PreflightError("the metric set cannot be computed:\n  "
                              f"visual_plausibility needs the VP weights at {vp_weights}")
-    return list(DIMENSION_METRICS)
+    listed = {metric for case in _cases(cfg, case_ids) for metric in case["metric_list"]}
+    if unknown := sorted(listed - set(DIMENSION_METRICS)):
+        raise PreflightError(f"the cases list metrics the kernel does not know: {unknown}")
+    return [metric for metric in DIMENSION_METRICS if metric in listed]
 
 def _head(repo: Path) -> str:
     return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
@@ -86,15 +93,18 @@ def bootstrap_run(cfg: KernelConfig, run_id: str | None, env: Mapping[str, str])
     recorder = _recorder(run_dir, env)
     for name in SNAPSHOT_FILES:
         shutil.copy2(cfg.repo_root / "configs" / name, run_dir / "config" / name)
+    shutil.copy2(cfg.eval_cases, run_dir / "config" / "proxy_cases.txt")
+    if cfg.overlay is not None:
+        shutil.copy2(cfg.overlay, run_dir / "config" / OVERLAY_SNAPSHOT)
     versions = {f"{name}_sha": _head(path) for name, path in repos.items()}
     (run_dir / "config" / "versions.json").write_text(json.dumps(versions, indent=2))
-    metric_set = preflight_metrics(cfg)
     judge = resolve_judge(cfg, env)
     ordered = (run_dir / "config" / "proxy_cases.txt").read_text().strip().split(",")
     size = int(cfg.get("eval.proxy_size"))
     if not 0 < size <= len(ordered):
         raise PreflightError(f"eval.proxy_size must be between 1 and {len(ordered)}, got {size}")
     case_ids = ordered[:size]
+    metric_set = preflight_metrics(cfg, case_ids)
     expected_n = initial_expected_n(cfg, case_ids)
     # run.json is written last: its presence is what marks the run as created.
     (run_dir / "config" / "run.json").write_text(json.dumps(
@@ -112,7 +122,7 @@ def initial_expected_n(cfg: KernelConfig, case_ids: list[str]) -> dict:
     files say which cases each judged metric applies to (so a judge call that never succeeded
     fails the root too). The root's report adds the rest (score_node), and every later node
     must match them."""
-    cases = [json.loads((cfg.wbench / "data" / "cases" / f"case_{i}.json").read_text()) for i in case_ids]
+    cases = _cases(cfg, case_ids)
     expected = {m: len(case_ids) for m in UNIVERSAL_METRICS}
     for metric in ("scene_adherence", "subject_adherence", "causal_fidelity"):
         expected[metric] = sum(bool(c.get(metric)) for c in cases)
@@ -138,7 +148,7 @@ def root_key(ctx: RunContext, cfg: KernelConfig) -> str:
     local = ctx.judge is not None and ctx.judge.kind == "local"
     eval_code = hashlib.sha256(b"".join(
         p.read_bytes() for p in sorted((Path(__file__).parent / "eval").glob("*.py")))).hexdigest()
-    fields = {"metric_set": ctx.metric_set, "case_ids": ctx.case_ids,
+    fields = {"metric_set": ctx.metric_set, "data": cfg.get("eval.data"), "case_ids": ctx.case_ids,
               "judge": [ctx.judge.kind, ctx.judge.model] if ctx.judge else None,
               "judge_settings": cfg.get("eval.judge"), "vp_weights": cfg.get("eval.vp_weights"),
               # a local judge is the captioner's server: how it is served decides what it sees

@@ -21,7 +21,7 @@ def build_render_config(cfg: KernelConfig, eval_lora: Path | None, node_rank: in
     config["run"]["log_dir"] = str(Path(node_dir) / "eval" / "logs")
     config["validation"]["per_sample_seed"] = True
     mode = config["validation"]["modes"]["wbench"]
-    mode["dataset"]["root"] = str(cfg.wbench / "data")
+    mode["dataset"]["root"] = str(cfg.eval_data)
     mode["dataset"]["case_ids"] = list(case_ids)
     mode["wbench_output_dir"] = str(videos_dir)
     target = Path(node_dir) / "eval" / "render_config.yaml"

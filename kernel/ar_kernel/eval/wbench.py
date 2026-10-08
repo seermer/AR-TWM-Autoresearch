@@ -12,7 +12,7 @@ from .judge import Judge, judge_env, judge_server
 def run_wbench_phases(cfg: KernelConfig, work_dir: Path, model: str, gpus: list[int],
                       metric_set: list[str], recorder, node_id: str, judge: Judge | None = None) -> dict:
     """precompute, gpu (twice), vlm (twice, behind a local judge server when `judge` is local),
-    visual plausibility, report. The metric set is always all 22, so no phase is optional."""
+    visual plausibility, report. Every phase runs whatever the metric set."""
     gpu_arg = ",".join(str(g) for g in gpus)
 
     def wbench(env: str, args: list[str], name: str, extra_env: dict | None = None, timeout=None) -> None:
@@ -27,7 +27,7 @@ def run_wbench_phases(cfg: KernelConfig, work_dir: Path, model: str, gpus: list[
 
     def main_phase(phase: str, extra_env: dict | None = None, timeout=None) -> None:
         wbench("wbench-main", ["python", "main.py", "--model", model, "--work_dir", str(work_dir),
-                               "--phase", phase, "--gpus", gpu_arg], phase, extra_env, timeout)
+                               "--data", str(cfg.eval_data), "--phase", phase, "--gpus", gpu_arg], phase, extra_env, timeout)
 
     def vlm(extra_env: dict | None = None) -> None:
         main_phase("vlm", extra_env)

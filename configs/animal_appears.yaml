@@ -1,0 +1,10 @@
+# `ar run --config configs/animal_appears.yaml`: score the animal_appears skill benchmark instead of the default cases.
+# Only the keys that differ from kernel.yaml.
+eval:
+  data: ../SkillWBench/animal_appears/data
+  cases: configs/animal_appears_cases.txt
+  proxy_size: 60
+  score_weights:
+    event_edit_adherence: 16     # the skill: half the score, the 16 other metrics the cases list the rest
+  measures:
+    event_edit_adherence: a land animal comes into view when instructed, fully and with the right details

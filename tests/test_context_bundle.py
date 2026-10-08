@@ -12,6 +12,7 @@ from ar_kernel.eval.score import agent_aggregates
 from ar_kernel.vcs.agents_repo import AgentsRepo
 
 CFG = KernelConfig.load()
+METRIC_SET = ["aesthetic_quality", "event_edit_adherence", "causal_fidelity"]
 # The shape score.aggregates() returns and the loop writes to eval/aggregates.json.
 AGGREGATES = {"metrics": {"aesthetic_quality": 0.78}, "dimensions": {"quality": 0.78},
               "strata": {"interaction_type": {"navigation": {"quality": 0.8}}, "category": {"Nature": {"quality": 0.8}},
@@ -29,7 +30,7 @@ def world(tmp_path):
     nodes = NodeStore(conn)
     nodes.create("root", None, 0)
     nodes.set_fields("root", agent_commit=root_commit)
-    nodes.record_score("root", 0.78, ["aesthetic_quality"], {"aesthetic_quality": 0.78})
+    nodes.record_score("root", 0.78, METRIC_SET, {"aesthetic_quality": 0.78})
     nodes.create("n1", "root", 1)
     (tmp_path / "nodes" / "root" / "eval").mkdir(parents=True)
     (tmp_path / "nodes" / "root" / "eval" / "aggregates.json").write_text(
@@ -59,7 +60,7 @@ def test_recipe_context_carries_rules_allowlists_and_retry(world, tmp_path):
     assert ctx.resolution_allowlist == [[544, 960], [416, 736], [352, 608]]
     assert ctx.base_recipe["optimizer"]["batch_size"] == 1
     assert not hasattr(ctx, "format_rules")
-    assert ctx.metric_guide["cause_and_effect"]["weight"] == 4.5 and len(ctx.metric_guide) == 22
+    assert ctx.metric_guide["cause_and_effect"]["weight"] == 4.5 and len(ctx.metric_guide) == len(METRIC_SET)
     write_bundle(ctx, tmp_path / "ctx2")
     assert json.loads((tmp_path / "ctx2" / "retry.json").read_text()) == retry
 
