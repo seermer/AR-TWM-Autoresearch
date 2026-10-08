@@ -386,7 +386,7 @@ class Wan22Backend(GpuJob):
             "item carries a first frame). A GPU job: returns {job_id} at once; collect with job_wait. "
             f"`frames`: 4k+1, 1 < frames <= {maximum}, default {default} (one value "
             "for the whole job). Item: {'prompt': str, 'image'?: first frame under /workspace (any "
-            "size; center-cropped and resized to 1280x704, e.g. a generate_images frame), 'seed': "
+            "size; center-cropped and resized to 1280x704), 'seed': "
             "int}. Each result item gives a `candidate` for data_ingest "
             "(a 1248x704 (~16:9), 24 fps mp4 center-cropped from Wan's 1280x704, caption, provenance); it "
             "carries no pose/camera_motion -- add one (annotate_camera then 'moving', or 'static') "

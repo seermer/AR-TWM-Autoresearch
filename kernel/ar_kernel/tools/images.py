@@ -1,5 +1,4 @@
-"""generate_images: Z-Image-Turbo first frames for rollouts to start
-from. Images carry no ingest candidate (they are inputs, not training clips); a rollout made
+"""generate_images: Z-Image-Turbo images for rollouts to start or end on. Images carry no ingest candidate (they are inputs, not training clips); a rollout made
 from one folds the image's hash into its own inputs_hash instead."""
 from __future__ import annotations
 
@@ -25,8 +24,8 @@ class ImageBackend(GpuJob):
     generator = "z-image-turbo"
     license = "Apache-2.0"
     config_key = "images"           # timeout_s
-    description = ("Generate first-frame images from text prompts (Z-Image-Turbo). AlayaWorld, "
-                   "Wan and LTX rollouts start from one of these. A GPU job: returns {job_id} at "
+    description = ("Generate images from text prompts (Z-Image-Turbo), for use as the first or last frame of "
+                   "a rollout. A GPU job: returns {job_id} at "
                    "once; collect with job_wait. `width`/`height`: multiples of 16 in 256..1920 "
                    "(default 1280x720, 16:9). Items: {'prompt': str, 'seed': int}. Each result "
                    "item gives `image`: a png in /workspace/staging/images/<job_id>/.")

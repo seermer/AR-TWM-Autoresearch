@@ -469,3 +469,36 @@ def test_keyframe_images_are_staged_and_hashed_by_content(keyed):
     assert got[2]["worker"]["keyframes"] == []
     h = [g["candidate"]["provenance"]["inputs_hash"] for g in got]
     assert len(set(h)) == 3                              # the frame index and the images are part of the hash
+
+
+# ---- descriptions name only their own tool ----
+
+OWN_WORDS = {            # the names only that tool's description may use
+    "generate_images": ("generate_images", "Z-Image"),
+    "rollout_alayaworld": ("rollout_alayaworld", "AlayaWorld"),
+    "rollout_wan22": ("rollout_wan22", "Wan"),
+    "rollout_ltx25": ("rollout_ltx25", "LTX"),
+    "rollout_h3": ("rollout_h3", "MiniMax", "H3"),
+}
+
+
+def test_no_tool_description_names_another_generator_or_optional_tool(tmp_path):
+    import re
+    from ar_kernel.tools.captioner import register_caption_tool
+    from ar_kernel.tools.gpu_jobs import build_gpu_backends
+    rec = Recorder(tmp_path / "run")
+    reg = TokenRegistry(rec)
+    q = JobQueue(rec, threading.Lock(), wait_cap_s=60)
+    try:
+        for b in build_gpu_backends(toggled_cfg(), tmp_path / "run", [0, 1, 2, 3], reg, rec):
+            q.register(b)
+        kit, mcp = ToolKit(reg, rec), new_mcp()
+        register_gpu_tools(mcp, kit, q)
+        register_caption_tool(mcp, kit, q)
+        tools = {t.name: t.description for t in asyncio.run(mcp.list_tools())}
+    finally:
+        q.shutdown()
+    assert set(OWN_WORDS) <= set(tools)
+    named = [(tool, word) for tool, text in tools.items() for owner, words in OWN_WORDS.items() if owner != tool
+             for word in words if re.search(rf"\b{re.escape(word)}\b", text)]
+    assert named == []
