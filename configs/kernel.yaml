@@ -187,7 +187,7 @@ generators:                       # rollout_* GPU jobs; switched on only after a
     env: .envs/gen-h3               # a conda-prefix env inside the repo (diffusers 0.40.0)
     weights: weights/minimax-h3     # MiniMaxAI/MiniMax-H3, diffusers layout, fl2va/t2va partition
     revision: 42ed227ee7df40d41602854ae760620d6eb651fe
-    enabled: false                  # true after the smoke run
+    enabled: true                   # smoke run 2026-10-08: 1 T2V + 1 first-and-last item pass ingest as per_chunk
     # Spike 2026-10-06 on 4 x 24 GB, 960x544, 49 steps: int8 transformer across the 4 cards,
     # 243 frames in 1160 s, peak 21.5 GiB on GPU 0 and 14.6 GiB on the others, 64 GiB host RAM.
     # bf16 fits 124 frames only; int8 on one card with streamed offload peaks at 216 GiB host RAM.

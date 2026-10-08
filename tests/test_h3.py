@@ -238,3 +238,72 @@ def test_bridge_refuses_cards_that_cannot_hold_the_text_encoder():
 def test_bridge_crops_any_keyframe_to_the_canvas(size):
     img = _bridge().fit(Image.new("RGB", size, (5, 6, 7)), (960, 544))
     assert img.size == (960, 544) and img.mode == "RGB"
+
+
+@pytest.mark.gpu
+def test_real_h3_rollout(tmp_path):
+    """AR_TEST_GPUS=0,1,2,3 pytest tests/test_h3.py -m gpu -s --basetemp=.cache/pytest/gpu   (~45 min)
+
+    One text-only single-turn item and one three-turn item with first and last keyframes (Z-Image
+    frames), through the real tool path; each candidate gets a ViGeo pose and must ingest as
+    video_timed_prompts_camera:per_chunk."""
+    import os
+    import shutil
+    from ar_kernel.archive.db import open_db
+    from ar_kernel.data.ingest import Candidate, Ingestor
+    from ar_kernel.tools.annotate import AnnotateBackend
+    from ar_kernel.tools.images import ImageBackend
+    from tests.test_rollouts import _wait
+
+    gpus = [int(g) for g in os.environ.get("AR_TEST_GPUS", "0,1,2,3").split(",")]
+    cfg = h3_cfg(env=REAL.get("generators.h3.env"))
+    run_dir, ws = tmp_path / "run", tmp_path / "ws"
+    staging = run_dir / "staging"
+    ws.mkdir(parents=True); staging.mkdir(parents=True)
+    rec = Recorder(run_dir)
+    reg = TokenRegistry(rec)
+    q = JobQueue(rec, threading.Lock(), wait_cap_s=3600)
+    for b in (ImageBackend, AnnotateBackend, H3Backend):
+        q.register(b(cfg, run_dir, gpus, reg, rec))
+    caller = reg.issue(node="gpu", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
+    host = lambda p: staging / Path(p).relative_to("/workspace/staging")
+    try:
+        img = _wait(q, caller, q.backends["generate_images"].submit(q, caller, {"width": 960, "height": 544, "items": [
+            {"prompt": "a quiet harbor at dawn seen from the quay, fishing boats, photorealistic", "seed": 3},
+            {"prompt": "the same harbor seen from the end of the pier looking back at the town, photorealistic",
+             "seed": 4}]})["job_id"])
+        assert img["state"] == "done", img.get("error")
+        first, last = (i["image"] for i in job_result(img)["items"])
+        items = [
+            {"scene_prompt": "Live-action, a first-person view on a forest trail in autumn, tall pines, low sun",
+             "turns": [{"prompt": "the camera pushes in at slow speed along the trail"}], "seed": 11},
+            {"scene_prompt": "Live-action, a first-person view on a quay in a quiet harbor at dawn",
+             "turns": [{"prompt": "the camera pushes in at slow speed along the quay"},
+                       {"prompt": "the camera pans right with large amplitude toward the fishing boats"},
+                       {"prompt": "a seagull lands on the nearest boat"}],
+             "keyframes": [{"image": first, "frame": 0}, {"image": last, "frame": -1}], "seed": 12}]
+        out = _wait(q, caller, submit(q, caller, items)["job_id"])
+        assert out["state"] == "done", out.get("error")
+        by = {i["index"]: i for i in job_result(out)["items"]}
+        assert all("candidate" in by[i] for i in (0, 1)), by
+        cands = [by[i]["candidate"] for i in (0, 1)]
+        print("h3 worker:", [by[i]["worker"] for i in (0, 1)])
+        ann = _wait(q, caller, q.backends["annotate_camera"].submit(
+            q, caller, {"items": [{"video": c["video"]} for c in cands]})["job_id"])
+        assert ann["state"] == "done", ann.get("error")
+    finally:
+        q.shutdown()
+    ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
+    for i, c in enumerate(cands):
+        a = job_result(ann)["items"][i]
+        assert "error" not in a, a
+        stage = staging / "ingest" / str(i)
+        stage.mkdir(parents=True)
+        shutil.copy(host(c["video"]), stage / "v.mp4")
+        shutil.copy(host(c["caption"]), stage / "c.json")
+        shutil.copy(host(a["pose"]), stage / "p.npz")
+        [res] = ing.ingest([Candidate(video=stage / "v.mp4", caption=stage / "c.json", pose=stage / "p.npz",
+                                      camera_motion="moving", provenance=c["provenance"], license=c["license"])],
+                           node_id="gpu")
+        assert res.accepted, res.reasons
+        assert "video_timed_prompts_camera:per_chunk" in res.formats, res.formats

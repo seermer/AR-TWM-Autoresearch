@@ -1307,9 +1307,10 @@ def test_ltx_finished_candidate_passes_the_real_ingestor_as_static(tmp_path):
 def test_real_ltx25_rollout(tmp_path, variant):
     """AR_TEST_GPUS=0,1,2,3 pytest tests/test_rollouts.py -m gpu -k ltx25 -s --basetemp=.cache/pytest/gpu
 
-    Per enabled variant: 2 T2V + 2 I2V items (default frames and size; four, so four workers run
-    at once when the host-RAM rule allows), workers per that rule over AR_TEST_GPUS. The I2V item's image is a generate_images (Z-Image) frame -- the tools
-    chain. Each candidate must ingest as video_caption_static (camera_motion: static)."""
+    Per enabled variant: 2 T2V items, one with a first keyframe and one with first and last
+    keyframes (default frames and size; four, so four workers run at once when the host-RAM rule
+    allows), workers per that rule over AR_TEST_GPUS. The keyframes are generate_images (Z-Image)
+    frames -- the tools chain. Each candidate must ingest as video_caption_static (camera_motion: static)."""
     import os
     import shutil
     import time
@@ -1339,9 +1340,11 @@ def test_real_ltx25_rollout(tmp_path, variant):
         frames = [i["image"] for i in job_result(img)["items"]]
         items = [{"prompt": "Ocean waves gently rolling onto a quiet beach at sunset, camera steady.", "seed": 2},
                  {"prompt": "The red barn under slowly moving clouds, grass swaying, camera steady.",
-                  "image": frames[0], "seed": 3},
+                  "keyframes": [{"image": frames[0], "frame": 0}], "seed": 3},
                  {"prompt": "A slow walk through a sunlit forest path, camera steady.", "seed": 4},
-                 {"prompt": "A cup of coffee steaming on a wooden table, camera steady.", "image": frames[1], "seed": 5}]
+                 {"prompt": "The camera pulls back from a red barn in a field until a cup of coffee on a wooden "
+                            "table fills the frame.",
+                  "keyframes": [{"image": frames[0], "frame": 0}, {"image": frames[1], "frame": -1}], "seed": 5}]
         t0 = time.monotonic()
         out = _wait(q, caller, q.backends["rollout_ltx25"].submit(q, caller, {"items": items, "variant": variant})["job_id"])
         wall = time.monotonic() - t0
