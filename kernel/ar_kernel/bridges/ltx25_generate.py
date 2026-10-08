@@ -1,6 +1,6 @@
 """rollout_ltx25 worker (runs in the gen-ltx25 conda-prefix env): Lightricks' ltx-pipelines, one
-pipeline built once, renders each item's shard (text-to-video, or image-to-video when the item
-carries a first frame, conditioned at frame 0 with strength 1.0).
+pipeline built once, renders each item's shard (text-to-video, or pinned to the item's
+keyframes: each image at its frame, -1 = the last, strength 1.0).
 
 python ltx25_generate.py --items items.json --out DIR --rank R --world W \
     --weights <weights/ltx-2.5> --variant distilled|dev --frames N --height H --width W \
@@ -119,7 +119,8 @@ def main() -> int:
         index, t0 = item["index"], time.monotonic()
         try:
             torch.cuda.reset_peak_memory_stats()
-            images = [ImageConditioningInput(item["image"], 0, 1.0)] if item.get("image") else []
+            images = [ImageConditioningInput(k["image"], a.frames - 1 if k["frame"] == -1 else k["frame"], 1.0)
+                      for k in item.get("keyframes") or []]
             with torch.inference_mode():
                 result = pipeline(prompt=item["prompt"], seed=int(item["seed"]), height=a.height, width=a.width,
                                   num_frames=a.frames, frame_rate=float(FPS), images=images,

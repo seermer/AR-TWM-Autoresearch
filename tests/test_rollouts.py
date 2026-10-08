@@ -1090,7 +1090,9 @@ def test_ltx_bad_params_are_refused_at_submit(ltx_env, params, match):
 
 @pytest.mark.parametrize("item, match", [
     ({"seed": 1}, "prompt"), ({"prompt": " ", "seed": 1}, "prompt"), ({"prompt": "p"}, "seed"),
-    ({"prompt": "p", "seed": True}, "seed"), ({"prompt": "p", "seed": 1, "image": 3}, "image")])
+    ({"prompt": "p", "seed": True}, "seed"),
+    ({"prompt": "p", "seed": 1, "keyframes": [{"image": 3, "frame": 0}]}, "each keyframe"),
+    ({"prompt": "p", "seed": 1, "image": "frame.png"}, "image")])
 def test_ltx_bad_items_are_refused_at_submit(ltx_env, item, match):
     make, caller, _ = ltx_env
     q = make()
@@ -1116,8 +1118,8 @@ def test_ltx_produces_and_publishes_a_silent_24fps_candidate_with_no_pose_or_cam
     make, caller, staging = ltx_env
     q = make()
     prompts = ["a walk in the woods", "a hiker on a ridge"]
-    job, by = run_ltx(q, caller, [{"prompt": prompts[0], "seed": 1},
-                                  {"prompt": prompts[1], "image": "frame.png", "seed": 2}])
+    job, by = run_ltx(q, caller, [{"prompt": prompts[0], "seed": 1}, {"prompt": prompts[1], "seed": 2, "keyframes": [
+        {"image": "frame.png", "frame": 0}, {"image": "frame.png", "frame": -1}]}])
     (h, w), default = REAL.get("generators.ltx25.resolutions")[0], REAL.get("generators.ltx25.frames")[0]
     for i, item in by.items():
         c = item["candidate"]
@@ -1137,7 +1139,30 @@ def test_ltx_produces_and_publishes_a_silent_24fps_candidate_with_no_pose_or_cam
         wk = item["worker"]
         assert wk["weights"] == str(REAL.repo_root / REAL.get("generators.ltx25.weights"))
         assert (wk["variant"], wk["quantization"], wk["offload"]) == ("distilled", "fp8-cast", "cpu")
-    assert by[1]["worker"]["image"].endswith("_image.png") and by[0]["worker"]["image"] is None
+    frames1 = by[1]["worker"]["keyframes"]
+    assert [k["frame"] for k in frames1] == [0, -1]
+    assert all("_keyframe" in k["image"] for k in frames1) and by[0]["worker"]["keyframes"] == []
+
+
+@pytest.mark.parametrize("frame, ok", [(0, True), (48, True), (-1, True), (49, False), (1000, False)])
+def test_ltx_keyframe_frames_must_be_inside_the_clip(ltx_env, frame, ok):
+    make, caller, _ = ltx_env
+    q = make()
+    args = {"items": [{"prompt": "p", "seed": 1, "keyframes": [{"image": "frame.png", "frame": frame}]}], "frames": 49}
+    if ok:
+        assert q.backends["rollout_ltx25"].submit(q, caller, args)["job_id"]
+    else:
+        with pytest.raises(ToolError, match="outside the clip"):
+            q.backends["rollout_ltx25"].submit(q, caller, args)
+
+
+def test_ltx_last_frame_given_twice_is_a_repeat(ltx_env):
+    make, caller, _ = ltx_env
+    q = make()
+    frames = [{"image": "frame.png", "frame": -1}, {"image": "frame.png", "frame": 48}]
+    with pytest.raises(ToolError, match="repeat"):
+        q.backends["rollout_ltx25"].submit(q, caller, {"items": [{"prompt": "p", "seed": 1, "keyframes": frames}],
+                                                       "frames": 49})
 
 
 def test_ltx_dev_job_is_named_after_its_variant(ltx_env):

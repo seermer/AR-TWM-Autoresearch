@@ -53,6 +53,13 @@ ImageItems = Annotated[list[dict[str, Any]] | str, items_schema(
 ClipItems = Annotated[list[dict[str, Any]] | str, items_schema(
     "the clips to render, one item each",
     {"prompt": _str("what the clip shows"), "image": _FRAME, "seed": _SEED}, ["prompt", "seed"])]
+KEYFRAMES_SCHEMA = {"type": "array", "description": "images the clip must show at given frames", "items": {
+    "type": "object", "additionalProperties": False, "required": ["image", "frame"], "properties": {
+        "image": _str("an image file under /workspace (any size; it is cropped and resized)"),
+        "frame": {"type": "integer", "description": "0-based frame index; 0 is the first frame, -1 the last"}}}}
+LtxItems = Annotated[list[dict[str, Any]] | str, items_schema(
+    "the clips to render, one item each",
+    {"prompt": _str("what the clip shows"), "keyframes": KEYFRAMES_SCHEMA, "seed": _SEED}, ["prompt", "seed"])]
 _TURN = {"type": "object", "additionalProperties": False, "required": ["action"], "properties": {
     "action": _str("camera move for this turn: W, A, S, D (translate), left, right, up, down (rotate), stop, "
                    "or two joined with '+', e.g. 'W+left'"),
@@ -89,6 +96,24 @@ def check_item_seed(item: dict) -> None:
         raise ToolError(f"seed must be an int: got {seed!r}")
 
 
+def check_keyframes(item: dict) -> None:
+    """An item's optional `keyframes`: [{'image': path, 'frame': int}], frame >= -1 (-1 = the last), none repeated."""
+    frames = item.get("keyframes")
+    if frames is None:
+        return
+    if not isinstance(frames, list):
+        raise ToolError("keyframes must be a list of {'image': path, 'frame': int}")
+    for k in frames:
+        if not (isinstance(k, dict) and set(k) == {"image", "frame"} and isinstance(k["image"], str)
+                and is_int(k["frame"])):
+            raise ToolError(f"each keyframe must be {{'image': path, 'frame': int}}: got {k!r}")
+        if k["frame"] < -1:
+            raise ToolError(f"frame must be -1 (the last frame) or a frame index from 0: got {k['frame']}")
+    seen = [k["frame"] for k in frames]
+    if len(set(seen)) != len(seen):
+        raise ToolError(f"keyframes repeat a frame: {seen}")
+
+
 def enabled_variants(block: dict, names: tuple[str, ...]) -> list[str]:
     """The variants config `block` lists (`variants: [a, b]`) that the backend knows, in config order."""
     return [v for v in block.get("variants") or [] if v in names]
@@ -111,6 +136,7 @@ class GpuJob:
     `max_items`."""
     name = tool = kind = generator = license = description = config_key = ""
     file_keys: tuple[str, ...] = ()
+    takes_keyframes = False     # items may carry `keyframes` (check_keyframes)
     timeout_s: float | None = None   # per-job wall-clock cap enforced by run_workers; None = no cap
 
     def __init__(self, cfg, run_dir: Path, gpus: list[int], registry, recorder,
@@ -137,6 +163,7 @@ class GpuJob:
         for n, item in enumerate(items):
             try:
                 self.check_item(item)
+                self.check_item_for(item, args)
             except ToolError as exc:
                 bad[n] = str(exc)
             if copies_held_out(self.cfg, *strings(item)):       # before a GPU is scheduled
@@ -151,6 +178,15 @@ class GpuJob:
                     except PathError as exc:
                         bad.setdefault(n, f"{key}: {exc}")
                     item = {**item, key: container_path(item[key])}
+            if self.takes_keyframes and n not in bad:
+                frames = []
+                for k in item.get("keyframes") or []:
+                    try:
+                        clip_host_path(caller, k["image"])
+                    except PathError as exc:
+                        bad.setdefault(n, f"keyframes: {exc}")
+                    frames.append({**k, "image": container_path(k["image"])})
+                item = {**item, "keyframes": frames}
             items[n] = item
         refuse(caller, self.name, items, bad)
         return {"job_id": q.submit(caller, self.name, args)}
@@ -160,6 +196,9 @@ class GpuJob:
 
     def check_item(self, item: dict) -> None:
         """One item. Raises ToolError with what is wrong: `submit` refuses the call for all bad items at once."""
+
+    def check_item_for(self, item: dict, args: dict) -> None:
+        """Checks of one item that need the job's arguments (after check_args filled defaults in). Raises ToolError."""
 
     # ---- run (worker thread, under the GPU lock) ----
     def run(self, job, cancel: threading.Event, report) -> dict:
@@ -206,6 +245,13 @@ class GpuJob:
                 stage_clip(caller, item[key], dst)
                 staged[key] = str(dst)
                 staged["hashes"][key] = sha256_file(dst)
+        if self.takes_keyframes:
+            staged["keyframes"] = []
+            for n, k in enumerate(item.get("keyframes") or []):
+                dst = inp / f"{index}_keyframe{n}{Path(k['image']).suffix}"
+                stage_clip(caller, k["image"], dst)
+                staged["keyframes"].append({**k, "image": str(dst)})
+                staged["hashes"][f"keyframe{n}"] = sha256_file(dst)
         return staged
 
     def produce(self, job, items: list[dict], work: Path, out: Path, cancel, report):
@@ -252,7 +298,9 @@ class GpuJob:
                     "seed": item.get("seed"), "generator": self.generator_name(job), "license": self.license,
                     "worker": worker}
         params = {k: v for k, v in job.args.items() if k != "items"}
-        spec = {k: v for k, v in item.items() if k not in (*self.file_keys, "index", "hashes")}
+        spec = {k: v for k, v in item.items() if k not in (*self.file_keys, "index", "hashes", "keyframes")}
+        if self.takes_keyframes:
+            spec["keyframe_frames"] = [k["frame"] for k in item["keyframes"]]
         inputs_hash = canonical_hash({"generator": self.generator_name(job), "params": params,
                                       "item": spec, "files": item["hashes"]})
         candidate = {**published, "provenance": {"kind": "rollout", "generator": self.generator_name(job),
@@ -393,7 +441,7 @@ def register_gpu_tools(mcp, kit, q) -> None:
     if "rollout_ltx25" in b:
         @mcp.tool(name="rollout_ltx25", description=job_description(b["rollout_ltx25"]))
         async def rollout_ltx25(
-                items: ClipItems, ctx: Context,
+                items: LtxItems, ctx: Context,
                 variant: Annotated[str | None, Field(description="default the first one listed above")] = None,
                 frames: Annotated[int | None, Field(description="8k+1 frames at 24 fps; one value for the job")] = None,
                 height: Annotated[int | None, Field(description="with width, one of the listed resolutions")] = None,

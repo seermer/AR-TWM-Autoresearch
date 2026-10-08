@@ -176,7 +176,7 @@ def ltx(item, status_path):
                                        "weights": args.weights, "variant": args.variant, "frames": args.frames,
                                        "height": args.height, "width": args.width,
                                        "quantization": args.quantization, "offload": args.offload,
-                                       "image": item.get("image")}))
+                                       "keyframes": item.get("keyframes")}))
 
 
 def image(item, status_path):

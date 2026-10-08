@@ -29,7 +29,7 @@ from ..archive.db import open_db
 from ..archive.nodes import NodeStore
 from ..data.probe import aspect_ok, probe_video
 from ..subproc import file_tail, free_port, meminfo_gib
-from .gpu_jobs import GpuJob, check_item_seed, enabled_variants, is_int, split_gpus
+from .gpu_jobs import GpuJob, check_item_seed, check_keyframes, enabled_variants, is_int, split_gpus
 from .jobs import run_cancellable
 from .server import ToolError
 
@@ -445,19 +445,20 @@ class Ltx25Backend(GpuJob):
     name = tool = "rollout_ltx25"
     kind = "rollout"
     config_key = "generators.ltx25"      # timeout_s
-    file_keys = ("image",)
+    takes_keyframes = True
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         (h, w), (default, maximum) = self.block["resolutions"][0], self.block["frames"]
         self.description = (
-            "Render training clips with LTX-2.5 (text-to-video, or image-to-video when an item carries a "
-            "first frame). A GPU job: returns {job_id} at once; collect with job_wait. Params (one value per "
+            "Render training clips with LTX-2.5 from a text prompt, optionally pinned to images at chosen "
+            "frames. A GPU job: returns {job_id} at once; collect with job_wait. Params (one value per "
             f"job): `variant` (one of {self.enabled_variants()}; default the first), `frames` (8k+1, "
             f"1 < frames <= {maximum}, default {default}), `height`/`width` (one of "
             f"{self.block['resolutions']} as [height, width]; default {h}x{w}). Item: {{'prompt': str, "
-            "'image'?: first frame under /workspace (any size; center-cropped and resized to the clip size, "
-            "e.g. a generate_images frame), 'seed': int}. Each result item gives a `candidate` for "
+            "'keyframes'?: [{'image': file under /workspace, 'frame': int}], 'seed': int}. A keyframe at "
+            "frame 0 is the first frame and one at -1 the last; any frame in between also works. Images of "
+            "any size are center-cropped and resized to the clip size. Each result item gives a `candidate` for "
             "data_ingest (a 24 fps, 16:9, silent mp4, caption, provenance); it carries no "
             "pose/camera_motion -- add one (annotate_camera then 'moving', or 'static') before ingesting. "
             "LTX often ignores camera instructions like 'camera steady'; never label a clip 'static' from its prompt; run annotate_camera, or check the frames, first. Batch many prompts per call.")
@@ -486,7 +487,19 @@ class Ltx25Backend(GpuJob):
         if size not in [list(r) for r in self.block["resolutions"]]:
             raise ToolError(f"[height, width] must be one of the resolutions {self.block['resolutions']}: got {size}")
 
-    check_item = staticmethod(check_clip_item)
+    def check_item(self, item):
+        if "image" in item:
+            raise ToolError("image is not a field of this tool: use keyframes [{'image': path, 'frame': 0}]")
+        check_clip_item(item)
+        check_keyframes(item)
+
+    def check_item_for(self, item, args):
+        frames = args["frames"]
+        seen = [frames - 1 if k["frame"] == -1 else k["frame"] for k in item.get("keyframes") or []]
+        if any(f >= frames for f in seen):
+            raise ToolError(f"a keyframe frame is outside the clip: frames are 0..{frames - 1}, or -1 for the last")
+        if len(set(seen)) != len(seen):
+            raise ToolError(f"keyframes repeat a frame: {seen}")
 
     def worker_groups(self, variant: str, n_items: int) -> list[list[int]]:
         """One GPU per worker; workers = min(GPUs (capped by the config's `workers`), items,

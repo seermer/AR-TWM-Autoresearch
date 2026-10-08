@@ -305,8 +305,9 @@ def test_listed_item_schemas_type_every_field(tmp_path):
         assert item["properties"]["seed"]["type"] == "integer", name
         assert item["properties"]["prompt"]["type"] == "string", name
         assert set(item["required"]) == {"prompt", "seed"}, name
-    for name in ("rollout_wan22", "rollout_ltx25"):
-        assert tools[name].input_schema["properties"]["items"]["anyOf"][0]["items"]["properties"]["image"]["type"] == "string"
+    assert tools["rollout_wan22"].input_schema["properties"]["items"]["anyOf"][0]["items"]["properties"]["image"]["type"] == "string"
+    key = tools["rollout_ltx25"].input_schema["properties"]["items"]["anyOf"][0]["items"]["properties"]["keyframes"]
+    assert key["items"]["properties"]["frame"]["type"] == "integer" and key["items"]["required"] == ["image", "frame"]
     alaya = tools["rollout_alayaworld"].input_schema["properties"]["items"]["anyOf"][0]["items"]
     from ar_kernel.tools.rollouts import VIEWPOINTS
     assert alaya["properties"]["viewpoint"]["enum"] == list(VIEWPOINTS)
@@ -401,3 +402,65 @@ def test_no_max_items_means_no_cap(env):
     q, caller, rec, ws, staging, run = env
     backend = q.backends["rollout_fake"]
     assert backend.max_items is None and "At most" not in job_description(backend)
+
+
+# ---- keyframes: images an item pins to frames ----
+
+class KeyframeJob(FakeJob):
+    name = tool = "rollout_keyed"
+    file_keys = ()
+    takes_keyframes = True
+
+    def check_item(self, item):
+        from ar_kernel.tools.gpu_jobs import check_keyframes
+        check_keyframes(item)
+
+    def produce(self, job, items, work, out, cancel, report):
+        for item in items:                                   # no worker: echo what was staged
+            (out / f"{item['index']}.json").write_text(json.dumps({"ok": True, "keyframes": item["keyframes"]}))
+            make_mp4(out / f"{item['index']}.mp4", seconds=1, fps=24, width=64, height=36)
+        return [0], {}
+
+
+@pytest.fixture
+def keyed(env):
+    from PIL import Image
+    q, caller, rec, ws, staging, run = env
+    Image.new("RGB", (64, 36), (1, 2, 3)).save(ws / "a.png")
+    Image.new("RGB", (64, 36), (9, 9, 9)).save(ws / "b.png")
+    q.register(KeyframeJob(KernelConfig.load(), run, [0], q.backends["rollout_fake"].registry, rec,
+                           gpu_memory=lambda g: {i: 100 for i in g}))
+    return q, caller, q.backends["rollout_keyed"], run
+
+
+@pytest.mark.parametrize("keyframes, match", [
+    ("a.png", "keyframes must be a list"),
+    ([{"image": "a.png"}], "each keyframe must be"),
+    ([{"image": "a.png", "frame": 0, "strength": 1}], "each keyframe must be"),
+    ([{"image": 3, "frame": 0}], "each keyframe must be"),
+    ([{"image": "a.png", "frame": True}], "each keyframe must be"),
+    ([{"image": "a.png", "frame": -2}], "frame must be -1"),
+    ([{"image": "a.png", "frame": 0}, {"image": "b.png", "frame": 0}], "repeat"),
+    ([{"image": "../outside.png", "frame": 0}], "keyframes"),
+    ([{"image": "missing.png", "frame": 0}], "keyframes"),      # as a missing top-level file is refused today
+])
+def test_bad_keyframes_are_refused_at_submit(keyed, keyframes, match):
+    q, caller, backend, _ = keyed
+    with pytest.raises(ToolError, match=match):
+        backend.submit(q, caller, {"items": [{"keyframes": keyframes, "seed": 1}]})
+
+
+def test_keyframe_images_are_staged_and_hashed_by_content(keyed):
+    q, caller, backend, run = keyed
+    items = [{"keyframes": [{"image": "a.png", "frame": 0}, {"image": "b.png", "frame": -1}], "seed": 1},
+             {"keyframes": [{"image": "a.png", "frame": 0}, {"image": "b.png", "frame": 5}], "seed": 1},
+             {"seed": 1}]
+    out = q.wait(caller, backend.submit(q, caller, {"items": items})["job_id"], 120)
+    assert out["state"] == "done", out["error"]
+    got = job_result(out)["items"]
+    staged = got[0]["worker"]["keyframes"]
+    assert [k["frame"] for k in staged] == [0, -1]
+    assert all(f"/jobs/{out['id']}/in/0_keyframe" in k["image"] for k in staged)
+    assert got[2]["worker"]["keyframes"] == []
+    h = [g["candidate"]["provenance"]["inputs_hash"] for g in got]
+    assert len(set(h)) == 3                              # the frame index and the images are part of the hash
