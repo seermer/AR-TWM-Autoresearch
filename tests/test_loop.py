@@ -344,7 +344,7 @@ def test_saving_a_root_another_run_already_saved_keeps_the_first(tmp_path):
     assert not cache.with_name("key.tmp").exists()
 
 
-def test_the_root_key_follows_what_changes_the_roots_score():
+def test_the_root_key_follows_what_changes_the_roots_score(tmp_path):
     """A root scored under other judge settings was reused silently against children judged with the new ones."""
     from types import SimpleNamespace
     from ar_kernel.config import KernelConfig
@@ -356,6 +356,15 @@ def test_the_root_key_follows_what_changes_the_roots_score():
     changed = lambda **raw: KernelConfig(raw={**real.raw, **raw}, repo_root=real.repo_root)
     key = root_key(ctx, real)
     assert root_key(ctx, changed()) == key
+    # another benchmark with the same case ids, or this one edited in place, is another root
+    for part, name in (("cases", "case_1.json"), ("images", "case_1.jpg"), ("masks", "case_1_mask.png")):
+        (tmp_path / part).mkdir()
+        (tmp_path / part / name).write_bytes(b"other")
+    other = changed(eval={**real.raw["eval"], "data": str(tmp_path)})
+    assert root_key(ctx, other) != key
+    moved = root_key(ctx, other)
+    (tmp_path / "masks" / "case_1_mask.png").write_bytes(b"edited")
+    assert root_key(ctx, other) != moved
     assert root_key(ctx, changed(eval={**real.raw["eval"], "judge": {"max_images": 8}})) != key
     assert root_key(ctx, changed(captioner={**real.raw["captioner"], "max_model_len": 4096})) != key
     # what does not change the root's metric means leaves the key alone

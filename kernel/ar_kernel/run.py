@@ -148,7 +148,11 @@ def root_key(ctx: RunContext, cfg: KernelConfig) -> str:
     local = ctx.judge is not None and ctx.judge.kind == "local"
     eval_code = hashlib.sha256(b"".join(
         p.read_bytes() for p in sorted((Path(__file__).parent / "eval").glob("*.py")))).hexdigest()
-    fields = {"metric_set": ctx.metric_set, "data": cfg.get("eval.data"), "case_ids": ctx.case_ids,
+    # the scored cases' own files (text, first frame, mask): the benchmark folder may not be in a git repo
+    data = hashlib.sha256(b"".join(
+        p.read_bytes() for i in ctx.case_ids for part in ("cases", "images", "masks")
+        for p in sorted((cfg.eval_data / part).glob(f"case_{i}[._]*")))).hexdigest()
+    fields = {"metric_set": ctx.metric_set, "data": data, "case_ids": ctx.case_ids,
               "judge": [ctx.judge.kind, ctx.judge.model] if ctx.judge else None,
               "judge_settings": cfg.get("eval.judge"), "vp_weights": cfg.get("eval.vp_weights"),
               # a local judge is the captioner's server: how it is served decides what it sees
