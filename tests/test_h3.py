@@ -53,7 +53,8 @@ def test_prompt_is_one_shot_with_in_shot_timestamps():
 
 @pytest.mark.parametrize("text, clean", [
     ("the camera pans right,", "the camera pans right."), ("a dog runs out ;", "a dog runs out."),
-    ("she waves!", "she waves!"), ("a long\n\nturn  with   gaps", "a long turn with gaps.")])
+    ("she waves!", "she waves!"), ('he says "go."', 'he says "go."'), ("镜头向右平移。", "镜头向右平移。"),
+    ("a long\n\nturn  with   gaps", "a long turn with gaps.")])
 def test_a_turn_is_one_clean_sentence(text, clean):
     p = build_prompt(SCENE, [text], [0], 243, [], "wind\n\nnon_diegetic_music: drums", MUSIC)
     assert f"At 00:00.000, {clean}\n\noverall_soundscape: wind non_diegetic_music: drums\n\n" in p
@@ -121,6 +122,8 @@ def submit(q, caller, items, **params):
 
 @pytest.mark.parametrize("bad, params, match", [
     (item(scene_prompt=" "), {}, "scene_prompt"),
+    (item(scene_prompt=" , "), {}, "scene_prompt"),
+    (item(turns=[{"prompt": ";"}]), {}, "turn 1"),
     (item(turns=[]), {}, "turns"),
     (item(turns=[{"prompt": ""}]), {}, "turn 1"),
     (item(turns=[{"prompt": "walk", "action": "W"}]), {}, "turn 1"),
@@ -170,7 +173,7 @@ def test_h3_produces_a_silent_clip_with_a_scene_caption_and_turn_metadata(h3_env
     assert c["h3_prompt"] == by[0]["worker"]["prompt"] == h3.build_prompt(SCENE, TURNS, [0, 89, 153], 243, [], SOUND, MUSIC)
     assert [(t["frame_start"], t["frame_end_exclusive"]) for t in c["turn_segments"]] == [(0, 89), (89, 153), (153, 243)]
     w = by[1]["worker"]
-    assert w["prompt"].startswith("How the reference pictures align") and [k["frame"] for k in w["keyframes"]] == [-1, 0]
+    assert w["prompt"].startswith("How the reference pictures align") and [k["frame"] for k in w["keyframes"]] == [0, -1]
     assert w["gpus"] == "0,1,4,5" and w["rank"] == 0             # one worker with every GPU
     assert w["weights"] == str(REAL.repo_root / REAL.get("generators.h3.weights")) and w["gpu0_reserve_gib"] == 16
 

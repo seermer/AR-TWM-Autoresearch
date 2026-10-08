@@ -152,7 +152,8 @@ def _run(cfg, args) -> int:
     run_cfg = KernelConfig.for_run(ctx.run_dir)
     ctx.gpus = resolve_gpus(run_cfg, os.environ)              # one config per run: never the live one
     check_visible(ctx.gpus)
-    check_tools_fit(run_cfg, ctx.gpus)
+    if args.resume:
+        check_tools_fit(run_cfg, ctx.gpus)
     repo = AgentsRepo(ctx.run_dir / "agents.git", remote=remote, namespace=ctx.run_dir.name,
                       on_push_error=lambda error: alert(ctx.recorder, "git_push_failed", error, level="warning"))
     if args.resume:

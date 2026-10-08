@@ -130,11 +130,6 @@ def check_keyframes(item: dict) -> None:
         raise ToolError(f"keyframes repeat a frame: {seen}")
 
 
-def enabled_variants(block: dict, names: tuple[str, ...]) -> list[str]:
-    """The variants config `block` lists (`variants: [a, b]`) that the backend knows, in config order."""
-    return [v for v in block.get("variants") or [] if v in names]
-
-
 def canonical_hash(obj) -> str:
     return hashlib.sha256(json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -202,7 +197,7 @@ class GpuJob:
                     except PathError as exc:
                         bad.setdefault(n, f"keyframes: {exc}")
                     frames.append({**k, "image": container_path(k["image"])})
-                item = {**item, "keyframes": sorted(frames, key=lambda k: k["frame"])}
+                item = {**item, "keyframes": sorted(frames, key=lambda k: (k["frame"] < 0, k["frame"]))}   # clip order
             items[n] = item
         refuse(caller, self.name, items, bad)
         return {"job_id": q.submit(caller, self.name, args)}

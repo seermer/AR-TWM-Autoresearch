@@ -24,7 +24,7 @@ MIN_FRAMES = 124
 FPS = 24
 HISTORY = 25                # the first round boundary
 ROUND = 32
-MIN_TURN_ROUNDS = 2         # 2.67 s: segments under 2.375 s are never trained, and H3's timing has ~0.5 s of slack
+MIN_TURN_ROUNDS = 2         # 2.67 s: segments under 2.375 s are never trained, and H3's timing is loose
 NO_CUTS = "The whole video is one continuous shot with smooth motion and no cuts."
 FIRST = "For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced."
 BOTH = ("How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the "
@@ -50,7 +50,7 @@ def _line(text: str) -> str:
 
 def _sentence(text: str) -> str:
     text = _line(text).rstrip(",;: ")
-    return text if text.endswith((".", "!", "?")) else text + "."
+    return text if text.rstrip("\"')”’").endswith((".", "!", "?", "。", "！", "？", "…")) else text + "."
 
 
 def _stamp(frame: int) -> str:
@@ -84,7 +84,7 @@ class H3Backend(GpuJob):
         h, w = self.block["resolution"]
         self.description = (
             "Render training clips with MiniMax H3 from a scene and a list of turns: one continuous shot with "
-            "no cuts, in which each turn's text takes effect at that turn's start. A GPU job: returns {job_id} at once; "
+            "no cuts, in which each turn's text is asked for at that turn's start. A GPU job: returns {job_id} at once; "
             f"collect with job_wait. Slow: about 20 minutes per {maximum}-frame clip. `frames`: 17n+5, "
             f"{MIN_FRAMES} <= frames <= {maximum}, default {default} (one value for the job). Item: "
             "{'scene_prompt': str, 'turns': [{'prompt': str}], 'overall_soundscape': str, 'non_diegetic_music': "
@@ -117,14 +117,14 @@ class H3Backend(GpuJob):
     def check_item(self, item):
         if "image" in item:
             raise ToolError("image is not a field of this tool: use keyframes [{'image': path, 'frame': 0}]")
-        if not isinstance(item.get("scene_prompt"), str) or not item["scene_prompt"].strip():
+        if not isinstance(item.get("scene_prompt"), str) or _sentence(item["scene_prompt"]) == ".":
             raise ToolError("scene_prompt must be a non-empty string")
         turns = item.get("turns")
         if not isinstance(turns, list) or not turns:
             raise ToolError("turns must be a non-empty list")
         for t, turn in enumerate(turns, 1):
             if not (isinstance(turn, dict) and set(turn) == {"prompt"} and isinstance(turn["prompt"], str)
-                    and turn["prompt"].strip()):
+                    and _sentence(turn["prompt"]) != "."):
                 raise ToolError(f"turn {t} must be {{'prompt': non-empty text}}: got {turn!r}")
         for key in ("overall_soundscape", "non_diegetic_music"):
             if not isinstance(item.get(key), str) or not item[key].strip():

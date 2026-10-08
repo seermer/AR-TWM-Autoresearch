@@ -82,16 +82,16 @@ def test_resume_claims_the_loop_before_its_cleanup(tmp_path, monkeypatch):
 
 def test_resume_resolves_gpus_from_the_runs_frozen_config(tmp_path, monkeypatch):
     _existing_run(tmp_path, monkeypatch, gpus_default="4,5,6,7")     # the live config says 0,1,2,3
-    seen = []
+    seen, fit = [], []
 
-    def visible(gpus):
-        seen.append(gpus)
+    def reached(*args, **kwargs):
         raise Reached
-    monkeypatch.setattr(cli, "check_visible", visible)
-    monkeypatch.setattr(cli, "check_tools_fit", lambda cfg, gpus: None)
+    monkeypatch.setattr(cli, "check_visible", seen.append)
+    monkeypatch.setattr(cli, "check_tools_fit", lambda cfg, gpus: fit.append((cfg.get("gpus.default"), gpus)))
+    monkeypatch.setattr(cli, "AgentsRepo", reached)              # the step after both checks
     with pytest.raises(Reached):
         cli.main(["run", "--run-id", "r1", "--resume"])
-    assert seen == [[4, 5, 6, 7]]
+    assert seen == [[4, 5, 6, 7]] and fit == [("4,5,6,7", [4, 5, 6, 7])]      # the fit check reads the frozen config too
 
 
 def test_a_new_run_without_the_llm_settings_creates_nothing(tmp_path, monkeypatch):
@@ -283,7 +283,9 @@ def test_force_stop_says_when_the_process_outlives_the_wait(tmp_path, monkeypatc
 
 def test_a_new_run_whose_tools_do_not_fit_creates_nothing(tmp_path, monkeypatch):
     from ar_kernel.config import GpuPolicyError
+    monkeypatch.setattr(cli.KernelConfig, "runs_dir", property(lambda self: tmp_path))
     monkeypatch.setenv("OPENAI_API_KEY", "k"); monkeypatch.setenv("OPENAI_MODEL", "m")
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.setattr(cli, "check_visible", lambda gpus: None)
 
     def too_small(cfg, gpus):

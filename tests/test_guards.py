@@ -35,7 +35,7 @@ def test_enabled_tools_must_fit_the_runs_cards():
         check_tools_fit(_fit_cfg(h3=h3, ltx25=ltx, wan22={"enabled": False, "min_total_gpu_gib": 999}),
                         [0, 1], totals=lambda g: {i: 24 for i in g})
     text = str(exc.value)
-    assert "GPUs 0,1 (48 GiB in total)" in text
+    assert "GPUs 0,1 (48 GiB in total)" in text and text.endswith("Give the run larger or more GPUs.")
     assert "generators.h3 needs 96 GiB" in text and "captioner needs 96 GiB" in text
     assert "annotate" not in text and "ltx25" not in text            # they fit
     assert "images" not in text and "wan22" not in text              # not enabled
@@ -43,3 +43,14 @@ def test_enabled_tools_must_fit_the_runs_cards():
     from ar_kernel.config import KernelConfig
     bare = KernelConfig(raw={"generators": {"h3": {"enabled": True}}}, repo_root=None)
     check_tools_fit(bare, [0], totals=lambda g: {0: 1})                    # no estimate: not checked
+
+
+def test_card_sizes_are_whole_gib_and_unreadable_output_means_no_check(monkeypatch):
+    from ar_kernel import guards
+    monkeypatch.setattr(guards, "smi", lambda args: "0, 24564\n1, 24564\n2, 11264\n")
+    assert guards.gpu_total_gib([0, 2, 7]) == {0: 24, 2: 11}
+    for text in ("0, [N/A]\n", "No devices were found\n", ""):
+        monkeypatch.setattr(guards, "smi", lambda args, text=text: text)
+        assert not guards.gpu_total_gib([0])
+    monkeypatch.setattr(guards, "smi", lambda args: None)
+    assert guards.gpu_total_gib([0]) is None

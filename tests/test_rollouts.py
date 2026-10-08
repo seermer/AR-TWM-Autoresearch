@@ -1140,7 +1140,7 @@ def test_ltx_produces_and_publishes_a_silent_24fps_candidate_with_no_pose_or_cam
         assert wk["weights"] == str(REAL.repo_root / REAL.get("generators.ltx25.weights"))
         assert (wk["variant"], wk["quantization"], wk["offload"]) == ("distilled", "fp8-cast", "cpu")
     frames1 = by[1]["worker"]["keyframes"]
-    assert [k["frame"] for k in frames1] == [-1, 0]
+    assert [k["frame"] for k in frames1] == [0, -1]
     assert all("_keyframe" in k["image"] for k in frames1) and by[0]["worker"]["keyframes"] == []
 
 

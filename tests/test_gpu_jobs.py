@@ -247,14 +247,12 @@ def test_build_gpu_backends_returns_exactly_the_enabled_backends_plus_the_captio
 
 
 def test_the_default_config_has_wan_off_and_ltx_distilled_only(tmp_path):
-    from ar_kernel.tools.gpu_jobs import build_gpu_backends, enabled_variants
+    from ar_kernel.tools.gpu_jobs import build_gpu_backends
     rec = Recorder(tmp_path / "run")
     cfg = KernelConfig.load()
-    names = {b.name for b in build_gpu_backends(cfg, tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)}
-    assert "rollout_wan22" not in names and {"rollout_alayaworld", "rollout_ltx25"} <= names
-    assert enabled_variants(cfg.get("generators.ltx25"), ("distilled", "dev")) == ["distilled"]
-    assert enabled_variants({"variants": ["dev", "distilled", "x"]}, ("distilled", "dev")) == ["dev", "distilled"]
-    assert enabled_variants({}, ("distilled", "dev")) == []
+    backends = {b.name: b for b in build_gpu_backends(cfg, tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)}
+    assert "rollout_wan22" not in backends and "rollout_alayaworld" in backends
+    assert backends["rollout_ltx25"].enabled_variants() == ["distilled"]
 
 
 def test_listed_tools_show_only_enabled_tools_and_enabled_variants(tmp_path):
@@ -465,7 +463,7 @@ def test_keyframe_images_are_staged_and_hashed_by_content(keyed):
     assert out["state"] == "done", out["error"]
     got = job_result(out)["items"]
     staged = got[0]["worker"]["keyframes"]
-    assert [k["frame"] for k in staged] == [-1, 0]             # sorted by frame at submit
+    assert [k["frame"] for k in staged] == [0, -1]             # in clip order whatever order was given
     assert all(f"/jobs/{out['id']}/in/0_keyframe" in k["image"] for k in staged)
     assert got[2]["worker"]["keyframes"] == []
     h = [g["candidate"]["provenance"]["inputs_hash"] for g in got]

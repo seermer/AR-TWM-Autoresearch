@@ -39,7 +39,8 @@ def gpu_total_gib(gpus: list[int]) -> dict[int, int] | None:
     out = smi(["--query-gpu=index,memory.total", "--format=csv,noheader,nounits"])
     if out is None:
         return None
-    total = {int(i): round(int(m) / 1024) for i, m in (line.split(",") for line in out.strip().splitlines())}
+    rows = [[x.strip() for x in line.split(",")] for line in out.splitlines()]
+    total = {int(r[0]): round(int(r[1]) / 1024) for r in rows if len(r) == 2 and r[0].isdigit() and r[1].isdigit()}
     return {g: total[g] for g in gpus if g in total}
 
 
@@ -59,5 +60,4 @@ def check_tools_fit(cfg, gpus: list[int], totals=gpu_total_gib) -> None:
                 if block.get("min_total_gpu_gib", 0) > whole]
     if problems:
         raise GpuPolicyError(f"enabled tools do not fit GPUs {','.join(map(str, gpus))} ({whole} GiB in total): "
-                             + "; ".join(problems) + ". Disable them in configs/kernel.yaml or give the run "
-                             "larger or more GPUs.")
+                             + "; ".join(problems) + ". Give the run larger or more GPUs.")

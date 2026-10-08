@@ -151,7 +151,7 @@ the other generators (`--items`, `--out`, per-item `<index>.mp4` then `<index>.j
 
 Text-only items use the pipeline's `t2va` workflow, items with an image the `fl2va` workflow;
 both share the loaded components. Keyframe images are staged into the job dir by the same
-`GpuJob` extension LTX uses (§4). `H3Backend(GpuJob)` in `tools/rollouts.py` runs one worker
+`GpuJob` extension LTX uses (§4). `H3Backend(GpuJob)` in `tools/h3.py` runs one worker
 that is given every GPU of the run, so it adapts to the machine. The bridge raises if the cards
 cannot hold the text encoder or the transformer.
 
@@ -257,12 +257,17 @@ start and never a failed job for the agent. A block without the key is not check
 
 ## 9. Testing and rollout
 
-- Unit tests with the existing fake-worker pattern: H3 item checks, prompt builder, segments,
+- Unit tests with the existing fake-worker pattern: H3 item checks, prompt builder, the scene-only caption,
   device map; LTX keyframes; item cap for each job tool; AlayaWorld without `variant`; Wan absent
   from the default tool list; the description test.
 - Real smoke runs on GPUs 0–3 before enabling H3: one text-only single-turn item and one
   three-turn item with first and last frame through the real tool path, then `data_ingest` of
   the results; one LTX item with first and last keyframes.
+- *(Amended 2026-10-08.)* The H3 smoke now renders three items (text-only, first-and-last,
+  last keyframe only) and ingests each with segments the test writes from `turn_segments`. The
+  Z-Image, Wan and H3 workers and WorldModel's two prompt-precache scripts run under
+  `torch.inference_mode`; WorldModel's inference engine keeps `torch.no_grad` because training
+  shares it.
 - Docs: `configs/kernel.yaml`, README, and the weights table and `generators` row of the
   2026-09-17 design spec.
 - Cleanup once implemented: delete `third_party/MiniMax-H3` (only its prompt guide was used).
@@ -270,7 +275,10 @@ start and never a failed job for the agent. A block without the key is not check
 ## 10. Risks
 
 - H3 timing was checked on one scene; the smoke run uses a different one, and agents are told
-  to check frames before trusting a segment boundary.
+  to check frames before trusting a segment boundary. *(Amended 2026-10-08: later smoke clips
+  were off by 1.3 s and by about 4 s, and a last keyframe unrelated to the first is reached by a
+  cut in the final frames even with the no-cuts sentence; the published caption therefore
+  carries no segments.)*
 - The bridge sets a private diffusers attribute to load components locally; it is tied to
   diffusers 0.40.0, which the env pins.
 - H3 is slow (about 20 minutes per clip); the cap and the description make the cost visible.

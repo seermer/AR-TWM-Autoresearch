@@ -29,7 +29,7 @@ from ..archive.db import open_db
 from ..archive.nodes import NodeStore
 from ..data.probe import aspect_ok, probe_video
 from ..subproc import file_tail, free_port, meminfo_gib
-from .gpu_jobs import IMAGE_EXTS, GpuJob, check_item_seed, check_keyframes, enabled_variants, is_int, split_gpus
+from .gpu_jobs import IMAGE_EXTS, GpuJob, check_item_seed, check_keyframes, is_int, split_gpus
 from .jobs import run_cancellable
 from .server import ToolError
 
@@ -466,7 +466,7 @@ class Ltx25Backend(GpuJob):
             "LTX often ignores camera instructions like 'camera steady'; never label a clip 'static' from its prompt; run annotate_camera, or check the frames, first. Batch many prompts per call.")
 
     def enabled_variants(self) -> list[str]:
-        return enabled_variants(self.block, ("distilled", "dev"))
+        return list(self.block.get("variants") or [])          # __init__ refused unknown names
 
     def generator_name(self, job) -> str:
         return f"ltx-2.5-{job.args['variant']}"
