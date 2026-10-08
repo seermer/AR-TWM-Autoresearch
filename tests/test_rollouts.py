@@ -1,5 +1,5 @@
 """rollout_alayaworld: case/config writers, submit checks, finish (CPU), the real produce with a
-fake worker, plus one real AlayaWorld gpu smoke per variant. Also rollout_wan22 (Wan2.2 TI2V-5B):
+fake worker, plus one real AlayaWorld gpu smoke. Also rollout_wan22 (Wan2.2 TI2V-5B):
 submit checks, finish (crop/probe, CPU), the real produce with a fake worker, plus one real Wan
 gpu smoke. And rollout_ltx25 (LTX-2.5 distilled/dev): submit checks, the host-RAM worker rule,
 finish (audio strip/probe, CPU), the real produce with a fake worker, plus one real gpu smoke
@@ -32,11 +32,12 @@ REAL = KernelConfig.load()
 FAKE = Path(__file__).parent / "fixtures" / "fake_gen_worker.py"
 
 
-def small_cfg(env="autoresearcher", enabled=("dmd4", "ar30")):
+def small_cfg(env="autoresearcher", enabled=True):
     raw = copy.deepcopy(REAL.raw)
     a = raw["generators"]["alayaworld"]
     a["env"] = env
-    a["variants"] = list(enabled)
+    a["enabled"] = enabled
+    a.pop("variants", None)
     return KernelConfig(raw=raw, repo_root=REAL.repo_root)
 
 
@@ -127,7 +128,7 @@ def _flat(d, prefix=()):
 
 
 def test_render_config_has_the_listed_fields(tmp_path):
-    c = render_config(REAL, variant="dmd4", rounds_per_turn=1, seed=7, indices=[0, 2], work=tmp_path,
+    c = render_config(REAL, rounds_per_turn=1, seed=7, indices=[0, 2], work=tmp_path,
                       text_cache=tmp_path / "te")
     mode = c["validation"]["modes"]["wbench"]
     assert mode["dataset"]["root"] == str(tmp_path / "data")
@@ -142,20 +143,17 @@ def test_render_config_has_the_listed_fields(tmp_path):
     for key, value in c["paths"].items():
         if isinstance(value, str):
             assert Path(value).is_absolute() and value.startswith(str(REAL.worldmodel)), key
-    assert c["paths"]["dmd_resume"] == str(REAL.worldmodel / "weights/alaya-world-dmd")
     # everything else is the eval's own wbench_full.yaml
     source = yaml.safe_load((REAL.worldmodel / "configs" / "wbench_full.yaml").read_text())
     assert c["sample"] == source["sample"] and c["spatial_memory"] == source["spatial_memory"]
     assert mode["memory_start_round"] == source["validation"]["modes"]["wbench"]["memory_start_round"]
 
 
-def test_ar30_differs_from_dmd4_in_exactly_the_four_keys(tmp_path):
-    kw = dict(rounds_per_turn=3, seed=1, indices=[0], work=tmp_path, text_cache=tmp_path / "te")
-    dmd4, ar30 = (_flat(render_config(REAL, variant=v, **kw)) for v in ("dmd4", "ar30"))
-    assert dmd4.keys() == ar30.keys()
-    diff = {k: ar30[k] for k in dmd4 if dmd4[k] != ar30[k]}
-    assert diff == {("paths", "dmd_resume"): None, ("validation", "sampling_steps"): 30,
-                    ("validation", "scheduler"): "shift", ("validation", "cfg_scale"): 3.0}
+def test_render_config_uses_the_ar_teacher(tmp_path):
+    c = render_config(REAL, rounds_per_turn=3, seed=1, indices=[0], work=tmp_path, text_cache=tmp_path / "te")
+    assert c["paths"]["dmd_resume"] is None
+    v = c["validation"]
+    assert (v["sampling_steps"], v["scheduler"], v["cfg_scale"]) == (30, "shift", 3.0)
 
 
 # ---- submit checks ----
@@ -200,7 +198,6 @@ def submit(q, caller, items, **params):
     (first_person(scene_prompt=""), {}, "scene_prompt"),
     (first_person(image="frame.txt"), {}, "image"),
     (first_person(turns=[{"action": "W", "camera": "fly"}]), {}, "camera"),
-    (first_person(), {"variant": "dmd8"}, "variant"),
     (first_person(), {"seed": "x"}, "seed"),
 ])
 def test_submit_refuses(env, item, params, match):
@@ -209,28 +206,13 @@ def test_submit_refuses(env, item, params, match):
         submit(q, caller, [item], **params)
 
 
-def test_submit_refuses_a_disabled_variant(tmp_path):
-    rec = Recorder(tmp_path / "run")
-    b = AlayaWorldBackend(small_cfg(enabled=("dmd4",)), tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
-    with pytest.raises(ToolError, match="variant"):
-        b.check_args({"items": [first_person()], "variant": "ar30"})
-
-
-def test_submit_with_only_ar30_enabled_defaults_to_ar30(tmp_path):
-    rec = Recorder(tmp_path / "run")
-    b = AlayaWorldBackend(small_cfg(enabled=("ar30",)), tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
-    args = {"items": [first_person()]}
-    b.check_args(args)
-    assert args["variant"] == "ar30"
-
-
 def test_submit_accepts_every_action_and_fills_defaults(tmp_path):
     rec = Recorder(tmp_path / "run")
     b = AlayaWorldBackend(small_cfg(), tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
     actions = ["W", "S", "A", "D", "left", "right", "up", "down", "stop", "W+left", "S+D", "W+down", "w"]
     args = {"items": [first_person(turns=[{"action": a}]) for a in actions]}
     b.check_args(args)
-    assert (args["variant"], args["rounds_per_turn"], args["seed"]) == ("dmd4", 3, 42)
+    assert (args["rounds_per_turn"], args["seed"]) == (3, 42) and "variant" not in args
 
 
 def test_limits_come_from_the_generator_config_block(tmp_path):
@@ -262,7 +244,7 @@ def _render_output(out, i, *, rounds, cpt, prompts, first=-7):
 
 
 def _job(**args):
-    return type("Job", (), {"id": "j1", "node": "n1", "args": {"variant": "dmd4", "seed": 42, **args}})()
+    return type("Job", (), {"id": "j1", "node": "n1", "args": {"seed": 42, **args}})()
 
 
 def _backend(tmp_path):
@@ -353,7 +335,7 @@ def test_finished_candidate_passes_the_real_ingestor_as_per_chunk(tmp_path):
     pose = write_poses(out / "vigeo.npz", n_frames=res["frames"], width=960, height=544)
     ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
     [r] = ing.ingest([Candidate(video=Path(res["video"]), caption=Path(res["caption"]), pose=pose,
-                                camera_motion="moving", provenance={"kind": "rollout", "generator": "alayaworld-dmd4",
+                                camera_motion="moving", provenance={"kind": "rollout", "generator": "alayaworld-ar30",
                                 "job_id": "j1", "inputs_hash": "x", "seed": 42})], node_id="n1")
     assert r.accepted, r.reasons
     assert "video_timed_prompts_camera:per_chunk" in r.formats
@@ -377,7 +359,7 @@ def test_produce_renders_and_publishes_candidates(env):
         assert "pose" not in c and "camera_motion" not in c
         assert c["commanded_camera"] == f"/workspace/staging/rollouts/{job}/{i}.commanded_camera.npz"
         assert c["license"] == REAL.get("generators.alayaworld.license")
-        assert c["provenance"]["generator"] == "alayaworld-dmd4" and c["provenance"]["seed"] == 5
+        assert c["provenance"]["generator"] == "alayaworld-ar30" and c["provenance"]["seed"] == 5
         assert c["frames"] == 2 * 3 * 32 - 7
         with np.load(staging / "rollouts" / job / f"{i}.commanded_camera.npz") as z:
             assert len(z["cam_c2w"]) == c["frames"]
@@ -445,9 +427,9 @@ def test_a_non_oserror_from_pil_fails_only_its_own_item(env, monkeypatch):
     assert "decompression bomb" in by[1]["error"].lower()
 
 
-def test_ar30_job_is_named_after_its_variant(env):
+def test_a_job_renders_with_the_ar_teacher(env):
     q, caller, _, run_dir = env
-    job, by = run_job(q, caller, [first_person(turns=[{"action": "W"}])], variant="ar30")
+    job, by = run_job(q, caller, [first_person(turns=[{"action": "W"}])])
     assert by[0]["candidate"]["provenance"]["generator"] == "alayaworld-ar30"
     cfg = yaml.safe_load((run_dir / "jobs" / job / "render_config.yaml").read_text())
     assert cfg["validation"]["sampling_steps"] == 30 and cfg["paths"]["dmd_resume"] is None
@@ -458,12 +440,11 @@ def test_ar30_job_is_named_after_its_variant(env):
 def test_render_config_with_a_node_adds_its_lora_and_history_encoder(tmp_path):
     kw = dict(rounds_per_turn=3, seed=1, indices=[0], work=tmp_path, text_cache=tmp_path / "te")
     node = dict(node_lora=tmp_path / "lora", node_rank=32, history_encoder=tmp_path / "ckpt" / "history_encoder.pt")
-    for variant, rank in (("dmd4", 256 + 32), ("ar30", 32)):      # ar30 has no student LoRA to add to
-        plain, tuned = (_flat(render_config(REAL, variant=variant, **kw, **extra)) for extra in ({}, node))
-        assert {k: tuned[k] for k in plain if plain[k] != tuned[k]} == {
-            ("paths", "dmd_resume"): str(tmp_path / "lora"),
-            ("paths", "history_encoder"): str(tmp_path / "ckpt" / "history_encoder.pt"),
-            ("lora", "rank"): rank, ("lora", "alpha"): rank}
+    plain, tuned = (_flat(render_config(REAL, **kw, **extra)) for extra in ({}, node))
+    assert {k: tuned[k] for k in plain if plain[k] != tuned[k]} == {
+        ("paths", "dmd_resume"): str(tmp_path / "lora"),
+        ("paths", "history_encoder"): str(tmp_path / "ckpt" / "history_encoder.pt"),
+        ("lora", "rank"): 32, ("lora", "alpha"): 32}
 
 
 def _scored_node(run_dir, node_id="n2", rank=32):
@@ -490,36 +471,26 @@ def test_submit_refuses_a_node_without_a_fine_tune(env, node):
         submit(q, caller, [first_person()], node=node)
 
 
-@pytest.mark.parametrize("variant", ["dmd4", "ar30"])
-def test_a_node_job_renders_with_the_nodes_fine_tune(env, monkeypatch, variant):
+def test_a_node_job_renders_with_the_nodes_fine_tune(env):
     q, caller, _, run_dir = env
     checkpoint = _scored_node(run_dir)
-
-    def fake_concat(cfg, ckpt, node_dir, recorder, node_id, cancel=None):
-        assert ckpt == checkpoint
-        (Path(node_dir) / "eval" / "lora").mkdir(parents=True)
-        return Path(node_dir) / "eval" / "lora"
-    monkeypatch.setattr(rollouts, "concat_eval_lora", fake_concat)
-    job, by = run_job(q, caller, [first_person(turns=[{"action": "W"}])], node="n2", variant=variant)
-    assert by[0]["candidate"]["provenance"]["generator"] == f"alayaworld-{variant}@n2"
-    work = run_dir / "jobs" / job
-    cfg = yaml.safe_load((work / "render_config.yaml").read_text())
-    lora, rank = (work / "eval" / "lora", 256 + 32) if variant == "dmd4" else (checkpoint, 32)
-    assert cfg["paths"]["dmd_resume"] == str(lora) and cfg["lora"]["rank"] == rank
+    job, by = run_job(q, caller, [first_person(turns=[{"action": "W"}])], node="n2")
+    assert by[0]["candidate"]["provenance"]["generator"] == "alayaworld-ar30@n2"
+    cfg = yaml.safe_load((run_dir / "jobs" / job / "render_config.yaml").read_text())
+    assert cfg["paths"]["dmd_resume"] == str(checkpoint) and cfg["lora"]["rank"] == 32
     assert cfg["paths"]["history_encoder"] == str(checkpoint / "history_encoder.pt")
-    assert not (work / "eval").exists()
 
 
-def test_build_gpu_backends_includes_alayaworld_only_with_an_enabled_variant(tmp_path):
+def test_build_gpu_backends_includes_alayaworld_only_when_enabled(tmp_path):
     from ar_kernel.tools.gpu_jobs import build_gpu_backends
     rec = Recorder(tmp_path / "run")
-    for enabled, present in (((), False), (("dmd4",), True), (("ar30",), True)):
+    for enabled, present in ((False, False), (True, True)):
         names = [b.name for b in build_gpu_backends(small_cfg(enabled=enabled), tmp_path / "run", [0, 1, 2, 3],
                                                     TokenRegistry(rec), rec)]
         assert ("rollout_alayaworld" in names) is present
 
 
-# ---- real AlayaWorld gpu smoke, per variant ----
+# ---- real AlayaWorld gpu smoke ----
 
 HIKER = ("Photorealistic wide shot, a hiker in a bright red jacket and grey backpack walking away from the camera "
          "along a narrow dirt trail on a green mountain ridge, seen from behind, full body in the center of the "
@@ -566,8 +537,7 @@ def _peak_sampler(gpus):
 
 
 @pytest.mark.gpu
-@pytest.mark.parametrize("variant", ["dmd4", "ar30"])
-def test_real_alayaworld_rollout(tmp_path, variant):
+def test_real_alayaworld_rollout(tmp_path):
     """AR_TEST_GPUS=0,1,2,3 pytest tests/test_rollouts.py -m gpu -s --basetemp=.cache/pytest/gpu
 
     First person: frame 0 of an example clip. Third person: a generate_images (Z-Image) frame with a
@@ -587,7 +557,7 @@ def test_real_alayaworld_rollout(tmp_path, variant):
 
     gpus = resolve_gpus(REAL, {"CUDA_VISIBLE_DEVICES": os.environ.get("AR_TEST_GPUS", "0,1,2,3")})
     raw = copy.deepcopy(REAL.raw)
-    raw["generators"]["alayaworld"]["variants"] = [variant]
+    raw["generators"]["alayaworld"]["enabled"] = True
     cfg = KernelConfig(raw=raw, repo_root=REAL.repo_root)
     run_dir, ws = tmp_path / "run", tmp_path / "ws"
     staging = run_dir / "staging"
@@ -627,7 +597,7 @@ def test_real_alayaworld_rollout(tmp_path, variant):
         t0 = time.monotonic()
         try:
             out = _wait(q, caller, q.backends["rollout_alayaworld"].submit(
-                q, caller, {"items": items, "variant": variant, "seed": 42})["job_id"])
+                q, caller, {"items": items, "seed": 42})["job_id"])
         finally:
             stop.set()
         wall = time.monotonic() - t0
@@ -678,15 +648,14 @@ def test_real_alayaworld_rollout(tmp_path, variant):
                      "generator": c["provenance"]["generator"]})
         if not (res.accepted and "video_timed_prompts_camera:per_chunk" in res.formats):
             failures.append(f"{i}: ingest {res.reasons}")
-    print(json.dumps({"variant": variant, "gpus": gpus, "wall_s": round(wall, 1), "peak_mib": peak,
+    print(json.dumps({"gpus": gpus, "wall_s": round(wall, 1), "peak_mib": peak,
                       "gpu_memory_mib": job_result(out)["gpu_memory_mib"], "rows": rows}, indent=1))
     assert job_result(out)["gpu_memory_released"] is True
     assert not failures, failures
 
 
 @pytest.mark.gpu
-@pytest.mark.parametrize("variant", ["dmd4", "ar30"])
-def test_real_alayaworld_rollout_of_a_node(tmp_path, variant):
+def test_real_alayaworld_rollout_of_a_node(tmp_path):
     """AR_TEST_CHECKPOINT=<a trained node's checkpoint dir> AR_TEST_RANK=<its LoRA rank> AR_TEST_GPUS=0,1,2,3
     pytest tests/test_rollouts.py -m gpu -s -k of_a_node --basetemp=.cache/pytest/gpu
 
@@ -700,7 +669,7 @@ def test_real_alayaworld_rollout_of_a_node(tmp_path, variant):
         pytest.skip("set AR_TEST_CHECKPOINT and AR_TEST_RANK")
     gpus = resolve_gpus(REAL, {"CUDA_VISIBLE_DEVICES": os.environ.get("AR_TEST_GPUS", "0,1,2,3")})
     raw = copy.deepcopy(REAL.raw)
-    raw["generators"]["alayaworld"]["variants"] = [variant]
+    raw["generators"]["alayaworld"]["enabled"] = True
     cfg = KernelConfig(raw=raw, repo_root=REAL.repo_root)
     run_dir, ws = tmp_path / "run", tmp_path / "ws"
     staging = run_dir / "staging"
@@ -721,13 +690,13 @@ def test_real_alayaworld_rollout_of_a_node(tmp_path, variant):
     frames = {}
     try:
         for node in (None, "n2"):
-            args = {"items": [dict(item)], "variant": variant, "seed": 42, "rounds_per_turn": 1}
+            args = {"items": [dict(item)], "seed": 42, "rounds_per_turn": 1}
             out = _wait(q, caller, q.backends["rollout_alayaworld"].submit(
                 q, caller, args if node is None else {**args, "node": node})["job_id"])
             assert out["state"] == "done", out.get("error")
             [got] = job_result(out)["items"]
             assert "candidate" in got, got
-            assert got["candidate"]["provenance"]["generator"] == f"alayaworld-{variant}" + (f"@{node}" if node else "")
+            assert got["candidate"]["provenance"]["generator"] == "alayaworld-ar30" + (f"@{node}" if node else "")
             assert job_result(out)["gpu_memory_released"] is True
             assert not (run_dir / "jobs" / out["id"] / "eval").exists()
             video = staging / Path(got["candidate"]["video"]).relative_to("/workspace/staging")
@@ -738,7 +707,7 @@ def test_real_alayaworld_rollout_of_a_node(tmp_path, variant):
         q.shutdown()
     assert frames[None].shape == frames["n2"].shape
     diff = float(np.abs(frames[None] - frames["n2"]).mean())
-    print(json.dumps({"variant": variant, "mean_abs_diff": round(diff, 3)}))
+    print(json.dumps({"mean_abs_diff": round(diff, 3)}))
     assert diff > 0.5
 
 # ---- Wan22Backend (rollout_wan22) ----

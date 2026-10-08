@@ -217,13 +217,14 @@ def test_commanded_camera_is_published_under_its_own_name_not_as_pose(env):
 
 # ---- build_gpu_backends: the services a run gets ----
 
-def toggled_cfg(annotate=True, images=True, alaya=("dmd4", "ar30"), wan=True, ltx=("distilled",)):
+def toggled_cfg(annotate=True, images=True, alaya=True, wan=True, ltx=("distilled",)):
     import copy
     base = KernelConfig.load()
     raw = copy.deepcopy(base.raw)
     raw["annotate"]["enabled"], raw["images"]["enabled"] = annotate, images
     g = raw["generators"]
-    g["alayaworld"]["variants"] = list(alaya)
+    g["alayaworld"]["enabled"] = alaya
+    g["alayaworld"].pop("variants", None)
     g["wan22"]["enabled"] = wan
     g["ltx25"]["variants"] = list(ltx)
     return KernelConfig(raw=raw, repo_root=base.repo_root)
@@ -231,10 +232,10 @@ def toggled_cfg(annotate=True, images=True, alaya=("dmd4", "ar30"), wan=True, lt
 
 @pytest.mark.parametrize("kw,expected", [
     ({}, {"annotate_camera", "generate_images", "rollout_alayaworld", "rollout_wan22", "rollout_ltx25"}),
-    ({"annotate": False, "images": False, "alaya": (), "wan": False, "ltx": ()}, set()),
-    ({"alaya": ("ar30",), "wan": False, "ltx": ("dev",)},
+    ({"annotate": False, "images": False, "alaya": False, "wan": False, "ltx": ()}, set()),
+    ({"alaya": True, "wan": False, "ltx": ("dev",)},
      {"annotate_camera", "generate_images", "rollout_alayaworld", "rollout_ltx25"}),
-    ({"annotate": False, "alaya": (), "ltx": ()}, {"generate_images", "rollout_wan22"}),
+    ({"annotate": False, "alaya": False, "ltx": ()}, {"generate_images", "rollout_wan22"}),
 ])
 def test_build_gpu_backends_returns_exactly_the_enabled_backends_plus_the_captioner(tmp_path, kw, expected):
     from ar_kernel.tools.gpu_jobs import build_gpu_backends
@@ -262,7 +263,7 @@ def test_listed_tools_show_only_enabled_tools_and_enabled_variants(tmp_path):
     reg = TokenRegistry(rec)
     q = JobQueue(rec, threading.Lock(), wait_cap_s=60)
     try:
-        for b in build_gpu_backends(toggled_cfg(images=False, alaya=("dmd4",), wan=False, ltx=("distilled",)),
+        for b in build_gpu_backends(toggled_cfg(images=False, wan=False, ltx=("distilled",)),
                                     tmp_path / "run", [0, 1, 2, 3], reg, rec):
             q.register(b)
         kit, mcp = ToolKit(reg, rec), new_mcp()
@@ -272,9 +273,9 @@ def test_listed_tools_show_only_enabled_tools_and_enabled_variants(tmp_path):
     finally:
         q.shutdown()
     assert set(tools) == {"annotate_camera", "rollout_alayaworld", "rollout_ltx25", "caption_videos"}
-    alaya, ltx = tools["rollout_alayaworld"].description, tools["rollout_ltx25"].description
-    assert "'dmd4'" in alaya and "'ar30'" not in alaya
+    ltx = tools["rollout_ltx25"].description
     assert "'distilled'" in ltx and "'dev'" not in ltx
+    assert "variant" not in tools["rollout_alayaworld"].input_schema["properties"]
 
 
 # ---- item schemas: the listed tools say each item field's type ----

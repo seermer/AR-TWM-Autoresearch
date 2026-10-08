@@ -28,7 +28,6 @@ from PIL import Image
 from ..archive.db import open_db
 from ..archive.nodes import NodeStore
 from ..data.probe import aspect_ok, probe_video
-from ..eval.lora import concat_eval_lora
 from ..subproc import file_tail, free_port, meminfo_gib
 from .gpu_jobs import GpuJob, check_item_seed, enabled_variants, is_int, split_gpus
 from .jobs import run_cancellable
@@ -54,9 +53,7 @@ ACTION_TOKENS = frozenset({
 TURN_KEYS = {"subject_action": "subject_action", "event": "event_edit", "viewpoint_change": "perspective_switch"}
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")                 # alaya/data/wbench.py _IMAGE_EXTS
 VIEWPOINTS = ("first_person", "third_person")
-VARIANTS = ("dmd4", "ar30")
-VARIANT_TEXT = {"dmd4": "4 sampling steps, fast", "ar30": "30 sampling steps, slower"}
-# ar30 = the AR teacher without the DMD LoRA, sampled as configs/infer_i2v_camera_ar.yaml does.
+# The AR teacher without the DMD LoRA, sampled as configs/infer_i2v_camera_ar.yaml does.
 AR30 = {("paths", "dmd_resume"): None, ("validation", "sampling_steps"): 30,
         ("validation", "scheduler"): "shift", ("validation", "cfg_scale"): 3.0}
 ROUND_FRAMES = 32           # one rollout round: 4 latents x temporal stride 8
@@ -85,13 +82,13 @@ def case_json(index: int, item: dict, image_rel: str, mask_rel: str | None) -> d
             "interactions": interactions, "metric_list": []}
 
 
-def render_config(cfg, *, variant: str, rounds_per_turn: int, seed: int, indices: list[int], work: Path,
+def render_config(cfg, *, rounds_per_turn: int, seed: int, indices: list[int], work: Path,
                   text_cache: Path, node_lora: Path | None = None, node_rank: int = 0,
                   history_encoder: Path | None = None) -> dict:
     """configs/wbench_full.yaml as eval/render.py:build_render_config adapts it, pointed at this
-    job's cases. The prompt cache is the run's (the eval's own holds only WBench's prompts).
-    `node_lora`: a node's fine-tune (rank `node_rank`) with its `history_encoder`: for dmd4 the
-    directory of the student LoRA concatenated with the node's, for ar30 the node's checkpoint."""
+    job's cases and sampled with the AR teacher (AR30). The prompt cache is the run's (the eval's
+    own holds only WBench's prompts). `node_lora`: a node's checkpoint (LoRA rank `node_rank`) with
+    its `history_encoder`."""
     wm = cfg.worldmodel
     c = yaml.safe_load((wm / "configs" / "wbench_full.yaml").read_text(encoding="utf-8"))
     for key, value in c["paths"].items():
@@ -104,13 +101,11 @@ def render_config(cfg, *, variant: str, rounds_per_turn: int, seed: int, indices
     mode["dataset"].update(root=str(work / "data"), case_ids=[str(i) for i in indices])
     mode["wbench_output_dir"] = str(work / "videos")
     mode["wbench_chunks_per_turn"] = int(rounds_per_turn)
-    if variant == "ar30":
-        for (section, key), value in AR30.items():
-            c[section][key] = value
+    for (section, key), value in AR30.items():
+        c[section][key] = value
     if node_lora is not None:
         c["paths"].update(dmd_resume=str(node_lora), history_encoder=str(history_encoder))
-        c["lora"]["rank"] = node_rank + (0 if variant == "ar30" else c["lora"]["rank"])
-        c["lora"]["alpha"] = c["lora"]["rank"]
+        c["lora"]["rank"] = c["lora"]["alpha"] = node_rank
     return c
 
 
@@ -176,7 +171,7 @@ class AlayaWorldBackend(GpuJob):
         "scored node's fine-tune. A GPU job: returns {job_id} at once; collect with job_wait. Each item is a "
         "first frame, the scene and character text, and a list of turns. A turn moves the camera and may add one "
         "instruction: an event in the scene, an action of the subject, or a change of viewpoint. A turn keeps its "
-        "camera move and its text for all its rounds. Samplers (`variant`): {variants}. Camera moves steer "
+        "camera move and its text for all its rounds. Camera moves steer "
         "translation reliably, rotation (turns, orbits) only weakly. Each result item gives a `candidate` (mp4, "
         "caption with one segment per round, provenance) with NO pose and no camera_motion: run annotate_camera "
         "on candidate.video, then data_ingest it with that pose and camera_motion 'moving' (eligible for "
@@ -187,20 +182,11 @@ class AlayaWorldBackend(GpuJob):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.max_turns = int(self.block["max_turns"])
-        variants = "; ".join(f"'{v}': {VARIANT_TEXT[v]}" for v in self.enabled_variants())
-        self.description = (self.description.replace("{variants}", variants)    # disabled variants omitted
-                            .replace("{max_turns}", str(self.max_turns)))
-
-    def enabled_variants(self) -> list[str]:
-        return enabled_variants(self.block, VARIANTS)
+        self.description = self.description.replace("{max_turns}", str(self.max_turns))
 
     def check_args(self, args):
-        args.setdefault("variant", (self.enabled_variants() or ["dmd4"])[0])
         args.setdefault("rounds_per_turn", 3)
         args.setdefault("seed", 42)
-        if args["variant"] not in self.enabled_variants():
-            raise ToolError(f"variant must be one of the enabled variants {self.enabled_variants()}: "
-                            f"got {args['variant']!r}")
         rpt = args["rounds_per_turn"]
         if not (is_int(rpt) and 1 <= rpt <= 3):
             raise ToolError(f"rounds_per_turn must be an int in 1..3: got {rpt!r}")
@@ -255,7 +241,7 @@ class AlayaWorldBackend(GpuJob):
 
     def generator_name(self, job) -> str:
         node = job.args.get("node")
-        return f"alayaworld-{job.args['variant']}" + (f"@{node}" if node else "")
+        return "alayaworld-ar30" + (f"@{node}" if node else "")
 
     def produce(self, job, items, work, out, cancel, report):
         data = work / "data"
@@ -295,19 +281,11 @@ class AlayaWorldBackend(GpuJob):
             if job.args.get("node"):
                 node = self._node(job.args["node"])
                 checkpoint = self.run_dir / node["checkpoint_path"]
-                # dmd4 renders as the eval does: the student LoRA and the node's as one adapter.
-                try:
-                    lora = checkpoint if job.args["variant"] == "ar30" else concat_eval_lora(
-                        self.cfg, checkpoint, work, self.recorder, job.node, cancel=cancel)
-                except RuntimeError:
-                    if cancel.is_set():             # the cancel killed it
-                        return None
-                    raise
-                fine_tune = dict(node_lora=lora, node_rank=node["lora_rank"],
+                fine_tune = dict(node_lora=checkpoint, node_rank=node["lora_rank"],
                                  history_encoder=checkpoint / "history_encoder.pt")
             config = work / "render_config.yaml"
             config.write_text(yaml.safe_dump(render_config(
-                self.cfg, variant=job.args["variant"], rounds_per_turn=job.args["rounds_per_turn"],
+                self.cfg, rounds_per_turn=job.args["rounds_per_turn"],
                 seed=job.args["seed"], indices=indices, work=work,
                 text_cache=self.run_dir / "cache" / "text_embed", **fine_tune), sort_keys=True), encoding="utf-8")
             # The eval renders with the text encoder off (a 24 GB card cannot hold Gemma next to the
@@ -349,7 +327,6 @@ class AlayaWorldBackend(GpuJob):
         finally:
             shutil.rmtree(data, ignore_errors=True)
             shutil.rmtree(work / "videos", ignore_errors=True)
-            shutil.rmtree(work / "eval", ignore_errors=True)        # the concatenated LoRA
 
     def finish(self, job, item, out):
         i = item["index"]

@@ -139,11 +139,9 @@ images:                           # generate_images GPU job (Z-Image-Turbo first
 generators:                       # rollout_* GPU jobs; switched on only after a smoke run
   alayaworld:
     env: alayaworld
-    # dmd4 = configs/wbench_full.yaml as the eval renders; ar30 = the same without the DMD LoRA, 30 steps.
-    # Clips carry no pose (user decision 2026-09-26: the renders follow commanded turns/orbits only
-    # weakly); agents run annotate_camera for it. Enabled after its smoke run: every clip
-    # ingested as per_chunk with its ViGeo pose.
-    variants: [dmd4, ar30]
+    # Rendered with the 30-step AR teacher (the DMD LoRA off). Clips carry no pose (user decision
+    # 2026-09-26: the renders follow commanded turns/orbits only weakly); agents run annotate_camera.
+    enabled: true
     max_turns: 9
     timeout_s: 43200
     license: LTX-2 Community License (AlayaWorld is an LTX-2 derivative)

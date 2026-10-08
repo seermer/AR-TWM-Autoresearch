@@ -360,12 +360,11 @@ def register_gpu_tools(mcp, kit, q) -> None:
         @mcp.tool(name="rollout_alayaworld", description=job_description(b["rollout_alayaworld"]))
         async def rollout_alayaworld(
                 items: WorldItems, ctx: Context,
-                variant: Annotated[str | None, Field(description="sampler; default the first one listed above")] = None,
                 rounds_per_turn: Annotated[int | None, Field(description="1..3, default 3; a round is 32 frames at 24 fps")] = None,
                 seed: Annotated[int | None, Field(description="default 42; one seed for the whole job")] = None,
                 node: Annotated[str | None, Field(description="render with this scored node's fine-tune instead of the released model")] = None,
         ) -> dict[str, Any]:
-            return await submit(ctx, "rollout_alayaworld", items=items, variant=variant,
+            return await submit(ctx, "rollout_alayaworld", items=items,
                                 rounds_per_turn=rounds_per_turn, seed=seed, node=node)
 
     if "generate_images" in b:
