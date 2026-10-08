@@ -205,3 +205,36 @@ def test_h3_is_registered_only_when_enabled(tmp_path):
         names = [b.name for b in build_gpu_backends(h3_cfg(enabled=enabled), tmp_path / "run", [0, 1, 2, 3],
                                                      TokenRegistry(rec), rec)]
         assert ("rollout_h3" in names) is present
+
+
+def _bridge():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("h3_generate", h3.H3_BRIDGE)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)             # torch and diffusers are imported inside main(), not here
+    return mod
+
+
+def test_bridge_spreads_the_blocks_by_memory_and_keeps_small_layers_on_gpu_0():
+    b = _bridge()
+    dmap = b.block_device_map([23.6, 23.6, 23.6, 23.6], 16)
+    blocks = [dmap[f"transformer_blocks.{i}"] for i in range(50)]
+    assert [blocks.count(d) for d in range(4)] == [5, 15, 15, 15]        # the split the spike measured
+    assert blocks == sorted(blocks)                                       # contiguous: one hop per card
+    assert all(dmap[name] == 0 for name in b.SMALL)
+    two = b.block_device_map([48.0, 48.0], 16)
+    assert [list(two.values()).count(d) for d in (0, 1)][1] == 30
+    assert set(b.block_device_map([80.0], 16).values()) == {0}
+
+
+def test_bridge_refuses_cards_that_cannot_hold_the_text_encoder():
+    b = _bridge()
+    b.require_memory([23.6] * 4)
+    with pytest.raises(RuntimeError, match="about 70 GiB"):
+        b.require_memory([23.6, 23.6])
+
+
+@pytest.mark.parametrize("size", [(1280, 720), (800, 1088), (640, 360), (960, 544)])
+def test_bridge_crops_any_keyframe_to_the_canvas(size):
+    img = _bridge().fit(Image.new("RGB", size, (5, 6, 7)), (960, 544))
+    assert img.size == (960, 544) and img.mode == "RGB"
