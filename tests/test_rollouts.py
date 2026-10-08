@@ -36,7 +36,7 @@ def small_cfg(env="autoresearcher", enabled=("dmd4", "ar30")):
     raw = copy.deepcopy(REAL.raw)
     a = raw["generators"]["alayaworld"]
     a["env"] = env
-    a["variants"] = {v: {"enabled": v in enabled} for v in ("dmd4", "ar30")}
+    a["variants"] = list(enabled)
     return KernelConfig(raw=raw, repo_root=REAL.repo_root)
 
 
@@ -587,7 +587,7 @@ def test_real_alayaworld_rollout(tmp_path, variant):
 
     gpus = resolve_gpus(REAL, {"CUDA_VISIBLE_DEVICES": os.environ.get("AR_TEST_GPUS", "0,1,2,3")})
     raw = copy.deepcopy(REAL.raw)
-    raw["generators"]["alayaworld"]["variants"][variant] = {"enabled": True}
+    raw["generators"]["alayaworld"]["variants"] = [variant]
     cfg = KernelConfig(raw=raw, repo_root=REAL.repo_root)
     run_dir, ws = tmp_path / "run", tmp_path / "ws"
     staging = run_dir / "staging"
@@ -700,7 +700,7 @@ def test_real_alayaworld_rollout_of_a_node(tmp_path, variant):
         pytest.skip("set AR_TEST_CHECKPOINT and AR_TEST_RANK")
     gpus = resolve_gpus(REAL, {"CUDA_VISIBLE_DEVICES": os.environ.get("AR_TEST_GPUS", "0,1,2,3")})
     raw = copy.deepcopy(REAL.raw)
-    raw["generators"]["alayaworld"]["variants"][variant] = {"enabled": True}
+    raw["generators"]["alayaworld"]["variants"] = [variant]
     cfg = KernelConfig(raw=raw, repo_root=REAL.repo_root)
     run_dir, ws = tmp_path / "run", tmp_path / "ws"
     staging = run_dir / "staging"
@@ -747,7 +747,7 @@ def small_wan_cfg(env="autoresearcher", enabled=True, **over):
     raw = copy.deepcopy(REAL.raw)
     w = raw["generators"]["wan22"]
     w["env"] = env
-    w["variants"] = {"ti2v-5b": {"enabled": enabled}}
+    w["enabled"] = enabled
     w.update(over)
     return KernelConfig(raw=raw, repo_root=REAL.repo_root)
 
@@ -973,7 +973,7 @@ def test_real_wan22_rollout(tmp_path):
 
     gpus = [int(g) for g in os.environ.get("AR_TEST_GPUS", "0,1,2,3").split(",")]   # one worker per GPU
     raw = copy.deepcopy(REAL.raw)
-    raw["generators"]["wan22"]["variants"]["ti2v-5b"] = {"enabled": True}
+    raw["generators"]["wan22"]["enabled"] = True
     cfg = KernelConfig(raw=raw, repo_root=REAL.repo_root)
     run_dir, ws = tmp_path / "run", tmp_path / "ws"
     staging = run_dir / "staging"
@@ -1065,14 +1065,13 @@ def _head():
 
 
 def small_ltx_cfg(env="autoresearcher", enabled=("distilled", "dev"), **over):
-    """The real ltx25 block, both variants enabled (their measured peak_rss_gib kept), pinned to
+    """The real ltx25 block with the given variants enabled, pinned to
     repo_root's own HEAD (a real git repo, so the CPU tests need no LTX-2 clone), with the RAM
     tests' host_reserve_gib of 60."""
     raw = copy.deepcopy(REAL.raw)
     b = raw["generators"]["ltx25"]
     b.update(env=env, repo=".", commit=_head(), host_reserve_gib=60)
-    for v in ("distilled", "dev"):
-        b["variants"][v]["enabled"] = v in enabled
+    b["variants"] = list(enabled)
     b.update(over)
     return KernelConfig(raw=raw, repo_root=REAL.repo_root)
 
@@ -1187,8 +1186,7 @@ def test_ltx_dev_job_is_named_after_its_variant(ltx_env):
     ((0, 1), 10, None, 2)])
 def test_ltx_worker_count_follows_host_ram(ltx_env, gpus, rss, cap, workers):
     make, caller, _ = ltx_env
-    q = make(gpus=gpus, workers=cap, variants={"distilled": {"enabled": True, "peak_rss_gib": rss},
-                                               "dev": {"enabled": False}})
+    q = make(gpus=gpus, workers=cap, peak_rss_gib=rss)
     _, by = run_ltx(q, caller, [{"prompt": "p", "seed": i} for i in range(5)])
     for i, item in by.items():
         assert item["worker"]["rank"] == i % workers and item["worker"]["gpus"] == str(gpus[i % workers])
@@ -1199,7 +1197,7 @@ def test_ltx_ram_shortfall_fails_the_job_before_any_worker(ltx_env, monkeypatch)
     message instead of letting the host OOM killer pick a victim."""
     make, caller, _ = ltx_env
     monkeypatch.setattr(rollouts, "meminfo_gib", lambda: {"MemTotal": 251.0, "MemAvailable": 90.0})
-    q = make(variants={"distilled": {"enabled": True, "peak_rss_gib": 40}, "dev": {"enabled": False}})
+    q = make(peak_rss_gib=40)
     job_id = q.backends["rollout_ltx25"].submit(q, caller, {"items": [{"prompt": "p", "seed": 1}]})["job_id"]
     out = q.wait(caller, job_id, 60)
     assert out["state"] == "failed"
@@ -1210,7 +1208,7 @@ def test_ltx_workers_shrink_to_what_mem_available_holds(ltx_env, monkeypatch):
     """4 GPUs, but MemAvailable - reserve fits 3 workers: the job runs on 3, not refused."""
     make, caller, _ = ltx_env
     monkeypatch.setattr(rollouts, "meminfo_gib", lambda: {"MemTotal": 251.0, "MemAvailable": 185.0})
-    q = make(variants={"distilled": {"enabled": True, "peak_rss_gib": 40}, "dev": {"enabled": False}})
+    q = make(peak_rss_gib=40)
     _, by = run_ltx(q, caller, [{"prompt": "p", "seed": i} for i in range(6)])
     assert {item["worker"]["gpus"] for item in by.values()} == {"0", "1", "4"}
     assert all(item["worker"]["rank"] == i % 3 for i, item in by.items())
@@ -1220,7 +1218,7 @@ def test_ltx_a_one_item_job_charges_one_worker(ltx_env, monkeypatch):
     """RAM is charged only for workers that get an item: 1 item runs with room for just 1 worker."""
     make, caller, _ = ltx_env
     monkeypatch.setattr(rollouts, "meminfo_gib", lambda: {"MemTotal": 251.0, "MemAvailable": 105.0})
-    q = make(variants={"distilled": {"enabled": True, "peak_rss_gib": 40}, "dev": {"enabled": False}})
+    q = make(peak_rss_gib=40)
     _, by = run_ltx(q, caller, [{"prompt": "p", "seed": 1}])
     assert by[0]["worker"]["gpus"] == "0" and by[0]["worker"]["rank"] == 0
 
@@ -1325,7 +1323,7 @@ def test_real_ltx25_rollout(tmp_path, variant):
     from ar_kernel.data.ingest import Candidate, Ingestor
     from ar_kernel.tools.images import ImageBackend
 
-    if not REAL.get(f"generators.ltx25.variants.{variant}.enabled"):
+    if variant not in REAL.get("generators.ltx25.variants"):
         pytest.skip(f"ltx25 {variant} is disabled in configs/kernel.yaml")
     gpus = [int(g) for g in os.environ.get("AR_TEST_GPUS", "0,1,2,3").split(",")]
     run_dir, ws = tmp_path / "run", tmp_path / "ws"

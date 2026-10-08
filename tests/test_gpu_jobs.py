@@ -223,11 +223,9 @@ def toggled_cfg(annotate=True, images=True, alaya=("dmd4", "ar30"), wan=True, lt
     raw = copy.deepcopy(base.raw)
     raw["annotate"]["enabled"], raw["images"]["enabled"] = annotate, images
     g = raw["generators"]
-    for v in g["alayaworld"]["variants"]:
-        g["alayaworld"]["variants"][v]["enabled"] = v in alaya
-    g["wan22"]["variants"]["ti2v-5b"]["enabled"] = wan
-    for v in g["ltx25"]["variants"]:
-        g["ltx25"]["variants"][v]["enabled"] = v in ltx
+    g["alayaworld"]["variants"] = list(alaya)
+    g["wan22"]["enabled"] = wan
+    g["ltx25"]["variants"] = list(ltx)
     return KernelConfig(raw=raw, repo_root=base.repo_root)
 
 
@@ -244,6 +242,17 @@ def test_build_gpu_backends_returns_exactly_the_enabled_backends_plus_the_captio
     names = [b.name for b in build_gpu_backends(toggled_cfg(**kw), tmp_path / "run", [0, 1, 2, 3],
                                                 TokenRegistry(rec), rec)]
     assert sorted(names) == sorted(expected | {"caption_videos"})     # the captioner is always present
+
+
+def test_the_default_config_has_wan_off_and_ltx_distilled_only(tmp_path):
+    from ar_kernel.tools.gpu_jobs import build_gpu_backends, enabled_variants
+    rec = Recorder(tmp_path / "run")
+    cfg = KernelConfig.load()
+    names = {b.name for b in build_gpu_backends(cfg, tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)}
+    assert "rollout_wan22" not in names and {"rollout_alayaworld", "rollout_ltx25"} <= names
+    assert enabled_variants(cfg.get("generators.ltx25"), ("distilled", "dev")) == ["distilled"]
+    assert enabled_variants({"variants": ["dev", "distilled", "x"]}, ("distilled", "dev")) == ["dev", "distilled"]
+    assert enabled_variants({}, ("distilled", "dev")) == []
 
 
 def test_listed_tools_show_only_enabled_tools_and_enabled_variants(tmp_path):

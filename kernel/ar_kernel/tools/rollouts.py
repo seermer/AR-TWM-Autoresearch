@@ -515,7 +515,7 @@ class Ltx25Backend(GpuJob):
         """One GPU per worker; workers = min(GPUs (capped by the config's `workers`), items,
         floor((MemAvailable - host_reserve_gib) / peak_rss_gib)): the job shrinks to what free
         host RAM holds (with the reserve kept for the kernel and OS) and refuses only below one."""
-        rss = float(self.block["variants"][variant]["peak_rss_gib"])
+        rss = float(self.block["peak_rss_gib"])
         reserve = float(self.block.get("host_reserve_gib", 60))
         avail = meminfo_gib()["MemAvailable"]
         by_ram = int((avail - reserve) // rss)

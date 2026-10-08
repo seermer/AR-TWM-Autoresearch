@@ -189,9 +189,7 @@ def _prefix_envs(cfg: KernelConfig) -> list[Finding]:
     out = []
     for name, block in blocks.items():
         env = str(block.get("env") or "")
-        variants = block.get("variants")
-        enabled = (any((v or {}).get("enabled") for v in variants.values()) if variants
-                   else bool(block.get("enabled")))
+        enabled = bool(block.get("enabled") or block.get("variants"))
         if "/" not in env or not enabled:
             continue
         path = Path(env) if Path(env).is_absolute() else cfg.repo_root / env

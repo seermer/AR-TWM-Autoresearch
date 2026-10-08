@@ -142,8 +142,7 @@ def test_broken_link_under_wbench_weights_is_reported(tmp_path):
 def test_missing_prefix_env_of_an_enabled_tool_is_a_failure(tmp_path):
     from ar_kernel.doctor import _prefix_envs
     cfg = KernelConfig(raw={"images": {"enabled": True, "env": ".envs/gen-zimage"},
-                            "generators": {"wan22": {"env": ".envs/gen-wan22",
-                                                     "variants": {"ti2v-5b": {"enabled": False}}}}},
+                            "generators": {"wan22": {"env": ".envs/gen-wan22", "enabled": False}}},
                        repo_root=tmp_path)
     found = {f.check: f.level for f in _prefix_envs(cfg)}
     assert found == {"env.images": "fail"}                # disabled wan22 is not checked

@@ -136,14 +136,14 @@ images:                           # generate_images GPU job (Z-Image-Turbo first
                                    # `model` (enable_model_cpu_offload) fits every allowed size, peak 12.8 GB
   timeout_s: 7200
   license: Apache-2.0
-generators:                       # rollout_* GPU jobs; a variant is enabled only after its smoke
+generators:                       # rollout_* GPU jobs; switched on only after a smoke run
   alayaworld:
     env: alayaworld
     # dmd4 = configs/wbench_full.yaml as the eval renders; ar30 = the same without the DMD LoRA, 30 steps.
     # Clips carry no pose (user decision 2026-09-26: the renders follow commanded turns/orbits only
     # weakly); agents run annotate_camera for it. Enabled after its smoke run: every clip
     # ingested as per_chunk with its ViGeo pose.
-    variants: {dmd4: {enabled: true}, ar30: {enabled: true}}
+    variants: [dmd4, ar30]
     max_turns: 9
     timeout_s: 43200
     license: LTX-2 Community License (AlayaWorld is an LTX-2 derivative)
@@ -152,7 +152,7 @@ generators:                       # rollout_* GPU jobs; a variant is enabled onl
     repo: third_party/Wan2.2      # relative to the AutoResearcher repo; gitignored
     commit: 1ea34ff48f87168174e12956e200b1d908b1c5ff   # pinned; the backend refuses to run off this commit
     weights: weights/wan2.2-ti2v-5b
-    variants: {ti2v-5b: {enabled: true}}   # smoke run: 2 T2V + 2 I2V pass ingest
+    enabled: false                 # smoke run passed (2 T2V + 2 I2V); switched off 2026-10-06
     gpus_per_worker: 1
     workers: null                 # null = as many as the GPU list allows
     frames: [121, 121]            # [default, max]; 4k+1
@@ -171,8 +171,9 @@ generators:                       # rollout_* GPU jobs; a variant is enabled onl
     # (RssAnon) peak is 35.4 GiB distilled / 36.8 GiB dev, and 4 concurrent distilled workers took
     # 147 GiB of MemAvailable (36.7 each). distilled: 59 s/clip alone, 4 workers ~100 s/clip each
     # (26 s/clip throughput); smoke on GPUs 0-3 passed. dev: 342 s/clip warm = 5.8x distilled
-    # (> 4x), so it stays disabled; it fits (same 10 GiB GPU peak).
-    variants: {distilled: {enabled: true, peak_rss_gib: 40}, dev: {enabled: false, peak_rss_gib: 40}}
+    # (> 4x), so it is left out; it fits (same 10 GiB GPU peak).
+    variants: [distilled]         # the enabled ones, first = default; dev fits but is 5.8x slower
+    peak_rss_gib: 40
     quantization: fp8-cast        # 24 GB cards: fp8-cast + CPU offload, one GPU per worker
     offload: cpu
     # host_reserve_gib also holds the ~36 GiB of shared mmapped weights, which MemAvailable counts as

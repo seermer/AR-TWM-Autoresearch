@@ -90,8 +90,8 @@ def check_item_seed(item: dict) -> None:
 
 
 def enabled_variants(block: dict, names: tuple[str, ...]) -> list[str]:
-    """The `names` whose `variants.<name>.enabled` is set in config `block`, in `names` order."""
-    return [v for v in names if ((block.get("variants") or {}).get(v) or {}).get("enabled")]
+    """The variants config `block` lists (`variants: [a, b]`) that the backend knows, in config order."""
+    return [v for v in block.get("variants") or [] if v in names]
 
 
 def canonical_hash(obj) -> str:
@@ -400,7 +400,7 @@ def register_gpu_tools(mcp, kit, q) -> None:
 
 def build_gpu_backends(cfg, run_dir: Path, gpus: list[int], registry, recorder) -> list:
     """Every GPU data backend a run gets: the captioner always, the others only when
-    their `annotate`/`images`/`generators` config enables them (a generator needs an enabled
+    their `annotate`/`images`/`generators` config enables them (a generator needs `enabled` or a listed
     variant). The caller registers each on the run's JobQueue, then calls `register_gpu_tools`
     and `register_caption_tool`."""
     from .annotate import AnnotateBackend          # imports this module
@@ -409,7 +409,8 @@ def build_gpu_backends(cfg, run_dir: Path, gpus: list[int], registry, recorder) 
     from .rollouts import AlayaWorldBackend, Ltx25Backend, Wan22Backend
 
     def generator_on(name: str) -> bool:
-        return any((v or {}).get("enabled") for v in (cfg.get(f"generators.{name}.variants") or {}).values())
+        block = cfg.get(f"generators.{name}") or {}
+        return bool(block.get("enabled") or block.get("variants"))
 
     enabled = [(True, CaptionBackend), (cfg.get("annotate.enabled"), AnnotateBackend),
                (cfg.get("images.enabled"), ImageBackend), (generator_on("alayaworld"), AlayaWorldBackend),
