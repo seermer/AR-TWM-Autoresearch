@@ -52,10 +52,10 @@ def require_memory(mem_gib: list[float]) -> None:
                            f"for its text encoder: got {sum(mem_gib):.0f} GiB on {len(mem_gib)} card(s)")
 
 
-def does_not_fit(what: str, mem_gib: list[float]) -> TooSmall:
+def out_of_memory(what: str, mem_gib: list[float]) -> RuntimeError:
     sizes = ", ".join(f"{m:.0f}" for m in mem_gib)
-    return TooSmall(f"MiniMax H3 ran out of GPU memory loading {what} on {len(mem_gib)} card(s) of {sizes} GiB; "
-                        "it was measured on 4 cards of 24 GiB")
+    return RuntimeError(f"MiniMax H3 ran out of GPU memory loading {what} on {len(mem_gib)} card(s) of {sizes} GiB; "
+                        "another process may be holding GPU memory")
 
 
 def block_device_map(mem_gib: list[float], reserve0_gib: float) -> dict[str, int]:
@@ -135,7 +135,7 @@ def main() -> int:
             a.weights, subfolder="text_encoder", dtype=torch.bfloat16, device_map="balanced",
             max_memory={i: f"{m - 2:.0f}GiB" for i, m in enumerate(mem)})
     except torch.OutOfMemoryError as exc:
-        raise does_not_fit("the text encoder", mem) from exc
+        raise out_of_memory("the text encoder", mem) from exc
     encoders = pipelines({n: e for n, (e, _) in flows.items()}, text_encoder=encoder)
     states = {}
     for item in mine:
@@ -163,7 +163,7 @@ def main() -> int:
             device_map=block_device_map(mem, a.gpu0_reserve_gib),
             quantization_config=TorchAoConfig(Int8WeightOnlyConfig(version=2), modules_to_not_convert=NOT_QUANTIZED))
     except torch.OutOfMemoryError as exc:
-        raise does_not_fit("the transformer", mem) from exc
+        raise out_of_memory("the transformer", mem) from exc
     transformer.requires_grad_(False)
     renderers = pipelines({n: r for n, (_, r) in flows.items()}, transformer=transformer)
     first = next(iter(renderers.values()))

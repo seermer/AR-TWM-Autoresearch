@@ -123,7 +123,10 @@ def test_a_worker_that_finds_the_machine_too_small_stops_the_run(env):
     assert out["state"] == "failed" and "does not fit this machine" in out["error"] and "too small" in out["error"]
     assert Control(run).stop_requested()
     [alert] = [e for e in rec.read_events() if e["type"] == "alert"]
-    assert alert["kind"] == "tool_does_not_fit" and "rollout_fake" in alert["message"]
+    assert alert["kind"] == "tool_does_not_fit"
+    log = run / "jobs" / out["id"] / "worker0.log"
+    assert alert["message"] == f"rollout_fake does not fit this machine; the run is stopping (see {log})"
+    assert "the cards are too small" in log.read_text()
 
 
 def test_per_item_failure_and_worker_crash_are_item_errors(env):

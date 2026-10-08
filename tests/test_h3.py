@@ -124,6 +124,9 @@ def submit(q, caller, items, **params):
     (item(scene_prompt=" "), {}, "scene_prompt"),
     (item(scene_prompt=" , "), {}, "scene_prompt"),
     (item(turns=[{"prompt": ";"}]), {}, "turn 1"),
+    (item(turns=[{"prompt": "..."}]), {}, "turn 1"),
+    (item(scene_prompt="?!"), {}, "scene_prompt"),
+    (item(non_diegetic_music="-"), {}, "non_diegetic_music"),
     (item(turns=[]), {}, "turns"),
     (item(turns=[{"prompt": ""}]), {}, "turn 1"),
     (item(turns=[{"prompt": "walk", "action": "W"}]), {}, "turn 1"),
@@ -249,12 +252,12 @@ def test_bridge_spreads_the_blocks_by_memory_and_keeps_small_layers_on_gpu_0():
 def test_bridge_refuses_cards_that_cannot_hold_the_text_encoder():
     b = _bridge()
     b.require_memory([23.6] * 4)
-    with pytest.raises(RuntimeError, match="about 70 GiB"):
+    with pytest.raises(b.TooSmall, match="about 70 GiB"):            # too small: the kernel stops the run on it
         b.require_memory([23.6, 23.6])
-    assert isinstance(b.does_not_fit("x", [1.0]), b.TooSmall) and b.UNFIT == 78       # main() exits with it
-    assert str(b.does_not_fit("the transformer", [23.6] * 3)) == (
-        "MiniMax H3 ran out of GPU memory loading the transformer on 3 card(s) of 24, 24, 24 GiB; "
-        "it was measured on 4 cards of 24 GiB")
+    oom = b.out_of_memory("the transformer", [23.6] * 4)             # a busy card, not the machine: a job failure
+    assert not isinstance(oom, b.TooSmall) and str(oom) == (
+        "MiniMax H3 ran out of GPU memory loading the transformer on 4 card(s) of 24, 24, 24, 24 GiB; "
+        "another process may be holding GPU memory")
 
 
 @pytest.mark.parametrize("size", [(1280, 720), (800, 1088), (640, 360), (960, 544)])

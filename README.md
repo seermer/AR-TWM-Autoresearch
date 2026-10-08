@@ -241,6 +241,7 @@ Do not delete files under `runs/$RUN` by hand.
 | `run ... exists; use --resume` | Use a new `--run-id`, or add `--resume` to continue it. |
 | `need at least 4 GPUs` / GPU out of memory at start | Set `CUDA_VISIBLE_DEVICES` to 4 or more idle GPUs. Check `nvidia-smi` for other processes. |
 | `enabled tools do not fit GPUs` | A tool needs more GPU memory in total than the run's cards have (`min_total_gpu_gib` in `configs/kernel.yaml`). Give the run more or larger GPUs, or switch that generator off before starting a new run. |
+| `tool_does_not_fit` alert in `ar status`, and the run stopped | A GPU tool found the machine too small while running; the alert names the worker log. Give the run more or larger GPUs, then `--resume`. |
 | `permission denied (publickey)` for the git remote | `ssh-add` your key in the shell that runs `ar`; check with `ssh -T git@github.com`. It shows up as a warning in `ar status`. |
 | `docker: permission denied` | Add your user to the `docker` group, log in again. |
 | Hugging Face `401` / `403` | Re-run `hf auth login` and accept the licences in step 3. |

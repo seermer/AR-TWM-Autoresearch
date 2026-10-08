@@ -384,11 +384,11 @@ class GpuJob:
             t.join()
         report({"done": done(), "total": total})
         if UNFIT_EXIT in codes:
-            message = (f"{self.tool} does not fit this machine; the run is stopping:\n"
-                       f"{file_tail(work / f'worker{codes.index(UNFIT_EXIT)}.log', 2000)}")
-            alert(self.recorder, "tool_does_not_fit", message)
+            log = work / f"worker{codes.index(UNFIT_EXIT)}.log"
+            message = f"{self.tool} does not fit this machine; the run is stopping"
+            alert(self.recorder, "tool_does_not_fit", f"{message} (see {log})")
             Control(self.run_dir).request_stop()
-            raise RuntimeError(message)
+            raise RuntimeError(f"{message}:\n{file_tail(log, 2000)}")
         world = len(groups)
         missing: dict[int, str] = {}
         for index in indices:

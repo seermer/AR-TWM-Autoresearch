@@ -108,7 +108,7 @@ non_diegetic_music: <the item's non_diegetic_music>
 the first included, carries its start time. The guide documents a timestamp only at a cut
 (`[Shot 2] At 00:03.500, the camera cuts to...`); a timestamp inside one shot is our own
 extension, chosen because the cut form changes the scene between shots. Its timing is loose:
-within about 0.5 s in the spike, about 1.3 s late in one smoke clip. The tool description says
+within about 0.5 s in the spike, about 1.3 s late in one smoke clip and about 4 s early in another. The tool description says
 so. Each text is collapsed to one line, and a turn loses a trailing `, ; :` before its full stop.
 
 Alignment line, copied from the guide, with `S.SS` the clip duration to two decimals:
@@ -245,10 +245,11 @@ others. `ar run` (new and resumed) and `ar doctor` stop with one error naming ev
 that needs more than the run's cards have, so a tool that cannot fit is the user's error at
 start and never a failed job for the agent. A block without the key is not checked.
 
-If a worker still finds the machine too small once a run is going (the H3 worker's memory check,
-or running out of memory while it loads), it exits with code 78. The kernel then alerts the
-user (`tool_does_not_fit`), asks the run to stop as `ar stop` does, and fails the job: the agent
-cannot fix it, so the run does not go on.
+If a worker still finds the machine too small once a run is going (the H3 worker's memory
+check), it exits with code 78. The kernel then alerts the user (`tool_does_not_fit`), asks the
+run to stop as `ar stop` does, and fails the job: the agent cannot fix it, so the run does not go
+on. Running out of memory while loading is an ordinary job failure: on a machine that passed the
+checks it means another process holds GPU memory.
 
 ## 8. Tool descriptions
 

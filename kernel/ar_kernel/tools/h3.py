@@ -48,6 +48,10 @@ def _line(text: str) -> str:
     return " ".join(text.split())
 
 
+def _says_something(text) -> bool:
+    return isinstance(text, str) and any(c.isalnum() for c in text)
+
+
 def _sentence(text: str) -> str:
     text = _line(text).rstrip(",;: ")
     return text if text.rstrip("\"')”’").endswith((".", "!", "?", "。", "！", "？", "…")) else text + "."
@@ -117,17 +121,16 @@ class H3Backend(GpuJob):
     def check_item(self, item):
         if "image" in item:
             raise ToolError("image is not a field of this tool: use keyframes [{'image': path, 'frame': 0}]")
-        if not isinstance(item.get("scene_prompt"), str) or _sentence(item["scene_prompt"]) == ".":
+        if not _says_something(item.get("scene_prompt")):
             raise ToolError("scene_prompt must be a non-empty string")
         turns = item.get("turns")
         if not isinstance(turns, list) or not turns:
             raise ToolError("turns must be a non-empty list")
         for t, turn in enumerate(turns, 1):
-            if not (isinstance(turn, dict) and set(turn) == {"prompt"} and isinstance(turn["prompt"], str)
-                    and _sentence(turn["prompt"]) != "."):
+            if not (isinstance(turn, dict) and set(turn) == {"prompt"} and _says_something(turn["prompt"])):
                 raise ToolError(f"turn {t} must be {{'prompt': non-empty text}}: got {turn!r}")
         for key in ("overall_soundscape", "non_diegetic_music"):
-            if not isinstance(item.get(key), str) or not item[key].strip():
+            if not _says_something(item.get(key)):
                 raise ToolError(f"{key} must be a non-empty string")
         check_keyframes(item)
         if any(k["frame"] not in (0, -1) for k in item.get("keyframes") or []):
