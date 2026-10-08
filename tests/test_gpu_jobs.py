@@ -310,7 +310,7 @@ def test_listed_item_schemas_type_every_field(tmp_path):
     key = tools["rollout_ltx25"].input_schema["properties"]["items"]["anyOf"][0]["items"]["properties"]["keyframes"]
     assert key["items"]["properties"]["frame"]["type"] == "integer" and key["items"]["required"] == ["image", "frame"]
     h3 = tools["rollout_h3"].input_schema["properties"]["items"]["anyOf"][0]["items"]
-    assert set(h3["required"]) == {"scene_prompt", "turns", "seed"}
+    assert set(h3["required"]) == {"scene_prompt", "turns", "overall_soundscape", "non_diegetic_music", "seed"}
     assert h3["properties"]["turns"]["items"]["required"] == ["prompt"]
     assert h3["properties"]["keyframes"] == tools["rollout_ltx25"].input_schema["properties"]["items"]["anyOf"][0]["items"]["properties"]["keyframes"]
     alaya = tools["rollout_alayaworld"].input_schema["properties"]["items"]["anyOf"][0]["items"]
@@ -465,11 +465,14 @@ def test_keyframe_images_are_staged_and_hashed_by_content(keyed):
     assert out["state"] == "done", out["error"]
     got = job_result(out)["items"]
     staged = got[0]["worker"]["keyframes"]
-    assert [k["frame"] for k in staged] == [0, -1]
+    assert [k["frame"] for k in staged] == [-1, 0]             # sorted by frame at submit
     assert all(f"/jobs/{out['id']}/in/0_keyframe" in k["image"] for k in staged)
     assert got[2]["worker"]["keyframes"] == []
     h = [g["candidate"]["provenance"]["inputs_hash"] for g in got]
     assert len(set(h)) == 3                              # the frame index and the images are part of the hash
+    swapped = [{"keyframes": items[0]["keyframes"][::-1], "seed": 1}]
+    again = job_result(q.wait(caller, backend.submit(q, caller, {"items": swapped})["job_id"], 120))["items"]
+    assert again[0]["candidate"]["provenance"]["inputs_hash"] == h[0]      # the order given does not matter
 
 
 # ---- descriptions name only their own tool ----

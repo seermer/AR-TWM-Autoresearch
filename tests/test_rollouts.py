@@ -1140,7 +1140,7 @@ def test_ltx_produces_and_publishes_a_silent_24fps_candidate_with_no_pose_or_cam
         assert wk["weights"] == str(REAL.repo_root / REAL.get("generators.ltx25.weights"))
         assert (wk["variant"], wk["quantization"], wk["offload"]) == ("distilled", "fp8-cast", "cpu")
     frames1 = by[1]["worker"]["keyframes"]
-    assert [k["frame"] for k in frames1] == [0, -1]
+    assert [k["frame"] for k in frames1] == [-1, 0]
     assert all("_keyframe" in k["image"] for k in frames1) and by[0]["worker"]["keyframes"] == []
 
 
@@ -1163,6 +1163,12 @@ def test_ltx_last_frame_given_twice_is_a_repeat(ltx_env):
     with pytest.raises(ToolError, match="repeat"):
         q.backends["rollout_ltx25"].submit(q, caller, {"items": [{"prompt": "p", "seed": 1, "keyframes": frames}],
                                                        "frames": 49})
+
+
+def test_ltx_an_unknown_variant_in_config_is_refused_at_startup(tmp_path):
+    rec = Recorder(tmp_path / "run")
+    with pytest.raises(ValueError, match="distiled"):
+        Ltx25Backend(small_ltx_cfg(enabled=("distiled",)), tmp_path / "run", [0], TokenRegistry(rec), rec)
 
 
 def test_ltx_dev_job_is_named_after_its_variant(ltx_env):

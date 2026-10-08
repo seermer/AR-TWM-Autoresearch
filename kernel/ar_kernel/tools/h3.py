@@ -3,9 +3,10 @@ from the agent's per-turn prompts.
 
 The agent gives a scene and a list of turns. The kernel puts the turn boundaries on the training
 round grid (frame 25 + 32j), writes one continuous shot in MiniMax's prompt format with an in-shot
-timestamp at each boundary ("At 00:03.708, ..."), and publishes the clip with one caption segment
-per turn. A cut per turn ("[Shot 2] At ...") keeps the timing but changes the scene, so it is not
-used. The clip carries no pose.
+timestamp at each turn's start ("At 00:03.708, ..."), and publishes the clip with one caption
+segment per turn. MiniMax's guide documents a timestamp only at a cut ("[Shot 2] At ..."); that
+keeps the timing but changes the scene, so the in-shot form is our own and its timing is loose.
+The clip carries no pose.
 """
 from __future__ import annotations
 
@@ -24,7 +25,7 @@ FPS = 24
 HISTORY = 25                # the first round boundary
 ROUND = 32
 MIN_TURN_ROUNDS = 2         # 2.67 s: segments under 2.375 s are never trained, and H3's timing has ~0.5 s of slack
-SOUND = "overall_soundscape: Natural ambient sound of the scene.\n\nnon_diegetic_music: N/A"
+NO_CUTS = "The whole video is one continuous shot with smooth motion and no cuts."
 FIRST = "For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced."
 BOTH = ("How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the "
         "0.00-second mark of the target video; Picture 2 (from Shot 1) aligns with the {end}-second mark of "
@@ -43,8 +44,12 @@ def turn_starts(frames: int, n_turns: int) -> list[int]:
     return [0] + [HISTORY + ROUND * per * k for k in range(1, n_turns)]
 
 
+def _line(text: str) -> str:
+    return " ".join(text.split())
+
+
 def _sentence(text: str) -> str:
-    text = text.strip()
+    text = _line(text).rstrip(",;: ")
     return text if text.endswith((".", "!", "?")) else text + "."
 
 
@@ -53,14 +58,16 @@ def _stamp(frame: int) -> str:
     return f"{int(seconds // 60):02d}:{seconds % 60:06.3f}"
 
 
-def build_prompt(scene: str, turns: list[str], starts: list[int], frames: int, keyframes: list[int]) -> str:
+def build_prompt(scene: str, turns: list[str], starts: list[int], frames: int, keyframes: list[int],
+                 soundscape: str, music: str) -> str:
     """The item as one continuous shot in MiniMax's base prompt format (alignment line, three fields)."""
-    body = f"[Shot 1] {_sentence(scene)} {_sentence(turns[0])}"
-    for text, start in zip(turns[1:], starts[1:]):
+    body = f"[Shot 1] {_sentence(scene)} {NO_CUTS}"
+    for text, start in zip(turns, starts):
         body += f" At {_stamp(start)}, {_sentence(text)}"
     end = f"{frames / FPS:.2f}"
     line = {(0,): FIRST, (-1, 0): BOTH, (-1,): LAST}.get(tuple(sorted(keyframes)), "").format(end=end)
-    return (f"{line}\n\n" if line else "") + f"integrated_multimodal_description: {body}\n\n{SOUND}"
+    return ((f"{line}\n\n" if line else "") + f"integrated_multimodal_description: {body}\n\n"
+            f"overall_soundscape: {_line(soundscape)}\n\nnon_diegetic_music: {_line(music)}")
 
 
 def build_caption(scene: str, turns: list[str], starts: list[int], frames: int) -> dict:
@@ -85,12 +92,15 @@ class H3Backend(GpuJob):
         default, maximum = self.block["frames"]
         h, w = self.block["resolution"]
         self.description = (
-            "Render training clips with MiniMax H3 from a scene and a list of turns: one continuous shot in "
-            "which each turn's text takes effect at that turn's start. A GPU job: returns {job_id} at once; "
+            "Render training clips with MiniMax H3 from a scene and a list of turns: one continuous shot with "
+            "no cuts, in which each turn's text takes effect at that turn's start. A GPU job: returns {job_id} at once; "
             f"collect with job_wait. Slow: about 20 minutes per {maximum}-frame clip. `frames`: 17n+5, "
             f"{MIN_FRAMES} <= frames <= {maximum}, default {default} (one value for the job). Item: "
-            "{'scene_prompt': str, 'turns': [{'prompt': str}], 'keyframes'?: [{'image': file under /workspace, "
-            "'frame': 0 or -1}], 'seed': int}. Turns start on training round boundaries (frame 25, then every "
+            "{'scene_prompt': str, 'turns': [{'prompt': str}], 'overall_soundscape': str, 'non_diegetic_music': "
+            "str, 'keyframes'?: [{'image': file under /workspace, 'frame': 0 or -1}], 'seed': int}. Start "
+            "`scene_prompt` with the visual style, e.g. 'Live-action,'. `overall_soundscape`: 1-4 sentences on "
+            "the ambient and action sounds; `non_diegetic_music`: the background score, or 'N/A'. The kernel "
+            "builds the model prompt from these. Turns start on training round boundaries (frame 25, then every "
             f"32 frames) and each lasts at least {MIN_TURN_ROUNDS} rounds, so a {maximum}-frame clip holds at most "
             f"{((maximum - HISTORY) // ROUND) // MIN_TURN_ROUNDS} turns. Write a turn as what happens, camera "
             "included, in phrases like: the camera pushes in / pulls out, pans left / right, trucks left / right, "
@@ -101,8 +111,10 @@ class H3Backend(GpuJob):
             "in the final frames. Each "
             f"result item gives a `candidate` for data_ingest (a {w}x{h}, 24 fps, silent mp4, a caption with one "
             "segment per turn, provenance); it carries no pose/camera_motion -- add one (annotate_camera then "
-            "'moving', or 'static') before ingesting. Timing is approximate (about half a second): check the "
-            "frames before trusting a segment boundary. Metadata, not labels: `turn_segments` and `h3_prompt`.")
+            "'moving', or 'static') before ingesting. Timing is loose: each turn's start time is written into "
+            "the prompt as a timestamp inside the one shot, which the model was not documented to follow, and "
+            "an event can land a second or more off. Check the frames, and write the segments you ingest to "
+            "match what the clip shows. Metadata, not labels: `turn_segments` and `h3_prompt`.")
 
     def check_args(self, args):
         default, maximum = self.block["frames"]
@@ -122,6 +134,9 @@ class H3Backend(GpuJob):
             if not (isinstance(turn, dict) and set(turn) == {"prompt"} and isinstance(turn["prompt"], str)
                     and turn["prompt"].strip()):
                 raise ToolError(f"turn {t} must be {{'prompt': non-empty text}}: got {turn!r}")
+        for key in ("overall_soundscape", "non_diegetic_music"):
+            if not isinstance(item.get(key), str) or not item[key].strip():
+                raise ToolError(f"{key} must be a non-empty string")
         check_keyframes(item)
         if any(k["frame"] not in (0, -1) for k in item.get("keyframes") or []):
             raise ToolError("a keyframe's frame must be frame 0 (the first frame) or -1 (the last)")
@@ -134,13 +149,15 @@ class H3Backend(GpuJob):
         turns = [t["prompt"] for t in item["turns"]]
         return turns, turn_starts(job.args["frames"], len(turns))
 
+    def _prompt(self, job, item) -> str:
+        turns, starts = self._layout(job, item)
+        return build_prompt(item["scene_prompt"], turns, starts, job.args["frames"],
+                            [k["frame"] for k in item.get("keyframes") or []],
+                            item["overall_soundscape"], item["non_diegetic_music"])
+
     def produce(self, job, items, work, out, cancel, report):
         frames = job.args["frames"]
-        prompts = {}
-        for item in items:
-            turns, starts = self._layout(job, item)
-            prompts[str(item["index"])] = build_prompt(item["scene_prompt"], turns, starts, frames,
-                                                       [k["frame"] for k in item["keyframes"]])
+        prompts = {str(item["index"]): self._prompt(job, item) for item in items}
         (work / "prompts.json").write_text(json.dumps(prompts, ensure_ascii=False), encoding="utf-8")
         h, w = self.block["resolution"]
         return self.run_workers(self.block["env"], lambda r, world: [
@@ -168,5 +185,4 @@ class H3Backend(GpuJob):
         segments = [{"turn_index": k, "prompt": t, "frame_start": s, "frame_end_exclusive": e}
                     for k, (t, s, e) in enumerate(zip(turns, starts, [*starts[1:], frames]))]
         return {"video": silent, "caption": caption, "frames": info.frames, "turn_segments": segments,
-                "h3_prompt": build_prompt(item["scene_prompt"], turns, starts, frames,
-                                          [k["frame"] for k in item.get("keyframes") or []])}
+                "h3_prompt": self._prompt(job, item)}

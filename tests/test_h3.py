@@ -21,6 +21,7 @@ from ar_kernel.tools.server import ToolError
 from tests.conftest import make_mp4
 
 SCENE = "A first-person view walks along a cobblestone street"
+SOUND, MUSIC = "Footsteps on stone and a light wind.", "N/A"
 TURNS = ["the camera pushes in slowly.", " the camera pans right to face a red door ", "a white dog runs out"]
 
 
@@ -39,14 +40,25 @@ def test_more_turns_than_the_clip_holds_is_refused(frames, n):
 
 
 def test_prompt_is_one_shot_with_in_shot_timestamps():
-    p = build_prompt(SCENE, TURNS, [0, 89, 153], 243, [])
+    p = build_prompt(SCENE, TURNS, [0, 89, 153], 243, [], SOUND, MUSIC)
     assert p == (
         "integrated_multimodal_description: [Shot 1] A first-person view walks along a cobblestone street. "
-        "the camera pushes in slowly. At 00:03.708, the camera pans right to face a red door. "
+        "The whole video is one continuous shot with smooth motion and no cuts. "
+        "At 00:00.000, the camera pushes in slowly. At 00:03.708, the camera pans right to face a red door. "
         "At 00:06.375, a white dog runs out.\n\n"
-        "overall_soundscape: Natural ambient sound of the scene.\n\n"
+        "overall_soundscape: Footsteps on stone and a light wind.\n\n"
         "non_diegetic_music: N/A")
     assert "[Shot 2]" not in p and ".." not in p
+
+
+@pytest.mark.parametrize("text, clean", [
+    ("the camera pans right,", "the camera pans right."), ("a dog runs out ;", "a dog runs out."),
+    ("she waves!", "she waves!"), ("a long\n\nturn  with   gaps", "a long turn with gaps.")])
+def test_a_turn_is_one_clean_sentence(text, clean):
+    p = build_prompt(SCENE, [text], [0], 243, [], "wind\n\nnon_diegetic_music: drums", MUSIC)
+    assert f"At 00:00.000, {clean}\n\noverall_soundscape: wind non_diegetic_music: drums\n\n" in p
+    assert p.count("\n\n") == 2                          # the three fields, and nothing an item wrote
+    assert build_caption(SCENE, [text], [0], 243)["caption"].endswith(clean)
 
 
 @pytest.mark.parametrize("keyframes, line", [
@@ -61,7 +73,7 @@ def test_prompt_is_one_shot_with_in_shot_timestamps():
            "10.12-second mark of the target video."),
 ])
 def test_alignment_line_follows_the_keyframes(keyframes, line):
-    p = build_prompt(SCENE, TURNS[:1], [0], 243, keyframes)
+    p = build_prompt(SCENE, TURNS[:1], [0], 243, keyframes, SOUND, MUSIC)
     assert p.startswith(line + "\n\nintegrated_multimodal_description: [Shot 1] ")
 
 
@@ -85,7 +97,8 @@ def h3_cfg(env="autoresearcher", **over):
 
 
 def item(**over):
-    return {"scene_prompt": SCENE, "turns": [{"prompt": t} for t in TURNS], "seed": 7, **over}
+    return {"scene_prompt": SCENE, "turns": [{"prompt": t} for t in TURNS], "overall_soundscape": SOUND,
+            "non_diegetic_music": MUSIC, "seed": 7, **over}
 
 
 @pytest.fixture
@@ -117,6 +130,8 @@ def submit(q, caller, items, **params):
     (item(turns=[{"prompt": "a"}] * 4), {}, "at most 3 turns"),
     (item(), {"frames": 124}, "at most 1 turns"),
     (item(seed="x"), {}, "seed"),
+    (item(overall_soundscape=" "), {}, "overall_soundscape"),
+    ({k: v for k, v in item().items() if k != "non_diegetic_music"}, {}, "non_diegetic_music"),
     (item(keyframes=[{"image": "first.png", "frame": 5}]), {}, "frame 0 .* or -1"),
     (item(keyframes=[{"image": "first.png", "frame": 0}, {"image": "last.png", "frame": 0}]), {}, "repeat"),
     (item(image="first.png"), {}, "image"),
@@ -154,10 +169,10 @@ def test_h3_produces_a_silent_clip_with_one_segment_per_turn(h3_env):
     assert streams == ["video"]
     caption = json.loads((staging / "rollouts" / job / "0.json").read_text())
     assert caption == h3.build_caption(SCENE, TURNS, [0, 89, 153], 243)
-    assert c["h3_prompt"] == by[0]["worker"]["prompt"] == h3.build_prompt(SCENE, TURNS, [0, 89, 153], 243, [])
+    assert c["h3_prompt"] == by[0]["worker"]["prompt"] == h3.build_prompt(SCENE, TURNS, [0, 89, 153], 243, [], SOUND, MUSIC)
     assert [(t["frame_start"], t["frame_end_exclusive"]) for t in c["turn_segments"]] == [(0, 89), (89, 153), (153, 243)]
     w = by[1]["worker"]
-    assert w["prompt"].startswith("How the reference pictures align") and [k["frame"] for k in w["keyframes"]] == [0, -1]
+    assert w["prompt"].startswith("How the reference pictures align") and [k["frame"] for k in w["keyframes"]] == [-1, 0]
     assert w["gpus"] == "0,1,4,5" and w["rank"] == 0             # one worker with every GPU
     assert w["weights"] == str(REAL.repo_root / REAL.get("generators.h3.weights")) and w["gpu0_reserve_gib"] == 16
 

@@ -449,6 +449,9 @@ class Ltx25Backend(GpuJob):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         (h, w), (default, maximum) = self.block["resolutions"][0], self.block["frames"]
+        unknown = set(self.block.get("variants") or []) - {"distilled", "dev"}
+        if unknown:
+            raise ValueError(f"generators.ltx25.variants: unknown variant(s) {sorted(unknown)}; known: distilled, dev")
         self.description = (
             "Render training clips with LTX-2.5 from a text prompt, optionally pinned to images at chosen "
             "frames. A GPU job: returns {job_id} at once; collect with job_wait. Params (one value per "

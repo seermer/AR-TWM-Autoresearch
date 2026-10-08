@@ -62,12 +62,15 @@ LtxItems = Annotated[list[dict[str, Any]] | str, items_schema(
     {"prompt": _str("what the clip shows"), "keyframes": KEYFRAMES_SCHEMA, "seed": _SEED}, ["prompt", "seed"])]
 H3Items = Annotated[list[dict[str, Any]] | str, items_schema(
     "the clips to render, one item each",
-    {"scene_prompt": _str("the scene: place, objects, light, viewpoint"),
+    {"scene_prompt": _str("the scene, starting with the visual style: 'Live-action, ...', then place, objects, "
+                          "light, viewpoint"),
      "turns": {"type": "array", "description": "the clip, turn by turn, as one continuous shot",
                "items": {"type": "object", "additionalProperties": False, "required": ["prompt"], "properties": {
                    "prompt": _str("what happens during this turn, the camera move included")}}},
+     "overall_soundscape": _str("ambient and action sounds across the clip, 1-4 sentences"),
+     "non_diegetic_music": _str("the background score, or 'N/A' for none"),
      "keyframes": KEYFRAMES_SCHEMA, "seed": _SEED},
-    ["scene_prompt", "turns", "seed"])]
+    ["scene_prompt", "turns", "overall_soundscape", "non_diegetic_music", "seed"])]
 _TURN = {"type": "object", "additionalProperties": False, "required": ["action"], "properties": {
     "action": _str("camera move for this turn: W, A, S, D (translate), left, right, up, down (rotate), stop, "
                    "or two joined with '+', e.g. 'W+left'"),
@@ -199,7 +202,7 @@ class GpuJob:
                     except PathError as exc:
                         bad.setdefault(n, f"keyframes: {exc}")
                     frames.append({**k, "image": container_path(k["image"])})
-                item = {**item, "keyframes": frames}
+                item = {**item, "keyframes": sorted(frames, key=lambda k: k["frame"])}
             items[n] = item
         refuse(caller, self.name, items, bad)
         return {"job_id": q.submit(caller, self.name, args)}
