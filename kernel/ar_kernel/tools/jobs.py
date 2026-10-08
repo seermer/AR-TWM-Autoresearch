@@ -248,7 +248,7 @@ def register_job_tools(mcp, kit, q: JobQueue) -> None:
               "state 'running' if it has not finished: call again to keep waiting. A finished job gives "
               "`result_file` and `summary` as job_status does.")
     async def job_wait(job_id: Annotated[str, Field(description="the job_id a GPU tool returned (its first 8 characters are enough)")], ctx: Context,
-                       timeout_s: Annotated[float, Field(description="seconds to wait; call again if the job is still running")] = q.wait_cap_s) -> dict[str, Any]:
+                       timeout_s: Annotated[float, Field(description="seconds to wait; call again if the job is still running")] = 300) -> dict[str, Any]:
         return await kit.call(ctx, "job_wait", {"job_id": job_id, "timeout_s": timeout_s},
                               lambda c: q.wait(c, job_id, timeout_s))
 

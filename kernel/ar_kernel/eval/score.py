@@ -84,14 +84,6 @@ def metric_guide(metric_set: list[str], weights: dict | None, measures: dict | N
 # inside WBench; a killed run leaves ~1 GB per in-flight case there.
 REGENERABLE = ("da3_cache", "megasam", "masks", "_navi_videos_tmp", "_megasam_tmp")
 
-# Computed for every proxy case, so their n is known before any node is scored. The other
-# metrics apply to a subset of cases; their n is taken from the root's report.
-UNIVERSAL_METRICS = (
-    "aesthetic_quality", "imaging_quality", "temporal_flickering", "dynamic_degree",
-    "motion_smoothness", "hpsv3_quality", "background_consistency", "segment_continuity",
-    "geometric_consistency", "photometric_consistency",
-)
-
 NAV_PARTS = ("navigation_accuracy", "navigation_consistency")
 
 

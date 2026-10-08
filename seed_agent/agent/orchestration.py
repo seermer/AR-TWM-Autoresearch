@@ -44,7 +44,8 @@ REPLAN = "Revise the plan. The engineer carries out the plan you submit next."
 REVIEW = ("The engineer finished. Check the result against your plan by looking at what was built, not only at "
           "this summary. If it tests the plan, call accept_result. If it falls short in a way the engineer can "
           "fix, submit a revised plan that says what to change: the work so far stays.")
-PLANNING_KERNEL_TOOLS = {"hf_search", "hf_list_files", "data_query", "ask", "read_skill"}    # read-only
+# read-only, but for data_fetch, which copies into staging
+PLANNING_KERNEL_TOOLS = {"hf_search", "hf_list_files", "data_query", "data_fetch", "ask", "read_skill"}
 EDIT_KERNEL_TOOLS = {"ask", "read_skill"}
 
 # Where each component lives in this agent, in the order an edit should consider them.

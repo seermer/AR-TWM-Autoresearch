@@ -95,19 +95,18 @@ def read_text(path: Path, offset: int = 0, limit: int | None = None) -> str:
 
 
 def make_file_tools(root: str) -> list:
-    @tool
+    writable = " or ".join(dict.fromkeys([root, "/workspace"]))
+
+    @tool(description=f"Read a text file (absolute, or relative to {root}). `offset` and `limit` select lines.")
     def read_file(path: str, offset: int = 0, limit: int | None = None) -> str:
-        """Read a text file (absolute, or relative to the tool root). `offset` and `limit` select lines."""
         return read_text(resolve_read(root, path), offset, limit)
 
-    @tool
+    @tool(description=f"List a directory (absolute, or relative to {root}); directories end with '/'.")
     def list_dir(path: str = ".") -> list[str]:
-        """List a directory (absolute, or relative to the tool root); directories end with '/'."""
         return sorted(p.name + ("/" if p.is_dir() else "") for p in resolve_read(root, path).iterdir())
 
-    @tool
+    @tool(description=f"Create or overwrite a text file (relative to {root}, or absolute under {writable}).")
     def write_file(path: str, content: str) -> str:
-        """Create or overwrite a text file (relative to the tool root, or absolute under it or under /workspace)."""
         target = resolve_inside(root, path)
         target.parent.mkdir(parents=True, exist_ok=True)
         with _lock_for(target):
@@ -128,14 +127,14 @@ def make_file_tools(root: str) -> list:
             _write_atomic(target, replace_once(text, old_string, new_string))
         return f"edited {path}"
 
-    @tool
+    @tool(description=f"Run a shell command in {root} (ffmpeg, ffprobe, python, ...). It is killed after "
+                      "`timeout_s` seconds. Returns the exit code and the output tail.")
     def run_command(command: str, timeout_s: int = 600) -> str:
-        """Run a shell command in the tool root (ffmpeg, ffprobe, python, ...). Returns the exit code and the output tail."""
         # Its own process group, so a timeout also kills what the shell started (python, ffmpeg, ...).
         proc = subprocess.Popen(["bash", "-lc", command], cwd=root, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True, start_new_session=True)
         try:
-            stdout, stderr = proc.communicate(timeout=min(int(timeout_s), 3600))
+            stdout, stderr = proc.communicate(timeout=int(timeout_s))
             status = f"exit {proc.returncode}"
         except subprocess.TimeoutExpired:
             os.killpg(proc.pid, signal.SIGKILL)

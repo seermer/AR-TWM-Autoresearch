@@ -25,6 +25,7 @@ class EditContext(_Ctx):
 
 class RecipeContext(_Ctx):
     workspace: str = "/workspace"
+    node_id: str = ""                                               # the node being built
     clip_pool_size: int = 0                                         # all clips in the archive
     clip_pool_stats: dict[str, Any] = Field(default_factory=dict)   # clips per ingesting node, source, format
     parent_data_commit: str | None = None

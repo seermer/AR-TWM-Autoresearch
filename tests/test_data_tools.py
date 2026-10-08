@@ -167,13 +167,24 @@ def test_a_clips_source_is_its_generator_or_repo_and_derived_clips_inherit_it():
     assert dataset_stats(manifest, clips)["x"]["sources"] == {"rollout:alayaworld-dmd4": 2, "derived": 1}
 
 
-def test_query_pages_through_the_pool_with_offset(env):
+def test_query_writes_every_match_to_a_file(env):
+    """live-10-03: a 1,300-clip reply dropped the tool connection."""
     tools, caller, results, _ = env
-    everything = tools.query(caller, {})
-    first = tools.query(caller, {"limit": 3})
-    rest = tools.query(caller, {"limit": 3, "offset": 3})
-    assert first["total"] == rest["total"] == everything["total"] and first["returned"] == 3
-    assert [c["clip_id"] for c in first["clips"] + rest["clips"]] == [c["clip_id"] for c in everything["clips"]][:6]
+    out = tools.query(caller, {})
+    assert out["result_file"].startswith("/workspace/staging/results/data_query-") and "returned" not in out
+    rows = json.loads((caller.staging_host / "results" / Path(out["result_file"]).name).read_text())
+    assert len(rows) == out["total"] == len(results) and rows[:5] == out["clips"]
+
+
+def test_fetch_copies_pool_clips_into_staging(env):
+    tools, caller, results, run = env
+    wanted = results[0]["clip_id"]
+    out = tools.fetch(caller, [wanted, "nope"])
+    assert out == {"folder": "/workspace/staging/pool_clips", "copied": 1, "not_in_pool": ["nope"]}
+    video = caller.staging_host / "pool_clips" / "videos" / f"{wanted}.mp4"
+    assert video.stat().st_size > 0 and video.stat().st_nlink == 1          # a copy, not a link into the archive
+    assert json.loads((caller.staging_host / "pool_clips" / "captions" / f"{wanted}.json").read_text())
+    assert (caller.staging_host / "pool_clips" / "poses" / f"{wanted}.npz").is_file()
 
 
 def test_commit_validation_errors_become_tool_errors(env):
@@ -259,7 +270,7 @@ def test_register_names_are_openai_safe():
     mcp = new_mcp()
     register_data_tools(mcp, ToolKit(None, None), None)
     names = [t.name for t in asyncio.run(mcp.list_tools())]
-    assert len(names) == 5 and all(re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", n) for n in names)
+    assert len(names) == 6 and all(re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", n) for n in names)
 
 
 def test_leakage_checker_is_built_once_across_concurrent_ingests(tmp_path, monkeypatch):

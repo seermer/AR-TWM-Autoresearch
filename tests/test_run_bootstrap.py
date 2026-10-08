@@ -220,12 +220,13 @@ def test_score_node_skips_cleanup_on_a_base_exception(tmp_path, monkeypatch):
 
 
 def test_expected_n_known_before_the_root_is_scored():
-    """Universal metrics cover every case; the judged ones follow the case files (case 2 has
-    scene and subject adherence and one subject_action turn, cases 1 and 3 are navigation only)."""
-    n = initial_expected_n(CFG, ["1", "2", "3"])
-    assert n["aesthetic_quality"] == 3 and "perspective_consistency" not in n
-    cases = [json.loads((CFG.wbench / "data" / "cases" / f"case_{i}.json").read_text()) for i in "123"]
-    assert n["scene_adherence"] == sum("scene_adherence" in c for c in cases)
+    ordered = (CFG.repo_root / "configs" / "proxy_cases.txt").read_text().strip().split(",")[:50]
+    cases = [json.loads((CFG.wbench / "data" / "cases" / f"case_{i}.json").read_text()) for i in ordered]
+    n = initial_expected_n(CFG, ordered)
+    assert n == {m: sum(m in c["metric_list"] for c in cases) for c in cases for m in c["metric_list"]}
+    assert n["navigation_trajectory"] == 13 and n["spatial_consistency"] == 6 and len(n) == 22
+    # the counts every earlier run recorded: the ten metrics every case has, and the judged ones by case content
+    assert n["aesthetic_quality"] == 50 and n["scene_adherence"] == sum(bool(c.get("scene_adherence")) for c in cases)
     assert n["subject_action_adherence"] == sum(
         any(i["type"] == "subject_action" for i in c["interactions"]) for c in cases)
 
@@ -244,7 +245,7 @@ def test_proxy_is_the_first_n_cases_of_the_ordered_list(tmp_path, monkeypatch):
 def test_bootstrap_records_universal_counts_and_attach_reads_them(tmp_path, monkeypatch):
     _runs(tmp_path, monkeypatch)
     ctx = bootstrap_run(CFG, run_id="r_n", env=ENV4)
-    assert ctx.expected_n["geometric_consistency"] == 50 and "spatial_consistency" not in ctx.expected_n
+    assert ctx.expected_n["geometric_consistency"] == 50 and ctx.expected_n["spatial_consistency"] == 6
     from ar_kernel.run import attach_run
     assert attach_run(CFG, "r_n", ENV4).expected_n == ctx.expected_n
 

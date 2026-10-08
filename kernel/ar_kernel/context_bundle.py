@@ -36,7 +36,8 @@ FOLDERS = {
         "/workspace": "your working directory, writable. It is kept for a retry and later nodes see it under "
                       "/nodes/<this node>/attempts/",
         "/workspace/staging": "what goes to and comes from kernel tools: downloads (hf/), GPU job outputs "
-                              "(annotations/, rollouts/, images/), result files (results/) and the candidates "
+                              "(annotations/, rollouts/, images/), result files (results/), clips copied from the pool "
+                              "(pool_clips/) and the candidates "
                               "you stage for data_ingest, which copies them into the archive. A separate mount: a hard link "
                               "between it and the rest of /workspace fails, so copy or move. Not kept for later "
                               "nodes",
@@ -151,7 +152,7 @@ def build_recipe_context(*, cfg, conn, run_dir: Path, repo, node_id: str, parent
         siblings=siblings(conn, run_dir, repo, parent_id, "improve_recipe"),
         archive=archive_summary(conn, "improve_recipe"),
         nodes_remaining=nodes_remaining, attempt=attempt, max_attempts=max_attempts, retry=retry,
-        dry_run=dry_run, folders=FOLDERS["improve_recipe"],
+        dry_run=dry_run, folders=FOLDERS["improve_recipe"], node_id=node_id,
         clip_pool_size=len(pool), clip_pool_stats=clip_pool_stats(pool),
         parent_data_commit=parent["data_commit"],
         parent_recipe=yaml.safe_load(recipe_path.read_text()) if recipe_path.exists() else {},

@@ -100,7 +100,10 @@ class _MockData:
                 "rejected_for": [{"count": len(candidates), "example": "mock tool server: smoke run"}]}
 
     def query(self, c, filter):
-        return {"total": 0, "returned": 0, "clips": []}
+        return {"total": 0, "clips": [], "result_file": ""}
+
+    def fetch(self, c, clip_ids):
+        return {"folder": "/workspace/staging/pool_clips", "copied": 0, "not_in_pool": []}
 
     def commit(self, c, parent, datasets, message, include=()):
         return {"commit_id": "0" * 64, "datasets": {}}

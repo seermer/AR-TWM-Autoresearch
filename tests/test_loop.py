@@ -131,6 +131,35 @@ def test_a_failed_eval_is_run_once_more(make_loop):
     assert alerts == ["eval_retry"]
 
 
+def test_a_known_machine_error_trains_once_more_without_the_agents(make_loop):
+    run, make = make_loop
+    script = Script(run, train=["infra", True])
+    loop = make(script, max_nodes=1)
+    loop.run()
+    assert NodeStore(loop.ctx.conn).get("n1")["status"] == "scored"
+    assert [r[:3] for r in script.retries if r[0] == "improve_recipe"] == [("improve_recipe", "n1", 1)]
+    assert [e["kind"] for e in loop.ctx.recorder.read_events() if e["type"] == "alert"] == ["train_retry"]
+
+
+def test_a_second_machine_error_costs_the_attempt(make_loop):
+    run, make = make_loop
+    script = Script(run, train=["infra", "infra", True])
+    loop = make(script, max_nodes=1)
+    loop.run()
+    assert NodeStore(loop.ctx.conn).get("n1")["status"] == "scored"
+    recipes = [r for r in script.retries if r[0] == "improve_recipe"]
+    assert len(recipes) == 2 and recipes[1][3]["kind"] == "train" and recipes[1][3]["failure"] == "infra"
+
+
+def test_a_crash_the_log_does_not_explain_goes_straight_to_the_agents(make_loop):
+    run, make = make_loop
+    script = Script(run, train=["crash", True])
+    loop = make(script, max_nodes=1)
+    loop.run()
+    assert len([r for r in script.retries if r[0] == "improve_recipe"]) == 2            # a retrain first would leave 1
+    assert "train_retry" not in [e["kind"] for e in loop.ctx.recorder.read_events() if e["type"] == "alert"]
+
+
 def test_eval_failing_twice_stops_the_run(make_loop):
     run, make = make_loop
     loop = make(Script(run, score=[0.7, RuntimeError("wbench gpu failed"), RuntimeError("wbench gpu failed")]),

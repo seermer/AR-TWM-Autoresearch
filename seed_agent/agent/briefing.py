@@ -143,6 +143,8 @@ def data_node(n: dict) -> str:
         lines.append(f"- Data commit: {n.get('data_commit')}")
     if n.get("recipe"):
         lines.append("- Recipe: " + ", ".join(f"{k} {v}" for k, v in n["recipe"].items()))
+    elif n.get("data"):
+        lines.append("- Recipe: all values kept default")
     return "\n".join(lines)
 
 
@@ -239,6 +241,7 @@ def _node_and_recipe(ctx, previous_plans: list | None) -> list[str]:
     return [
         POINTER,
         "## This node\n\n" + "\n".join([
+            f"- Node id: {ctx.node_id}",
             f"- Training GPUs: {ctx.n_gpus}",
             f"- Parent data commit: {ctx.parent_data_commit or 'none (the parent is the root)'}",
             _pool(ctx),
@@ -282,4 +285,4 @@ def edit_context(ctx, components: dict, previous_plans: list | None) -> str:
 def coder_context(ctx, components: dict) -> str:
     """What the coder gets with the plan."""
     return "\n\n".join(s for s in [POINTER, f"## This agent\n\n{components_section(components)}",
-                                    folders_section(ctx.folders)] if s)
+                                    folders_section(ctx.folders), retry_section(ctx.retry, None)] if s)

@@ -32,6 +32,14 @@ class TrainOutcome:
     log_path: Path
     detail: str = ""        # human-readable reason, surfaced to the agent on failure
 
+def machine_error(outcome: TrainOutcome) -> str | None:
+    """The known machine error a failed run's log names (NCCL, disk full, ...), or None: a crash
+    with no such line may be the recipe's or the data's doing."""
+    if outcome.failure != "infra" or not Path(outcome.log_path).is_file():
+        return None
+    log = Path(outcome.log_path).read_text(encoding="utf-8", errors="replace")
+    return next((sig for sig in INFRA_SIGNATURES if sig in log), None)
+
 def classify_failure(log: str, returncode: int) -> str:
     if any(sig in log for sig in RECIPE_SIGNATURES):
         return "recipe"

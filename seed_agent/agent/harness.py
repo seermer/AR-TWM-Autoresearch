@@ -33,6 +33,7 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Annotated, Any, TypedDict
@@ -41,7 +42,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (AIMessage, AnyMessage, HumanMessage, RemoveMessage,
                                      SystemMessage, ToolMessage)
 from langchain_core.messages.tool import ToolCall
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, ToolException
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
 from langgraph.types import Send
@@ -102,6 +103,16 @@ def _content(output: Any) -> str | list:
         return str(output)
 
 
+def error_text(name: str, exc: Exception) -> str:
+    """What the model reads when a tool call fails: the message itself, not the exception's repr."""
+    if not isinstance(exc, ToolException):
+        return TOOL_ERROR.format(error=f"{type(exc).__name__}: {exc}")
+    # A kernel tool's error. Pydantic adds a type tag and a documentation link to each schema error.
+    lines = [re.sub(r"\s*\[type=.*\]$", "", line) for line in str(exc).removeprefix(f"Error executing tool {name}: ").splitlines()
+             if "errors.pydantic.dev" not in line]
+    return TOOL_ERROR.format(error="\n".join(lines))
+
+
 async def run_tool(tools: dict[str, BaseTool], call: ToolCall) -> ToolMessage:
     tool = tools.get(call["name"])
     if tool is None:
@@ -115,7 +126,7 @@ async def run_tool(tools: dict[str, BaseTool], call: ToolCall) -> ToolMessage:
         return ToolMessage(INVALID_ARGS.format(name=call["name"], args=call["args"], error=error),
                            name=call["name"], tool_call_id=call["id"], status="error")
     except Exception as exc:  # noqa: BLE001 -- difference 1: report, do not crash
-        return ToolMessage(TOOL_ERROR.format(error=repr(exc)), name=call["name"],
+        return ToolMessage(error_text(call["name"], exc), name=call["name"],
                            tool_call_id=call["id"], status="error")
     message.content = _content(message.content)
     if isinstance(message.content, str):

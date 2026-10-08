@@ -73,7 +73,7 @@ def test_every_kernel_tool_argument_is_described(tmp_path):
     tools = _tools(tmp_path)
     assert "filter" not in tools["data_query"].input_schema["properties"]
     assert set(tools["data_query"].input_schema["properties"]) == {
-        "format", "camera_motion", "clip_ids", "ingested_by", "data_commit", "limit", "offset"}
+        "format", "camera_motion", "clip_ids", "ingested_by", "data_commit"}
     for name, tool in tools.items():
         for arg, schema in tool.input_schema["properties"].items():
             assert schema.get("description"), f"{name}.{arg} has no description"

@@ -71,7 +71,7 @@ disk:
 telemetry:
   gpu_sample_sec: 5
 tools:
-  job_wait_max_s: 300
+  job_wait_max_s: 3600
   hf_download_max_bytes: 21474836480   # 20 GiB per hf.download call
 ask:                             # the ask tool: one stateless question to the agent's model
   max_images_per_phase: 100      # per phase attempt, shared by all its roles; a question without images is not limited

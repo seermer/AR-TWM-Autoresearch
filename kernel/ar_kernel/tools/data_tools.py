@@ -1,9 +1,10 @@
-"""Data tools: video_probe, data_ingest, data_query, data_commit, recipe_check."""
+"""Data tools: video_probe, data_ingest, data_query, data_fetch, data_commit, recipe_check."""
 from __future__ import annotations
 
 import json
 import re
 import shutil
+import tempfile
 import threading
 import uuid
 from pathlib import Path
@@ -21,12 +22,11 @@ from ..data.ingest import Candidate, Ingestor
 from ..data.leakage import LeakageChecker
 from ..data.probe import probe_video
 from ..train.gate import Gate
-from .context import PathError, to_host
+from .context import STAGING, PathError, to_host
 from .gpu_jobs import items_schema
+from .hf_tools import move_into
 from ..process_digest import _shape
 from .server import FROM_FILE, SHOWN, ToolError, listed, publish, refuse
-
-QUERY_LIMIT = 100           # clips per page: a clip record is about 1,200 characters
 
 
 class DataTools:
@@ -136,9 +136,33 @@ class DataTools:
             if filter.get("ingested_by") and clip.get("ingested_by") != filter["ingested_by"]:
                 continue
             out.append({**clip_record(clip, usage), **({"datasets": in_commit[clip["clip_id"]]} if in_commit else {})})
-        offset, limit = int(filter.get("offset") or 0), int(filter.get("limit") or QUERY_LIMIT)
-        page = out[offset:offset + limit]
-        return {"total": len(out), "returned": len(page), "clips": page}
+        return {"total": len(out), "clips": out[:SHOWN],
+                "result_file": publish(caller, f"data_query-{uuid.uuid4().hex[:8]}", out)}
+
+    def fetch(self, caller, clip_ids) -> dict:
+        wanted = list(dict.fromkeys(listed(caller, clip_ids, "clip_ids")))
+        conn = open_db(self.run_dir)
+        try:
+            pool = {clip["clip_id"]: clip for clip in pool_clips(conn)}
+            blobs = BlobStore(self.run_dir, conn)
+            for clip in (pool[i] for i in wanted if i in pool):
+                files = [(blobs.path(clip["video_digest"], "video"), f"videos/{clip['clip_id']}.mp4"),
+                         (blobs.path(clip["caption_digest"], "caption"), f"captions/{clip['clip_id']}.json")]
+                if clip.get("pose_digest"):
+                    files.append((blobs.path(clip["pose_digest"], "pose"), f"poses/{clip['clip_id']}.npz"))
+                for blob, rel in files:             # a copy: a hard link would let the agent change the archive's file
+                    # written through the open handle: the agent owns staging and could swap the name for a link
+                    with tempfile.NamedTemporaryFile(dir=caller.staging_host, suffix=".tmp", delete=False) as handle, \
+                            open(blob, "rb") as source:
+                        shutil.copyfileobj(source, handle)
+                    try:
+                        move_into(Path(handle.name), caller.staging_host, f"pool_clips/{rel}")
+                    finally:
+                        Path(handle.name).unlink(missing_ok=True)
+        finally:
+            conn.close()
+        return {"folder": str(STAGING / "pool_clips"), "copied": sum(i in pool for i in wanted),
+                "not_in_pool": [i for i in wanted if i not in pool]}
 
     def commit(self, caller, parent: str | None, datasets: dict, message: str, include: list[str] = ()) -> dict:
         datasets = {name: {**d, "clips": listed(caller, d.get("clips"), f"{name}.clips")} if isinstance(d, dict) else d
@@ -332,7 +356,8 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
 
     @mcp.tool(name="data_query", description="Search the clip pool of the whole run. Every argument narrows the "
               "result; with none, all clips are listed. Each clip has its provenance, metadata, eligible formats "
-              "and the scores of the nodes that trained on it. `total` counts all matches; page with `offset`.")
+              "and the scores of the nodes that trained on it. The reply holds `total`, the first "
+              f"{SHOWN} clips, and `result_file`: a JSON file with every match.")
     async def data_query(
             ctx: Context,
             format: Annotated[str | None, Field(description="keep clips eligible for this format, e.g. "
@@ -340,13 +365,21 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
             camera_motion: Annotated[Literal["moving", "static"] | None, Field(description="keep clips with this camera motion")] = None,
             clip_ids: Annotated[list[str] | str | None, Field(description=f"keep only these clip ids, {FROM_FILE}")] = None,
             ingested_by: Annotated[str | None, Field(description="keep clips this node ingested, e.g. the id of the node being built")] = None,
-            data_commit: Annotated[str | None, Field(description="keep the clips of this data commit; each clip then has `datasets`, the commit's datasets that hold it")] = None,
-            limit: Annotated[int, Field(description="clips per page")] = QUERY_LIMIT,
-            offset: Annotated[int, Field(description="skip this many matches")] = 0) -> dict:
+            data_commit: Annotated[str | None, Field(description="keep the clips of this data commit; each clip then has `datasets`, the commit's datasets that hold it")] = None) -> dict:
         given = dict(format=format, camera_motion=camera_motion, clip_ids=clip_ids, ingested_by=ingested_by,
-                     data_commit=data_commit, limit=limit, offset=offset)
+                     data_commit=data_commit)
         filter = {key: value for key, value in given.items() if value is not None}
         return await kit.call(ctx, "data_query", filter, lambda c: tools.query(c, filter))
+
+    @mcp.tool(name="data_fetch", description="Copy the files of clips in the pool to /workspace/staging/pool_clips/, "
+              "to look at them: any clip data_query lists, also one that no data commit holds. Each clip gives "
+              "videos/<clip_id>.mp4, captions/<clip_id>.json and, when it has a camera pose, poses/<clip_id>.npz: "
+              "the same layout a node's training view has. Returns the folder, the number of clips copied and "
+              "the ids that are not in the pool.")
+    async def data_fetch(
+            clip_ids: Annotated[list[str] | str, Field(description=f"the clips to copy: a list of clip ids, {FROM_FILE}")],
+            ctx: Context) -> dict:
+        return await kit.call(ctx, "data_fetch", {"clip_ids": clip_ids}, lambda c: tools.fetch(c, clip_ids))
 
     @mcp.tool(name="data_commit", description="Create an immutable data commit: the whole training set of this node. "
               "It holds the datasets of the commits in `include` plus the ones in `datasets`, and nothing else: "

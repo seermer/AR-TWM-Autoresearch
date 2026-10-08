@@ -80,7 +80,11 @@ class Script:
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text("CUDA out of memory\n")
         self._wait("train")
-        if not self._next("train", True):
+        result = self._next("train", True)
+        if result in ("infra", "crash"):         # a known machine error, or a crash the log does not explain
+            log.write_text("NCCL error\n" if result == "infra" else "Traceback\n")
+            return TrainOutcome(None, "infra", log)
+        if not result:
             return TrainOutcome(None, "recipe", log, detail="CUDA OOM")
         ck = attempt_dir / "train" / "outputs" / "checkpoint-2"
         ck.mkdir(parents=True)

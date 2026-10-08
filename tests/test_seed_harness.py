@@ -145,8 +145,22 @@ def test_tool_exception_is_reported_where_create_agent_raises():
     messages, _ = asyncio.run(_run(_ours, script, TOOLS, None, [HumanMessage("x")]))
     err = messages[2]
     assert err["type"] == "tool" and err["status"] == "error" and err["tool_call_id"] == "c1"
-    assert err["content"] == "Error: RuntimeError('boom 1')\n Please fix your mistakes."
+    assert err["content"] == "Error: RuntimeError: boom 1\n Please fix your mistakes."
     assert messages[-1]["content"] == "recovered"
+
+
+def test_a_failed_tool_call_reads_as_its_message_not_as_a_repr():
+    """The texts are from live-10-03: a schema error with pydantic's tag and link, and a lost path."""
+    from langchain_core.tools import ToolException
+    from agent.harness import error_text
+    schema = ToolException("Error executing tool data_commit: 1 validation error for data_commitArguments\ndatasets\n"
+                           "  Input should be a valid dictionary [type=dict_type, input_value='/workspace/r.json', "
+                           "input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/dict_type")
+    assert error_text("data_commit", schema) == ("Error: 1 validation error for data_commitArguments\ndatasets\n"
+                                                 "  Input should be a valid dictionary\n Please fix your mistakes.")
+    with pytest.raises(FileNotFoundError) as missing:
+        open("/no/such/file.txt")
+    assert "'/no/such/file.txt'" in error_text("read_file", missing.value)
 
 
 def test_estimate_uses_last_reported_usage_plus_tail():

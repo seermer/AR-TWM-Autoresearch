@@ -29,7 +29,7 @@ from .selection import select_parent, selection_seed, update_values
 from .subproc import file_tail
 from .train.gate import Gate
 from .train.recipe import lora_of
-from .train.runner import TrainOutcome, TrainRunner
+from .train.runner import TrainOutcome, TrainRunner, machine_error
 from .transcripts import write_transcripts
 
 
@@ -338,6 +338,11 @@ class Loop:
             self._record_recipe(child, res, gate.resolved_path)
             self._state(child, "train", k)
             trained = self.phases.train(self, gate.resolved_path, child, adir)
+            if machine_error(trained):          # not the agents' doing: train once more before it costs an attempt
+                alert(self.ctx.recorder, "train_retry", f"{child} attempt {k}: {machine_error(trained)}; "
+                      "training once more", level="warning", node_id=child)
+                shutil.rmtree(adir / "train" / "outputs", ignore_errors=True)
+                trained = self.phases.train(self, gate.resolved_path, child, adir)
             if trained.checkpoint is None or trained.failure != "none":   # e.g. nan loss after a checkpoint
                 retry = {"kind": "train", "failure": trained.failure, "detail": trained.detail,
                          "log_tail": file_tail(trained.log_path, 20_000), **_submitted(res)}

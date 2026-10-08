@@ -1,6 +1,7 @@
 from __future__ import annotations
 import datetime as dt
 import hashlib, json, os, shutil, subprocess
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Mapping
@@ -13,7 +14,7 @@ from .config import OVERLAY_SNAPSHOT, SNAPSHOT_FILES, KernelConfig, resolve_gpus
 from .eval.judge import Judge, resolve_judge
 from .eval.lora import concat_eval_lora
 from .eval.render import build_render_config, render_proxy
-from .eval.score import (DIMENSION_METRICS, UNIVERSAL_METRICS, aggregates, case_counts, cleanup_eval,
+from .eval.score import (DIMENSION_METRICS, aggregates, case_counts, cleanup_eval,
                          score_from_report)
 from .eval.wbench import run_wbench_phases
 from .telemetry.recorder import Recorder
@@ -118,17 +119,9 @@ def bootstrap_run(cfg: KernelConfig, run_id: str | None, env: Mapping[str, str])
 
 
 def initial_expected_n(cfg: KernelConfig, case_ids: list[str]) -> dict:
-    """Case counts known up front: the universal metrics cover every proxy case, and the case
-    files say which cases each judged metric applies to (so a judge call that never succeeded
-    fails the root too). The root's report adds the rest (score_node), and every later node
-    must match them."""
-    cases = _cases(cfg, case_ids)
-    expected = {m: len(case_ids) for m in UNIVERSAL_METRICS}
-    for metric in ("scene_adherence", "subject_adherence", "causal_fidelity"):
-        expected[metric] = sum(bool(c.get(metric)) for c in cases)
-    for kind in ("event_edit", "subject_action", "perspective_switch"):
-        expected[f"{kind}_adherence"] = sum(any(i.get("type") == kind for i in c["interactions"]) for c in cases)
-    return expected
+    """Case counts known up front: each case file lists the metrics that apply to it, so a root with a
+    missing or failed case fails. The root's report then sets the counts every later node must match."""
+    return dict(Counter(metric for case in _cases(cfg, case_ids) for metric in case["metric_list"]))
 
 
 def record_root_counts(ctx: RunContext, expected_n: dict) -> None:

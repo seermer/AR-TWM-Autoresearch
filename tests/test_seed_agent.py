@@ -256,6 +256,29 @@ def test_engineers_get_what_they_act_on_and_not_the_history():
     assert "  - harness: agent/harness.py" in coder and "## Folders\n\n- `/agent`: the agent code you change\n- `/workspace/scratch`: throwaway" in coder
     assert "## Folders\n\n- `/workspace/staging`: a separate mount" in engineer_context(
         _recipe_ctx(folders={"/workspace/staging": "a separate mount"}), None)
+    assert "- Node id: n7\n" in engineer_context(_recipe_ctx(node_id="n7"), None)      # data_query's ingested_by asks for it
+    retried = EditContext(nodes_remaining=1, attempt=2, max_attempts=3, retry={"kind": "contract", "error": "import fails"})
+    assert "## Retry" in coder_context(retried, {}) and "import fails" in coder_context(retried, {})
+    assert "## Retry" not in coder
+
+
+def test_a_trained_node_with_an_empty_recipe_says_so():
+    from agent.briefing import data_node
+    node = {"node_id": "n1", "status": "scored", "score": 0.5, "rationale": None, "recipe": {},
+            "data": {"d": {"format": "video_caption_camera", "weight": 1.0, "clips": 4, "sources": {"hf:o/s": 4}}},
+            "data_commit": "c1"}
+    assert data_node(node).endswith("- Recipe: all values kept default")
+    assert "Recipe" not in data_node({**node, "data": {}})                    # the root trained nothing
+
+
+def test_file_tools_name_their_folder():
+    from agent.tools import make_file_tools
+    tools = {t.name: t for t in make_file_tools("/agent")}
+    assert "relative to /agent" in tools["read_file"].description and "tool root" not in str(
+        [t.description for t in tools.values()])
+    assert tools["write_file"].description.endswith("absolute under /agent or /workspace).")
+    assert make_file_tools("/workspace")[2].description.endswith("absolute under /workspace).")
+    assert "in /agent" in tools["run_command"].description and "`timeout_s` seconds" in tools["run_command"].description
 
 
 def test_brief_marks_a_cut_and_points_to_the_full_context(monkeypatch):
@@ -539,7 +562,7 @@ def test_improve_recipe_full_flow(kernel, tmp_path):
     outputs = _tool_outputs(rec, "n-recipe")
     assert any("Error invoking tool 'submit_plan'" in o and "at most 4000 characters" in o for o in outputs)
     assert any("no_such_tool is not a valid tool" in o for o in outputs)                       # unknown tool
-    assert any(o.startswith("Error: ToolException(") and "downloads are disabled" in o
+    assert any(o.startswith("Error: ") and "ToolException" not in o and "downloads are disabled" in o
                for o in outputs)                                                 # kernel tool error reported
     kinds = [e["type"] for e in rec.read_events("n-recipe")]
     assert "tool.call" in kinds and "tool.error" in kinds                        # kernel-side records
@@ -560,7 +583,8 @@ def test_improve_recipe_full_flow(kernel, tmp_path):
     assert any(t.startswith("<engineer_result>") and '"notes": "pool clips"' in t and "accept_result" in t for t in tasks)
     assert "pool clips suffice" in body["result"]["rationale"]                  # the final plan
     planner_tools = _tools_of(rec, "n-recipe", "# Mission\nYou choose the one data idea")
-    assert {"hf_search", "data_query", "ask", "read_skill", "read_file", "run_command", "arxiv_search"} <= planner_tools
+    assert {"hf_search", "data_query", "data_fetch", "ask", "read_skill", "read_file", "run_command",
+            "arxiv_search"} <= planner_tools
     engineer_tools = _tools_of(rec, "n-recipe", "# Mission\nYou build the training data")
     assert {"request_replan", "read_skill", "data_ingest", "arxiv_search"} <= engineer_tools
     assert "ask_planner" not in engineer_tools

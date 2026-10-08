@@ -600,7 +600,7 @@ they are rarely reached:
 | tool-error example in the process digest (`process_digest.EXAMPLE_CHARS`) | 1,000 chars | 469; the old cap of 160 cut 5 of 11, two before the reason |
 | process digest per node (`MAX_BYTES`, `MAX_ERRORS`) | 10,000 bytes, 8 errors, all shown | 1,471 bytes, 5 errors |
 | one tool result (`harness.TOOL_RESULT_LIMIT`) | 200,000 chars | 62,730 (`data_query`); a 100-item GPU job returns 50,000 to 160,000 |
-| `data_query` page | 100 clips (about 1,200 chars each), `offset` for more | - |
+| `data_query` result | *(2026-10-08, user decision)* `total`, the first 5 clips, and `result_file` with every match; no paging | - |
 | training log tail in a retry report | 20,000 chars | always a tail by design |
 | traceback and stderr tails in contract and attempt failures | 6,000 chars | - |
 
@@ -703,7 +703,7 @@ exactly two ways:
 | | Receives | Returns |
 |---|---|---|
 | `EditContext` | `agent_dir=/agent` (rw copy of own code); lineage history (per ancestor: code diff, recipe diff, data manifest stats (per dataset, clip counts by source: `rollout:<generator>`, `hf:<repo>`, or `derived` when nothing more is recorded *(2026-10-01)*), score, per-metric and per-stratum aggregates, rationale); archive-wide aggregates (tree shape, scores, subtree values, recipes; no clips); `nodes_remaining`; `attempt`, `max_attempts`, `retry` report; `dry_run` flag; *(2026-10-01)* `siblings`: the parent's other finished children, each with the same fields as a lineage entry | `EditResult{summary, component}` (`component`: the one edit component the plan chose, optional, recorded and never enforced, §9.1.1; the kernel computes the diff) |
-| `RecipeContext` | `workspace=/workspace`; archive-wide clip pool summary (the most recent 2000 clips; `clip_pool_size` is the true count *(2026-10-01)*; `data_query` pages through all of them with `offset`; per clip: provenance, license, metadata, eligible formats, ingesting node, scores of nodes that trained on it); parent's data commit and recipe; base recipe; the tunable-key schema and allowlists (§8); the standard-format rules (§6); GPU count; the same aggregates; `nodes_remaining`; attempt/retry info; `dry_run` flag | `RecipeResult{data_commit, recipe (dict of tunable keys), rationale}` |
+| `RecipeContext` | `workspace=/workspace`; archive-wide clip pool summary (the most recent 2000 clips; `clip_pool_size` is the true count *(2026-10-01)*; `data_query` lists all of them, in a result file *(2026-10-08)*; `node_id`, the node being built *(2026-10-08)*; per clip: provenance, license, metadata, eligible formats, ingesting node, scores of nodes that trained on it); parent's data commit and recipe; base recipe; the tunable-key schema and allowlists (§8); the standard-format rules (§6); GPU count; the same aggregates; `nodes_remaining`; attempt/retry info; `dry_run` flag | `RecipeResult{data_commit, recipe (dict of tunable keys), rationale}` |
 
 ### 9.4 Contract verification (step 4, fresh container from the child commit)
 
@@ -771,6 +771,7 @@ conversion, cropping, trimming, captioning, prompt timing) is agent code.
 | `data.ingest(candidates)` | §5.5. |
 | `data.query(filter)` | Any clip in the run's pool, with provenance, metadata, eligible formats, ingesting node and the scores of nodes that used it. |
 | `data.commit(parent, datasets, message)` | §5.6; returns `commit_id` and per-dataset stats. |
+| `data.fetch(clip_ids)` | *(2026-10-08, user decision.)* Copies the files of pool clips to `/workspace/staging/pool_clips/{videos,captions,poses}/`, so a clip that no data commit holds can be looked at. Copies, never hard links. Planner and data engineer. |
 | `job.status(job_id)` | State of a GPU job (`queued`, `running`, `done`, `failed`, `cancelled`), progress counters, and the result payload when finished. |
 | `job.wait(job_id, timeout_s)` | Blocks up to `min(timeout_s, tools.job_wait_max_s)` and returns the same payload as `job.status`, with `running` on expiry. |
 | `job.cancel(job_id)` | Stops a queued or running GPU job. |
@@ -880,7 +881,10 @@ cache key includes the case ids, §11.3).
   have n equal to the proxy size, and the six judged metrics must have n equal to the number of
   proxy cases they apply to (read from the case files), so a judge call that never succeeded fails
   the root as well; the root's report then fixes every metric's n (`run.json["expected_n"]`) and every
-  later node must match it (`ScoreError` otherwise).
+  later node must match it (`ScoreError` otherwise). *(2026-10-08, user decision)* Every
+  metric's n is now the number of proxy cases that list it (`metric_list`; the same numbers for the
+  sixteen above), so a root with any missing or failed case fails; every node still takes its counts
+  from the root.
 - *(Amended 2026-09-27, Plan 4 as built / user decision: no pause, §14.2.)* If a metric in
   the set is still missing from a node's `report.json` (`score_from_report` raises
   `KeyError`), that is an eval failure like any other: the node ends `eval_failed`, an
@@ -1044,7 +1048,7 @@ built, reads that JSON rather than a new store.)*
 | kernel tools | download/rollout/annotation errors | returned to the agent as tool errors |
 | gate | any check fails | retry loop 5↔6 |
 | gateway | upstream 429/5xx *(2026-10-08: and 401-403)* | gateway retries with exponential backoff *(2026-10-08: `gateway.upstream_retries` 8, about 4 minutes; the agent's client never retries)* |
-| precache/train | *(amended 2026-09-27, Plan 4 as built / user decision)* any failure — recipe-caused (CUDA OOM, NaN/inf loss, wall-time cap) or infrastructure (host OOM kill, disk full, NCCL/driver error, text-embed cache miss), including a run that writes a checkpoint but still fails | reported to the agent as a failed attempt (§7.2); back to 5↔6, consuming one attempt; exhausted ⇒ `train_failed` |
+| precache/train | *(amended 2026-09-27, Plan 4 as built / user decision)* any failure — recipe-caused (CUDA OOM, NaN/inf loss, wall-time cap) or infrastructure (host OOM kill, disk full, NCCL/driver error, text-embed cache miss), including a run that writes a checkpoint but still fails | reported to the agent as a failed attempt (§7.2); back to 5↔6, consuming one attempt; exhausted ⇒ `train_failed`. *(2026-10-08, user decision)* A failure whose log names a known machine error (`INFRA_SIGNATURES`: NCCL, disk full, ...) first trains once more with the same recipe and data (`train_retry` alert), without the agents and without consuming an attempt. Any other failure is unchanged. |
 | LoRA concatenation, render, WBench (scoring) | *(amended 2026-09-27, Plan 4 as built / user decision)* any failure | the eval is run once more (`eval_retry` alert); a second failure: node `eval_failed`, alert, loop continues with a new cycle. *(2026-10-08, user decision)* A second failure now **stops the run** with an `eval_failed` alert (a broken evaluation would fail every later node after its training); the node is marked `interrupted` on resume. Only the root can still end `eval_failed`. |
 | gateway (provider outage) | *(amended 2026-09-27, Plan 4 as built / user decision, option A)* upstream unavailable: an agent attempt fails while at least `gateway.outage_error_rate` (0.8) of the last `gateway.outage_window_min` (10) minutes' LLM calls, and at least `gateway.outage_min_calls` (3) of them, failed with 429/5xx or connection errors *(2026-10-08, user decision: 401, 402 and 403 count too, and the gateway retries them like 429/5xx, so a short provider fault costs retries and only a sustained one stops the run)* | the run **stops** (a stop, not a pause); `llm_outage` alert; the node in progress is marked `interrupted` on resume and not charged (§14.3); the operator resumes with `ar run --resume` |
 | budget | *(added 2026-09-27, Plan 4 as built / user decision)* the LLM spend ledger reaches `budget.max_usd` | the run **stops**; the node in progress is marked `interrupted` on resume and not charged (§14.3) |
@@ -1253,7 +1257,7 @@ Three real nodes with small recipes before the first long run.
 | `leakage.phash_max_distance` / `leakage.min_ncc` / `leakage.min_entropy` | 4 / 0.95 / 4.0 bits |
 | `eval.proxy_size` | 50 |
 | `eval.score_weights` | 4.5 for `event_edit_adherence`, `subject_action_adherence`, `perspective_switch_adherence`, `causal_fidelity`; 1 otherwise |
-| `tools.job_wait_max_s` | 300 |
+| `tools.job_wait_max_s` | 3600 *(2026-10-08; was 300. A call that gives no `timeout_s` waits 300 s)* |
 | `captioner` | `env: vllm`, `model: Qwen/Qwen3.8-27B-FP8` (by id, HF cache, offline), `tensor_parallel: null` (= largest power of two <= node GPU count), `max_model_len: 32768`, `gpu_memory_utilization: 0.85`, `max_tokens: 512`, `media_io_kwargs: {video: {num_frames: 64, fps: 2}}`, `startup_timeout_s: 1200`, `clip_timeout_s: 300`, `memory_release_timeout_s: 120`, `extra_args: []` *(added 2026-09-25, Follow-up C)*. *(Amended 2026-09-28, owner's launch, checked on 57 clips: `max_model_len: 81920`, `gpu_memory_utilization: 0.90`, `max_num_seqs: 20`, `max_num_batched_tokens: 32768`, `reasoning_parser: qwen3`, `reasoning_effort: medium` per request, `mm_encoder_tp_mode: data`, `speculative_config: null` (MTP optional); `max_tokens` removed. Clips are sent concurrently, up to `max_num_seqs`. Each clip's reasoning is recorded in its `caption.clip` event; the agent gets only the caption. vLLM's Qwen3-VL loader ignores `num_frames` and samples 2 frames/s. See the verification log.)* |
 | `train.resolution_allowlist` | `[[416,736],[352,608]]` |
 | `train.lora_allowlist` | `[[16,16],[32,32],[64,64]]` |
