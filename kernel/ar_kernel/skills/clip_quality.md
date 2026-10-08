@@ -12,5 +12,6 @@ Install what helps with `pip install --user` (for example `scenedetect`, or a sm
 - Blur: the variance of the Laplacian per frame (`cv2.Laplacian(gray, cv2.CV_64F).var()`), compared across the batch. Drop the lowest tail rather than using one absolute threshold.
 - Cuts inside a clip: `scenedetect`, or a histogram difference between neighbouring frames. Poses estimated across a cut are not valid, and one caption cannot describe both shots. data_ingest adds a warning to a clip whose pose jumps between two frames (a step 15 times the clip's median step, or a turn of 20 degrees), naming the frames.
 - Camera motion: the total translation and rotation in `cam_c2w` is near zero for a static clip and clearly non-zero for a moving one. Dense optical flow (`cv2.calcOpticalFlowFarneback`) should agree on the direction.
+- Per-turn prompts of a generated clip may not be reliable: what a turn asked for can show up early, late, weakly or not at all. Check each turn against the frames before using its prompt or its time range as a label.
 - Caption against video: ask the captioning tool a narrow question about the clip (the camera motion, the setting) and compare the answer with the saved caption.
 - Sample a few clips from a source before converting all of it.

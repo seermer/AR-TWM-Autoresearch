@@ -7,6 +7,8 @@ paths:
 gpus:
   default: "0,1,2,3"
   min_count: 4
+  # Each GPU tool's block has `min_total_gpu_gib`: the memory it needs across the run's cards, an
+  # estimate of 96 (4 x 24 GB) or 48 (2 x 24 GB). A run does not start while an enabled tool needs more.
   free_below_mib: 512            # a kernel GPU job an agent asked for is refused while a GPU holds more than
                                  # this (the agent container sees the same GPUs; a display server uses less)
 retries:
@@ -73,6 +75,7 @@ ask:                             # the ask tool: one stateless question to the a
   max_image_side: 1024           # px; larger images are downscaled before they are sent
 captioner:                       # caption_videos GPU job: a local vLLM server, never the paid agent model
   env: vllm             # conda env with vLLM (0.29.0), lives in .envs/vllm
+  min_total_gpu_gib: 96          # the launch below was tuned on 4 x 24 GB
   model: Qwen/Qwen3.8-27B-FP8    # resolved by id through the HF cache (HF_HUB_OFFLINE=1: never downloads)
   tensor_parallel: null          # null = the largest power of two <= the number of node GPUs
   # The owner's launch on 4 x 24 GB, checked on 57 clips (2026-09-28). vLLM test-runs the
@@ -122,6 +125,7 @@ timeouts:                        # soft timeouts; the hard cap is 4x soft
 annotate:                         # annotate_camera GPU job
   enabled: true                   # ViGeo verified on the example clips
   env: alayaworld
+  min_total_gpu_gib: 48
   repo: third_party/ViGeo         # relative to paths.worldmodel
   checkpoint: third_party/ViGeo/checkpoints/ViGeo1.1
   max_frames: 1200                # longer clips are refused per clip (memory)
@@ -129,6 +133,7 @@ annotate:                         # annotate_camera GPU job
 images:                           # generate_images GPU job (Z-Image-Turbo first frames)
   enabled: true                   # verified: 8 prompts on 4 GPUs, gpu_memory_released true
   env: .envs/gen-zimage           # a conda-prefix env inside the repo
+  min_total_gpu_gib: 48
   weights: weights/z-image-turbo
   revision: f332072aa78be7aecdf3ee76d5c247082da564a6
   steps: 9
@@ -139,6 +144,7 @@ images:                           # generate_images GPU job (Z-Image-Turbo first
 generators:                       # rollout_* GPU jobs; switched on only after a smoke run
   alayaworld:
     env: alayaworld
+    min_total_gpu_gib: 48         # the prompt precache spreads Gemma over two cards
     # Rendered with the 30-step AR teacher (the DMD LoRA off). Clips carry no pose (user decision
     # 2026-09-26: the renders follow commanded turns/orbits only weakly); agents run annotate_camera.
     enabled: true
@@ -147,6 +153,7 @@ generators:                       # rollout_* GPU jobs; switched on only after a
     license: LTX-2 Community License (AlayaWorld is an LTX-2 derivative)
   wan22:
     env: .envs/gen-wan22           # a conda-prefix env inside the repo
+    min_total_gpu_gib: 48
     repo: third_party/Wan2.2      # relative to the AutoResearcher repo; gitignored
     commit: 1ea34ff48f87168174e12956e200b1d908b1c5ff   # pinned; the backend refuses to run off this commit
     weights: weights/wan2.2-ti2v-5b
@@ -161,6 +168,7 @@ generators:                       # rollout_* GPU jobs; switched on only after a
     license: Apache-2.0
   ltx25:
     env: .envs/gen-ltx25           # a conda-prefix env inside the repo
+    min_total_gpu_gib: 48
     repo: third_party/LTX-2       # relative to the AutoResearcher repo; gitignored
     commit: a95ab856bf29407b6b066ede0abe1846050db56c   # pinned; the backend refuses to run off this commit
     weights: weights/ltx-2.5
@@ -185,6 +193,7 @@ generators:                       # rollout_* GPU jobs; switched on only after a
     license: LTX-2 Community License
   h3:
     env: .envs/gen-h3               # a conda-prefix env inside the repo (diffusers 0.40.0)
+    min_total_gpu_gib: 96           # the bf16 text encoder alone needs about 70 GiB
     weights: weights/minimax-h3     # MiniMaxAI/MiniMax-H3, diffusers layout, fl2va/t2va partition
     revision: 42ed227ee7df40d41602854ae760620d6eb651fe
     enabled: true                   # smoke run 2026-10-08: 1 T2V + 1 first-and-last item pass ingest as per_chunk

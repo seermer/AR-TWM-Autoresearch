@@ -45,6 +45,12 @@ def require_memory(mem_gib: list[float]) -> None:
                            f"for its text encoder: got {sum(mem_gib):.0f} GiB on {len(mem_gib)} card(s)")
 
 
+def does_not_fit(what: str, mem_gib: list[float]) -> RuntimeError:
+    sizes = ", ".join(f"{m:.0f}" for m in mem_gib)
+    return RuntimeError(f"MiniMax H3 ran out of GPU memory loading {what} on {len(mem_gib)} card(s) of {sizes} GiB; "
+                        "it was measured on 4 cards of 24 GiB")
+
+
 def block_device_map(mem_gib: list[float], reserve0_gib: float) -> dict[str, int]:
     """Small layers on GPU 0; the blocks in order across the cards, in proportion to each card's
     memory less `reserve0_gib` on GPU 0 (the VAEs, the small layers, decoding)."""
@@ -117,9 +123,12 @@ def main() -> int:
                                            encoding="utf-8")
 
     # Phase 1: conditioning for every item.
-    encoder = Qwen3VLForConditionalGeneration.from_pretrained(
-        a.weights, subfolder="text_encoder", dtype=torch.bfloat16, device_map="balanced",
-        max_memory={i: f"{m - 2:.0f}GiB" for i, m in enumerate(mem)})
+    try:
+        encoder = Qwen3VLForConditionalGeneration.from_pretrained(
+            a.weights, subfolder="text_encoder", dtype=torch.bfloat16, device_map="balanced",
+            max_memory={i: f"{m - 2:.0f}GiB" for i, m in enumerate(mem)})
+    except torch.OutOfMemoryError as exc:
+        raise does_not_fit("the text encoder", mem) from exc
     encoders = pipelines({n: e for n, (e, _) in flows.items()}, text_encoder=encoder)
     states = {}
     for item in mine:
@@ -132,7 +141,8 @@ def main() -> int:
                     call["image"] = images[0]
                 if -1 in images:
                     call["last_image"] = images[-1]
-            states[index] = encoders[workflow_of(item)](**call)
+            with torch.inference_mode():
+                states[index] = encoders[workflow_of(item)](**call)
         except Exception as exc:          # noqa: BLE001 -- a per-item error; move on (protocol)
             failed(index, exc)
     del encoders, encoder
@@ -140,10 +150,13 @@ def main() -> int:
     torch.cuda.empty_cache()
 
     # Phase 2: the transformer, then every clip.
-    transformer = MiniMaxH3Transformer3DModel.from_pretrained(
-        a.weights, subfolder="transformer", dtype=torch.bfloat16,
-        device_map=block_device_map(mem, a.gpu0_reserve_gib),
-        quantization_config=TorchAoConfig(Int8WeightOnlyConfig(version=2), modules_to_not_convert=NOT_QUANTIZED))
+    try:
+        transformer = MiniMaxH3Transformer3DModel.from_pretrained(
+            a.weights, subfolder="transformer", dtype=torch.bfloat16,
+            device_map=block_device_map(mem, a.gpu0_reserve_gib),
+            quantization_config=TorchAoConfig(Int8WeightOnlyConfig(version=2), modules_to_not_convert=NOT_QUANTIZED))
+    except torch.OutOfMemoryError as exc:
+        raise does_not_fit("the transformer", mem) from exc
     transformer.requires_grad_(False)
     renderers = pipelines({n: r for n, (_, r) in flows.items()}, transformer=transformer)
     first = next(iter(renderers.values()))
@@ -159,9 +172,10 @@ def main() -> int:
                 torch.cuda.reset_peak_memory_stats(i)
             name = workflow_of(item)
             size = {"height": a.height, "width": a.width} if name == "t2va" else {}    # fl2va: set while encoding
-            result = renderers[name](state=states.pop(index), num_frames=a.frames, **size,
-                                     generator=torch.Generator().manual_seed(int(item["seed"])),
-                                     output=["videos", "audio", "sampling_rate"])
+            with torch.inference_mode():
+                result = renderers[name](state=states.pop(index), num_frames=a.frames, **size,
+                                         generator=torch.Generator().manual_seed(int(item["seed"])),
+                                         output=["videos", "audio", "sampling_rate"])
             encode_video(result["videos"][0], fps=FPS, output_path=str(out / f"{index}.mp4"))
             status = {"ok": True, "seconds": round(time.monotonic() - t0, 2),
                       "peak_allocated_gib": [round(torch.cuda.max_memory_allocated(i) / 2**30, 1)

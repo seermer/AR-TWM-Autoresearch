@@ -32,3 +32,32 @@ def check_visible(gpus: list[int], visible=visible_gpus) -> None:
     missing = [g for g in gpus if g not in seen]
     if missing:
         raise GpuPolicyError(f"GPU(s) {missing} are not visible to nvidia-smi (visible: {sorted(seen)})")
+
+
+def gpu_total_gib(gpus: list[int]) -> dict[int, int] | None:
+    """Each card's memory in whole GiB (a 24 GB card reports 23.99)."""
+    out = smi(["--query-gpu=index,memory.total", "--format=csv,noheader,nounits"])
+    if out is None:
+        return None
+    total = {int(i): round(int(m) / 1024) for i, m in (line.split(",") for line in out.strip().splitlines())}
+    return {g: total[g] for g in gpus if g in total}
+
+
+def check_tools_fit(cfg, gpus: list[int], totals=gpu_total_gib) -> None:
+    """Raise when an enabled GPU tool's `min_total_gpu_gib` (its config block's estimate of the
+    memory it needs across the run's cards) exceeds what the run's cards have: the run would
+    otherwise start and the tool fail for the agent."""
+    cards = totals(gpus)
+    if not cards:
+        return
+    blocks = {"captioner": cfg.get("captioner") or {},
+              **{k: b for k in ("annotate", "images") if (b := cfg.get(k) or {}).get("enabled")},
+              **{f"generators.{k}": b for k, b in (cfg.get("generators") or {}).items()
+                 if b.get("enabled") or b.get("variants")}}
+    whole = sum(cards.values())
+    problems = [f"{name} needs {block['min_total_gpu_gib']} GiB" for name, block in blocks.items()
+                if block.get("min_total_gpu_gib", 0) > whole]
+    if problems:
+        raise GpuPolicyError(f"enabled tools do not fit GPUs {','.join(map(str, gpus))} ({whole} GiB in total): "
+                             + "; ".join(problems) + ". Disable them in configs/kernel.yaml or give the run "
+                             "larger or more GPUs.")

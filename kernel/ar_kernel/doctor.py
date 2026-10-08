@@ -8,7 +8,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import KernelConfig, resolve_gpus
+from .config import GpuPolicyError, KernelConfig, resolve_gpus
+from .guards import check_tools_fit
 from .subproc import project_env
 from .tools.vllm_server import require_free_gpus
 
@@ -166,6 +167,14 @@ def _gpus(cfg: KernelConfig) -> list[Finding]:
     return out
 
 
+def _fit(cfg: KernelConfig) -> list[Finding]:
+    try:
+        check_tools_fit(cfg, resolve_gpus(cfg, os.environ))
+    except GpuPolicyError as exc:
+        return [Finding("fail", "gpus.fit", str(exc))]
+    return [Finding("ok", "gpus.fit", "every enabled tool's estimate fits the run's GPUs")]
+
+
 def _dotenv(cfg: KernelConfig) -> list[Finding]:
     out = []
     for repo in (cfg.repo_root, cfg.worldmodel, cfg.wbench):
@@ -207,6 +216,7 @@ def run_checks(cfg: KernelConfig | None = None) -> list[Finding]:
     findings += _siblings(cfg)
     findings += _tools()
     findings += _gpus(cfg)
+    findings += _fit(cfg)
     findings += _envs(cfg)
     findings += _prefix_envs(cfg)
     findings += _dotenv(cfg)

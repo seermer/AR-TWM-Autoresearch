@@ -5,7 +5,7 @@ from .archive.nodes import NodeStore
 from .config import KernelConfig, load_dotenv, resolve_gpus
 from .control import Control, drive, exit_process, kill_recorded_groups, mark_interrupted
 from .doctor import report, run_checks
-from .guards import alert, check_visible
+from .guards import alert, check_tools_fit, check_visible
 from .loop import Loop
 from .monitor import Monitor
 from .run import PreflightError, RunNotFound, attach_run, bootstrap_run, rescore_node
@@ -113,6 +113,7 @@ def _run(cfg, args) -> int:
             raise ValueError(f"{key} is empty; set it in AutoResearcher/.env before `ar run`")
     if not args.resume:
         check_visible(resolve_gpus(cfg, os.environ))          # the live config is what the run will freeze
+        check_tools_fit(cfg, resolve_gpus(cfg, os.environ))
         if args.git_remote and (error := AgentsRepo.check_remote(args.git_remote)):
             print(f"error: cannot reach --git-remote {args.git_remote}: {error}", file=sys.stderr)
             return 2
@@ -151,6 +152,7 @@ def _run(cfg, args) -> int:
     run_cfg = KernelConfig.for_run(ctx.run_dir)
     ctx.gpus = resolve_gpus(run_cfg, os.environ)              # one config per run: never the live one
     check_visible(ctx.gpus)
+    check_tools_fit(run_cfg, ctx.gpus)
     repo = AgentsRepo(ctx.run_dir / "agents.git", remote=remote, namespace=ctx.run_dir.name,
                       on_push_error=lambda error: alert(ctx.recorder, "git_push_failed", error, level="warning"))
     if args.resume:

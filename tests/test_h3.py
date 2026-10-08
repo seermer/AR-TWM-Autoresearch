@@ -1,4 +1,4 @@
-"""rollout_h3: turn layout on the round grid, the MiniMax prompt format, captions, submit checks,
+"""rollout_h3: turn layout on the round grid, the MiniMax prompt format, submit checks,
 the real produce with a fake worker, and one real gpu smoke."""
 import copy
 import json
@@ -15,7 +15,7 @@ from ar_kernel.data.probe import probe_video
 from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools import h3
 from ar_kernel.tools.context import TokenRegistry
-from ar_kernel.tools.h3 import H3Backend, build_caption, build_prompt, turn_starts
+from ar_kernel.tools.h3 import H3Backend, build_prompt, turn_starts
 from ar_kernel.tools.jobs import JobQueue
 from ar_kernel.tools.server import ToolError
 from tests.conftest import make_mp4
@@ -58,7 +58,6 @@ def test_a_turn_is_one_clean_sentence(text, clean):
     p = build_prompt(SCENE, [text], [0], 243, [], "wind\n\nnon_diegetic_music: drums", MUSIC)
     assert f"At 00:00.000, {clean}\n\noverall_soundscape: wind non_diegetic_music: drums\n\n" in p
     assert p.count("\n\n") == 2                          # the three fields, and nothing an item wrote
-    assert build_caption(SCENE, [text], [0], 243)["caption"].endswith(clean)
 
 
 @pytest.mark.parametrize("keyframes, line", [
@@ -77,13 +76,11 @@ def test_alignment_line_follows_the_keyframes(keyframes, line):
     assert p.startswith(line + "\n\nintegrated_multimodal_description: [Shot 1] ")
 
 
-def test_caption_covers_every_turn_and_segments_tile_the_clip():
-    c = build_caption(SCENE, TURNS, [0, 89, 153], 243)
-    assert c["caption"] == ("A first-person view walks along a cobblestone street. the camera pushes in slowly. "
-                            "Then the camera pans right to face a red door. Then a white dog runs out.")
-    assert [s["time_range_s"] for s in c["segments"]] == [[0.0, 89 / 24], [89 / 24, 153 / 24], [153 / 24, 243 / 24]]
-    assert c["segments"][1]["prompt"] == ("A first-person view walks along a cobblestone street. "
-                                          "the camera pans right to face a red door.")
+def timed_caption(candidate: dict) -> dict:
+    """The caption an agent writes from `turn_segments` once the frames confirm them."""
+    return {"caption": SCENE, "segments": [
+        {"time_range_s": [t["frame_start"] / 24, t["frame_end_exclusive"] / 24], "prompt": f"{SCENE}. {t['prompt']}"}
+        for t in candidate["turn_segments"]]}
 
 
 REAL = KernelConfig.load()
@@ -151,7 +148,7 @@ def test_h3_job_over_the_configured_cap_is_refused(h3_env):
         submit(q, caller, [item()] * (cap + 1))
 
 
-def test_h3_produces_a_silent_clip_with_one_segment_per_turn(h3_env):
+def test_h3_produces_a_silent_clip_with_a_scene_caption_and_turn_metadata(h3_env):
     q, caller, staging = h3_env
     items = [item(), item(turns=[{"prompt": "the camera holds still"}],
                           keyframes=[{"image": "first.png", "frame": 0}, {"image": "last.png", "frame": -1}])]
@@ -168,7 +165,8 @@ def test_h3_produces_a_silent_clip_with_one_segment_per_turn(h3_env):
                               str(staging / "rollouts" / job / "0.mp4")], capture_output=True, text=True).stdout.split()
     assert streams == ["video"]
     caption = json.loads((staging / "rollouts" / job / "0.json").read_text())
-    assert caption == h3.build_caption(SCENE, TURNS, [0, 89, 153], 243)
+    assert caption == {"caption": SCENE + "."}             # the scene only: turns are the agent's to confirm
+    assert [t["prompt"] for t in c["turn_segments"]] == TURNS
     assert c["h3_prompt"] == by[0]["worker"]["prompt"] == h3.build_prompt(SCENE, TURNS, [0, 89, 153], 243, [], SOUND, MUSIC)
     assert [(t["frame_start"], t["frame_end_exclusive"]) for t in c["turn_segments"]] == [(0, 89), (89, 153), (153, 243)]
     w = by[1]["worker"]
@@ -206,11 +204,14 @@ def test_h3_finished_candidate_passes_the_real_ingestor_as_per_chunk(tmp_path):
         SimpleNamespace(args={"frames": 243}), {"index": 0, **item()}, out)
     pose = write_poses(out / "vigeo.npz", n_frames=res["frames"], width=960, height=544)
     ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
-    [r] = ing.ingest([Candidate(video=Path(res["video"]), caption=Path(res["caption"]), pose=pose,
+    assert json.loads(Path(res["caption"]).read_text()) == {"caption": SCENE + "."}
+    timed = out / "timed.json"
+    timed.write_text(json.dumps(timed_caption(res)))
+    [r] = ing.ingest([Candidate(video=Path(res["video"]), caption=timed, pose=pose,
                                 camera_motion="moving", provenance={"kind": "rollout", "generator": "minimax-h3",
                                 "job_id": "j1", "inputs_hash": "x", "seed": 7})], node_id="n1")
     assert r.accepted, r.reasons
-    assert "video_timed_prompts_camera:per_chunk" in r.formats
+    assert "video_timed_prompts_camera:per_chunk" in r.formats       # the planned boundaries are on the round grid
 
 
 def test_h3_is_registered_only_when_enabled(tmp_path):
@@ -247,6 +248,9 @@ def test_bridge_refuses_cards_that_cannot_hold_the_text_encoder():
     b.require_memory([23.6] * 4)
     with pytest.raises(RuntimeError, match="about 70 GiB"):
         b.require_memory([23.6, 23.6])
+    assert str(b.does_not_fit("the transformer", [23.6] * 3)) == (
+        "MiniMax H3 ran out of GPU memory loading the transformer on 3 card(s) of 24, 24, 24 GiB; "
+        "it was measured on 4 cards of 24 GiB")
 
 
 @pytest.mark.parametrize("size", [(1280, 720), (800, 1088), (640, 360), (960, 544)])
@@ -257,10 +261,11 @@ def test_bridge_crops_any_keyframe_to_the_canvas(size):
 
 @pytest.mark.gpu
 def test_real_h3_rollout(tmp_path):
-    """AR_TEST_GPUS=0,1,2,3 pytest tests/test_h3.py -m gpu -s --basetemp=.cache/pytest/gpu   (~45 min)
+    """AR_TEST_GPUS=0,1,2,3 pytest tests/test_h3.py -m gpu -s --basetemp=.cache/pytest/gpu   (~70 min)
 
-    One text-only single-turn item and one three-turn item with first and last keyframes (Z-Image
-    frames), through the real tool path; each candidate gets a ViGeo pose and must ingest as
+    A text-only single-turn item, a three-turn item with first and last keyframes and a two-turn
+    item with only a last keyframe (Z-Image frames), through the real tool path; each candidate
+    gets a ViGeo pose and, with segments written from its `turn_segments`, must ingest as
     video_timed_prompts_camera:per_chunk."""
     import os
     import shutil
@@ -289,20 +294,25 @@ def test_real_h3_rollout(tmp_path):
              "seed": 4}]})["job_id"])
         assert img["state"] == "done", img.get("error")
         first, last = (i["image"] for i in job_result(img)["items"])
+        audio = {"overall_soundscape": "A light wind and quiet natural ambience.", "non_diegetic_music": "N/A"}
         items = [
             {"scene_prompt": "Live-action, a first-person view on a forest trail in autumn, tall pines, low sun",
-             "turns": [{"prompt": "the camera pushes in at slow speed along the trail"}], "seed": 11},
+             "turns": [{"prompt": "the camera pushes in at slow speed along the trail"}], "seed": 11, **audio},
             {"scene_prompt": "Live-action, a first-person view on a quay in a quiet harbor at dawn",
              "turns": [{"prompt": "the camera pushes in at slow speed along the quay"},
                        {"prompt": "the camera pans right with large amplitude toward the fishing boats"},
                        {"prompt": "a seagull lands on the nearest boat"}],
-             "keyframes": [{"image": first, "frame": 0}, {"image": last, "frame": -1}], "seed": 12}]
+             "keyframes": [{"image": first, "frame": 0}, {"image": last, "frame": -1}], "seed": 12, **audio},
+            {"scene_prompt": "Live-action, a first-person view on a quay in a quiet harbor at dawn",
+             "turns": [{"prompt": "the camera trucks left at slow speed along the water's edge"},
+                       {"prompt": "the camera pans left and settles on the white fishing boat moored at the quay"}],
+             "keyframes": [{"image": first, "frame": -1}], "seed": 13, **audio}]
         out = _wait(q, caller, submit(q, caller, items)["job_id"])
         assert out["state"] == "done", out.get("error")
         by = {i["index"]: i for i in job_result(out)["items"]}
-        assert all("candidate" in by[i] for i in (0, 1)), by
-        cands = [by[i]["candidate"] for i in (0, 1)]
-        print("h3 worker:", [by[i]["worker"] for i in (0, 1)])
+        assert all("candidate" in by[i] for i in range(3)), by
+        cands = [by[i]["candidate"] for i in range(3)]
+        print("h3 worker:", [by[i]["worker"] for i in range(3)])
         ann = _wait(q, caller, q.backends["annotate_camera"].submit(
             q, caller, {"items": [{"video": c["video"]} for c in cands]})["job_id"])
         assert ann["state"] == "done", ann.get("error")
@@ -315,7 +325,8 @@ def test_real_h3_rollout(tmp_path):
         stage = staging / "ingest" / str(i)
         stage.mkdir(parents=True)
         shutil.copy(host(c["video"]), stage / "v.mp4")
-        shutil.copy(host(c["caption"]), stage / "c.json")
+        assert set(json.loads(host(c["caption"]).read_text())) == {"caption"}
+        (stage / "c.json").write_text(json.dumps(timed_caption(c)))
         shutil.copy(host(a["pose"]), stage / "p.npz")
         [res] = ing.ingest([Candidate(video=stage / "v.mp4", caption=stage / "c.json", pose=stage / "p.npz",
                                       camera_motion="moving", provenance=c["provenance"], license=c["license"])],

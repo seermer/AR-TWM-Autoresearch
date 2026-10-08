@@ -196,3 +196,15 @@ def test_a_missing_nvidia_runtime_and_busy_gpus_are_failures(monkeypatch):
     monkeypatch.setattr(doctor.shutil, "which", lambda name: "/usr/bin/" + name)
     monkeypatch.setattr(doctor, "require_free_gpus", lambda gpus, limit: None)
     assert {f.level for f in doctor._gpus(cfg)} == {"ok"}
+
+
+def test_a_tool_that_does_not_fit_the_gpus_is_a_failure(monkeypatch):
+    from ar_kernel import doctor
+    from ar_kernel.config import GpuPolicyError
+    cfg = KernelConfig.load()
+    monkeypatch.setattr(doctor, "check_tools_fit", lambda cfg, gpus: None)
+    assert [f.level for f in doctor._fit(cfg)] == ["ok"]
+    monkeypatch.setattr(doctor, "check_tools_fit", lambda cfg, gpus: (_ for _ in ()).throw(
+        GpuPolicyError("enabled tools do not fit GPUs 0,1: generators.h3 needs 70 GiB")))
+    [found] = doctor._fit(cfg)
+    assert (found.level, found.check) == ("fail", "gpus.fit") and "generators.h3 needs 70 GiB" in found.detail

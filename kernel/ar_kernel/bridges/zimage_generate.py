@@ -45,9 +45,10 @@ def main() -> int:
     for item in mine:
         index, t0 = item["index"], time.monotonic()
         try:
-            image = pipe(prompt=item["prompt"], width=args.width, height=args.height,
-                        num_inference_steps=args.steps, guidance_scale=0.0,
-                        generator=torch.Generator("cuda").manual_seed(item["seed"])).images[0]
+            with torch.inference_mode():
+                image = pipe(prompt=item["prompt"], width=args.width, height=args.height,
+                             num_inference_steps=args.steps, guidance_scale=0.0,
+                             generator=torch.Generator("cuda").manual_seed(item["seed"])).images[0]
             image.save(out / f"{index}.png")
             status = {"ok": True, "seconds": round(time.monotonic() - t0, 2)}
         except Exception as exc:          # noqa: BLE001 -- a per-item error; move on (protocol)

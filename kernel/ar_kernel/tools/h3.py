@@ -3,8 +3,8 @@ from the agent's per-turn prompts.
 
 The agent gives a scene and a list of turns. The kernel puts the turn boundaries on the training
 round grid (frame 25 + 32j), writes one continuous shot in MiniMax's prompt format with an in-shot
-timestamp at each turn's start ("At 00:03.708, ..."), and publishes the clip with one caption
-segment per turn. MiniMax's guide documents a timestamp only at a cut ("[Shot 2] At ..."); that
+timestamp at each turn's start ("At 00:03.708, ..."), and publishes the clip with a caption of
+the scene only (the turns and their planned frame ranges are metadata). MiniMax's guide documents a timestamp only at a cut ("[Shot 2] At ..."); that
 keeps the timing but changes the scene, so the in-shot form is our own and its timing is loose.
 The clip carries no pose.
 """
@@ -70,15 +70,6 @@ def build_prompt(scene: str, turns: list[str], starts: list[int], frames: int, k
             f"overall_soundscape: {_line(soundscape)}\n\nnon_diegetic_music: {_line(music)}")
 
 
-def build_caption(scene: str, turns: list[str], starts: list[int], frames: int) -> dict:
-    """The whole clip in `caption`; one segment per turn, in seconds, tiling [0, frames / 24]."""
-    ends = [*starts[1:], frames]
-    caption = " Then ".join(_sentence(t) for t in turns)
-    return {"caption": f"{_sentence(scene)} {caption}",
-            "segments": [{"time_range_s": [s / FPS, e / FPS], "prompt": f"{_sentence(scene)} {_sentence(t)}"}
-                         for t, s, e in zip(turns, starts, ends)]}
-
-
 class H3Backend(GpuJob):
     """rollout_h3: one worker with every GPU of the run (the int8 transformer is spread across them)."""
     name = tool = "rollout_h3"
@@ -109,12 +100,13 @@ class H3Backend(GpuJob):
             f"frame 0 is the first frame and one at -1 the last; images are center-cropped to {w}x{h}. A last "
             "keyframe must be a view the shot can reach from the first: an unrelated image is reached by a cut "
             "in the final frames. Each "
-            f"result item gives a `candidate` for data_ingest (a {w}x{h}, 24 fps, silent mp4, a caption with one "
-            "segment per turn, provenance); it carries no pose/camera_motion -- add one (annotate_camera then "
+            f"result item gives a `candidate` for data_ingest (a {w}x{h}, 24 fps, silent mp4, a caption holding "
+            "the scene only, provenance); it carries no pose/camera_motion -- add one (annotate_camera then "
             "'moving', or 'static') before ingesting. Timing is loose: each turn's start time is written into "
             "the prompt as a timestamp inside the one shot, which the model was not documented to follow, and "
-            "an event can land a second or more off. Check the frames, and write the segments you ingest to "
-            "match what the clip shows. Metadata, not labels: `turn_segments` and `h3_prompt`.")
+            "an event can land a second or more off. The published caption therefore has no per-turn segments: "
+            "check the frames, then write the segments you ingest to match what the clip shows. Metadata, not "
+            "labels: `turn_segments` (each turn's prompt and its planned frame range) and `h3_prompt`.")
 
     def check_args(self, args):
         default, maximum = self.block["frames"]
@@ -181,7 +173,7 @@ class H3Backend(GpuJob):
         if info.frames != frames:
             raise ValueError(f"rendered clip has {info.frames} frames, not {frames}")
         turns, starts = self._layout(job, item)
-        caption = self.write_caption(out, item, build_caption(item["scene_prompt"], turns, starts, frames))
+        caption = self.write_caption(out, item, {"caption": _sentence(item["scene_prompt"])})
         segments = [{"turn_index": k, "prompt": t, "frame_start": s, "frame_end_exclusive": e}
                     for k, (t, s, e) in enumerate(zip(turns, starts, [*starts[1:], frames]))]
         return {"video": silent, "caption": caption, "frames": info.frames, "turn_segments": segments,

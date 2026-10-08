@@ -57,13 +57,19 @@ Job parameters:
 Item:
 
 ```json
-{"scene_prompt": "first-person view walking along a cobblestone street ...",
+{"scene_prompt": "Live-action, a first-person view walking along a cobblestone street ...",
  "turns": [{"prompt": "the camera pushes in slowly along the street"},
            {"prompt": "the camera pans right to face a red door"},
            {"prompt": "the door opens and a white dog runs out"}],
+ "overall_soundscape": "Footsteps on stone and a light wind.",
+ "non_diegetic_music": "N/A",
  "keyframes": [{"image": "first.png", "frame": 0}, {"image": "last.png", "frame": -1}],
  "seed": 42}
 ```
+
+- *(Amended 2026-10-08.)* `overall_soundscape` and `non_diegetic_music` (strings, required) are
+  two of the guide's three core fields; the kernel builds the third from `scene_prompt` and
+  `turns`. `scene_prompt` starts with the visual style, as the guide's examples do.
 
 - `scene_prompt` (string, required) and `turns` (non-empty list of `{"prompt": string}`) use the
   same names as `rollout_alayaworld`. The number of turns is limited by the clip length (§3.2).
@@ -91,12 +97,19 @@ MiniMax-AI/MiniMax-H3 at d21241f):
 ```text
 <alignment line, only with images>
 
-integrated_multimodal_description: [Shot 1] <scene_prompt> <turn 1>. At 00:SS.mmm, <turn 2>. At 00:SS.mmm, <turn 3>.
+integrated_multimodal_description: [Shot 1] <scene_prompt>. The whole video is one continuous shot with smooth motion and no cuts. At 00:00.000, <turn 1>. At 00:SS.mmm, <turn 2>. At 00:SS.mmm, <turn 3>.
 
-overall_soundscape: Natural ambient sound of the scene.
+overall_soundscape: <the item's overall_soundscape>
 
-non_diegetic_music: N/A
+non_diegetic_music: <the item's non_diegetic_music>
 ```
+
+*(Amended 2026-10-08.)* The no-cuts sentence is fixed text from the kernel and every turn,
+the first included, carries its start time. The guide documents a timestamp only at a cut
+(`[Shot 2] At 00:03.500, the camera cuts to...`); a timestamp inside one shot is our own
+extension, chosen because the cut form changes the scene between shots. Its timing is loose:
+within about 0.5 s in the spike, about 1.3 s late in one smoke clip. The tool description says
+so. Each text is collapsed to one line, and a turn loses a trailing `, ; :` before its full stop.
 
 Alignment line, copied from the guide, with `S.SS` the clip duration to two decimals:
 
@@ -116,18 +129,10 @@ The builder is a pure function with unit tests; the assembled prompt is stored i
 ### 3.3 Output
 
 Per item, a `candidate` for `data_ingest`: a silent 960x544, 24 fps mp4, a caption, provenance
-(generator `minimax-h3`), and no pose. The caption has one segment per turn:
-
-```json
-{"caption": "<scene_prompt> <turn 1>. Then <turn 2>. Then <turn 3>.",
- "segments": [{"time_range_s": [0.0, 3.708], "prompt": "<scene_prompt> <turn 1>"},
-              {"time_range_s": [3.708, 6.375], "prompt": "<scene_prompt> <turn 2>"},
-              {"time_range_s": [6.375, 10.125], "prompt": "<scene_prompt> <turn 3>"}]}
-```
-
-The caption covers the whole clip, because an ingested clip can also be trained as
-`video_caption_camera`, which reads only `caption`. (`rollout_alayaworld` sets `caption` to its
-first round's prompt; that is left as is.)
+(generator `minimax-h3`), and no pose. *(Amended 2026-10-08.)* The caption holds the scene only,
+`{"caption": "<scene_prompt>."}`: the timing of a turn is not reliable, so the agent checks the
+frames and writes the per-turn segments it ingests. What it asked for stays in the result as
+metadata. (`rollout_alayaworld`'s published caption is left as is.)
 
 Metadata, not labels: `turn_segments` (each turn's text and frame range) and `h3_prompt`.
 The published clip passes the existing checks (24 fps; 960/544 is within 2% of 16:9).
@@ -231,6 +236,14 @@ Each job tool's config block (`captioner`, `annotate`, `images`, `generators.<na
 `max_items`. Absent means no cap, as today. A call with more items is refused whole, with the
 cap in the error, and nothing is queued. When a cap is set, `job_description` appends
 "At most N items per job." Only `generators.h3` sets one (30).
+
+### 7.3 Tools must fit the run's GPUs *(added 2026-10-08)*
+
+Each GPU tool's config block has `min_total_gpu_gib`, an estimate of the memory it needs across
+the run's cards: 96 (4 x 24 GB) for `captioner` and `generators.h3`, 48 (2 x 24 GB) for the
+others. `ar run` (new and resumed) and `ar doctor` stop with one error naming every enabled tool
+that needs more than the run's cards have, so a tool that cannot fit is the user's error at
+start and never a failed job for the agent. A block without the key is not checked.
 
 ## 8. Tool descriptions
 

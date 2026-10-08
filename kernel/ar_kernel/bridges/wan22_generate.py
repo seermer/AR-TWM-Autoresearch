@@ -72,11 +72,12 @@ def main() -> int:
         try:
             torch.cuda.reset_peak_memory_stats()
             img = fit_first_frame(Image.open(item["image"])) if item.get("image") else None
-            video = pipe.generate(
-                item["prompt"], img=img, size=SIZE_CONFIGS["1280*704"],
-                max_area=MAX_AREA_CONFIGS["1280*704"], frame_num=args.frames, shift=cfg.sample_shift,
-                sample_solver="unipc", sampling_steps=cfg.sample_steps, guide_scale=cfg.sample_guide_scale,
-                seed=item["seed"], offload_model=args.offload_model)
+            with torch.inference_mode():
+                video = pipe.generate(
+                    item["prompt"], img=img, size=SIZE_CONFIGS["1280*704"],
+                    max_area=MAX_AREA_CONFIGS["1280*704"], frame_num=args.frames, shift=cfg.sample_shift,
+                    sample_solver="unipc", sampling_steps=cfg.sample_steps, guide_scale=cfg.sample_guide_scale,
+                    seed=item["seed"], offload_model=args.offload_model)
             save_video(tensor=video[None], save_file=str(out / f"{index}.mp4"), fps=cfg.sample_fps,
                        nrow=1, normalize=True, value_range=(-1, 1))
             status = {"ok": True, "seconds": round(time.monotonic() - t0, 2),
