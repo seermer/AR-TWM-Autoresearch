@@ -117,6 +117,7 @@ Both are verified by §16.3 items 9 and 10 before the first real run.
 | `WorldModel/weights/alaya-world-dmd` | Released v1.1 stage3 LoRA (4-step student) | Proxy rendering; fast rollouts |
 | `WorldModel/weights/ltx-2.3` | LTX-2.3 base + Gemma text encoder | Training/rendering dependencies |
 | `AutoResearcher/weights/ltx-2.5` | Lightricks LTX-2.5, dev + distilled (LTX-2.x Community License), 24 fps | Video-generation data source |
+| `AutoResearcher/weights/minimax-h3` | MiniMax H3 (diffusers layout, t2va/fl2va partition), 24 fps | Video-generation data source |
 | `AutoResearcher/weights/wan2.2-ti2v-5b` | Wan 2.2 TI2V-5B (Apache-2.0), 720p 24 fps | Video-generation data source |
 
 ### 2.4 Caches
@@ -1252,7 +1253,7 @@ Three real nodes with small recipes before the first long run.
 | `telemetry.gpu_sample_sec` | 5 |
 | `agents.context_window_tokens` / `agents.compact_at` | 1000000 (set to the agent model's window) / 0.6 *(as configured; corrected 2026-10-01)* |
 | `alerts.stall_min` / `gateway_error_rate` / `gateway_error_window_min` | 30 / 0.2 / 5 |
-| `generators` | `alayaworld: {dmd4, ar30}`, `ltx25: {dev, distilled}`, `wan22: {ti2v-5b}`, each `enabled` per §16.3 item 5 *(amended 2026-09-26, Plan 3 as built: enabled = dmd4, ar30, ti2v-5b, distilled. Each block has `env` (a name or a repo-relative prefix env), `variants: {<v>: {enabled}}`, `max_items`, `timeout_s`, `license`; alayaworld `max_turns: 9`; wan22/ltx25 `repo` + pinned `commit` (the backend refuses other commits), `weights`, `frames: [default, max]` (wan22 `[121, 121]`, ltx25 `[121, 241]`), `workers`; wan22 `gpus_per_worker: 1`, `extra_args: {offload_model: true, t5_cpu: true}`; ltx25 `quantization: fp8-cast`, `offload: cpu`, per-variant `peak_rss_gib: 40`, `host_reserve_gib: 100`, `resolutions: [[576, 1024]]`)* |
+| `generators` | `alayaworld`, `wan22`, `h3`: `enabled`; `ltx25`: `variants` (a list of the enabled ones) *(amended 2026-10-06: flat switches, AlayaWorld AR-only, Wan off, H3 added; see 2026-10-06-h3-generator-and-rollout-changes-design.md)* *(amended 2026-09-26, Plan 3 as built: enabled = dmd4, ar30, ti2v-5b, distilled. Each block has `env` (a name or a repo-relative prefix env), `variants: {<v>: {enabled}}`, `max_items`, `timeout_s`, `license`; alayaworld `max_turns: 9`; wan22/ltx25 `repo` + pinned `commit` (the backend refuses other commits), `weights`, `frames: [default, max]` (wan22 `[121, 121]`, ltx25 `[121, 241]`), `workers`; wan22 `gpus_per_worker: 1`, `extra_args: {offload_model: true, t5_cpu: true}`; ltx25 `quantization: fp8-cast`, `offload: cpu`, per-variant `peak_rss_gib: 40`, `host_reserve_gib: 100`, `resolutions: [[576, 1024]]`)* |
 | `annotate` | *(Added 2026-09-26, Plan 3.)* `enabled: true`, `env: alayaworld`, `repo`/`checkpoint` (ViGeo under `WorldModel/third_party/ViGeo`), `max_frames: 1200`, `max_items: 100` *(2026-10-01: every GPU job takes at most 100 items)*, `timeout_s: 21600` |
 | `images` | *(Added 2026-09-26, Plan 3.)* `enabled: true`, `env: .envs/gen-zimage`, `weights: weights/z-image-turbo` + pinned `revision`, `steps: 9`, `offload: model`, `max_items: 100`, `timeout_s: 7200`, `license: Apache-2.0` |
 

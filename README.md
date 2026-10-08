@@ -12,7 +12,7 @@ Every step ends with a check; do not continue if it fails.
 | Driver | `nvidia-smi` shows `CUDA Version: 13.2` or higher |
 | CUDA toolkit | `nvcc --version` works and says 12.x (usually `/usr/local/cuda-12.8`) |
 | RAM | 128 GB minimum, 256 GB recommended |
-| Disk | 700 GB free on one disk (downloads about 460 GB) |
+| Disk | 850 GB free on one disk (downloads about 600 GB) |
 | Software | `conda` (Miniforge), `git`, `ffmpeg`, `docker` (your user can run `docker ps` without `sudo`) with `nvidia-container-toolkit` (agent containers use the GPUs) |
 | Accounts | GitHub (SSH key), Hugging Face, an LLM API key (see step 3) |
 
@@ -47,13 +47,13 @@ Check: `ls ../WBench/third_party/mega-sam/base/setup.py` prints the path.
 
 ## 2. Create the environments
 
-Nine conda environments, all created inside `AutoResearcher/.envs/`. Takes 30 to 60 minutes and about 50 GB.
+Ten conda environments, all created inside `AutoResearcher/.envs/`. Takes 30 to 60 minutes and about 55 GB.
 
 ```bash
 scripts/setup_envs.sh
 ```
 
-Check: `ls .envs` lists `alayaworld autoresearcher gen-ltx25 gen-wan22 gen-zimage panel vllm wbench-main wbench-vp`.
+Check: `ls .envs` lists `alayaworld autoresearcher gen-h3 gen-ltx25 gen-wan22 gen-zimage panel vllm wbench-main wbench-vp`.
 If it stops on an error, fix the cause and run it again: environments that already exist are skipped.
 To rebuild one, delete `.envs/<name>` and run `scripts/setup_envs.sh <name>`.
 
@@ -111,7 +111,7 @@ Check: `ls -l ../WorldModel/.env ../WBench/.env` both show `-> ../AutoResearcher
 
 Optional model context size: `agents.context_window_tokens` in `configs/kernel.yaml` is set to 1000000 tokens, and the agent compacts its conversation at `agents.compact_at` (0.6) of it. Lower it if your model's context window is smaller.
 
-## 4. Download weights and data (about 460 GB)
+## 4. Download weights and data (about 600 GB)
 
 Run all of it, from `AutoResearcher`. Each command can be re-run; it skips finished files.
 
@@ -140,6 +140,11 @@ hf download Lightricks/LTX-2.5 --local-dir weights/ltx-2.5 \
             "vae/ltx-2.5-audio-vae-bf16.safetensors" \
             "latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors" \
             "loras/ltx-2.5-22b-distilled-lora-450-bf16.safetensors"
+hf download MiniMaxAI/MiniMax-H3 --revision 42ed227ee7df40d41602854ae760620d6eb651fe \
+  --include "model_index.json" --include "modular_model_index.json" --include "transformer/*" \
+  --include "text_encoder/*" --include "vae/*" --include "audio_vae/*" --include "tokenizer/*" \
+  --include "processor/*" --include "scheduler/*" --include "audio_scheduler/*" \
+  --local-dir weights/minimax-h3        # 137 GB; one --include per pattern
 
 # Video captioning model (lands in .cache/huggingface)
 hf download Qwen/Qwen3.8-27B-FP8

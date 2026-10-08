@@ -162,7 +162,7 @@ generators:
     frames: [243, 243]                   # [default, max]; 17n+5, min 124
     resolution: [544, 960]               # [height, width]
     max_items: 30                        # ~10 h at the measured 1,160 s per clip
-    gpu0_reserve_gib: 12                 # video VAE + small layers
+    gpu0_reserve_gib: 16                 # video VAE, small layers and decoding; gives the 5/15/15/15 split the spike ran
     timeout_s: 43200
 ```
 
@@ -181,7 +181,11 @@ The item's `image` field is replaced by:
 - `frame` is a 0-based frame index; `-1` is the last frame. Missing or empty is text-to-video;
   one entry at frame 0 is today's image-to-video.
 - The bridge passes each entry as `ImageConditioningInput(path, frame, 1.0)`.
-- Which indices LTX accepts is settled by the smoke run; the tool refuses the rest.
+- Any index in `0..frames-1` is accepted: LTX conditions frame 0 by replacing its latent and any
+  other frame as a guiding keyframe (`combined_image_conditionings`). An index outside the clip
+  is refused.
+- A per-item check that needs the job's arguments (`check_item_for`) is added to `GpuJob` for the
+  frame range, and reused by H3 for the turn count.
 - `GpuJob`'s input staging handles the top-level fields a backend lists in `file_keys`
   (path check, copy into the job dir). It is extended once to the `image` of each `keyframes`
   entry, for both LTX and H3.
@@ -232,7 +236,7 @@ cap in the error, and nothing is queued. When a cap is set, `job_description` ap
 
 - A description does not name another generator or an optional tool. `generate_images` says its
   images can start or end a rollout, without listing rollout tools; rollout tools drop
-  "e.g. a generate_images frame" and "like Wan's".
+  "e.g. a generate_images frame".
 - `job_wait`, `data_ingest` and `annotate_camera` may be named: they are treated as always
   registered.
 - A test fails if any registered tool's description contains another optional tool's name or

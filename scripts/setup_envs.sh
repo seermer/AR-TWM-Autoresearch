@@ -10,7 +10,7 @@ export CONDA_PKGS_DIRS=$PWD/.cache/conda/pkgs PIP_CACHE_DIR=$PWD/.cache/pip
 ROOT=$PWD
 mkdir -p .cache third_party
 
-ALL="autoresearcher panel vllm alayaworld wbench-main wbench-vp gen-zimage gen-wan22 gen-ltx25"
+ALL="autoresearcher panel vllm alayaworld wbench-main wbench-vp gen-zimage gen-wan22 gen-ltx25 gen-h3"
 run() { conda run --no-capture-output -p ".envs/$1" "${@:2}"; }
 # `configs/kernel.yaml` pins the Wan2.2 and LTX-2 revisions; read them with the autoresearcher env's yaml
 pin() { .envs/autoresearcher/bin/python -c "import yaml; print(yaml.safe_load(open('configs/kernel.yaml'))['generators']['$1']['commit'])"; }
