@@ -32,6 +32,11 @@ With --variant set it stands in for ltx25_generate.py instead (ltx mode, see ltx
 before the image and wan modes, whose --weights/--frames that bridge's argv also carries): it
 writes a --width x --height, 24 fps mp4 of --frames frames WITH an audio track (as LTX-2.5's own
 output has one) and echoes --weights/--variant/--quantization/--offload.
+
+With --prompts set it stands in for h3_generate.py instead (h3 mode, see h3(): checked first,
+since that bridge's argv also carries --weights and --frames): it writes a --width x --height,
+24 fps mp4 of --frames frames with an audio track and echoes --weights, --frames, the item's
+prompt from the prompts file and its keyframes.
 """
 import argparse
 import json
@@ -127,6 +132,8 @@ parser.add_argument("--t5-cpu", dest="t5_cpu", action="store_true", default=True
 parser.add_argument("--no-t5-cpu", dest="t5_cpu", action="store_false")
 parser.add_argument("--variant")                     # set: ltx mode (stands in for ltx25_generate.py)
 parser.add_argument("--quantization")
+parser.add_argument("--prompts")                     # set: h3 mode (stands in for h3_generate.py)
+parser.add_argument("--gpu0-reserve-gib", type=float)
 args, _ = parser.parse_known_args()
 
 
@@ -179,6 +186,21 @@ def ltx(item, status_path):
                                        "keyframes": item.get("keyframes")}))
 
 
+def h3(item, status_path):
+    """h3_generate.py's contract without a model."""
+    prompts = json.loads(Path(args.prompts).read_text(encoding="utf-8"))
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i",
+                    f"testsrc=size={args.width}x{args.height}:rate={item.get('fps', 24)}", "-f", "lavfi", "-i",
+                    "sine=frequency=440:sample_rate=32000", "-frames:v", str(args.frames), "-shortest",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(out / f"{item['index']}.mp4")],
+                   check=True)
+    status_path.write_text(json.dumps({"ok": True, "seconds": 0.01, "rank": args.rank,
+                                       "gpus": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
+                                       "weights": args.weights, "frames": args.frames,
+                                       "gpu0_reserve_gib": args.gpu0_reserve_gib,
+                                       "prompt": prompts[str(item["index"])], "keyframes": item.get("keyframes")}))
+
+
 def image(item, status_path):
     """zimage_generate.py's contract without a model: a solid PNG of the requested size."""
     from PIL import Image
@@ -208,6 +230,9 @@ for item in mine:
         continue
     if item.get("fail"):
         status_path.write_text(json.dumps({"ok": False, "error": "boom"}))
+        continue
+    if args.prompts is not None:
+        h3(item, status_path)
         continue
     if args.max_frames is not None:
         annotate(item, status_path)

@@ -60,6 +60,14 @@ KEYFRAMES_SCHEMA = {"type": "array", "description": "images the clip must show a
 LtxItems = Annotated[list[dict[str, Any]] | str, items_schema(
     "the clips to render, one item each",
     {"prompt": _str("what the clip shows"), "keyframes": KEYFRAMES_SCHEMA, "seed": _SEED}, ["prompt", "seed"])]
+H3Items = Annotated[list[dict[str, Any]] | str, items_schema(
+    "the clips to render, one item each",
+    {"scene_prompt": _str("the scene: place, objects, light, viewpoint"),
+     "turns": {"type": "array", "description": "the clip, turn by turn, as one continuous shot",
+               "items": {"type": "object", "additionalProperties": False, "required": ["prompt"], "properties": {
+                   "prompt": _str("what happens during this turn, the camera move included")}}},
+     "keyframes": KEYFRAMES_SCHEMA, "seed": _SEED},
+    ["scene_prompt", "turns", "seed"])]
 _TURN = {"type": "object", "additionalProperties": False, "required": ["action"], "properties": {
     "action": _str("camera move for this turn: W, A, S, D (translate), left, right, up, down (rotate), stop, "
                    "or two joined with '+', e.g. 'W+left'"),
@@ -450,6 +458,14 @@ def register_gpu_tools(mcp, kit, q) -> None:
             return await submit(ctx, "rollout_ltx25", items=items, variant=variant, frames=frames,
                                 height=height, width=width)
 
+    if "rollout_h3" in b:
+        @mcp.tool(name="rollout_h3", description=job_description(b["rollout_h3"]))
+        async def rollout_h3(
+                items: H3Items, ctx: Context,
+                frames: Annotated[int | None, Field(description="17n+5 frames at 24 fps; one value for the job")] = None,
+        ) -> dict[str, Any]:
+            return await submit(ctx, "rollout_h3", items=items, frames=frames)
+
 
 def build_gpu_backends(cfg, run_dir: Path, gpus: list[int], registry, recorder) -> list:
     """Every GPU data backend a run gets: the captioner always, the others only when
@@ -458,6 +474,7 @@ def build_gpu_backends(cfg, run_dir: Path, gpus: list[int], registry, recorder) 
     and `register_caption_tool`."""
     from .annotate import AnnotateBackend          # imports this module
     from .captioner import CaptionBackend
+    from .h3 import H3Backend
     from .images import ImageBackend
     from .rollouts import AlayaWorldBackend, Ltx25Backend, Wan22Backend
 
@@ -467,5 +484,6 @@ def build_gpu_backends(cfg, run_dir: Path, gpus: list[int], registry, recorder) 
 
     enabled = [(True, CaptionBackend), (cfg.get("annotate.enabled"), AnnotateBackend),
                (cfg.get("images.enabled"), ImageBackend), (generator_on("alayaworld"), AlayaWorldBackend),
-               (generator_on("wan22"), Wan22Backend), (generator_on("ltx25"), Ltx25Backend)]
+               (generator_on("wan22"), Wan22Backend), (generator_on("ltx25"), Ltx25Backend),
+               (generator_on("h3"), H3Backend)]
     return [backend(cfg, run_dir, gpus, registry, recorder) for on, backend in enabled if on]

@@ -1,9 +1,24 @@
 """rollout_h3: turn layout on the round grid, the MiniMax prompt format, captions, submit checks,
 the real produce with a fake worker, and one real gpu smoke."""
-import pytest
+import copy
+import json
+import subprocess
+import threading
+from pathlib import Path
 
-from ar_kernel.tools.h3 import build_caption, build_prompt, turn_starts
+import pytest
+from PIL import Image
+
+from conftest import job_result
+from ar_kernel.config import KernelConfig
+from ar_kernel.data.probe import probe_video
+from ar_kernel.telemetry.recorder import Recorder
+from ar_kernel.tools import h3
+from ar_kernel.tools.context import TokenRegistry
+from ar_kernel.tools.h3 import H3Backend, build_caption, build_prompt, turn_starts
+from ar_kernel.tools.jobs import JobQueue
 from ar_kernel.tools.server import ToolError
+from tests.conftest import make_mp4
 
 SCENE = "A first-person view walks along a cobblestone street"
 TURNS = ["the camera pushes in slowly.", " the camera pans right to face a red door ", "a white dog runs out"]
@@ -57,3 +72,136 @@ def test_caption_covers_every_turn_and_segments_tile_the_clip():
     assert [s["time_range_s"] for s in c["segments"]] == [[0.0, 89 / 24], [89 / 24, 153 / 24], [153 / 24, 243 / 24]]
     assert c["segments"][1]["prompt"] == ("A first-person view walks along a cobblestone street. "
                                           "the camera pans right to face a red door.")
+
+
+REAL = KernelConfig.load()
+FAKE = Path(__file__).parent / "fixtures" / "fake_gen_worker.py"
+
+
+def h3_cfg(env="autoresearcher", **over):
+    raw = copy.deepcopy(REAL.raw)
+    raw["generators"]["h3"].update({"env": env, "enabled": True, **over})
+    return KernelConfig(raw=raw, repo_root=REAL.repo_root)
+
+
+def item(**over):
+    return {"scene_prompt": SCENE, "turns": [{"prompt": t} for t in TURNS], "seed": 7, **over}
+
+
+@pytest.fixture
+def h3_env(tmp_path, monkeypatch):
+    """The real H3Backend.produce/run_workers, with h3_generate.py swapped for the fake worker."""
+    monkeypatch.setattr(h3, "H3_BRIDGE", FAKE)
+    rec = Recorder(tmp_path / "run")
+    reg = TokenRegistry(rec)
+    q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
+    ws, staging = tmp_path / "ws", tmp_path / "staging"
+    ws.mkdir(); staging.mkdir()
+    Image.new("RGB", (640, 360), (10, 20, 30)).save(ws / "first.png")
+    Image.new("RGB", (640, 360), (30, 20, 10)).save(ws / "last.png")
+    q.register(H3Backend(h3_cfg(), tmp_path / "run", [0, 1, 4, 5], reg, rec, gpu_memory=lambda g: {i: 100 for i in g}))
+    caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
+    yield q, caller, staging
+    q.shutdown()
+
+
+def submit(q, caller, items, **params):
+    return q.backends["rollout_h3"].submit(q, caller, {"items": items, **params})
+
+
+@pytest.mark.parametrize("bad, params, match", [
+    (item(scene_prompt=" "), {}, "scene_prompt"),
+    (item(turns=[]), {}, "turns"),
+    (item(turns=[{"prompt": ""}]), {}, "turn 1"),
+    (item(turns=[{"prompt": "walk", "action": "W"}]), {}, "turn 1"),
+    (item(turns=[{"prompt": "a"}] * 4), {}, "at most 3 turns"),
+    (item(), {"frames": 124}, "at most 1 turns"),
+    (item(seed="x"), {}, "seed"),
+    (item(keyframes=[{"image": "first.png", "frame": 5}]), {}, "frame 0 .* or -1"),
+    (item(keyframes=[{"image": "first.png", "frame": 0}, {"image": "last.png", "frame": 0}]), {}, "repeat"),
+    (item(image="first.png"), {}, "image"),
+    (item(), {"frames": 240}, r"17n\+5"), (item(), {"frames": 107}, "124"), (item(), {"frames": 260}, "243"),
+])
+def test_h3_submit_refuses(h3_env, bad, params, match):
+    q, caller, _ = h3_env
+    with pytest.raises(ToolError, match=match):
+        submit(q, caller, [bad], **params)
+
+
+def test_h3_job_over_the_configured_cap_is_refused(h3_env):
+    q, caller, _ = h3_env
+    cap = REAL.get("generators.h3.max_items")
+    assert cap == 30
+    with pytest.raises(ToolError, match="at most 30 items per job"):
+        submit(q, caller, [item()] * (cap + 1))
+
+
+def test_h3_produces_a_silent_clip_with_one_segment_per_turn(h3_env):
+    q, caller, staging = h3_env
+    items = [item(), item(turns=[{"prompt": "the camera holds still"}],
+                          keyframes=[{"image": "first.png", "frame": 0}, {"image": "last.png", "frame": -1}])]
+    out = q.wait(caller, submit(q, caller, items)["job_id"], 120)
+    assert out["state"] == "done", out
+    by = {i["index"]: i for i in job_result(out)["items"]}
+    job = out["id"]
+    c = by[0]["candidate"]
+    assert c["provenance"]["generator"] == "minimax-h3" and c["provenance"]["seed"] == 7
+    assert "pose" not in c and "camera_motion" not in c and c["frames"] == 243
+    info = probe_video(staging / "rollouts" / job / "0.mp4")
+    assert (info.width, info.height, info.frames, round(info.fps)) == (960, 544, 243, 24)
+    streams = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0",
+                              str(staging / "rollouts" / job / "0.mp4")], capture_output=True, text=True).stdout.split()
+    assert streams == ["video"]
+    caption = json.loads((staging / "rollouts" / job / "0.json").read_text())
+    assert caption == h3.build_caption(SCENE, TURNS, [0, 89, 153], 243)
+    assert c["h3_prompt"] == by[0]["worker"]["prompt"] == h3.build_prompt(SCENE, TURNS, [0, 89, 153], 243, [])
+    assert [(t["frame_start"], t["frame_end_exclusive"]) for t in c["turn_segments"]] == [(0, 89), (89, 153), (153, 243)]
+    w = by[1]["worker"]
+    assert w["prompt"].startswith("How the reference pictures align") and [k["frame"] for k in w["keyframes"]] == [0, -1]
+    assert w["gpus"] == "0,1,4,5" and w["rank"] == 0             # one worker with every GPU
+    assert w["weights"] == str(REAL.repo_root / REAL.get("generators.h3.weights")) and w["gpu0_reserve_gib"] == 16
+
+
+def test_h3_finish_refuses_a_render_of_the_wrong_size_or_length(tmp_path):
+    from types import SimpleNamespace
+    rec = Recorder(tmp_path / "run")
+    b = H3Backend(h3_cfg(), tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
+    out = tmp_path / "out"
+    out.mkdir()
+    staged = {"index": 0, **item()}
+    make_mp4(out / "0.mp4", seconds=2, fps=24, width=1024, height=576)
+    with pytest.raises(ValueError, match="960x544"):
+        b.finish(SimpleNamespace(args={"frames": 243}), staged, out)
+    make_mp4(out / "0.mp4", seconds=2, fps=24, width=960, height=544)
+    with pytest.raises(ValueError, match="48 frames, not 243"):
+        b.finish(SimpleNamespace(args={"frames": 243}), staged, out)
+
+
+def test_h3_finished_candidate_passes_the_real_ingestor_as_per_chunk(tmp_path):
+    from types import SimpleNamespace
+    from ar_kernel.archive.db import open_db
+    from ar_kernel.data.ingest import Candidate, Ingestor
+    from tests.conftest import write_poses
+    run_dir = tmp_path / "run"
+    out = run_dir / "staging" / "rollouts"
+    out.mkdir(parents=True)
+    make_mp4(out / "0.mp4", seconds=243 / 24, fps=24, width=960, height=544)
+    rec = Recorder(run_dir)
+    res = H3Backend(h3_cfg(), run_dir, [0, 1, 2, 3], TokenRegistry(rec), rec).finish(
+        SimpleNamespace(args={"frames": 243}), {"index": 0, **item()}, out)
+    pose = write_poses(out / "vigeo.npz", n_frames=res["frames"], width=960, height=544)
+    ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
+    [r] = ing.ingest([Candidate(video=Path(res["video"]), caption=Path(res["caption"]), pose=pose,
+                                camera_motion="moving", provenance={"kind": "rollout", "generator": "minimax-h3",
+                                "job_id": "j1", "inputs_hash": "x", "seed": 7})], node_id="n1")
+    assert r.accepted, r.reasons
+    assert "video_timed_prompts_camera:per_chunk" in r.formats
+
+
+def test_h3_is_registered_only_when_enabled(tmp_path):
+    from ar_kernel.tools.gpu_jobs import build_gpu_backends
+    rec = Recorder(tmp_path / "run")
+    for enabled, present in ((True, True), (False, False)):
+        names = [b.name for b in build_gpu_backends(h3_cfg(enabled=enabled), tmp_path / "run", [0, 1, 2, 3],
+                                                     TokenRegistry(rec), rec)]
+        assert ("rollout_h3" in names) is present

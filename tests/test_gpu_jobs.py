@@ -217,7 +217,7 @@ def test_commanded_camera_is_published_under_its_own_name_not_as_pose(env):
 
 # ---- build_gpu_backends: the services a run gets ----
 
-def toggled_cfg(annotate=True, images=True, alaya=True, wan=True, ltx=("distilled",)):
+def toggled_cfg(annotate=True, images=True, alaya=True, wan=True, ltx=("distilled",), h3=True):
     import copy
     base = KernelConfig.load()
     raw = copy.deepcopy(base.raw)
@@ -227,15 +227,16 @@ def toggled_cfg(annotate=True, images=True, alaya=True, wan=True, ltx=("distille
     g["alayaworld"].pop("variants", None)
     g["wan22"]["enabled"] = wan
     g["ltx25"]["variants"] = list(ltx)
+    g["h3"]["enabled"] = h3
     return KernelConfig(raw=raw, repo_root=base.repo_root)
 
 
 @pytest.mark.parametrize("kw,expected", [
-    ({}, {"annotate_camera", "generate_images", "rollout_alayaworld", "rollout_wan22", "rollout_ltx25"}),
-    ({"annotate": False, "images": False, "alaya": False, "wan": False, "ltx": ()}, set()),
-    ({"alaya": True, "wan": False, "ltx": ("dev",)},
+    ({}, {"annotate_camera", "generate_images", "rollout_alayaworld", "rollout_wan22", "rollout_ltx25", "rollout_h3"}),
+    ({"annotate": False, "images": False, "alaya": False, "wan": False, "ltx": (), "h3": False}, set()),
+    ({"alaya": True, "wan": False, "ltx": ("dev",), "h3": False},
      {"annotate_camera", "generate_images", "rollout_alayaworld", "rollout_ltx25"}),
-    ({"annotate": False, "alaya": False, "ltx": ()}, {"generate_images", "rollout_wan22"}),
+    ({"annotate": False, "alaya": False, "ltx": (), "h3": False}, {"generate_images", "rollout_wan22"}),
 ])
 def test_build_gpu_backends_returns_exactly_the_enabled_backends_plus_the_captioner(tmp_path, kw, expected):
     from ar_kernel.tools.gpu_jobs import build_gpu_backends
@@ -263,7 +264,7 @@ def test_listed_tools_show_only_enabled_tools_and_enabled_variants(tmp_path):
     reg = TokenRegistry(rec)
     q = JobQueue(rec, threading.Lock(), wait_cap_s=60)
     try:
-        for b in build_gpu_backends(toggled_cfg(images=False, wan=False, ltx=("distilled",)),
+        for b in build_gpu_backends(toggled_cfg(images=False, wan=False, ltx=("distilled",), h3=False),
                                     tmp_path / "run", [0, 1, 2, 3], reg, rec):
             q.register(b)
         kit, mcp = ToolKit(reg, rec), new_mcp()
@@ -308,6 +309,10 @@ def test_listed_item_schemas_type_every_field(tmp_path):
     assert tools["rollout_wan22"].input_schema["properties"]["items"]["anyOf"][0]["items"]["properties"]["image"]["type"] == "string"
     key = tools["rollout_ltx25"].input_schema["properties"]["items"]["anyOf"][0]["items"]["properties"]["keyframes"]
     assert key["items"]["properties"]["frame"]["type"] == "integer" and key["items"]["required"] == ["image", "frame"]
+    h3 = tools["rollout_h3"].input_schema["properties"]["items"]["anyOf"][0]["items"]
+    assert set(h3["required"]) == {"scene_prompt", "turns", "seed"}
+    assert h3["properties"]["turns"]["items"]["required"] == ["prompt"]
+    assert h3["properties"]["keyframes"] == tools["rollout_ltx25"].input_schema["properties"]["items"]["anyOf"][0]["items"]["properties"]["keyframes"]
     alaya = tools["rollout_alayaworld"].input_schema["properties"]["items"]["anyOf"][0]["items"]
     from ar_kernel.tools.rollouts import VIEWPOINTS
     assert alaya["properties"]["viewpoint"]["enum"] == list(VIEWPOINTS)
