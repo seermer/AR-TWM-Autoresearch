@@ -300,6 +300,15 @@ def test_paths_are_validated_before_a_job_is_queued(make, paths, message):
         submit(q, caller, paths, "Caption.")
 
 
+def test_more_clips_than_max_items_are_refused(make):
+    q, caller, _, ws, _ = make(fake_cfg(max_items=1))
+    for name in ("a.mp4", "b.mp4"):
+        (ws / name).write_bytes(b"ok")
+    with pytest.raises(ToolError, match="at most 1 items per job: got 2"):
+        submit(q, caller, ["a.mp4", "b.mp4"], "Caption.")
+    assert submit(q, caller, ["a.mp4"], "Caption.")["job_id"]
+
+
 def test_empty_prompt_is_refused(make):
     q, caller, _, ws, _ = make()
     (ws / "a.mp4").write_bytes(b"ok")

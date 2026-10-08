@@ -366,3 +366,38 @@ def test_a_prompt_copied_from_the_evaluation_is_refused_before_the_job_is_queued
     assert q.submitted == 0
     assert backend.submit(q, caller, {"items": [{"prompt": "a quiet beach", "seed": 1}]}) == {"job_id": "job1"}
     assert [e["type"] for e in rec.read_events("n1")].count("isolation.refused") == 1
+
+
+# ---- max_items: the optional per-job item cap ----
+
+def _capped(tmp_path, cap):
+    import copy
+    base = KernelConfig.load()
+    raw = copy.deepcopy(base.raw)
+    raw["annotate"]["max_items"] = cap
+
+    class CappedJob(FakeJob):
+        name = tool = "rollout_capped"
+        config_key = "annotate"
+    rec = Recorder(tmp_path / "run2")
+    return CappedJob(KernelConfig(raw=raw, repo_root=base.repo_root), tmp_path / "run2", [0], TokenRegistry(rec), rec)
+
+
+def test_a_job_over_max_items_is_refused_whole(env, tmp_path):
+    from ar_kernel.tools.gpu_jobs import job_description
+    q, caller, rec, ws, staging, run = env
+    backend = _capped(tmp_path, 2)
+    items = [{"src": "a.mp4", "seed": i} for i in range(3)]
+    with pytest.raises(ToolError, match="at most 2 items per job: got 3"):
+        backend.submit(q, caller, {"items": items})
+    assert not q._jobs                                  # nothing was queued
+    assert "At most 2 items per job." in job_description(backend)
+    q.register(backend)
+    assert backend.submit(q, caller, {"items": items[:2]})["job_id"]      # exactly the cap is accepted
+
+
+def test_no_max_items_means_no_cap(env):
+    from ar_kernel.tools.gpu_jobs import job_description
+    q, caller, rec, ws, staging, run = env
+    backend = q.backends["rollout_fake"]
+    assert backend.max_items is None and "At most" not in job_description(backend)

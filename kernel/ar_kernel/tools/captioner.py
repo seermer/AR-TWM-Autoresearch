@@ -77,6 +77,7 @@ class CaptionBackend:
                  gpu_memory=gpu_memory_mib, poll_s: float = 2.0) -> None:
         self.cfg, self.run_dir, self.gpus = cfg, Path(run_dir), list(gpus)
         self.registry, self.recorder, self.gpu_memory, self.poll_s = registry, recorder, gpu_memory, poll_s
+        self.max_items = (cfg.get("captioner") or {}).get("max_items")
 
     def server_command(self, port: int, media_dir: Path) -> list[str]:
         return serve_command(self.cfg.get("captioner"), self.gpus, port, "captioner", media_dir)
@@ -192,6 +193,9 @@ def submit(q, caller, paths, prompt: str) -> dict:
     paths = listed(caller, paths, "paths")
     if not paths:
         raise ToolError("paths is empty")
+    cap = getattr(q.backends[TOOL], "max_items", None)
+    if cap and len(paths) > cap:
+        raise ToolError(f"at most {cap} items per job: got {len(paths)}; send the rest in another job")
     if not prompt.strip():
         raise ToolError("prompt is empty")
     bad = {}
@@ -207,12 +211,15 @@ def submit(q, caller, paths, prompt: str) -> dict:
 def register_caption_tool(mcp, kit, q) -> None:
     """caption_videos queues a job for the queue's `caption_videos` backend (the real
     CaptionBackend, or a fake in smoke runs)."""
+    cap = getattr(q.backends[TOOL], "max_items", None)
+
     @mcp.tool(name=TOOL, description="Caption video clips with the kernel's local video model, which sees the "
               "whole clip. A GPU job: returns {job_id} at once; collect it with job_wait. Loading the model takes "
               "minutes for every job, then seconds per clip, so send every clip of one prompt in one call. The finished "
               "job's result file (job_wait gives its path) holds `clips`: each path mapped to {caption} or "
               "{error}. Captions are text only: for data_ingest, write {\"caption\": \"<text>\"} to a JSON file "
-              "under /workspace/staging/ with a script that reads the result file.")
+              "under /workspace/staging/ with a script that reads the result file."
+              + (f" At most {cap} clips per job." if cap else ""))
     async def caption_videos(
             paths: Annotated[list[str] | str, Field(description="video files under /workspace (relative paths "
                                                     f"resolve against /workspace), {FROM_FILE}")],

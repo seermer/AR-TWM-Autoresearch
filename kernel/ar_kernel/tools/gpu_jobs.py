@@ -107,7 +107,8 @@ class GpuJob:
     """Base JobQueue backend. Subclasses set name/tool, kind ("rollout" | "annotation" | "image"),
     generator (provenance name), license, file_keys (item fields naming workspace files),
     optionally config_key (the kernel.yaml block, `self.block`, whose timeout_s and license override
-    the class defaults) and implement check_args, produce and finish. A job takes any number of items."""
+    the class defaults) and implement check_args, produce and finish. A job takes any number of items, or at most the block's
+    `max_items`."""
     name = tool = kind = generator = license = description = config_key = ""
     file_keys: tuple[str, ...] = ()
     timeout_s: float | None = None   # per-job wall-clock cap enforced by run_workers; None = no cap
@@ -119,12 +120,15 @@ class GpuJob:
         self.block = (cfg.get(self.config_key) if self.config_key else None) or {}
         self.timeout_s = self.block.get("timeout_s", self.timeout_s)
         self.license = self.block.get("license", self.license)
+        self.max_items = self.block.get("max_items")
 
     # ---- submit (tool call; fast; ToolError goes back to the agent) ----
     def submit(self, q, caller, args: dict) -> dict:
         items = listed(caller, args.get("items"), "items")
         if not items:
             raise ToolError("items is empty")
+        if self.max_items and len(items) > self.max_items:
+            raise ToolError(f"at most {self.max_items} items per job: got {len(items)}; send the rest in another job")
         refuse(caller, self.name, items, {n: "not an object" for n, item in enumerate(items)
                                           if not isinstance(item, dict)})
         args = {**args, "items": items}
@@ -335,7 +339,9 @@ JOB_NOTE = (" One call is one job: send every item in it, however many (jobs run
 def job_description(backend) -> str:
     limit = getattr(backend, "timeout_s", None)
     stop = f" A job is stopped after {limit / 3600:g} h; items not finished by then are item errors." if limit else ""
-    return backend.description + JOB_NOTE + stop
+    cap = getattr(backend, "max_items", None)
+    most = f" At most {cap} items per job." if cap else ""
+    return backend.description + JOB_NOTE + most + stop
 
 
 def register_gpu_tools(mcp, kit, q) -> None:
