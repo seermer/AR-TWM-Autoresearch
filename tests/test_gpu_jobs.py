@@ -115,6 +115,17 @@ def test_inputs_hash_depends_on_file_content_not_path(env):
     assert h[0] == h[1] != h[2]
 
 
+def test_a_worker_that_finds_the_machine_too_small_stops_the_run(env):
+    """Exit code 78 is nothing the agent can fix: the job fails, the user is alerted and the run is asked to stop."""
+    from ar_kernel.control import Control
+    q, caller, rec, ws, staging, run = env
+    out = q.wait(caller, submit(q, caller, [{"src": "a.mp4", "unfit": True}])["job_id"], 120)
+    assert out["state"] == "failed" and "does not fit this machine" in out["error"] and "too small" in out["error"]
+    assert Control(run).stop_requested()
+    [alert] = [e for e in rec.read_events() if e["type"] == "alert"]
+    assert alert["kind"] == "tool_does_not_fit" and "rollout_fake" in alert["message"]
+
+
 def test_per_item_failure_and_worker_crash_are_item_errors(env):
     q, caller, rec, ws, staging, run = env
     items = [{"src": "a.mp4"}, {"src": "a.mp4", "fail": True}, {"src": "a.mp4", "crash": True}, {"src": "a.mp4"}]

@@ -224,6 +224,9 @@ for item in mine:
         time.sleep(item["sleep"])
     if item.get("crash"):
         sys.exit(3)
+    if item.get("unfit"):
+        print("the cards are too small", file=sys.stderr)
+        sys.exit(78)
     status_path = out / f"{index}.json"
     if item.get("truncated"):
         status_path.write_text('{"ok": true, "ran')      # deliberately incomplete JSON

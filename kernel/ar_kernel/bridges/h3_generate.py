@@ -39,15 +39,22 @@ def fit(image: Image.Image, size: tuple[int, int]) -> Image.Image:
     return ImageOps.fit(image.convert("RGB"), size, Image.LANCZOS)
 
 
+UNFIT = 78                  # exit code: the machine is too small (gpu_jobs.UNFIT_EXIT stops the run on it)
+
+
+class TooSmall(RuntimeError):
+    pass
+
+
 def require_memory(mem_gib: list[float]) -> None:
     if sum(mem_gib) < TEXT_ENCODER_GIB:
-        raise RuntimeError(f"MiniMax H3 needs about {TEXT_ENCODER_GIB} GiB of GPU memory across the job's cards "
+        raise TooSmall(f"MiniMax H3 needs about {TEXT_ENCODER_GIB} GiB of GPU memory across the job's cards "
                            f"for its text encoder: got {sum(mem_gib):.0f} GiB on {len(mem_gib)} card(s)")
 
 
-def does_not_fit(what: str, mem_gib: list[float]) -> RuntimeError:
+def does_not_fit(what: str, mem_gib: list[float]) -> TooSmall:
     sizes = ", ".join(f"{m:.0f}" for m in mem_gib)
-    return RuntimeError(f"MiniMax H3 ran out of GPU memory loading {what} on {len(mem_gib)} card(s) of {sizes} GiB; "
+    return TooSmall(f"MiniMax H3 ran out of GPU memory loading {what} on {len(mem_gib)} card(s) of {sizes} GiB; "
                         "it was measured on 4 cards of 24 GiB")
 
 
@@ -189,4 +196,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except TooSmall as exc:
+        print(exc, file=sys.stderr)
+        sys.exit(UNFIT)

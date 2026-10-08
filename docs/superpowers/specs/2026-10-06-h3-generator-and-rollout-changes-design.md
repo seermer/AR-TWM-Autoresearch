@@ -245,6 +245,11 @@ others. `ar run` (new and resumed) and `ar doctor` stop with one error naming ev
 that needs more than the run's cards have, so a tool that cannot fit is the user's error at
 start and never a failed job for the agent. A block without the key is not checked.
 
+If a worker still finds the machine too small once a run is going (the H3 worker's memory check,
+or running out of memory while it loads), it exits with code 78. The kernel then alerts the
+user (`tool_does_not_fit`), asks the run to stop as `ar stop` does, and fails the job: the agent
+cannot fix it, so the run does not go on.
+
 ## 8. Tool descriptions
 
 - A description does not name another generator or an optional tool. `generate_images` says its

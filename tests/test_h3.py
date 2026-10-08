@@ -251,6 +251,7 @@ def test_bridge_refuses_cards_that_cannot_hold_the_text_encoder():
     b.require_memory([23.6] * 4)
     with pytest.raises(RuntimeError, match="about 70 GiB"):
         b.require_memory([23.6, 23.6])
+    assert isinstance(b.does_not_fit("x", [1.0]), b.TooSmall) and b.UNFIT == 78       # main() exits with it
     assert str(b.does_not_fit("the transformer", [23.6] * 3)) == (
         "MiniMax H3 ran out of GPU memory loading the transformer on 3 card(s) of 24, 24, 24 GiB; "
         "it was measured on 4 cards of 24 GiB")

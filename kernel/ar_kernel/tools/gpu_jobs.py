@@ -21,6 +21,8 @@ from mcp.server.mcpserver import Context
 from pydantic import Field, WithJsonSchema
 
 from ..archive.blobs import sha256_file
+from ..control import Control
+from ..guards import alert
 from ..isolation import EXCLUDED_PROMPT, copies_held_out, strings
 from ..subproc import file_tail
 from .captioner import clip_host_path, container_path, stage_clip
@@ -132,6 +134,9 @@ def check_keyframes(item: dict) -> None:
 
 def canonical_hash(obj) -> str:
     return hashlib.sha256(json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+UNFIT_EXIT = 78             # a worker's exit code for "this machine is too small": not the agent's to fix
 
 
 def split_gpus(gpus: list[int], per_worker: int, workers: int | None) -> list[list[int]]:
@@ -378,6 +383,12 @@ class GpuJob:
         for t in threads:
             t.join()
         report({"done": done(), "total": total})
+        if UNFIT_EXIT in codes:
+            message = (f"{self.tool} does not fit this machine; the run is stopping:\n"
+                       f"{file_tail(work / f'worker{codes.index(UNFIT_EXIT)}.log', 2000)}")
+            alert(self.recorder, "tool_does_not_fit", message)
+            Control(self.run_dir).request_stop()
+            raise RuntimeError(message)
         world = len(groups)
         missing: dict[int, str] = {}
         for index in indices:
