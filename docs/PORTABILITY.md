@@ -60,7 +60,7 @@ start; the first captioner start after that also rebuilds the vLLM compile cache
 
 *(Rewritten 2026-09-28.)* Each conda env is a **prefix** env, `AutoResearcher/.envs/<name>` (gitignored):
 `autoresearcher`, `alayaworld`, `wbench-main`, `wbench-vp`, `vllm`, `gen-zimage`, `gen-wan22`,
-`gen-ltx25`, `gen-h3`, `panel`. Only the `conda` executable itself stays outside (a prerequisite, like `git`).
+`gen-ltx25`, `gen-lightx2v`, `panel`. Only the `conda` executable itself stays outside (a prerequisite, like `git`).
 
 **Building them: `scripts/setup_envs.sh [name ...]`** (all ten by default; the README has the walkthrough).
 Per env it reads two tracked files in `envs/`:

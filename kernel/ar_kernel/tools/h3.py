@@ -1,5 +1,5 @@
-"""rollout_h3: clips rendered by MiniMax H3 (diffusers' MiniMaxH3ModularPipeline, in its own env)
-from the agent's per-turn prompts.
+"""rollout_h3: clips rendered by MiniMax H3 (through LightX2V, in its own env) from the agent's
+per-turn prompts.
 
 The agent gives a scene and a list of turns. The kernel puts the turn boundaries on the training
 round grid (frame 25 + 32j), writes one continuous shot in MiniMax's prompt format with an in-shot
@@ -15,8 +15,9 @@ import subprocess
 from pathlib import Path
 
 from ..data.probe import probe_video
+from ..subproc import meminfo_gib
 from .gpu_jobs import GpuJob, check_item_seed, check_keyframes, is_int
-from .rollouts import FFMPEG_TIMEOUT_S, check_published
+from .rollouts import FFMPEG_TIMEOUT_S, check_published, checked_repo
 from .server import ToolError
 
 H3_BRIDGE = Path(__file__).resolve().parents[1] / "bridges" / "h3_generate.py"
@@ -74,8 +75,12 @@ def build_prompt(scene: str, turns: list[str], starts: list[int], frames: int, k
             f"overall_soundscape: {_line(soundscape)}\n\nnon_diegetic_music: {_line(music)}")
 
 
+def launcher(ranks: int) -> list[str]:
+    return ["python", "-m", "torch.distributed.run", "--standalone", f"--nproc_per_node={ranks}"]
+
+
 class H3Backend(GpuJob):
-    """rollout_h3: one worker with every GPU of the run (the int8 transformer is spread across them)."""
+    """rollout_h3: one torchrun worker with a rank on every GPU of the run (sequence parallel)."""
     name = tool = "rollout_h3"
     kind = "rollout"
     generator = "minimax-h3"
@@ -89,7 +94,8 @@ class H3Backend(GpuJob):
         self.description = (
             "Render training clips with MiniMax H3 from a scene and a list of turns: one continuous shot with "
             "no cuts, in which each turn's text is asked for at that turn's start. A GPU job: returns {job_id} at once; "
-            f"collect with job_wait. Slow: about 20 minutes per {maximum}-frame clip. `frames`: 17n+5, "
+            f"collect with job_wait. A job loads for several minutes, then takes about 4 minutes per {maximum}-frame "
+            "clip. `frames`: 17n+5, "
             f"{MIN_FRAMES} <= frames <= {maximum}, default {default} (one value for the job). Item: "
             "{'scene_prompt': str, 'turns': [{'prompt': str}], 'overall_soundscape': str, 'non_diegetic_music': "
             "str, 'keyframes'?: [{'image': file under /workspace, 'frame': 0 or -1}], 'seed': int}. Start "
@@ -155,13 +161,26 @@ class H3Backend(GpuJob):
         prompts = {str(item["index"]): self._prompt(job, item) for item in items}
         (work / "prompts.json").write_text(json.dumps(prompts, ensure_ascii=False), encoding="utf-8")
         h, w = self.block["resolution"]
+        checked_repo(self.cfg, self.config_key, "LightX2V")
+        avail, rss, reserve = meminfo_gib()["MemAvailable"], self.block["peak_rss_gib"], self.block["host_reserve_gib"]
+        if avail - reserve < rss:
+            raise RuntimeError(f"not enough free host RAM for rollout_h3: MemAvailable {avail:.0f} GiB - "
+                               f"host_reserve_gib {reserve:g} < peak_rss_gib {rss:g}; free host memory and retry")
+        config = json.loads((self.cfg.repo_root / self.block["config"]).read_text(encoding="utf-8"))
+        cache = self.cfg.repo_root / config["adaln_cache_dir"]
+        if not cache.is_dir():
+            raise RuntimeError(f"no AdaLN cache at {cache}: build it once (README, model weights)")
+        config["adaln_cache_dir"] = str(cache)
+        config["parallel"]["seq_p_size"] = len(self.gpus)
+        (work / "lightx2v.json").write_text(json.dumps(config), encoding="utf-8")
         return self.run_workers(self.block["env"], lambda r, world: [
-            "python", str(H3_BRIDGE), "--items", str(work / "items.json"), "--prompts", str(work / "prompts.json"),
-            "--out", str(out), "--rank", str(r), "--world", str(world),
-            "--weights", str(self.cfg.repo_root / self.block["weights"]), "--frames", str(frames),
-            "--height", str(h), "--width", str(w), "--gpu0-reserve-gib", str(self.block["gpu0_reserve_gib"])],
+            *launcher(len(self.gpus)), str(H3_BRIDGE), "--items", str(work / "items.json"),
+            "--prompts", str(work / "prompts.json"), "--out", str(out),
+            "--weights", str(self.cfg.repo_root / self.block["weights"]), "--config", str(work / "lightx2v.json"),
+            "--frames", str(frames), "--height", str(h), "--width", str(w)],
             [self.gpus], job=job, work=work, out=out, total=len(items), cancel=cancel, report=report,
-            extra_env={"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True", "HF_HUB_OFFLINE": "1"})
+            extra_env={"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True", "DTYPE": "BF16",
+                       "TOKENIZERS_PARALLELISM": "false", "HF_HUB_OFFLINE": "1"})
 
     def finish(self, job, item, out):
         frames = job.args["frames"]

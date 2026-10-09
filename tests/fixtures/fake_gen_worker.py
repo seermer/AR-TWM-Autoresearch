@@ -114,8 +114,8 @@ if "--precache" in sys.argv or "--cases" in sys.argv:
 parser = argparse.ArgumentParser()
 parser.add_argument("--items", required=True)
 parser.add_argument("--out", required=True)
-parser.add_argument("--rank", type=int, required=True)
-parser.add_argument("--world", type=int, required=True)
+parser.add_argument("--rank", type=int, default=0)       # h3_generate.py takes neither: one worker
+parser.add_argument("--world", type=int, default=1)
 parser.add_argument("--max-frames", type=int)        # set: annotate mode (stands in for vigeo_poses.py)
 parser.add_argument("--repo")
 parser.add_argument("--checkpoint")
@@ -133,7 +133,7 @@ parser.add_argument("--no-t5-cpu", dest="t5_cpu", action="store_false")
 parser.add_argument("--variant")                     # set: ltx mode (stands in for ltx25_generate.py)
 parser.add_argument("--quantization")
 parser.add_argument("--prompts")                     # set: h3 mode (stands in for h3_generate.py)
-parser.add_argument("--gpu0-reserve-gib", type=float)
+parser.add_argument("--config")
 args, _ = parser.parse_known_args()
 
 
@@ -197,7 +197,7 @@ def h3(item, status_path):
     status_path.write_text(json.dumps({"ok": True, "seconds": 0.01, "rank": args.rank,
                                        "gpus": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
                                        "weights": args.weights, "frames": args.frames,
-                                       "gpu0_reserve_gib": args.gpu0_reserve_gib,
+                                       "config": json.loads(Path(args.config).read_text(encoding="utf-8")),
                                        "prompt": prompts[str(item["index"])], "keyframes": item.get("keyframes")}))
 
 

@@ -101,8 +101,14 @@ def item(**over):
 
 @pytest.fixture
 def h3_env(tmp_path, monkeypatch):
-    """The real H3Backend.produce/run_workers, with h3_generate.py swapped for the fake worker."""
+    """The real H3Backend.produce/run_workers, with torchrun and h3_generate.py swapped for the fake worker."""
     monkeypatch.setattr(h3, "H3_BRIDGE", FAKE)
+    monkeypatch.setattr(h3, "launcher", lambda ranks: ["python"])
+    monkeypatch.setattr(h3, "checked_repo", lambda *a: None)
+    monkeypatch.setattr(h3, "meminfo_gib", lambda: {"MemAvailable": 250.0})
+    (tmp_path / "adaln").mkdir()
+    config = tmp_path / "lightx2v.json"
+    config.write_text(json.dumps({"adaln_cache_dir": str(tmp_path / "adaln"), "parallel": {"seq_p_size": 8}}))
     rec = Recorder(tmp_path / "run")
     reg = TokenRegistry(rec)
     q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
@@ -110,7 +116,8 @@ def h3_env(tmp_path, monkeypatch):
     ws.mkdir(); staging.mkdir()
     Image.new("RGB", (640, 360), (10, 20, 30)).save(ws / "first.png")
     Image.new("RGB", (640, 360), (30, 20, 10)).save(ws / "last.png")
-    q.register(H3Backend(h3_cfg(), tmp_path / "run", [0, 1, 4, 5], reg, rec, gpu_memory=lambda g: {i: 100 for i in g}))
+    q.register(H3Backend(h3_cfg(config=str(config)), tmp_path / "run", [0, 1, 4, 5], reg, rec,
+                         gpu_memory=lambda g: {i: 100 for i in g}))
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
     yield q, caller, staging
     q.shutdown()
@@ -178,7 +185,15 @@ def test_h3_produces_a_silent_clip_with_a_scene_caption_and_turn_metadata(h3_env
     w = by[1]["worker"]
     assert w["prompt"].startswith("How the reference pictures align") and [k["frame"] for k in w["keyframes"]] == [0, -1]
     assert w["gpus"] == "0,1,4,5" and w["rank"] == 0             # one worker with every GPU
-    assert w["weights"] == str(REAL.repo_root / REAL.get("generators.h3.weights")) and w["gpu0_reserve_gib"] == 16
+    assert w["weights"] == str(REAL.repo_root / REAL.get("generators.h3.weights"))
+    assert w["config"]["parallel"] == {"seq_p_size": 4}          # a rank per GPU
+
+
+def test_h3_job_fails_while_host_ram_is_short(h3_env, monkeypatch):
+    q, caller, _ = h3_env
+    monkeypatch.setattr(h3, "meminfo_gib", lambda: {"MemAvailable": 150.0})
+    out = q.wait(caller, submit(q, caller, [item()])["job_id"], 120)
+    assert out["state"] == "failed" and "not enough free host RAM" in json.dumps(out)
 
 
 def test_h3_finish_refuses_a_render_of_the_wrong_size_or_length(tmp_path):
@@ -233,31 +248,8 @@ def _bridge():
     import importlib.util
     spec = importlib.util.spec_from_file_location("h3_generate", h3.H3_BRIDGE)
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)             # torch and diffusers are imported inside main(), not here
+    spec.loader.exec_module(mod)             # torch and lightx2v are imported inside main(), not here
     return mod
-
-
-def test_bridge_spreads_the_blocks_by_memory_and_keeps_small_layers_on_gpu_0():
-    b = _bridge()
-    dmap = b.block_device_map([23.6, 23.6, 23.6, 23.6], 16)
-    blocks = [dmap[f"transformer_blocks.{i}"] for i in range(50)]
-    assert [blocks.count(d) for d in range(4)] == [5, 15, 15, 15]        # the split the spike measured
-    assert blocks == sorted(blocks)                                       # contiguous: one hop per card
-    assert all(dmap[name] == 0 for name in b.SMALL)
-    two = b.block_device_map([48.0, 48.0], 16)
-    assert [list(two.values()).count(d) for d in (0, 1)][1] == 30
-    assert set(b.block_device_map([80.0], 16).values()) == {0}
-
-
-def test_bridge_refuses_cards_that_cannot_hold_the_text_encoder():
-    b = _bridge()
-    b.require_memory([23.6] * 4)
-    with pytest.raises(b.TooSmall, match="about 70 GiB"):            # too small: the kernel stops the run on it
-        b.require_memory([23.6, 23.6])
-    oom = b.out_of_memory("the transformer", [23.6] * 4)             # a busy card, not the machine: a job failure
-    assert not isinstance(oom, b.TooSmall) and str(oom) == (
-        "MiniMax H3 ran out of GPU memory loading the transformer on 4 card(s) of 24, 24, 24, 24 GiB; "
-        "another process may be holding GPU memory")
 
 
 @pytest.mark.parametrize("size", [(1280, 720), (800, 1088), (640, 360), (960, 544)])
@@ -268,7 +260,7 @@ def test_bridge_crops_any_keyframe_to_the_canvas(size):
 
 @pytest.mark.gpu
 def test_real_h3_rollout(tmp_path):
-    """AR_TEST_GPUS=0,1,2,3 pytest tests/test_h3.py -m gpu -s --basetemp=.cache/pytest/gpu   (~70 min)
+    """AR_TEST_GPUS=0,1,2,3 pytest tests/test_h3.py -m gpu -s --basetemp=.cache/pytest/gpu   (~20 min)
 
     A text-only single-turn item, a three-turn item with first and last keyframes and a two-turn
     item with only a last keyframe (Z-Image frames), through the real tool path; each candidate

@@ -53,7 +53,7 @@ Ten conda environments, all created inside `AutoResearcher/.envs/`. Takes 30 to 
 scripts/setup_envs.sh
 ```
 
-Check: `ls .envs` lists `alayaworld autoresearcher gen-h3 gen-ltx25 gen-wan22 gen-zimage panel vllm wbench-main wbench-vp`.
+Check: `ls .envs` lists `alayaworld autoresearcher gen-lightx2v gen-ltx25 gen-wan22 gen-zimage panel vllm wbench-main wbench-vp`.
 If it stops on an error, fix the cause and run it again: environments that already exist are skipped.
 To rebuild one, delete `.envs/<name>` and run `scripts/setup_envs.sh <name>`.
 
@@ -145,6 +145,10 @@ hf download MiniMaxAI/MiniMax-H3 --revision 42ed227ee7df40d41602854ae760620d6eb6
   --include "text_encoder/*" --include "vae/*" --include "audio_vae/*" --include "tokenizer/*" \
   --include "processor/*" --include "scheduler/*" --include "audio_scheduler/*" \
   --local-dir weights/minimax-h3        # 137 GB; one --include per pattern
+# rollout_h3's AdaLN cache (one GPU, once; again after changing infer_steps in configs/h3_lightx2v.json)
+CUDA_VISIBLE_DEVICES=0 DTYPE=BF16 conda run -p .envs/gen-lightx2v python \
+  third_party/LightX2V/tools/cache_minimax_h3_adaln/cache_minimax_h3_adaln.py --model_path weights/minimax-h3 \
+  --config_json configs/h3_lightx2v.json --model-variant fl2av       # writes weights/minimax-h3-adaln
 
 # Video captioning model (lands in .cache/huggingface)
 hf download Qwen/Qwen3.8-27B-FP8

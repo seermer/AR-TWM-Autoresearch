@@ -196,17 +196,21 @@ generators:                       # rollout_* GPU jobs; switched on only after a
                                   # 25 per worker x ~900 s (2x the ~400 s cold 121-frame clip) ~ 6.3 h
     license: LTX-2 Community License
   h3:
-    env: .envs/gen-h3               # a conda-prefix env inside the repo (diffusers 0.40.0)
-    min_total_gpu_gib: 96           # the bf16 text encoder alone needs about 70 GiB
+    env: .envs/gen-lightx2v         # a conda-prefix env inside the repo (LightX2V, SageAttention)
+    repo: third_party/LightX2V      # relative to the AutoResearcher repo; gitignored
+    commit: 97853b1b12e5d29ef3e2b63b781a67b23c191d4c   # pinned; the backend refuses to run off this commit
+    config: configs/h3_lightx2v.json   # LightX2V's shared block offload recipe: bf16 weights in one host copy
+                                    # for all ranks, sequence parallel, SageAttention, parallel VAE decode
+    min_total_gpu_gib: 96           # measured on 4 x 24 GB only
     weights: weights/minimax-h3     # MiniMaxAI/MiniMax-H3, diffusers layout, fl2va/t2va partition
     revision: 42ed227ee7df40d41602854ae760620d6eb651fe
-    enabled: true                   # smoke run 2026-10-08: text-only, first-and-last and last-only items pass ingest
-    # Spike 2026-10-06 on 4 x 24 GB, 960x544, 49 steps: int8 transformer across the 4 cards,
-    # 243 frames in 1160 s, peak 21.5 GiB on GPU 0 and 14.6 GiB on the others, 64 GiB host RAM.
-    # bf16 fits 124 frames only; int8 on one card with streamed offload peaks at 216 GiB host RAM.
+    enabled: true                   # smoke run 2026-10-09: text-only, first-and-last and last-only items pass ingest
+    # That run, on 4 x 24 GB, 960x544, 29 steps: 243 frames in about 207 s after a 6 min load,
+    # about 11 GiB on each card, about 127 GiB of host RAM in use.
     frames: [243, 243]              # [default, max]; 17n+5, min 124
     resolution: [544, 960]          # [height, width]
-    max_items: 30                   # ~10 h at the measured speed
-    gpu0_reserve_gib: 16            # GPU 0 also holds both VAEs and the small layers and decodes
+    max_items: 30                   # ~2 h at the measured speed
+    peak_rss_gib: 140               # host RAM of one job; a job starts only while
+    host_reserve_gib: 60            # MemAvailable - host_reserve_gib >= peak_rss_gib
     timeout_s: 43200
     license: MiniMax H3 Community License
