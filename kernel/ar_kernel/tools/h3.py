@@ -94,8 +94,7 @@ class H3Backend(GpuJob):
         self.description = (
             "Render training clips with MiniMax H3 from a scene and a list of turns: one continuous shot with "
             "no cuts, in which each turn's text is asked for at that turn's start. A GPU job: returns {job_id} at once; "
-            f"collect with job_wait. A job loads for several minutes, then takes about 4 minutes per {maximum}-frame "
-            "clip at the smallest size and about 8 at the largest. Params (one value per job): `frames` (17n+5, "
+            "collect with job_wait. Params (one value per job): `frames` (17n+5, "
             f"{MIN_FRAMES} <= frames <= {maximum}, default {default}), `width`/`height` (one of "
             f"{sizes_text(self.block['resolutions'])}; default {w}x{h}). Item: "
             "{'scene_prompt': str, 'turns': [{'prompt': str}], 'overall_soundscape': str, 'non_diegetic_music': "

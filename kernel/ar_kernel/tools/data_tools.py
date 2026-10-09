@@ -201,7 +201,7 @@ class DataTools:
                 raise ToolError(f"unknown data commit {data_commit!r}") from exc
             parent_commit = _parent_commit(conn, caller.node)
             if not self.gpu_lock.acquire(blocking=False):       # the describe step is a GPU job
-                raise ToolError("a GPU job is running and the check needs the GPUs for under a minute: "
+                raise ToolError("a GPU job is running and the check needs the GPUs: "
                                 "call again once your jobs have finished (job_wait).")
             try:
                 try:
@@ -401,7 +401,7 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
                               lambda c: tools.commit(c, parent, datasets, message, include or []))
 
     @mcp.tool(name="recipe_check", description="Run every pre-training check on a recipe and a data commit "
-              "without using up an attempt. It uses the GPUs for under a minute, so it is refused while a GPU job "
+              "without using up an attempt. It uses the GPUs, so it is refused while a GPU job "
               "runs. Returns ok and the failures. Among the checks: steps_per_epoch = "
               "floor(floor(epoch_windows / n_gpus) / optimizer.grad_accum_steps) must be at least 1, and "
               "optimizer.epochs * steps_per_epoch at least optimizer.max_steps, where epoch_windows is the "

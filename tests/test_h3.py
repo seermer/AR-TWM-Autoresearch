@@ -147,7 +147,7 @@ def submit(q, caller, items, **params):
     (item(keyframes=[{"image": "first.png", "frame": 0}, {"image": "last.png", "frame": 0}]), {}, "repeat"),
     (item(image="first.png"), {}, "image"),
     (item(keyframes=[{"image": "small.png", "frame": -1}]), {},
-     "keyframes: the image at frame -1 is 960x544, but the job renders 1376x768"),
+     "the keyframe at frame -1 is 960x544, but the job renders 1376x768"),
     (item(), {"height": 1024, "width": 1536}, "16:9"), (item(), {"height": 720, "width": 1280}, "resolutions"),
     (item(), {"width": 960}, "16:9"),
     (item(), {"frames": 240}, r"17n\+5"), (item(), {"frames": 107}, "124"), (item(), {"frames": 260}, "243"),

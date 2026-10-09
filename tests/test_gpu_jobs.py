@@ -521,3 +521,17 @@ def test_no_tool_description_names_another_generator_or_optional_tool(tmp_path):
     named = [(tool, word) for tool, text in tools.items() for owner, words in OWN_WORDS.items() if owner != tool
              for word in words if re.search(rf"\b{re.escape(word)}\b", text)]
     assert named == []
+
+
+def test_a_frame_image_with_an_exif_orientation_is_refused(tmp_path):
+    """Some models apply the tag and some ignore it, so a rotated image would be cropped or stretched."""
+    from PIL import Image
+    from ar_kernel.tools.gpu_jobs import check_frame_image
+    img = Image.new("RGB", (64, 36), (1, 2, 3))
+    exif = img.getexif()
+    exif[0x0112] = 6
+    img.save(tmp_path / "turned.jpg", exif=exif)
+    img.save(tmp_path / "plain.jpg")
+    check_frame_image(KernelConfig.load(), tmp_path / "plain.jpg", (64, 36), "image")
+    with pytest.raises(ToolError, match="image carries an EXIF orientation"):
+        check_frame_image(KernelConfig.load(), tmp_path / "turned.jpg", (64, 36), "image")

@@ -422,10 +422,10 @@ def test_frame_images_of_another_size_are_refused_at_submit_with_their_item_and_
     [refused] = (staging / "results").glob("rollout_alayaworld-refused-*.json")
     rows = {r["index"]: r["error"] for r in json.loads(refused.read_text())}
     assert sorted(rows) == [0, 2, 3, 4]
-    assert rows[0].startswith("image: the image cannot be read as an image")
-    assert rows[2].startswith("image: the image is 1024x576, but the job renders 960x544")
-    assert rows[3] == "image: the image is 1536x1024, which is not within 2% of 16:9"
-    assert rows[4].startswith("subject_mask: the image is 1024x576, but the job renders 960x544")
+    assert rows[0].startswith("image is not a readable image")
+    assert rows[2].startswith("image is 1024x576, but the job renders 960x544")
+    assert rows[3] == "image is 1536x1024, which is not within 2% of 16:9"
+    assert rows[4].startswith("subject_mask is 1024x576, but the job renders 960x544")
 
 
 def test_an_image_changed_after_submit_fails_only_its_own_item(env):
@@ -436,7 +436,7 @@ def test_an_image_changed_after_submit_fails_only_its_own_item(env):
     job = SimpleNamespace(id="j1", token=caller.token, node="n1", args={
         "items": [first_person(image="other.png"), first_person()], "rounds_per_turn": 3, "seed": 42})
     out = q.backends["rollout_alayaworld"].run(job, threading.Event(), lambda progress: None)
-    assert out["items"][0]["error"].startswith("input: image: the image is 1024x576, but the job renders 960x544")
+    assert out["items"][0]["error"].startswith("input: image is 1024x576, but the job renders 960x544")
     assert "candidate" in out["items"][1]
 
 
@@ -1105,7 +1105,7 @@ def test_ltx_bad_params_are_refused_at_submit(ltx_env, params, match):
     ({"prompt": "p", "seed": True}, "seed"),
     ({"prompt": "p", "seed": 1, "keyframes": [{"image": 3, "frame": 0}]}, "each keyframe"),
     ({"prompt": "p", "seed": 1, "keyframes": [{"image": "small.png", "frame": 0}]},
-     "keyframes: the image at frame 0 is 960x544, but the job renders 1024x576"),
+     "the keyframe at frame 0 is 960x544, but the job renders 1024x576"),
     ({"prompt": "p", "seed": 1, "image": "frame.png"}, "image")])
 def test_ltx_bad_items_are_refused_at_submit(ltx_env, item, match):
     make, caller, _ = ltx_env

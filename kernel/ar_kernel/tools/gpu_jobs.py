@@ -164,12 +164,15 @@ def sizes_text(resolutions: list) -> str:
 
 def check_frame_image(cfg, path: Path, size: tuple[int, int], what: str) -> None:
     """An image a clip starts or ends on is used as it is: it must be within the ingest tolerance of
-    16:9 and exactly the job's (width, height)."""
+    16:9, exactly the job's (width, height), and stored unrotated (some models apply an EXIF
+    orientation and some ignore it)."""
     try:
         with Image.open(path) as im:
-            got = im.size
+            got, orientation = im.size, im.getexif().get(0x0112, 1)
     except Exception as exc:            # noqa: BLE001 -- PIL raises many types on a broken file
-        raise ToolError(f"{what} cannot be read as an image: {type(exc).__name__}: {exc}") from None
+        raise ToolError(f"{what} is not a readable image: {type(exc).__name__}: {exc}") from None
+    if orientation != 1:
+        raise ToolError(f"{what} carries an EXIF orientation: save it with the orientation applied and no tag")
     if not _near_16_9(cfg, *got):
         raise ToolError(f"{what} is {got[0]}x{got[1]}, which is not within "
                         f"{cfg.get('ingest.aspect_tolerance'):.0%} of 16:9")
@@ -240,18 +243,22 @@ class GpuJob:
                     try:
                         host = clip_host_path(caller, item[key])
                         if key in self.frame_keys:
-                            check_frame_image(self.cfg, host, self.frame_size(args), "the image")
-                    except (PathError, ToolError) as exc:
+                            check_frame_image(self.cfg, host, self.frame_size(args), key)
+                    except PathError as exc:
                         bad.setdefault(n, f"{key}: {exc}")
+                    except ToolError as exc:
+                        bad.setdefault(n, str(exc))
                     item = {**item, key: container_path(item[key])}
             if self.takes_keyframes and n not in bad:
                 frames = []
                 for k in item.get("keyframes") or []:
                     try:
                         check_frame_image(self.cfg, clip_host_path(caller, k["image"]), self.frame_size(args),
-                                          f"the image at frame {k['frame']}")
-                    except (PathError, ToolError) as exc:
+                                          f"the keyframe at frame {k['frame']}")
+                    except PathError as exc:
                         bad.setdefault(n, f"keyframes: {exc}")
+                    except ToolError as exc:
+                        bad.setdefault(n, str(exc))
                     frames.append({**k, "image": container_path(k["image"])})
                 item = {**item, "keyframes": sorted(frames, key=lambda k: (k["frame"] < 0, k["frame"]))}   # clip order
             items[n] = item
@@ -317,7 +324,7 @@ class GpuJob:
                 dst = inp / f"{index}_{key}{Path(item[key]).suffix}"
                 stage_clip(caller, item[key], dst)
                 if key in self.frame_keys:
-                    check_frame_image(self.cfg, dst, self.frame_size(args), f"{key}: the image")
+                    check_frame_image(self.cfg, dst, self.frame_size(args), key)
                 staged[key] = str(dst)
                 staged["hashes"][key] = sha256_file(dst)
         if self.takes_keyframes:
@@ -326,7 +333,7 @@ class GpuJob:
                 dst = inp / f"{index}_keyframe{n}{Path(k['image']).suffix}"
                 stage_clip(caller, k["image"], dst)
                 check_frame_image(self.cfg, dst, self.frame_size(args),
-                                  f"keyframes: the image at frame {k['frame']}")
+                                  f"the keyframe at frame {k['frame']}")
                 staged["keyframes"].append({**k, "image": str(dst)})
                 staged["hashes"][f"keyframe{n}"] = sha256_file(dst)
         return staged

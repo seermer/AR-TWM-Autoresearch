@@ -214,8 +214,8 @@ def register_caption_tool(mcp, kit, q) -> None:
     cap = getattr(q.backends.get(TOOL), "max_items", None)
 
     @mcp.tool(name=TOOL, description="Caption video clips with the kernel's local video model, which sees the "
-              "whole clip. A GPU job: returns {job_id} at once; collect it with job_wait. Loading the model takes "
-              "minutes for every job, then seconds per clip, so send every clip of one prompt in one call. The finished "
+              "whole clip. A GPU job: returns {job_id} at once; collect it with job_wait. Every job loads the "
+              "model again, so send every clip of one prompt in one call. The finished "
               "job's result file (job_wait gives its path) holds `clips`: each path mapped to {caption} or "
               "{error}. Captions are text only: for data_ingest, write {\"caption\": \"<text>\"} to a JSON file "
               "under /workspace/staging/ with a script that reads the result file."

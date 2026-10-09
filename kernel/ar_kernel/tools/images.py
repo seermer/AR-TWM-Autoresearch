@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from .gpu_jobs import GpuJob, check_item_seed, check_size, is_int, split_gpus
+from .gpu_jobs import GpuJob, check_item_seed, check_size, split_gpus
 from .server import ToolError
 
 BRIDGE = Path(__file__).resolve().parents[1] / "bridges" / "zimage_generate.py"
@@ -16,7 +16,7 @@ WIDTH, HEIGHT = 1376, 768        # the defaults
 
 
 def _valid_side(n) -> bool:
-    return is_int(n) and _MIN_SIDE <= n <= _MAX_SIDE and n % 16 == 0
+    return _MIN_SIDE <= n <= _MAX_SIDE and n % 16 == 0
 
 
 class ImageBackend(GpuJob):
