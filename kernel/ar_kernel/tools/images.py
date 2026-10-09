@@ -12,7 +12,6 @@ from .server import ToolError
 BRIDGE = Path(__file__).resolve().parents[1] / "bridges" / "zimage_generate.py"
 
 _MIN_SIDE, _MAX_SIDE = 256, 1920
-WIDTH, HEIGHT = 1376, 768        # the defaults
 
 
 def _valid_side(n) -> bool:
@@ -25,15 +24,20 @@ class ImageBackend(GpuJob):
     generator = "z-image-turbo"
     license = "Apache-2.0"
     config_key = "images"           # timeout_s
-    description = ("Generate images from text prompts (Z-Image-Turbo), for use as the first or last frame of "
-                   "a rollout. A GPU job: returns {job_id} at "
-                   "once; collect with job_wait. `width`/`height`: within 2% of 16:9, and multiples of 16 "
-                   f"in 256..1920 (default {WIDTH}x{HEIGHT}). A rollout uses a frame image as it is, so make it "
-                   "at exactly the size that rollout renders. Items: {'prompt': str, 'seed': int}. Each result "
-                   "item gives `image`: a png in /workspace/staging/images/<job_id>/.")
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.height, self.width = self.block["default_size"]
+        self.description = (
+            "Generate images from text prompts (Z-Image-Turbo), for use as the first or last frame of "
+            "a rollout. A GPU job: returns {job_id} at "
+            "once; collect with job_wait. `width`/`height`: within 2% of 16:9, and multiples of 16 "
+            f"in 256..1920 (default {self.width}x{self.height}). A rollout uses a frame image as it is, so make it "
+            "at exactly the size that rollout renders. Items: {'prompt': str, 'seed': int}. Each result "
+            "item gives `image`: a png in /workspace/staging/images/<job_id>/.")
 
     def check_args(self, args):
-        width, height = args.setdefault("width", WIDTH), args.setdefault("height", HEIGHT)
+        width, height = args.setdefault("width", self.width), args.setdefault("height", self.height)
         check_size(self.cfg, width, height)
         if not (_valid_side(width) and _valid_side(height)):
             raise ToolError(f"width/height must be multiples of 16 in [{_MIN_SIDE}, {_MAX_SIDE}]: "

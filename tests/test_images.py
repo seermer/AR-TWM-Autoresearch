@@ -18,6 +18,7 @@ from ar_kernel.tools.jobs import JobQueue
 from ar_kernel.tools.server import ToolError
 
 REAL = KernelConfig.load()
+DEFAULT = tuple(reversed(REAL.get("images.default_size")))      # (width, height)
 FAKE = Path(__file__).parent / "fixtures" / "fake_gen_worker.py"
 
 
@@ -62,7 +63,7 @@ def test_image_is_published_with_the_requested_size(env):
     assert item["prompt"] == "a red fox in snow" and item["seed"] == 1
     assert item["generator"] == "z-image-turbo" and item["license"] == "Apache-2.0"
     with _open(staging, item) as im:
-        assert im.size == (images.WIDTH, images.HEIGHT) == (1376, 768)
+        assert im.size == DEFAULT
 
 
 def test_custom_size_is_honored(env):
@@ -165,7 +166,7 @@ def test_real_zimage_generates_plausible_images(tmp_path):
     for item in job_result(out)["items"]:
         assert "error" not in item, item
         with Image.open(staging / Path(item["image"]).relative_to("/workspace/staging")) as im:
-            assert im.size == (images.WIDTH, images.HEIGHT)
+            assert im.size == DEFAULT
     assert job_result(out)["gpu_memory_released"] is True
     print({"gpus": gpus, "gpu_memory_mib": job_result(out)["gpu_memory_mib"],
           "seconds": [i["worker"].get("seconds") for i in job_result(out)["items"]]})

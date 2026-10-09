@@ -94,6 +94,9 @@ def h3_cfg(env="autoresearcher", **over):
     return KernelConfig(raw=raw, repo_root=REAL.repo_root)
 
 
+DEFAULT, OTHER = ((w, h) for h, w in REAL.get("generators.h3.resolutions")[:2])      # (width, height)
+
+
 def item(**over):
     return {"scene_prompt": SCENE, "turns": [{"prompt": t} for t in TURNS], "overall_soundscape": SOUND,
             "non_diegetic_music": MUSIC, "seed": 7, **over}
@@ -114,9 +117,9 @@ def h3_env(tmp_path, monkeypatch):
     q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
     ws, staging = tmp_path / "ws", tmp_path / "staging"
     ws.mkdir(); staging.mkdir()
-    Image.new("RGB", (1376, 768), (10, 20, 30)).save(ws / "first.png")
-    Image.new("RGB", (1376, 768), (30, 20, 10)).save(ws / "last.png")
-    Image.new("RGB", (960, 544), (30, 20, 10)).save(ws / "small.png")
+    Image.new("RGB", DEFAULT, (10, 20, 30)).save(ws / "first.png")
+    Image.new("RGB", DEFAULT, (30, 20, 10)).save(ws / "last.png")
+    Image.new("RGB", OTHER, (30, 20, 10)).save(ws / "other.png")
     q.register(H3Backend(h3_cfg(config=str(config)), tmp_path / "run", [0, 1, 4, 5], reg, rec,
                          gpu_memory=lambda g: {i: 100 for i in g}))
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
@@ -146,10 +149,10 @@ def submit(q, caller, items, **params):
     (item(keyframes=[{"image": "first.png", "frame": 5}]), {}, "frame 0 .* or -1"),
     (item(keyframes=[{"image": "first.png", "frame": 0}, {"image": "last.png", "frame": 0}]), {}, "repeat"),
     (item(image="first.png"), {}, "image"),
-    (item(keyframes=[{"image": "small.png", "frame": -1}]), {},
-     "the keyframe at frame -1 is 960x544, but the job renders 1376x768"),
+    (item(keyframes=[{"image": "other.png", "frame": -1}]), {},
+     "the keyframe at frame -1 is {}x{}, but the job renders {}x{}".format(*OTHER, *DEFAULT)),
     (item(), {"height": 1024, "width": 1536}, "16:9"), (item(), {"height": 720, "width": 1280}, "resolutions"),
-    (item(), {"width": 960}, "16:9"),
+    (item(), {"width": 1024 if DEFAULT[0] != 1024 else 960}, "16:9"),
     (item(), {"frames": 240}, r"17n\+5"), (item(), {"frames": 107}, "124"), (item(), {"frames": 260}, "243"),
 ])
 def test_h3_submit_refuses(h3_env, bad, params, match):
@@ -161,8 +164,7 @@ def test_h3_submit_refuses(h3_env, bad, params, match):
 def test_h3_job_over_the_configured_cap_is_refused(h3_env):
     q, caller, _ = h3_env
     cap = REAL.get("generators.h3.max_items")
-    assert cap == 30
-    with pytest.raises(ToolError, match="at most 30 items per job"):
+    with pytest.raises(ToolError, match=f"at most {cap} items per job"):
         submit(q, caller, [item()] * (cap + 1))
 
 
@@ -178,7 +180,7 @@ def test_h3_produces_a_silent_clip_with_a_scene_caption_and_turn_metadata(h3_env
     assert c["provenance"]["generator"] == "minimax-h3" and c["provenance"]["seed"] == 7
     assert "pose" not in c and "camera_motion" not in c and c["frames"] == 243
     info = probe_video(staging / "rollouts" / job / "0.mp4")
-    assert (info.width, info.height, info.frames, round(info.fps)) == (1376, 768, 243, 24)     # the default size
+    assert (info.width, info.height, info.frames, round(info.fps)) == (*DEFAULT, 243, 24)
     streams = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0",
                               str(staging / "rollouts" / job / "0.mp4")], capture_output=True, text=True).stdout.split()
     assert streams == ["video"]
@@ -301,7 +303,8 @@ def test_real_h3_rollout(tmp_path):
     caller = reg.issue(node="gpu", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
     host = lambda p: staging / Path(p).relative_to("/workspace/staging")
     try:
-        img = _wait(q, caller, q.backends["generate_images"].submit(q, caller, {"items": [          # both tools at their default size
+        img = _wait(q, caller, q.backends["generate_images"].submit(q, caller, {
+            "width": DEFAULT[0], "height": DEFAULT[1], "items": [
             {"prompt": "a quiet harbor at dawn seen from the quay, fishing boats, photorealistic", "seed": 3},
             {"prompt": "the same harbor seen from the end of the pier looking back at the town, photorealistic",
              "seed": 4}]})["job_id"])
