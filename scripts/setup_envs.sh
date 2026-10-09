@@ -2,6 +2,10 @@
 # Builds the project's conda envs into AutoResearcher/.envs/<name>.
 #   scripts/setup_envs.sh              # all nine, in order
 #   scripts/setup_envs.sh vllm panel   # only these
+# Candidate generator backends, built only when named: gen-vllm-omni gen-sglang
+# gen-sglang compiles kernels on first use; launch it with `conda run -p .envs/gen-sglang` and
+#   CUDA_HOME=<env> CPATH=<env>/targets/x86_64-linux/include SGLANG_CACHE_DIR=.cache/sglang
+#   LIBRARY_PATH=<env>/targets/x86_64-linux/lib:<env>/targets/x86_64-linux/lib/stubs
 # An env that already exists is skipped; delete .envs/<name> to rebuild it.
 # Needs: conda, git, and a CUDA toolkit (nvcc) for wbench-main. Run from anywhere; run one copy at a time.
 set -euo pipefail
