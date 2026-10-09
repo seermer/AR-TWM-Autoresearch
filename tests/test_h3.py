@@ -252,6 +252,17 @@ def test_h3_finished_candidate_passes_the_real_ingestor_as_per_chunk(tmp_path):
     assert "video_timed_prompts_camera:per_chunk" in r.formats       # the planned boundaries are on the round grid
 
 
+def test_descriptions_make_h3_the_default_rollout_tool(tmp_path):
+    from ar_kernel.tools.gpu_jobs import build_gpu_backends
+    rec = Recorder(tmp_path / "run")
+    d = {b.name: b.description for b in build_gpu_backends(h3_cfg(), tmp_path / "run", [0, 1, 2, 3],
+                                                           TokenRegistry(rec), rec) if b.name.startswith("rollout_")}
+    assert d["rollout_h3"].startswith("MiniMax H3 is the most powerful video generation model of the rollout tools: "
+                                      "use this tool for a new training clip unless")
+    assert d["rollout_ltx25"].startswith("Use this tool when a clip needs a keyframe between its first and last")
+    assert d["rollout_alayaworld"].startswith("Use this tool when a clip's camera has to follow commanded moves")
+
+
 def test_h3_is_registered_only_when_enabled(tmp_path):
     from ar_kernel.tools.gpu_jobs import build_gpu_backends
     rec = Recorder(tmp_path / "run")

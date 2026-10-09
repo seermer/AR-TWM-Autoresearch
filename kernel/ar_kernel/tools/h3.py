@@ -92,8 +92,10 @@ class H3Backend(GpuJob):
         default, maximum = self.block["frames"]
         h, w = self.block["resolutions"][0]
         self.description = (
-            "Render training clips with MiniMax H3 from a scene and a list of turns: one continuous shot with "
-            "no cuts, in which each turn's text is asked for at that turn's start. A GPU job: returns {job_id} at once; "
+            "MiniMax H3 is the most powerful video generation model of the rollout tools: use this tool for a new "
+            "training clip unless the clip needs a feature that only another rollout tool has. Render training clips "
+            "with MiniMax H3 from a scene and a list of turns: one continuous shot with no cuts, in which each "
+            "turn's text is asked for at that turn's start. A GPU job: returns {job_id} at once; "
             "collect with job_wait. Params (one value per job): `frames` (17n+5, "
             f"{MIN_FRAMES} <= frames <= {maximum}, default {default}), `width`/`height` (one of "
             f"{sizes_text(self.block['resolutions'])}; default {w}x{h}). Item: "

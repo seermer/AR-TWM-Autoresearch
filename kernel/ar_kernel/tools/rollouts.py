@@ -168,6 +168,8 @@ class AlayaWorldBackend(GpuJob):
     config_key = "generators.alayaworld"      # timeout_s
     file_keys = frame_keys = ("image", "subject_mask")
     description = (
+        "Use this tool when a clip's camera has to follow commanded moves, or the clip has to come from a node's "
+        "fine-tune. "
         "Render clips with AlayaWorld itself: the released model that every node fine-tunes, or with `node` a "
         "scored node's fine-tune. A GPU job: returns {job_id} at once; collect with job_wait. Each item is a "
         "first frame, the scene and character text, and a list of turns. The first frame, and a subject mask, "
@@ -466,6 +468,8 @@ class Ltx25Backend(GpuJob):
         if unknown:
             raise ValueError(f"generators.ltx25.variants: unknown variant(s) {sorted(unknown)}; known: distilled, dev")
         self.description = (
+            "Use this tool when a clip needs a keyframe between its first and last frame, or has to be shorter "
+            "than the other rollout tools allow. "
             "Render training clips with LTX-2.5 from a text prompt, optionally pinned to images at chosen "
             "frames. A GPU job: returns {job_id} at once; collect with job_wait. Params (one value per "
             f"job): `variant` ({' or '.join(self.enabled_variants())}; default the first), `frames` (8k+1, "
