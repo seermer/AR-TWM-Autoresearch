@@ -18,10 +18,12 @@ from types import SimpleNamespace
 from typing import Annotated, Any, Callable
 
 from mcp.server.mcpserver import Context
+from PIL import Image
 from pydantic import Field, WithJsonSchema
 
 from ..archive.blobs import sha256_file
 from ..control import Control
+from ..data.probe import TARGET_ASPECT
 from ..guards import alert
 from ..isolation import EXCLUDED_PROMPT, copies_held_out, strings
 from ..subproc import file_tail
@@ -57,7 +59,7 @@ ClipItems = Annotated[list[dict[str, Any]] | str, items_schema(
     {"prompt": _str("what the clip shows"), "image": _FRAME, "seed": _SEED}, ["prompt", "seed"])]
 KEYFRAMES_SCHEMA = {"type": "array", "description": "images the clip must show at given frames", "items": {
     "type": "object", "additionalProperties": False, "required": ["image", "frame"], "properties": {
-        "image": _str("an image file under /workspace (any size; it is cropped and resized)"),
+        "image": _str("an image file under /workspace, exactly the clip's width x height (it is used as it is)"),
         "frame": {"type": "integer", "description": "0-based frame index; 0 is the first frame, -1 the last"}}}}
 LtxItems = Annotated[list[dict[str, Any]] | str, items_schema(
     "the clips to render, one item each",
@@ -82,12 +84,14 @@ _TURN = {"type": "object", "additionalProperties": False, "required": ["action"]
                              "or 'tp_to_tp: <the new view>'")}}
 WorldItems = Annotated[list[dict[str, Any]] | str, items_schema(
     "the clips to render, one item each",
-    {"image": _str("first frame: an image file under /workspace (.jpg, .png, ...; any size)"),
+    {"image": _str("first frame: an image file under /workspace (.jpg, .png, ...), exactly the size the tool "
+                   "description gives (it is used as it is)"),
      "viewpoint": {"type": "string", "enum": ["first_person", "third_person"],     # rollouts.VIEWPOINTS
                    "description": "whose eyes the first frame is seen through"},
      "scene_prompt": _str("the scene: place, objects, light"),
      "character_prompt": _str("the subject, if there is one"),
-     "subject_mask": _str("an image under /workspace, white where the subject is in the first frame"),
+     "subject_mask": _str("an image under /workspace of the first frame's size, white where the subject is in "
+                          "the first frame"),
      "turns": {"type": "array", "items": _TURN,
                "description": "the clip, turn by turn; each turn lasts `rounds_per_turn` rounds"}},
     ["image", "viewpoint", "scene_prompt", "turns"])]
@@ -131,6 +135,49 @@ def check_keyframes(item: dict) -> None:
         raise ToolError(f"keyframes repeat a frame: {seen}")
 
 
+def _near_16_9(cfg, width: int, height: int) -> bool:
+    return abs(width / height - TARGET_ASPECT) <= TARGET_ASPECT * float(cfg.get("ingest.aspect_tolerance"))
+
+
+def check_size(cfg, width, height) -> None:
+    """A job's `width` x `height`: within the ingest tolerance of 16:9, the first check of every tool."""
+    if not (is_int(width) and is_int(height) and width > 0 and height > 0):
+        raise ToolError(f"width and height must be positive ints: got {width!r} and {height!r}")
+    if not _near_16_9(cfg, width, height):
+        raise ToolError(f"{width}x{height} is not within {cfg.get('ingest.aspect_tolerance'):.0%} of 16:9")
+
+
+def check_listed_size(cfg, args: dict, resolutions: list) -> None:
+    """Fill `height`/`width` in from the first of the tool's `resolutions` ([height, width] pairs), then
+    check the size: 16:9 first, then that it is on the list."""
+    h, w = resolutions[0]
+    size = [args.setdefault("height", h), args.setdefault("width", w)]
+    check_size(cfg, size[1], size[0])
+    if size not in [list(r) for r in resolutions]:
+        raise ToolError(f"width x height must be one of the resolutions {sizes_text(resolutions)}: "
+                        f"got {size[1]}x{size[0]}")
+
+
+def sizes_text(resolutions: list) -> str:
+    return ", ".join(f"{w}x{h}" for h, w in resolutions)
+
+
+def check_frame_image(cfg, path: Path, size: tuple[int, int], what: str) -> None:
+    """An image a clip starts or ends on is used as it is: it must be within the ingest tolerance of
+    16:9 and exactly the job's (width, height)."""
+    try:
+        with Image.open(path) as im:
+            got = im.size
+    except Exception as exc:            # noqa: BLE001 -- PIL raises many types on a broken file
+        raise ToolError(f"{what} cannot be read as an image: {type(exc).__name__}: {exc}") from None
+    if not _near_16_9(cfg, *got):
+        raise ToolError(f"{what} is {got[0]}x{got[1]}, which is not within "
+                        f"{cfg.get('ingest.aspect_tolerance'):.0%} of 16:9")
+    if got != tuple(size):
+        raise ToolError(f"{what} is {got[0]}x{got[1]}, but the job renders {size[0]}x{size[1]} and uses the "
+                        f"image as it is: make it exactly that size")
+
+
 def canonical_hash(obj) -> str:
     return hashlib.sha256(json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -145,12 +192,14 @@ def split_gpus(gpus: list[int], per_worker: int, workers: int | None) -> list[li
 
 class GpuJob:
     """Base JobQueue backend. Subclasses set name/tool, kind ("rollout" | "annotation" | "image"),
-    generator (provenance name), license, file_keys (item fields naming workspace files),
+    generator (provenance name), license, file_keys (item fields naming workspace files), frame_keys
+    (those of them holding an image that must have the job's size, with `frame_size`),
     optionally config_key (the kernel.yaml block, `self.block`, whose timeout_s and license override
     the class defaults) and implement check_args, produce and finish. A job takes any number of items, or at most the block's
     `max_items`."""
     name = tool = kind = generator = license = description = config_key = ""
     file_keys: tuple[str, ...] = ()
+    frame_keys: tuple[str, ...] = ()
     takes_keyframes = False     # items may carry `keyframes` (check_keyframes)
     timeout_s: float | None = None   # per-job wall-clock cap enforced by run_workers; None = no cap
 
@@ -189,16 +238,19 @@ class GpuJob:
             for key in self.file_keys:
                 if isinstance(item.get(key), str):
                     try:
-                        clip_host_path(caller, item[key])
-                    except PathError as exc:
+                        host = clip_host_path(caller, item[key])
+                        if key in self.frame_keys:
+                            check_frame_image(self.cfg, host, self.frame_size(args), "the image")
+                    except (PathError, ToolError) as exc:
                         bad.setdefault(n, f"{key}: {exc}")
                     item = {**item, key: container_path(item[key])}
             if self.takes_keyframes and n not in bad:
                 frames = []
                 for k in item.get("keyframes") or []:
                     try:
-                        clip_host_path(caller, k["image"])
-                    except PathError as exc:
+                        check_frame_image(self.cfg, clip_host_path(caller, k["image"]), self.frame_size(args),
+                                          f"the image at frame {k['frame']}")
+                    except (PathError, ToolError) as exc:
                         bad.setdefault(n, f"keyframes: {exc}")
                     frames.append({**k, "image": container_path(k["image"])})
                 item = {**item, "keyframes": sorted(frames, key=lambda k: (k["frame"] < 0, k["frame"]))}   # clip order
@@ -214,6 +266,10 @@ class GpuJob:
 
     def check_item_for(self, item: dict, args: dict) -> None:
         """Checks of one item that need the job's arguments (after check_args filled defaults in). Raises ToolError."""
+
+    def frame_size(self, args: dict) -> tuple[int, int]:
+        """(width, height) the job renders: what a `frame_keys` image and every keyframe must be."""
+        return args["width"], args["height"]
 
     # ---- run (worker thread, under the GPU lock) ----
     def run(self, job, cancel: threading.Event, report) -> dict:
@@ -231,8 +287,8 @@ class GpuJob:
             staged = []
             for index, item in enumerate(job.args["items"]):
                 try:
-                    staged.append(self._stage(caller, index, item, inp))
-                except (PathError, OSError) as exc:
+                    staged.append(self._stage(caller, index, item, inp, job.args))
+                except (PathError, OSError, ToolError) as exc:
                     results[index] = {"index": index, "error": f"input: {exc}"}
             (work / "items.json").write_text(json.dumps(staged), encoding="utf-8")
             if staged and not cancel.is_set():
@@ -252,12 +308,16 @@ class GpuJob:
         return {"items": [results[i] for i in sorted(results)],
                 "gpu_memory_mib": {"before": before, "after": after}, "gpu_memory_released": released}
 
-    def _stage(self, caller, index: int, item: dict, inp: Path) -> dict:
+    def _stage(self, caller, index: int, item: dict, inp: Path, args: dict) -> dict:
+        """The item with its files copied into `inp`. The agent can change a file after submit, so a
+        frame image's size is checked again on the copy the job uses."""
         staged = {**item, "index": index, "hashes": {}}
         for key in self.file_keys:
             if isinstance(item.get(key), str):
                 dst = inp / f"{index}_{key}{Path(item[key]).suffix}"
                 stage_clip(caller, item[key], dst)
+                if key in self.frame_keys:
+                    check_frame_image(self.cfg, dst, self.frame_size(args), f"{key}: the image")
                 staged[key] = str(dst)
                 staged["hashes"][key] = sha256_file(dst)
         if self.takes_keyframes:
@@ -265,6 +325,8 @@ class GpuJob:
             for n, k in enumerate(item.get("keyframes") or []):
                 dst = inp / f"{index}_keyframe{n}{Path(k['image']).suffix}"
                 stage_clip(caller, k["image"], dst)
+                check_frame_image(self.cfg, dst, self.frame_size(args),
+                                  f"keyframes: the image at frame {k['frame']}")
                 staged["keyframes"].append({**k, "image": str(dst)})
                 staged["hashes"][f"keyframe{n}"] = sha256_file(dst)
         return staged
@@ -446,8 +508,8 @@ def register_gpu_tools(mcp, kit, q) -> None:
         @mcp.tool(name="generate_images", description=job_description(b["generate_images"]))
         async def generate_images(
                 items: ImageItems, ctx: Context,
-                width: Annotated[int | None, Field(description="multiple of 16 in 256..1920, default 1280")] = None,
-                height: Annotated[int | None, Field(description="multiple of 16 in 256..1920, default 720")] = None,
+                width: Annotated[int | None, Field(description="multiple of 16 in 256..1920; the default is in the tool description")] = None,
+                height: Annotated[int | None, Field(description="multiple of 16 in 256..1920; the default is in the tool description")] = None,
         ) -> dict[str, Any]:
             return await submit(ctx, "generate_images", items=items, width=width, height=height)
 
@@ -476,8 +538,10 @@ def register_gpu_tools(mcp, kit, q) -> None:
         async def rollout_h3(
                 items: H3Items, ctx: Context,
                 frames: Annotated[int | None, Field(description="17n+5 frames at 24 fps; one value for the job")] = None,
+                height: Annotated[int | None, Field(description="with width, one of the listed resolutions")] = None,
+                width: Annotated[int | None, Field(description="with height, one of the listed resolutions")] = None,
         ) -> dict[str, Any]:
-            return await submit(ctx, "rollout_h3", items=items, frames=frames)
+            return await submit(ctx, "rollout_h3", items=items, frames=frames, height=height, width=width)
 
 
 def build_gpu_backends(cfg, run_dir: Path, gpus: list[int], registry, recorder) -> list:

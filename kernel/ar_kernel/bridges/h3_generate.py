@@ -16,18 +16,14 @@ import os
 import time
 from pathlib import Path
 
-from PIL import Image, ImageOps
+from PIL import Image
 
 TASKS = {(): "t2av", (0,): "i2av", (-1,): "l2av", (-1, 0): "fl2av"}
 
 
-def fit(image: Image.Image, size: tuple[int, int]) -> Image.Image:
-    """Center-crop and resize to the canvas (the runner would stretch a first frame instead)."""
-    return ImageOps.fit(image.convert("RGB"), size, Image.LANCZOS)
-
-
 def request_of(item: dict, prompt: str, frames: int, height: int, width: int) -> dict:
-    images = {k["frame"]: fit(Image.open(k["image"]), (width, height)) for k in item.get("keyframes") or []}
+    # the kernel has checked that each keyframe is exactly width x height, so the runner uses it as it is
+    images = {k["frame"]: Image.open(k["image"]) for k in item.get("keyframes") or []}
     return {"task": TASKS[tuple(sorted(images))], "prompt": prompt, "seed": int(item["seed"]),
             "size": [height, width], "num_frames": frames,
             "image_path": images.get(0), "last_frame_path": images.get(-1)}

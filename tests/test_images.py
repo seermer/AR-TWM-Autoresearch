@@ -62,7 +62,7 @@ def test_image_is_published_with_the_requested_size(env):
     assert item["prompt"] == "a red fox in snow" and item["seed"] == 1
     assert item["generator"] == "z-image-turbo" and item["license"] == "Apache-2.0"
     with _open(staging, item) as im:
-        assert im.size == (1280, 720)              # config default width/height
+        assert im.size == (images.WIDTH, images.HEIGHT) == (1376, 768)
 
 
 def test_custom_size_is_honored(env):
@@ -83,7 +83,15 @@ def test_size_out_of_range_is_refused_at_submit(env):
     q, caller, staging = env
     with pytest.raises(ToolError, match="multiples of 16"):
         q.backends["generate_images"].submit(q, caller, {"items": [{"prompt": "p", "seed": 1}],
-                                                          "width": 2000, "height": 720})
+                                                          "width": 2048, "height": 1152})
+
+
+@pytest.mark.parametrize("width, height", [(1536, 1024), (1024, 1024), (768, 1376), (1376, 720)])
+def test_size_off_16_9_is_refused_at_submit(env, width, height):
+    q, caller, staging = env
+    with pytest.raises(ToolError, match="not within 2% of 16:9"):
+        q.backends["generate_images"].submit(q, caller, {"items": [{"prompt": "p", "seed": 1}],
+                                                          "width": width, "height": height})
 
 
 def test_missing_prompt_is_refused_at_submit(env):
@@ -157,7 +165,7 @@ def test_real_zimage_generates_plausible_images(tmp_path):
     for item in job_result(out)["items"]:
         assert "error" not in item, item
         with Image.open(staging / Path(item["image"]).relative_to("/workspace/staging")) as im:
-            assert im.size == (1280, 720)
+            assert im.size == (images.WIDTH, images.HEIGHT)
     assert job_result(out)["gpu_memory_released"] is True
     print({"gpus": gpus, "gpu_memory_mib": job_result(out)["gpu_memory_mib"],
           "seconds": [i["worker"].get("seconds") for i in job_result(out)["items"]]})

@@ -29,7 +29,8 @@ from ..archive.db import open_db
 from ..archive.nodes import NodeStore
 from ..data.probe import aspect_ok, probe_video
 from ..subproc import file_tail, free_port, meminfo_gib
-from .gpu_jobs import IMAGE_EXTS, GpuJob, check_item_seed, check_keyframes, is_int, split_gpus
+from .gpu_jobs import (IMAGE_EXTS, GpuJob, check_item_seed, check_keyframes, check_listed_size, is_int, sizes_text,
+                       split_gpus)
 from .jobs import run_cancellable
 from .server import ToolError
 
@@ -165,14 +166,16 @@ class AlayaWorldBackend(GpuJob):
     name = tool = "rollout_alayaworld"
     kind = "rollout"
     config_key = "generators.alayaworld"      # timeout_s
-    file_keys = ("image", "subject_mask")
+    file_keys = frame_keys = ("image", "subject_mask")
     description = (
         "Render clips with AlayaWorld itself: the released model that every node fine-tunes, or with `node` a "
         "scored node's fine-tune. A GPU job: returns {job_id} at once; collect with job_wait. Each item is a "
-        "first frame, the scene and character text, and a list of turns. A turn moves the camera and may add one "
+        "first frame, the scene and character text, and a list of turns. The first frame, and a subject mask, "
+        "must be exactly {size}: it is used as it is. A turn moves the camera and may add one "
         "instruction: an event in the scene, an action of the subject, or a change of viewpoint. A turn keeps its "
         "camera move and its text for all its rounds. Camera moves steer "
-        "translation reliably, rotation (turns, orbits) only weakly. Each result item gives a `candidate` (mp4, "
+        "translation reliably, rotation (turns, orbits) only weakly; an event or subject action may show up "
+        "early, late, weakly or not at all. Each result item gives a `candidate` (mp4, "
         "caption with one segment per round, provenance) with NO pose and no camera_motion: run annotate_camera "
         "on candidate.video, then data_ingest it with that pose and camera_motion 'moving' (eligible for "
         "video_timed_prompts_camera:per_chunk). Metadata, not labels: `commanded_camera` (npz of the camera path "
@@ -182,7 +185,14 @@ class AlayaWorldBackend(GpuJob):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.max_turns = int(self.block["max_turns"])
-        self.description = self.description.replace("{max_turns}", str(self.max_turns))
+        render = self.cfg.worldmodel / "configs" / "wbench_full.yaml"          # the size every clip is rendered at
+        sample = yaml.safe_load(render.read_text(encoding="utf-8"))["sample"]
+        self.size = sample["width"], sample["height"]
+        self.description = self.description.replace("{max_turns}", str(self.max_turns)).replace(
+            "{size}", f"{self.size[0]}x{self.size[1]}")
+
+    def frame_size(self, args):
+        return self.size
 
     def check_args(self, args):
         args.setdefault("rounds_per_turn", 3)
@@ -459,11 +469,11 @@ class Ltx25Backend(GpuJob):
             "Render training clips with LTX-2.5 from a text prompt, optionally pinned to images at chosen "
             "frames. A GPU job: returns {job_id} at once; collect with job_wait. Params (one value per "
             f"job): `variant` ({' or '.join(self.enabled_variants())}; default the first), `frames` (8k+1, "
-            f"1 < frames <= {maximum}, default {default}), `height`/`width` (one of "
-            f"{', '.join(f'{rh}x{rw}' for rh, rw in self.block['resolutions'])}; default {h}x{w}). Item: {{'prompt': str, "
+            f"1 < frames <= {maximum}, default {default}), `width`/`height` (one of "
+            f"{sizes_text(self.block['resolutions'])}; default {w}x{h}). Item: {{'prompt': str, "
             "'keyframes'?: [{'image': file under /workspace, 'frame': int}], 'seed': int}. A keyframe at "
-            "frame 0 is the first frame and one at -1 the last; any frame in between also works. Images of "
-            "any size are center-cropped and resized to the clip size. Each result item gives a `candidate` for "
+            "frame 0 is the first frame and one at -1 the last; any frame in between also works. A keyframe "
+            "image must be exactly the job's width x height: it is used as it is. Each result item gives a `candidate` for "
             "data_ingest (a 24 fps, 16:9, silent mp4, caption, provenance); it carries no "
             "pose/camera_motion -- add one (annotate_camera then 'moving', or 'static') before ingesting. "
             "LTX often ignores camera instructions like 'camera steady'; never label a clip 'static' from its prompt; run annotate_camera, or check the frames, first. Batch many prompts per call.")
@@ -485,12 +495,7 @@ class Ltx25Backend(GpuJob):
             raise ToolError(f"frames must be 8k+1 with 1 < frames <= {maximum}: got {frames!r}")
         if frames % 8 != 1:
             raise ToolError(f"frames must be 8k+1: got {frames!r}")
-        h, w = self.block["resolutions"][0]
-        size = [args.setdefault("height", h), args.setdefault("width", w)]
-        if not all(is_int(v) for v in size):
-            raise ToolError(f"height and width must be ints: got {size}")
-        if size not in [list(r) for r in self.block["resolutions"]]:
-            raise ToolError(f"[height, width] must be one of the resolutions {self.block['resolutions']}: got {size}")
+        check_listed_size(self.cfg, args, self.block["resolutions"])
 
     def check_item(self, item):
         if "image" in item:

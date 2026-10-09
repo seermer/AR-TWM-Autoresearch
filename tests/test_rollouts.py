@@ -168,9 +168,9 @@ def env(tmp_path, monkeypatch):
     q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
     ws, staging = tmp_path / "ws", tmp_path / "staging"
     ws.mkdir(); staging.mkdir()
-    Image.new("RGB", (640, 360), (90, 120, 60)).save(ws / "frame.png")
-    mask = Image.new("L", (640, 360), 0)
-    mask.paste(255, (250, 100, 390, 340))
+    Image.new("RGB", (960, 544), (90, 120, 60)).save(ws / "frame.png")
+    mask = Image.new("L", (960, 544), 0)
+    mask.paste(255, (375, 150, 585, 510))
     mask.save(ws / "mask.png")
     (ws / "mask.txt").write_text("not an image")
     q.register(AlayaWorldBackend(small_cfg(), tmp_path / "run", [0, 1, 4, 5], reg, rec,
@@ -403,28 +403,41 @@ def test_rounds_per_turn_1_gives_a_segment_per_round(env):
     assert len(cap["segments"]) == 2 and cap["segments"][1]["time_range_s"][0] * 24 == pytest.approx(25)
 
 
-def test_a_case_without_video_and_a_bad_image_fail_alone(env):
+def test_a_case_without_video_fails_alone(env):
     q, caller, staging, _ = env
-    (staging.parent / "ws" / "broken.png").write_bytes(b"not a png")
-    _, by = run_job(q, caller, [first_person(scene_prompt="NO_VIDEO here"), first_person(image="broken.png"),
-                                first_person()])
+    _, by = run_job(q, caller, [first_person(scene_prompt="NO_VIDEO here"), first_person()])
     assert by[0]["error"] == "no video rendered"
-    assert by[1]["error"].startswith("input:")
-    assert "Error" in by[1]["error"].split(":")[1]     # the exception type is named
-    assert "candidate" in by[2]
+    assert "candidate" in by[1]
 
 
-def test_a_non_oserror_from_pil_fails_only_its_own_item(env, monkeypatch):
-    """PIL's decompression-bomb guard raises DecompressionBombError -- a plain Exception, not an
-    OSError -- on an oversize image. produce() must catch that too and fail only that item,
-    rather than letting it escape and fail the whole job (the other items still render)."""
+def test_frame_images_of_another_size_are_refused_at_submit_with_their_item_and_check(env):
     q, caller, staging, _ = env
-    Image.new("RGB", (100, 100), (1, 2, 3)).save(staging.parent / "ws" / "tiny.png")
-    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 20000)   # tiny.png (10k px) stays under 2x this;
-    _, by = run_job(q, caller, [first_person(image="tiny.png"), first_person(), first_person(image="tiny.png")])
-    assert "candidate" in by[0] and "candidate" in by[2]
-    assert by[1]["error"].startswith("input:") and "Error" in by[1]["error"].split(":")[1]     # the exception type is named
-    assert "decompression bomb" in by[1]["error"].lower()
+    ws = staging.parent / "ws"
+    (ws / "broken.png").write_bytes(b"not a png")
+    Image.new("RGB", (1024, 576), (1, 2, 3)).save(ws / "other.png")
+    Image.new("RGB", (1536, 1024), (1, 2, 3)).save(ws / "wide.png")
+    with pytest.raises(ToolError, match="4 of 5 items"):
+        submit(q, caller, [first_person(image="broken.png"), first_person(), first_person(image="other.png"),
+                           first_person(image="wide.png"), third_person(subject_mask="other.png")])
+    [refused] = (staging / "results").glob("rollout_alayaworld-refused-*.json")
+    rows = {r["index"]: r["error"] for r in json.loads(refused.read_text())}
+    assert sorted(rows) == [0, 2, 3, 4]
+    assert rows[0].startswith("image: the image cannot be read as an image")
+    assert rows[2].startswith("image: the image is 1024x576, but the job renders 960x544")
+    assert rows[3] == "image: the image is 1536x1024, which is not within 2% of 16:9"
+    assert rows[4].startswith("subject_mask: the image is 1024x576, but the job renders 960x544")
+
+
+def test_an_image_changed_after_submit_fails_only_its_own_item(env):
+    """The job runs from a staged copy made after submit: the size check runs again on that copy."""
+    from types import SimpleNamespace
+    q, caller, staging, run_dir = env
+    Image.new("RGB", (1024, 576), (1, 2, 3)).save(staging.parent / "ws" / "other.png")
+    job = SimpleNamespace(id="j1", token=caller.token, node="n1", args={
+        "items": [first_person(image="other.png"), first_person()], "rounds_per_turn": 3, "seed": 42})
+    out = q.backends["rollout_alayaworld"].run(job, threading.Event(), lambda progress: None)
+    assert out["items"][0]["error"].startswith("input: image: the image is 1024x576, but the job renders 960x544")
+    assert "candidate" in out["items"][1]
 
 
 def test_a_job_renders_with_the_ar_teacher(env):
@@ -500,12 +513,12 @@ HIKER = ("Photorealistic wide shot, a hiker in a bright red jacket and grey back
 def _hiker_mask(path):
     """Hand-drawn around the hiker of generate_images(HIKER, seed 3) at 1280x720."""
     from PIL import ImageDraw
-    m = Image.new("L", (1280, 720), 0)
+    m = Image.new("L", (1280, 720), 0)          # drawn at that size, saved at the render size
     d = ImageDraw.Draw(m)
     d.ellipse((646, 260, 697, 305), fill=255)
     d.polygon([(603, 300), (737, 300), (745, 468), (715, 472), (708, 662), (642, 662), (630, 478), (598, 468)],
               fill=255)
-    m.save(path)
+    m.resize((960, 544), Image.NEAREST).save(path)
 
 
 def _wait(q, caller, job_id):
@@ -564,7 +577,7 @@ def test_real_alayaworld_rollout(tmp_path):
     ws.mkdir(parents=True); staging.mkdir(parents=True)
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i",
                     str(REAL.worldmodel / "data/examples/video_caption_camera/videos/clip_0001.mp4"),
-                    "-frames:v", "1", str(ws / "street.png")], check=True)
+                    "-frames:v", "1", "-vf", "scale=960:544", str(ws / "street.png")], check=True)
     _hiker_mask(ws / "hiker_mask.png")
     rec = Recorder(run_dir)
     reg = TokenRegistry(rec)
@@ -575,7 +588,7 @@ def test_real_alayaworld_rollout(tmp_path):
     host = lambda p: staging / Path(p).relative_to("/workspace/staging")
     try:
         img = _wait(q, caller, q.backends["generate_images"].submit(
-            q, caller, {"items": [{"prompt": HIKER, "seed": 3}]})["job_id"])
+            q, caller, {"width": 960, "height": 544, "items": [{"prompt": HIKER, "seed": 3}]})["job_id"])
         assert img["state"] == "done", img.get("error")
         hiker = job_result(img)["items"][0]["image"]
         items = [
@@ -676,7 +689,7 @@ def test_real_alayaworld_rollout_of_a_node(tmp_path):
     (run_dir / "nodes" / "n2" / "checkpoint-300").symlink_to(Path(os.environ["AR_TEST_CHECKPOINT"]).resolve())
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i",
                     str(REAL.worldmodel / "data/examples/video_caption_camera/videos/clip_0001.mp4"),
-                    "-frames:v", "1", str(ws / "street.png")], check=True)
+                    "-frames:v", "1", "-vf", "scale=960:544", str(ws / "street.png")], check=True)
     rec = Recorder(run_dir)
     reg = TokenRegistry(rec)
     q = JobQueue(rec, threading.Lock(), wait_cap_s=3600)
@@ -1057,7 +1070,8 @@ def ltx_env(tmp_path, monkeypatch):
     q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
     ws, staging = tmp_path / "ws", tmp_path / "staging"
     ws.mkdir(); staging.mkdir()
-    Image.new("RGB", (640, 360), (10, 20, 30)).save(ws / "frame.png")
+    Image.new("RGB", (1024, 576), (10, 20, 30)).save(ws / "frame.png")
+    Image.new("RGB", (960, 544), (10, 20, 30)).save(ws / "small.png")
 
     def make(gpus=(0, 1, 4, 5), **over):
         q.register(Ltx25Backend(small_ltx_cfg(**over), tmp_path / "run", list(gpus), reg, rec,
@@ -1077,7 +1091,7 @@ def run_ltx(q, caller, items, **params):
 @pytest.mark.parametrize("params, match", [
     ({"frames": 120}, r"8k\+1"), ({"frames": 1}, "1 < frames"), ({"frames": 125}, r"8k\+1"),
     ({"frames": 100001}, "1 < frames"), ({"frames": "x"}, "1 < frames"),
-    ({"height": 720, "width": 1280}, "resolutions"), ({"width": 960}, "resolutions"),
+    ({"height": 720, "width": 1280}, "resolutions"), ({"width": 960}, "16:9"), ({"height": 768}, "16:9"),
     ({"height": 576.0}, "ints"), ({"width": True}, "ints"), ({"variant": "pro"}, "variant")])
 def test_ltx_bad_params_are_refused_at_submit(ltx_env, params, match):
     make, caller, _ = ltx_env
@@ -1090,6 +1104,8 @@ def test_ltx_bad_params_are_refused_at_submit(ltx_env, params, match):
     ({"seed": 1}, "prompt"), ({"prompt": " ", "seed": 1}, "prompt"), ({"prompt": "p"}, "seed"),
     ({"prompt": "p", "seed": True}, "seed"),
     ({"prompt": "p", "seed": 1, "keyframes": [{"image": 3, "frame": 0}]}, "each keyframe"),
+    ({"prompt": "p", "seed": 1, "keyframes": [{"image": "small.png", "frame": 0}]},
+     "keyframes: the image at frame 0 is 960x544, but the job renders 1024x576"),
     ({"prompt": "p", "seed": 1, "image": "frame.png"}, "image")])
 def test_ltx_bad_items_are_refused_at_submit(ltx_env, item, match):
     make, caller, _ = ltx_env
@@ -1338,8 +1354,9 @@ def test_real_ltx25_rollout(tmp_path, variant):
     peak, stop = _peak_sampler(gpus)
     try:
         img = _wait(q, caller, q.backends["generate_images"].submit(
-            q, caller, {"items": [{"prompt": "a red barn in an open field, photorealistic", "seed": 9},
-                                  {"prompt": "a cup of coffee on a wooden table, photorealistic", "seed": 10}]})["job_id"])
+            q, caller, {"width": 1024, "height": 576, "items": [
+                {"prompt": "a red barn in an open field, photorealistic", "seed": 9},
+                {"prompt": "a cup of coffee on a wooden table, photorealistic", "seed": 10}]})["job_id"])
         assert img["state"] == "done", img.get("error")
         frames = [i["image"] for i in job_result(img)["items"]]
         items = [{"prompt": "Ocean waves gently rolling onto a quiet beach at sunset, camera steady.", "seed": 2},

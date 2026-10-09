@@ -428,6 +428,9 @@ class KeyframeJob(FakeJob):
     file_keys = ()
     takes_keyframes = True
 
+    def frame_size(self, args):
+        return 64, 36
+
     def check_item(self, item):
         from ar_kernel.tools.gpu_jobs import check_keyframes
         check_keyframes(item)

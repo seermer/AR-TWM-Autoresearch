@@ -12,7 +12,7 @@ from ..config import KernelConfig, run_config_path
 from ..isolation import EXCLUDED_CLIP, blocked, copies_held_out
 from .checker import CheckerError, check_clip_formats
 from .leakage import LeakageChecker
-from .probe import aspect_ok, probe_video
+from .probe import TARGET_ASPECT, aspect_ok, probe_video
 
 # A camera step this many times the clip's median step, or a turn of this many degrees between two
 # frames, is reported. Measured on two runs' clips: single-shot clips stay under 5x and 1 degree;
@@ -165,7 +165,9 @@ class Ingestor:
         if not aspect_ok(info, self.tolerance):
             return self._reject(candidate, node_id, [
                 f"display aspect ratio {info.display_aspect:.4f} (coded {info.width}x{info.height}, "
-                f"sar {info.sar:.4f}) is not within {self.tolerance:.0%} of 16:9"])
+                f"sar {info.sar:.4f}) is {abs(info.display_aspect / TARGET_ASPECT - 1):.1%} "
+                f"{'wider' if info.display_aspect > TARGET_ASPECT else 'narrower'} than 16:9; the limit is "
+                f"{self.tolerance:.0%}. Skill data_formats, 'Converting a video', says how to bring a clip to 16:9"])
 
         probe_root = self.run_dir / "tmp" / f"probe_{uuid.uuid4().hex}"     # parallel ingests never share it
         shutil.rmtree(probe_root, ignore_errors=True)

@@ -16,7 +16,7 @@ from pathlib import Path
 
 from ..data.probe import probe_video
 from ..subproc import meminfo_gib
-from .gpu_jobs import GpuJob, check_item_seed, check_keyframes, is_int
+from .gpu_jobs import GpuJob, check_item_seed, check_keyframes, check_listed_size, is_int, sizes_text
 from .rollouts import FFMPEG_TIMEOUT_S, check_published, checked_repo
 from .server import ToolError
 
@@ -90,13 +90,14 @@ class H3Backend(GpuJob):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         default, maximum = self.block["frames"]
-        h, w = self.block["resolution"]
+        h, w = self.block["resolutions"][0]
         self.description = (
             "Render training clips with MiniMax H3 from a scene and a list of turns: one continuous shot with "
             "no cuts, in which each turn's text is asked for at that turn's start. A GPU job: returns {job_id} at once; "
             f"collect with job_wait. A job loads for several minutes, then takes about 4 minutes per {maximum}-frame "
-            "clip. `frames`: 17n+5, "
-            f"{MIN_FRAMES} <= frames <= {maximum}, default {default} (one value for the job). Item: "
+            "clip at the smallest size and about 8 at the largest. Params (one value per job): `frames` (17n+5, "
+            f"{MIN_FRAMES} <= frames <= {maximum}, default {default}), `width`/`height` (one of "
+            f"{sizes_text(self.block['resolutions'])}; default {w}x{h}). Item: "
             "{'scene_prompt': str, 'turns': [{'prompt': str}], 'overall_soundscape': str, 'non_diegetic_music': "
             "str, 'keyframes'?: [{'image': file under /workspace, 'frame': 0 or -1}], 'seed': int}. Start "
             "`scene_prompt` with the visual style, e.g. 'Live-action,'. `overall_soundscape`: 1-4 sentences on "
@@ -107,14 +108,14 @@ class H3Backend(GpuJob):
             "included, in phrases like: the camera pushes in / pulls out, pans left / right, trucks left / right, "
             "tilts up / down, pedestals up / down, arcs around the subject, tracks the subject, holds a static "
             "shot; add 'with small / large amplitude' or 'at slow / fast speed' when it matters. A keyframe at "
-            f"frame 0 is the first frame and one at -1 the last; images are center-cropped to {w}x{h}. A last "
+            "frame 0 is the first frame and one at -1 the last; a keyframe image must be exactly the job's width x "
+            "height: it is used as it is. A last "
             "keyframe must be a view the shot can reach from the first: an unrelated image is reached by a cut "
             "in the final frames. Each "
-            f"result item gives a `candidate` for data_ingest (a {w}x{h}, 24 fps, silent mp4, a caption holding "
+            "result item gives a `candidate` for data_ingest (a 24 fps, silent mp4, a caption holding "
             "the scene only, provenance); it carries no pose/camera_motion -- add one (annotate_camera then "
-            "'moving', or 'static') before ingesting. Timing is loose: each turn's start time is written into "
-            "the prompt as a timestamp inside the one shot, which the model was not documented to follow, and "
-            "an event can land a second or more off. The published caption therefore has no per-turn segments: "
+            "'moving', or 'static') before ingesting. An event may land a second or more earlier or later "
+            "than its turn, or not appear at all. The published caption therefore has no per-turn segments: "
             "check the frames, then write the segments you ingest to match what the clip shows. Metadata, not "
             "labels: `turn_segments` (each turn's prompt and its planned frame range) and `h3_prompt`.")
 
@@ -123,6 +124,7 @@ class H3Backend(GpuJob):
         frames = args.setdefault("frames", default)
         if not (is_int(frames) and MIN_FRAMES <= frames <= maximum and (frames - 5) % 17 == 0):
             raise ToolError(f"frames must be 17n+5 with {MIN_FRAMES} <= frames <= {maximum}: got {frames!r}")
+        check_listed_size(self.cfg, args, self.block["resolutions"])
 
     def check_item(self, item):
         if "image" in item:
@@ -160,7 +162,7 @@ class H3Backend(GpuJob):
         frames = job.args["frames"]
         prompts = {str(item["index"]): self._prompt(job, item) for item in items}
         (work / "prompts.json").write_text(json.dumps(prompts, ensure_ascii=False), encoding="utf-8")
-        h, w = self.block["resolution"]
+        h, w = job.args["height"], job.args["width"]
         checked_repo(self.cfg, self.config_key, "LightX2V")
         avail, rss, reserve = meminfo_gib()["MemAvailable"], self.block["peak_rss_gib"], self.block["host_reserve_gib"]
         if avail - reserve < rss:
@@ -184,7 +186,7 @@ class H3Backend(GpuJob):
 
     def finish(self, job, item, out):
         frames = job.args["frames"]
-        h, w = self.block["resolution"]
+        h, w = job.args["height"], job.args["width"]
         silent = out / f"{item['index']}.silent.mp4"
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(out / f"{item['index']}.mp4"), "-an",
                         "-c:v", "copy", str(silent)], check=True, timeout=FFMPEG_TIMEOUT_S)

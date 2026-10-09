@@ -114,8 +114,9 @@ def h3_env(tmp_path, monkeypatch):
     q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
     ws, staging = tmp_path / "ws", tmp_path / "staging"
     ws.mkdir(); staging.mkdir()
-    Image.new("RGB", (640, 360), (10, 20, 30)).save(ws / "first.png")
-    Image.new("RGB", (640, 360), (30, 20, 10)).save(ws / "last.png")
+    Image.new("RGB", (1376, 768), (10, 20, 30)).save(ws / "first.png")
+    Image.new("RGB", (1376, 768), (30, 20, 10)).save(ws / "last.png")
+    Image.new("RGB", (960, 544), (30, 20, 10)).save(ws / "small.png")
     q.register(H3Backend(h3_cfg(config=str(config)), tmp_path / "run", [0, 1, 4, 5], reg, rec,
                          gpu_memory=lambda g: {i: 100 for i in g}))
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
@@ -145,6 +146,10 @@ def submit(q, caller, items, **params):
     (item(keyframes=[{"image": "first.png", "frame": 5}]), {}, "frame 0 .* or -1"),
     (item(keyframes=[{"image": "first.png", "frame": 0}, {"image": "last.png", "frame": 0}]), {}, "repeat"),
     (item(image="first.png"), {}, "image"),
+    (item(keyframes=[{"image": "small.png", "frame": -1}]), {},
+     "keyframes: the image at frame -1 is 960x544, but the job renders 1376x768"),
+    (item(), {"height": 1024, "width": 1536}, "16:9"), (item(), {"height": 720, "width": 1280}, "resolutions"),
+    (item(), {"width": 960}, "16:9"),
     (item(), {"frames": 240}, r"17n\+5"), (item(), {"frames": 107}, "124"), (item(), {"frames": 260}, "243"),
 ])
 def test_h3_submit_refuses(h3_env, bad, params, match):
@@ -173,7 +178,7 @@ def test_h3_produces_a_silent_clip_with_a_scene_caption_and_turn_metadata(h3_env
     assert c["provenance"]["generator"] == "minimax-h3" and c["provenance"]["seed"] == 7
     assert "pose" not in c and "camera_motion" not in c and c["frames"] == 243
     info = probe_video(staging / "rollouts" / job / "0.mp4")
-    assert (info.width, info.height, info.frames, round(info.fps)) == (960, 544, 243, 24)
+    assert (info.width, info.height, info.frames, round(info.fps)) == (1376, 768, 243, 24)     # the default size
     streams = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0",
                               str(staging / "rollouts" / job / "0.mp4")], capture_output=True, text=True).stdout.split()
     assert streams == ["video"]
@@ -187,6 +192,17 @@ def test_h3_produces_a_silent_clip_with_a_scene_caption_and_turn_metadata(h3_env
     assert w["gpus"] == "0,1,4,5" and w["rank"] == 0             # one worker with every GPU
     assert w["weights"] == str(REAL.repo_root / REAL.get("generators.h3.weights"))
     assert w["config"]["parallel"] == {"seq_p_size": 4}          # a rank per GPU
+
+
+def test_h3_renders_each_listed_size_from_a_keyframe_of_that_size(h3_env):
+    q, caller, staging = h3_env
+    for height, width in REAL.get("generators.h3.resolutions"):
+        Image.new("RGB", (width, height), (1, 2, 3)).save(staging.parent / "ws" / "first.png")
+        out = q.wait(caller, submit(q, caller, [item(keyframes=[{"image": "first.png", "frame": 0}])],
+                                    height=height, width=width)["job_id"], 120)
+        assert out["state"] == "done", out
+        info = probe_video(staging / "rollouts" / out["id"] / "0.mp4")
+        assert (info.width, info.height) == (width, height)
 
 
 def test_h3_job_fails_while_host_ram_is_short(h3_env, monkeypatch):
@@ -203,12 +219,13 @@ def test_h3_finish_refuses_a_render_of_the_wrong_size_or_length(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
     staged = {"index": 0, **item()}
+    job = SimpleNamespace(args={"frames": 243, "height": 544, "width": 960})
     make_mp4(out / "0.mp4", seconds=2, fps=24, width=1024, height=576)
     with pytest.raises(ValueError, match="960x544"):
-        b.finish(SimpleNamespace(args={"frames": 243}), staged, out)
+        b.finish(job, staged, out)
     make_mp4(out / "0.mp4", seconds=2, fps=24, width=960, height=544)
     with pytest.raises(ValueError, match="48 frames, not 243"):
-        b.finish(SimpleNamespace(args={"frames": 243}), staged, out)
+        b.finish(job, staged, out)
 
 
 def test_h3_finished_candidate_passes_the_real_ingestor_as_per_chunk(tmp_path):
@@ -222,7 +239,7 @@ def test_h3_finished_candidate_passes_the_real_ingestor_as_per_chunk(tmp_path):
     make_mp4(out / "0.mp4", seconds=243 / 24, fps=24, width=960, height=544)
     rec = Recorder(run_dir)
     res = H3Backend(h3_cfg(), run_dir, [0, 1, 2, 3], TokenRegistry(rec), rec).finish(
-        SimpleNamespace(args={"frames": 243}), {"index": 0, **item()}, out)
+        SimpleNamespace(args={"frames": 243, "height": 544, "width": 960}), {"index": 0, **item()}, out)
     pose = write_poses(out / "vigeo.npz", n_frames=res["frames"], width=960, height=544)
     ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
     assert json.loads(Path(res["caption"]).read_text()) == {"caption": SCENE + "."}
@@ -242,20 +259,6 @@ def test_h3_is_registered_only_when_enabled(tmp_path):
         names = [b.name for b in build_gpu_backends(h3_cfg(enabled=enabled), tmp_path / "run", [0, 1, 2, 3],
                                                      TokenRegistry(rec), rec)]
         assert ("rollout_h3" in names) is present
-
-
-def _bridge():
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("h3_generate", h3.H3_BRIDGE)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)             # torch and lightx2v are imported inside main(), not here
-    return mod
-
-
-@pytest.mark.parametrize("size", [(1280, 720), (800, 1088), (640, 360), (960, 544)])
-def test_bridge_crops_any_keyframe_to_the_canvas(size):
-    img = _bridge().fit(Image.new("RGB", size, (5, 6, 7)), (960, 544))
-    assert img.size == (960, 544) and img.mode == "RGB"
 
 
 @pytest.mark.gpu
@@ -287,7 +290,7 @@ def test_real_h3_rollout(tmp_path):
     caller = reg.issue(node="gpu", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
     host = lambda p: staging / Path(p).relative_to("/workspace/staging")
     try:
-        img = _wait(q, caller, q.backends["generate_images"].submit(q, caller, {"width": 960, "height": 544, "items": [
+        img = _wait(q, caller, q.backends["generate_images"].submit(q, caller, {"items": [          # both tools at their default size
             {"prompt": "a quiet harbor at dawn seen from the quay, fishing boats, photorealistic", "seed": 3},
             {"prompt": "the same harbor seen from the end of the pier looking back at the town, photorealistic",
              "seed": 4}]})["job_id"])

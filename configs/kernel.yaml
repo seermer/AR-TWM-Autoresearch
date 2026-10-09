@@ -46,7 +46,7 @@ isolation:                       # keeps the evaluation set out of agents' reach
   audit_patterns: [wbench, meituan-longcat, "2605.25874"]   # the model writing one quarantines the node;
                                  #   the gateway drops the sentence around one in anything else it reads
 train:
-  resolution_allowlist: [[544, 960], [416, 736], [352, 608]]   # the base recipe's is the first
+  resolution_allowlist: [[544, 960], [416, 736]]   # the base recipe's is the first
   lora_allowlist: [[16, 16], [32, 32], [64, 64]]
 eval:
   data: ../WBench/data           # the scored benchmark: cases/, images/, masks/
@@ -162,6 +162,8 @@ generators:                       # rollout_* GPU jobs; switched on only after a
     commit: 1ea34ff48f87168174e12956e200b1d908b1c5ff   # pinned; the backend refuses to run off this commit
     weights: weights/wan2.2-ti2v-5b
     enabled: false                 # smoke run passed (2 T2V + 2 I2V); switched off 2026-10-06
+    # Not under the size rule of the other tools: it still crops a first frame to 1280x704 and crops its
+    # render to 1248x704. Bring it under the rule (gpu_jobs.check_size, frame_keys) before switching it on.
     gpus_per_worker: 1
     workers: null                 # null = as many as the GPU list allows
     frames: [121, 121]            # [default, max]; 4k+1
@@ -191,7 +193,8 @@ generators:                       # rollout_* GPU jobs; switched on only after a
     host_reserve_gib: 100         # workers = min(GPUs, items, floor((MemAvailable - this) / peak_rss_gib)),
     workers: null                 # checked at job start; fails only below 1. Optional cap on the GPU count.
     frames: [121, 241]            # [default, max]; 8k+1
-    resolutions: [[576, 1024]]    # [height, width], each divisible by 64 (two-stage), 16:9
+    resolutions: [[576, 1024]]    # [height, width], first = default; each divisible by 64 (two-stage) and
+                                  # within ingest.aspect_tolerance of 16:9
     timeout_s: 28800              # 8 h. Worst case from measurements: 100 cold 241-frame clips on 4 workers =
                                   # 25 per worker x ~900 s (2x the ~400 s cold 121-frame clip) ~ 6.3 h
     license: LTX-2 Community License
@@ -208,8 +211,11 @@ generators:                       # rollout_* GPU jobs; switched on only after a
     # That run, on 4 x 24 GB, 960x544, 29 steps: 243 frames in about 207 s after a 6 min load,
     # about 11 GiB on each card, about 127 GiB of host RAM in use.
     frames: [243, 243]              # [default, max]; 17n+5, min 124
-    resolution: [544, 960]          # [height, width]
-    max_items: 30                   # ~2 h at the measured speed
+    # 1376x768 was run once, at 4 steps: 16 s per step, 14 GiB on each card; about 8 minutes per clip at
+    # 29 steps is a projection, and the two sizes in between were not run.
+    resolutions: [[768, 1376], [768, 1344], [576, 1024], [544, 960]]   # [height, width], first = default;
+                                    # multiples of 32, within ingest.aspect_tolerance of 16:9
+    max_items: 30                   # ~2 h at the measured speed, ~4 h projected at the default size
     peak_rss_gib: 140               # host RAM of one job; a job starts only while
     host_reserve_gib: 60            # MemAvailable - host_reserve_gib >= peak_rss_gib
     timeout_s: 43200

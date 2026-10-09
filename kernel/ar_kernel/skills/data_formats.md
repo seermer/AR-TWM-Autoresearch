@@ -14,7 +14,8 @@ description: Use when preparing clips, captions, timed prompt segments or camera
 - video_caption_static: video + caption; truly fixed camera; no poses (identity is used).
 - Training window: 57 frames at 24 fps (25 history + 32 target). Rollout rounds are 32 frames.
 - Video: .mp4, fps >= 24 (higher is subsampled), duration >= 2.375 s, DISPLAY aspect within 2% of 16:9,
-  no display rotation (re-encode with rotation applied). Frames are resized, never cropped.
+  no display rotation (re-encode with rotation applied). Training stretches every frame to its own size and
+  never crops, so a clip of another shape would train distorted.
 - Caption: non-empty "caption" string.
 - Poses: cam_c2w [N,4,4] with N = the mp4's frame count, camera-to-world, OpenCV convention, finite,
   bottom row [0,0,0,1], orthonormal rotation with det +1. Optional intrinsics [3,3] or [N,3,3] in pixels.
@@ -25,7 +26,12 @@ description: Use when preparing clips, captions, timed prompt segments or camera
 
 - Probe: `ffprobe -v error -select_streams v:0 -show_entries stream=width,height,avg_frame_rate,nb_frames,sample_aspect_ratio:stream_side_data=rotation -of json in.mp4`
 - Display aspect = width * SAR / height, with width and height swapped for a 90 or 270 degree rotation.
-- Center-crop to 16:9 without stretching: `ffmpeg -i in.mp4 -vf "crop='min(iw,ih*16/9)':'min(ih,iw*9/16)',setsar=1" -c:v libx264 -pix_fmt yuv420p -crf 18 -an out.mp4`. Re-encoding also applies any rotation, and `-pix_fmt yuv420p` keeps 10-bit or 4:4:4 sources decodable.
+- Prefer material that is already 16:9, and render your own clips at a 16:9 size: then nothing has to be cut.
+- To bring another shape to 16:9, crop it; ffmpeg or a Python script can do this. Never pad with bars, never stretch, and never change only the aspect label of the file.
+- Choose the crop window from the frames, so that the subject and the action stay inside it for the whole clip. The centre is often the wrong window.
+- Drop a clip when the crop would lose the subject or most of the picture.
+- Crop first, then annotate the camera: a pose measured on the uncropped clip does not fit the cropped one.
+- Re-encoding applies any display rotation. Encode to 8-bit 4:2:0 so that 10-bit or 4:4:4 sources stay decodable.
 - Keep the source frame rate if it is at least 24 fps. Never raise it by duplicating frames.
 - Trimming changes the frame count, so slice the pose array to the same frames.
 

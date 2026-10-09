@@ -57,7 +57,7 @@ def test_recipe_context_carries_rules_allowlists_and_retry(world, tmp_path):
                                parent_id="root", attempt=2, max_attempts=3, retry=retry,
                                nodes_remaining=9, n_gpus=4, tools=["data_query", "data_commit"])
     assert "optimizer.max_steps" in ctx.tunable_rules
-    assert ctx.resolution_allowlist == [[544, 960], [416, 736], [352, 608]]
+    assert ctx.resolution_allowlist == [[544, 960], [416, 736]]
     assert ctx.base_recipe["optimizer"]["batch_size"] == 1
     assert not hasattr(ctx, "format_rules")
     assert ctx.metric_guide["cause_and_effect"]["weight"] == 4.5 and len(ctx.metric_guide) == len(METRIC_SET)

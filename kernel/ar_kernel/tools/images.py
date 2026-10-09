@@ -6,12 +6,13 @@ from pathlib import Path
 
 from PIL import Image
 
-from .gpu_jobs import GpuJob, check_item_seed, is_int, split_gpus
+from .gpu_jobs import GpuJob, check_item_seed, check_size, is_int, split_gpus
 from .server import ToolError
 
 BRIDGE = Path(__file__).resolve().parents[1] / "bridges" / "zimage_generate.py"
 
 _MIN_SIDE, _MAX_SIDE = 256, 1920
+WIDTH, HEIGHT = 1376, 768        # the defaults
 
 
 def _valid_side(n) -> bool:
@@ -26,12 +27,14 @@ class ImageBackend(GpuJob):
     config_key = "images"           # timeout_s
     description = ("Generate images from text prompts (Z-Image-Turbo), for use as the first or last frame of "
                    "a rollout. A GPU job: returns {job_id} at "
-                   "once; collect with job_wait. `width`/`height`: multiples of 16 in 256..1920 "
-                   "(default 1280x720, 16:9). Items: {'prompt': str, 'seed': int}. Each result "
+                   "once; collect with job_wait. `width`/`height`: within 2% of 16:9, and multiples of 16 "
+                   f"in 256..1920 (default {WIDTH}x{HEIGHT}). A rollout uses a frame image as it is, so make it "
+                   "at exactly the size that rollout renders. Items: {'prompt': str, 'seed': int}. Each result "
                    "item gives `image`: a png in /workspace/staging/images/<job_id>/.")
 
     def check_args(self, args):
-        width, height = args.get("width", 1280), args.get("height", 720)
+        width, height = args.setdefault("width", WIDTH), args.setdefault("height", HEIGHT)
+        check_size(self.cfg, width, height)
         if not (_valid_side(width) and _valid_side(height)):
             raise ToolError(f"width/height must be multiples of 16 in [{_MIN_SIDE}, {_MAX_SIDE}]: "
                             f"got {width}x{height}")
@@ -43,7 +46,7 @@ class ImageBackend(GpuJob):
 
     def produce(self, job, items, work, out, cancel, report):
         i = self.block
-        width, height = job.args.get("width", 1280), job.args.get("height", 720)
+        width, height = job.args["width"], job.args["height"]
         weights = self.cfg.repo_root / i["weights"]
         return self.run_workers(i["env"], lambda r, w: [
             "python", str(BRIDGE), "--items", str(work / "items.json"), "--out", str(out), "--rank", str(r),
@@ -53,7 +56,7 @@ class ImageBackend(GpuJob):
 
     def finish(self, job, item, out):
         png = out / f"{item['index']}.png"
-        width, height = job.args.get("width", 1280), job.args.get("height", 720)
+        width, height = job.args["width"], job.args["height"]
         with Image.open(png) as im:
             if im.size != (width, height):
                 raise ValueError(f"image is {im.size[0]}x{im.size[1]}, not {width}x{height}")
