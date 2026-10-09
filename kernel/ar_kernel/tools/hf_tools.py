@@ -1,4 +1,4 @@
-"""hf_search / hf_list_files / hf_download. The kernel downloads, with its own token and size caps."""
+"""hf_search / hf_list_files / hf_download, for dataset and model repos. The kernel downloads, with its own token."""
 from __future__ import annotations
 
 import fnmatch
@@ -16,10 +16,17 @@ from pydantic import Field
 
 from ..isolation import blocked
 from .context import STAGING
-from .server import ToolError
+from .server import FROM_FILE, ToolError, listed
 
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
 LIST_PAGE, LIST_MAX = 200, 1000
+KINDS = ("dataset", "model")
+_KIND = "which kind of repo: 'dataset' (default) or 'model'"
+
+
+def _check_kind(kind: str) -> None:
+    if kind not in KINDS:
+        raise ToolError(f"kind must be 'dataset' or 'model': got {kind!r}")
 
 
 def _layout(names: list[str]) -> str:
@@ -70,16 +77,15 @@ class HfTools:
             api = api or huggingface_hub.HfApi()
             snapshot = snapshot or huggingface_hub.snapshot_download
         self.api, self.snapshot, self.cfg = api, snapshot, cfg
-        self.cap = int(cfg.get("tools.hf_download_max_bytes"))
 
     def search(self, caller, query: str, kind: str = "dataset", limit: int = 20) -> list[dict]:
-        if kind != "dataset":
-            raise ToolError("only kind='dataset' is supported: models are not training data")
+        _check_kind(kind)
         words = (query or "").lower().split()
         if not words:
             raise ToolError("query is empty")
         # The Hub matches one substring, so ask for the longest word and keep the hits holding every word.
-        hits = self.api.list_datasets(search=max(words, key=len), limit=min(int(limit), 100) * 5, full=True)
+        find = self.api.list_datasets if kind == "dataset" else self.api.list_models
+        hits = find(search=max(words, key=len), limit=min(int(limit), 100) * 5, full=True)
         rows = [{"id": d.id, "license": _license(d), "tags": list(d.tags or [])[:40],
                  "gated": getattr(d, "gated", False),
                  "downloads": getattr(d, "downloads", None),
@@ -88,14 +94,16 @@ class HfTools:
                 and not blocked(self.cfg, " ".join([d.id, *(d.tags or [])]))]
         return rows[:min(int(limit), 100)]
 
-    def _info(self, repo: str, revision: str):
+    def _info(self, repo: str, revision: str, kind: str):
+        _check_kind(kind)
         if not REPO_RE.match(repo or ""):
-            raise ToolError(f"invalid dataset repo id {repo!r}")
-        missing = ToolError(f"dataset {repo!r} was not found on the Hub")
+            raise ToolError(f"invalid {kind} repo id {repo!r}")
+        missing = ToolError(f"{kind} {repo!r} was not found on the Hub")
         if blocked(self.cfg, repo):             # reads exactly like a repo that does not exist
             raise missing
         try:
-            return self.api.dataset_info(repo, revision=revision, files_metadata=True)
+            info = self.api.dataset_info if kind == "dataset" else self.api.model_info
+            return info(repo, revision=revision, files_metadata=True)
         except GatedRepoError as exc:           # a RepositoryNotFoundError too, but the repo exists
             raise ToolError(str(exc)) from None
         except RepositoryNotFoundError:
@@ -104,14 +112,14 @@ class HfTools:
             raise ToolError(str(exc)) from None
 
     def list_files(self, caller, repo: str, revision: str, pattern: str = "*",
-                   limit: int = LIST_PAGE, offset: int = 0) -> dict:
+                   limit: int = LIST_PAGE, offset: int = 0, kind: str = "dataset") -> dict:
         """One page of the repo's files matching `pattern` (fnmatch; `*` crosses folders), with sizes."""
-        info = self._info(repo, revision)
+        info = self._info(repo, revision, kind)
         files = sorted((s.rfilename, int(s.size or 0)) for s in info.siblings
                        if fnmatch.fnmatch(s.rfilename, pattern))
         offset, limit = max(0, int(offset)), max(1, min(int(limit), LIST_MAX))
         try:
-            self.api.auth_check(repo, repo_type="dataset")
+            self.api.auth_check(repo, repo_type=kind)
             accessible = True
         except (GatedRepoError, RepositoryNotFoundError):     # gated without access, or private
             accessible = False
@@ -121,9 +129,10 @@ class HfTools:
                 "matching_bytes": sum(size for _, size in files), "offset": offset,
                 "files": [{"path": f, "size": size} for f, size in files[offset:offset + limit]]}
 
-    def download(self, caller, repo: str, revision: str, patterns: list[str],
-                 max_bytes: int | None = None) -> dict:
-        info = self._info(repo, revision)
+    def download(self, caller, repo: str, revision: str, patterns: list[str] | str,
+                 max_bytes: int | None = None, kind: str = "dataset") -> dict:
+        info = self._info(repo, revision, kind)
+        patterns = listed(caller, patterns, "patterns")
         files = sorted(s.rfilename for s in info.siblings
                        if any(fnmatch.fnmatch(s.rfilename, p) for p in patterns))
         if not files:
@@ -136,10 +145,9 @@ class HfTools:
                 raise ToolError(f"repo lists unsafe file path {f!r}; refusing to download")
         sizes = {s.rfilename: int(s.size or 0) for s in info.siblings}
         total = sum(sizes[f] for f in files)
-        cap = min(self.cap, int(max_bytes)) if max_bytes else self.cap
-        if total > cap:
+        if max_bytes and total > int(max_bytes):
             largest = ", ".join(f"{f} ({sizes[f]} bytes)" for f in sorted(files, key=lambda f: -sizes[f])[:5])
-            raise ToolError(f"{len(files)} files total {total} bytes, over the {cap}-byte cap; narrow the "
+            raise ToolError(f"{len(files)} files total {total} bytes, over the {max_bytes}-byte cap; narrow the "
                             f"patterns (exact paths work). Largest matches: {largest}. hf_list_files lists "
                             f"paths and sizes")
         # The agent owns staging. Refuse early (before a large transfer) if a planted link already
@@ -151,7 +159,7 @@ class HfTools:
         tmp.mkdir(parents=True)
         try:
             try:
-                self.snapshot(repo_id=repo, repo_type="dataset", revision=info.sha,
+                self.snapshot(repo_id=repo, repo_type=kind, revision=info.sha,
                               allow_patterns=files, local_dir=str(tmp))
             except HfHubHTTPError as exc:
                 raise ToolError(str(exc)) from None
@@ -163,50 +171,54 @@ class HfTools:
                                     f"{exc}") from None
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
-        return {"repo": repo, "revision": info.sha, "bytes": total, "license": _license(info),
-                "files": [str(STAGING / rel / f) for f in files],
-                "provenance": {"kind": "hf_dataset", "repo": repo, "revision": info.sha,
-                               "files": files}}
+        out = {"repo": repo, "revision": info.sha, "bytes": total, "license": _license(info),
+               "files": [str(STAGING / rel / f) for f in files]}
+        if kind == "dataset":               # a model is not training data: no record for data_ingest
+            out["provenance"] = {"kind": "hf_dataset", "repo": repo, "revision": info.sha, "files": files}
+        return out
 
 
 def register_hf_tools(mcp, kit, tools: HfTools) -> None:
-    @mcp.tool(name="hf_search", description="Search Hugging Face datasets. Every word of `query` must appear in the dataset id or tags. "
-              "Returns ids, license, tags and whether the dataset is gated.")
+    @mcp.tool(name="hf_search", description="Search Hugging Face datasets or models. Every word of `query` must "
+              "appear in the repo id or tags. Returns ids, license, tags and whether the repo is gated.")
     async def hf_search(
-            query: Annotated[str, Field(description="words that must all appear in the dataset id or tags")],
+            query: Annotated[str, Field(description="words that must all appear in the repo id or tags")],
             ctx: Context,
-            kind: Annotated[str, Field(description="only 'dataset'")] = "dataset",
+            kind: Annotated[str, Field(description=_KIND)] = "dataset",
             limit: Annotated[int, Field(description="results to return, at most 100")] = 20) -> list[dict]:
         return await kit.call(ctx, "hf_search", {"query": query, "kind": kind, "limit": limit},
                               lambda c: tools.search(c, query, kind, limit))
 
-    @mcp.tool(name="hf_list_files", description="List a dataset repo's files with their sizes (bytes), "
+    @mcp.tool(name="hf_list_files", description="List a dataset or model repo's files with their sizes (bytes), "
               "without downloading: paths matching `pattern` (fnmatch; `*` also crosses folders, e.g. "
               "'videos/*.mp4'), sorted, one page of `limit` (default 200, at most 1000) from `offset`. "
               "Also returns the pinned revision, license, the matching count and bytes, and `gated` / `accessible` "
-              "(a gated dataset with accessible false cannot be downloaded with this token).")
+              "(a gated repo with accessible false cannot be downloaded with this token).")
     async def hf_list_files(
-            repo: Annotated[str, Field(description="dataset id, 'owner/name'")],
+            repo: Annotated[str, Field(description="repo id, 'owner/name'")],
             revision: Annotated[str, Field(description="branch, tag or commit, e.g. 'main'")],
             ctx: Context,
             pattern: Annotated[str, Field(description="fnmatch pattern; '*' also crosses folders, e.g. 'videos/*.mp4'")] = "*",
             limit: Annotated[int, Field(description="files per page, at most 1000")] = LIST_PAGE,
-            offset: Annotated[int, Field(description="skip this many matching files")] = 0) -> dict[str, Any]:
+            offset: Annotated[int, Field(description="skip this many matching files")] = 0,
+            kind: Annotated[str, Field(description=_KIND)] = "dataset") -> dict[str, Any]:
         return await kit.call(ctx, "hf_list_files",
                               {"repo": repo, "revision": revision, "pattern": pattern, "limit": limit,
-                               "offset": offset},
-                              lambda c: tools.list_files(c, repo, revision, pattern, limit, offset))
+                               "offset": offset, "kind": kind},
+                              lambda c: tools.list_files(c, repo, revision, pattern, limit, offset, kind))
 
-    @mcp.tool(name="hf_download", description="Download files matching glob patterns from a dataset "
-              "repo into /workspace/staging/hf/. The revision is pinned to a commit SHA; the result "
-              "includes a ready-made provenance record for data_ingest.")
+    @mcp.tool(name="hf_download", description="Download files matching glob patterns from a dataset or model "
+              "repo into /workspace/staging/hf/. The revision is pinned to a commit SHA; for a dataset the "
+              "result includes a ready-made provenance record for data_ingest.")
     async def hf_download(
-            repo: Annotated[str, Field(description="dataset id, 'owner/name'")],
+            repo: Annotated[str, Field(description="repo id, 'owner/name'")],
             revision: Annotated[str, Field(description="branch, tag or commit; the result pins it to a commit")],
-            patterns: Annotated[list[str], Field(description="fnmatch patterns or exact paths of the files to fetch")],
+            patterns: Annotated[list[str] | str, Field(description="fnmatch patterns or exact paths of the files "
+                                                                   f"to fetch, {FROM_FILE}")],
             ctx: Context,
-            max_bytes: Annotated[int | None, Field(description="refuse if the matching files total more than this; the kernel has its own cap per call")] = None) -> dict[str, Any]:
+            max_bytes: Annotated[int | None, Field(description="refuse if the matching files total more than this; no limit when left out")] = None,
+            kind: Annotated[str, Field(description=_KIND)] = "dataset") -> dict[str, Any]:
         return await kit.call(ctx, "hf_download",
                               {"repo": repo, "revision": revision, "patterns": patterns,
-                               "max_bytes": max_bytes},
-                              lambda c: tools.download(c, repo, revision, patterns, max_bytes))
+                               "max_bytes": max_bytes, "kind": kind},
+                              lambda c: tools.download(c, repo, revision, patterns, max_bytes, kind))

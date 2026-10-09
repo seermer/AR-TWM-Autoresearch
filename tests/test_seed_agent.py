@@ -130,6 +130,10 @@ def test_snap_timed_prompts_refuses_overlaps_and_names_dropped_segments():
         [{"time_range_s": [0.0, 1.0], "prompt": "a"}, {"time_range_s": [1.0, 1.1], "prompt": "b"},
          {"time_range_s": [1.1, 6.0], "prompt": "c"}]), "duration": 6.0})
     assert out.endswith('Dropped, shorter than a round after snapping: ["b"]')
+    same = snap_timed_prompts.invoke({"segments_json": json.dumps(     # the dropped one shares its text with a kept one
+        [{"time_range_s": [0.0, 1.0], "prompt": "a"}, {"time_range_s": [1.0, 1.1], "prompt": "c"},
+         {"time_range_s": [1.1, 6.0], "prompt": "c"}]), "duration": 6.0})
+    assert same.endswith('Dropped, shorter than a round after snapping: ["c"]')
 
 
 def test_long_tool_results_go_to_a_file(tmp_path, monkeypatch):
@@ -301,6 +305,23 @@ def test_replans_stop_at_the_round_limit():
     with pytest.raises(ToolException, match="No replans left"):
         asyncio.run(tool.ainvoke({"report": "r"}))
     assert box.value is None
+
+
+def test_a_role_that_never_submits_is_reminded_three_times(tmp_path, monkeypatch):
+    from types import SimpleNamespace as NS
+    from agent import orchestration as orch
+    monkeypatch.setattr(orch, "SCRATCH", tmp_path / "scratch")
+    sent = []
+
+    class Agent:
+        async def ainvoke(self, state):
+            sent.append(state["messages"][-1].content)
+            return {"messages": state["messages"]}
+    role = orch.Role.__new__(orch.Role)
+    role.agent, role.messages, role.submissions = Agent(), [], [NS(value=None, name="submit_plan")]
+    with pytest.raises(orch.NoSubmission):
+        asyncio.run(role.run("the task"))
+    assert sent == ["the task", *[orch.REMIND.format(tools="submit_plan")] * 3]
 
 
 def test_a_review_that_never_answers_keeps_the_submitted_result(tmp_path, monkeypatch):

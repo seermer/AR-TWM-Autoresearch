@@ -287,7 +287,7 @@ def test_listed_tools_show_only_enabled_tools_and_enabled_variants(tmp_path):
         q.shutdown()
     assert set(tools) == {"annotate_camera", "rollout_alayaworld", "rollout_ltx25", "caption_videos"}
     ltx = tools["rollout_ltx25"].description
-    assert "'distilled'" in ltx and "'dev'" not in ltx
+    assert "`variant` (distilled;" in ltx
     assert "variant" not in tools["rollout_alayaworld"].input_schema["properties"]
 
 

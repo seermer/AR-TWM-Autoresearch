@@ -109,6 +109,7 @@ def test_probe_reports_display_geometry(env):
     make_mp4(caller.staging_host / "probe_me.mp4", seconds=3.0)
     info = tools.probe(caller, "/workspace/staging/probe_me.mp4")
     assert info["width"] == 736 and info["rotation"] == 0 and abs(info["display_aspect"] - 736 / 414) < 1e-6
+    assert tools.probe(caller, "staging/probe_me.mp4") == info      # relative to /workspace, like caption_videos
 
 
 def test_query_returns_the_archive_wide_pool_with_provenance(env):

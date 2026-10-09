@@ -31,6 +31,13 @@ class FakeApi:
         if self.no_access:
             raise hf_errors.GatedRepoError("gated", response=httpx.Response(403, request=httpx.Request("GET", "http://x")))
 
+    def list_models(self, search, limit, full=True):
+        return [SimpleNamespace(id="openai/clip", tags=[], downloads=1, last_modified=None, card_data={})]
+
+    def model_info(self, repo_id, revision=None, files_metadata=False):
+        return SimpleNamespace(id=repo_id, sha=SHA, card_data={},
+                               siblings=[SimpleNamespace(rfilename="videos/a.mp4", size=1000)])
+
     def dataset_info(self, repo_id, revision=None, files_metadata=False):
         return SimpleNamespace(id=repo_id, sha=SHA, card_data={"license": "cc-by-4.0"},
                                siblings=[SimpleNamespace(rfilename="videos/a.mp4", size=1000),
@@ -40,6 +47,7 @@ class FakeApi:
 
 def fake_snapshot(repo_id, repo_type, revision, allow_patterns, local_dir, **_):
     from pathlib import Path
+    fake_snapshot.repo_type = repo_type
     for name in ("videos/a.mp4", "videos/b.mp4"):
         p = Path(local_dir) / name
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -316,3 +324,21 @@ def test_a_blocked_repo_reads_exactly_like_a_missing_one(env, monkeypatch):
                 call()
             messages.append(str(err.value).replace(repo, "<repo>"))
     assert set(messages) == {"dataset '<repo>' was not found on the Hub"}
+
+
+def test_models_are_searched_listed_and_downloaded_like_datasets(env):
+    tools, caller = env
+    assert tools.search(caller, "clip", "model", 5)[0]["id"] == "openai/clip"
+    assert tools.list_files(caller, "openai/clip", "main", kind="model")["matching_files"] == 1
+    out = tools.download(caller, "openai/clip", "main", ["*"], kind="model")
+    assert fake_snapshot.repo_type == "model" and "provenance" not in out
+    with pytest.raises(ToolError, match="kind must be"):
+        tools.search(caller, "clip", "space", 5)
+
+
+def test_download_has_no_cap_of_its_own_and_takes_patterns_from_a_file(env):
+    tools, caller = env
+    caller.workspace_host.mkdir(parents=True, exist_ok=True)
+    (caller.workspace_host / "want.json").write_text('["videos/a.mp4", "videos/b.mp4"]')
+    out = tools.download(caller, "org/walks", "main", "want.json")
+    assert out["bytes"] == 4000 and len(out["files"]) == 2

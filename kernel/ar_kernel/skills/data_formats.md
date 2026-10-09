@@ -7,7 +7,6 @@ description: Use when preparing clips, captions, timed prompt segments or camera
 
 ## The standard formats (the only ones accepted)
 
-- Layout per dataset root: videos/<id>.mp4, captions/<id>.json, poses/<id>.npz (camera formats only).
 - video_caption_camera: video + caption + per-frame camera poses.
 - video_timed_prompts_camera: as above + caption "segments": [{"time_range_s": [start, end), "prompt"}].
   per_chunk mode: every boundary inside the clip on a round boundary 25/24 + k*32/24 s (within half a frame).

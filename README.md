@@ -190,11 +190,10 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 nohup ar run --run-id $RUN --max-nodes 6 --git-remo
 ```
 
 The loop first measures the starting model (the "root", about 2 hours), then improves it node by node
-(about 5-6 hours per node measured on 4 GPUs). The root is measured once: it is kept in `root_cache/`
+(about 9-14 hours per node measured on 4 GPUs). The root is measured once: it is kept in `root_cache/`
 and reused by every later run with the same cases, metrics, judge and WorldModel/WBench commits. A run
 scores the first `eval.proxy_size` (50) cases of `configs/proxy_cases.txt`, and the score is a weighted
-mean of the metrics those cases list, all 22 here (`eval.score_weights` in `configs/kernel.yaml`). With
-the local judge the root scores `0.507` (measured 2026-10-01).
+mean of the metrics those cases list, all 22 here (`eval.score_weights` in `configs/kernel.yaml`).
 
 To score another benchmark, add `--config <file>` to `ar run`. The file holds only the `kernel.yaml`
 keys that differ, and the run keeps it, so `--resume` takes no `--config`. Two are provided, one per
@@ -231,7 +230,7 @@ From another computer: `ssh -L 7860:127.0.0.1:7860 <user>@<server>`, then open t
 ## 9. Stop and resume
 
 ```bash
-ar stop --run-id $RUN                   # stops after the current step finishes
+ar stop --run-id $RUN                   # stops after the current node finishes (can take hours)
 ar stop --run-id $RUN --force           # stops now, waits until the loop has exited
 CUDA_VISIBLE_DEVICES=0,1,2,3 nohup ar run --run-id $RUN --resume >> runs/$RUN.console.log 2>&1 &
 ```

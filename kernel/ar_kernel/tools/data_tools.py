@@ -22,7 +22,7 @@ from ..data.ingest import Candidate, Ingestor
 from ..data.leakage import LeakageChecker
 from ..data.probe import probe_video
 from ..train.gate import Gate
-from .context import STAGING, PathError, to_host
+from .context import STAGING, WORKSPACE, PathError, to_host
 from .gpu_jobs import items_schema
 from .hf_tools import move_into
 from ..process_digest import _shape
@@ -52,7 +52,7 @@ class DataTools:
             raise ToolError(str(exc)) from exc
 
     def probe(self, caller, path: str) -> dict:
-        info = probe_video(self._host(caller, path))
+        info = probe_video(self._host(caller, path if path.startswith("/") else str(WORKSPACE / path)))
         return {"frames": info.frames, "fps": info.fps, "width": info.width, "height": info.height,
                 "duration": info.duration, "rotation": info.rotation, "sar": info.sar,
                 "display_aspect": info.display_aspect}
@@ -242,12 +242,11 @@ def _counted(texts) -> list[dict]:
 def _manifest(run_dir: Path, commit_id: str) -> dict:
     conn = open_db(run_dir)
     try:
-        row = conn.execute("SELECT manifest FROM data_commits WHERE commit_id=?", (commit_id,)).fetchone()
+        return CommitStore(conn, BlobStore(run_dir, conn), ClipStore(conn)).manifest(commit_id)
+    except KeyError:
+        raise ToolError(f"unknown data commit {commit_id!r}") from None
     finally:
         conn.close()
-    if row is None:
-        raise ToolError(f"unknown data commit {commit_id!r}")
-    return json.loads(row["manifest"])
 
 
 def _parent_commit(conn, node_id: str) -> str | None:
@@ -339,7 +338,8 @@ Candidates = Annotated[list[dict[str, Any]] | str, items_schema("the clips to in
 def register_data_tools(mcp, kit, tools: DataTools) -> None:
     @mcp.tool(name="video_probe", description="Frame count, fps, coded size, rotation, pixel "
               "aspect and display aspect of a video under /workspace.")
-    async def video_probe(path: Annotated[str, Field(description="a video file under /workspace")],
+    async def video_probe(path: Annotated[str, Field(description="a video file under /workspace (a relative path "
+                                                             "resolves against /workspace)")],
                           ctx: Context) -> dict:
         return await kit.call(ctx, "video_probe", {"path": path}, lambda c: tools.probe(c, path))
 

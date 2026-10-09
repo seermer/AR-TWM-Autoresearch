@@ -194,6 +194,7 @@ def submit(q, caller, items, **params):
     (first_person(), {"rounds_per_turn": 4}, "rounds_per_turn"),
     (third_person(subject_mask="mask.txt"), {}, "subject_mask"),
     (first_person(viewpoint="top_down"), {}, "viewpoint"),
+    (first_person(viewpoint_prompt="from above"), {}, "viewpoint_prompt is not a field of an item"),
     (first_person(scene_prompt=""), {}, "scene_prompt"),
     (first_person(image="frame.txt"), {}, "image"),
     (first_person(turns=[{"action": "W", "camera": "fly"}]), {}, "camera"),

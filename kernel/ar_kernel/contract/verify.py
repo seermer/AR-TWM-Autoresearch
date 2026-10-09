@@ -116,10 +116,10 @@ class _MockHf:
     def search(self, c, query, kind="dataset", limit=20):
         return []
 
-    def list_files(self, c, repo, revision, pattern="*", limit=200, offset=0):
+    def list_files(self, c, repo, revision, pattern="*", limit=200, offset=0, kind="dataset"):
         return {"repo": repo, "revision": revision, "matching_files": 0, "files": []}
 
-    def download(self, c, repo, revision, patterns, max_bytes=None):
+    def download(self, c, repo, revision, patterns, max_bytes=None, kind="dataset"):
         raise ToolError("mock tool server: downloads are disabled during a smoke run")
 
 

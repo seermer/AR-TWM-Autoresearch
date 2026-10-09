@@ -49,6 +49,7 @@ ACTION_TOKENS = frozenset({
     "W", "S", "A", "D", "w", "a", "s", "d", "left", "right", "up", "down", "stop",
     "forward", "backward", "cam_left", "cam_right", "cam_up", "cam_down", "look_left", "look_right",
     "look_up", "look_down", "pitch_up", "pitch_down", "yaw_left", "yaw_right", "->", "→", "<-", "←"})
+ITEM_KEYS = ("image", "viewpoint", "scene_prompt", "character_prompt", "subject_mask", "turns")
 # Item key of a turn's instruction -> the render script's interaction type.
 TURN_KEYS = {"subject_action": "subject_action", "event": "event_edit", "viewpoint_change": "perspective_switch"}
 VIEWPOINTS = ("first_person", "third_person")
@@ -197,6 +198,9 @@ class AlayaWorldBackend(GpuJob):
     def check_item(self, item: dict) -> None:
         def bad(msg):
             raise ToolError(msg)
+        unknown = sorted(set(item) - set(ITEM_KEYS))
+        if unknown:
+            bad(f"{', '.join(unknown)} is not a field of an item: the fields are {', '.join(ITEM_KEYS)}")
         if not str(item.get("image", "")).lower().endswith(IMAGE_EXTS):
             bad(f"image must be an image file ({', '.join(IMAGE_EXTS)}): got {item.get('image')!r}")
         if item.get("viewpoint") not in VIEWPOINTS:
@@ -454,9 +458,9 @@ class Ltx25Backend(GpuJob):
         self.description = (
             "Render training clips with LTX-2.5 from a text prompt, optionally pinned to images at chosen "
             "frames. A GPU job: returns {job_id} at once; collect with job_wait. Params (one value per "
-            f"job): `variant` (one of {self.enabled_variants()}; default the first), `frames` (8k+1, "
+            f"job): `variant` ({' or '.join(self.enabled_variants())}; default the first), `frames` (8k+1, "
             f"1 < frames <= {maximum}, default {default}), `height`/`width` (one of "
-            f"{self.block['resolutions']} as [height, width]; default {h}x{w}). Item: {{'prompt': str, "
+            f"{', '.join(f'{rh}x{rw}' for rh, rw in self.block['resolutions'])}; default {h}x{w}). Item: {{'prompt': str, "
             "'keyframes'?: [{'image': file under /workspace, 'frame': int}], 'seed': int}. A keyframe at "
             "frame 0 is the first frame and one at -1 the last; any frame in between also works. Images of "
             "any size are center-cropped and resized to the clip size. Each result item gives a `candidate` for "

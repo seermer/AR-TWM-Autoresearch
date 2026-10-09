@@ -95,7 +95,7 @@ def to_host(caller: Caller, container_path: str) -> Path:
     host = (base / path.relative_to(root)).resolve()
     if not host.is_relative_to(base.resolve()):
         raise PathError(f"{container_path} escapes its mount: kernel tools do not follow a symbolic link (or '..') "
-                        "out of /workspace or /workspace/staging, so copy or hard-link the file instead")
+                        "out of /workspace or /workspace/staging, so copy the file instead")
     return host
 
 

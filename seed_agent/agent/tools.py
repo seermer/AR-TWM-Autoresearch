@@ -13,6 +13,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import Counter
 from html.parser import HTMLParser
 from pathlib import Path
 from xml.etree import ElementTree
@@ -113,10 +114,9 @@ def make_file_tools(root: str) -> list:
             _write_atomic(target, content)
         return f"wrote {len(content)} chars to {path}"
 
-    @tool
+    @tool(description="Replace one exact occurrence of `old_string` with `new_string` in a text file. "
+                      "`old_string` must appear exactly once.")
     def edit_file(path: str, old_string: str, new_string: str) -> str:
-        """Replace one exact occurrence of `old_string` with `new_string` in a text file. `old_string` must
-        appear exactly once."""
         target = resolve_inside(root, path)
         with _lock_for(target):     # parallel edits of one file are applied one after the other
             try:        # strict: writing back text with replaced undecodable bytes would corrupt the file
@@ -162,10 +162,9 @@ def _fetch(url: str) -> str:
         return response.read().decode("utf-8", errors="replace")
 
 
-@tool
+@tool(description="Search arXiv with the arXiv API query syntax, for example 'all:\"world model\" AND cat:cs.CV' or "
+                  "'ti:camera AND abs:\"video generation\"'. Returns id, title, first published date and abstract.")
 def arxiv_search(query: str, max_results: int = 10) -> list[dict]:
-    """Search arXiv with the arXiv API query syntax, for example 'all:"world model" AND cat:cs.CV' or
-    'ti:camera AND abs:"video generation"'. Returns id, title, first published date and abstract."""
     url = ARXIV_API + "?" + urllib.parse.urlencode(
         {"search_query": query, "max_results": min(int(max_results), 50), "sortBy": "relevance"})
     feed = ElementTree.fromstring(_fetch(url))
@@ -214,10 +213,9 @@ class _PaperText(HTMLParser):
             self.heading.append(data)
 
 
-@tool
+@tool(description="Fetch an arXiv paper's full text (from its HTML version) and save it to /workspace/papers/<id>.txt. "
+                  "Returns the file path, its length and the section headings; read the parts you need from the file.")
 def arxiv_read(arxiv_id: str) -> dict:
-    """Fetch an arXiv paper's full text (from its HTML version) and save it to /workspace/papers/<id>.txt.
-    Returns the file path, its length and the section headings; read the parts you need from the file."""
     try:
         html = _fetch(f"https://arxiv.org/html/{arxiv_id}")
     except urllib.error.HTTPError as exc:
@@ -259,15 +257,14 @@ def snap_segments(segments: list[dict], duration: float) -> list[dict]:
             for seg, start, end in zip(ordered, cuts, cuts[1:]) if end - start > 1e-9]
 
 
-@tool
+@tool(description="Snap timed-prompt segment boundaries to rollout-round boundaries. Input and output: a JSON list of "
+                  '{"time_range_s": [start, end], "prompt": str}. Overlapping segments are refused, gaps are closed, '
+                  "and a segment that shrinks to nothing is dropped and named.")
 def snap_timed_prompts(segments_json: str, duration: float) -> str:
-    """Snap timed-prompt segment boundaries to rollout-round boundaries. Input and output: a JSON list of
-    {"time_range_s": [start, end], "prompt": str}. Overlapping segments are refused, gaps are closed, and a
-    segment that shrinks to nothing is dropped and named."""
     segments = json.loads(segments_json)
     snapped = snap_segments(segments, duration)
-    kept = [s["prompt"] for s in snapped]
-    dropped = [s["prompt"] for s in segments if s["prompt"] not in kept]
+    # counted, not looked up by text: a dropped segment may share its prompt with a kept one
+    dropped = list((Counter(s["prompt"] for s in segments) - Counter(s["prompt"] for s in snapped)).elements())
     out = json.dumps(snapped)
     return f"{out}\nDropped, shorter than a round after snapping: {json.dumps(dropped)}" if dropped else out
 

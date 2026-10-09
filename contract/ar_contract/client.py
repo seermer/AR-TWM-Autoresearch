@@ -26,7 +26,6 @@ from langchain_core.messages import AIMessage
 from langchain_openai import ChatOpenAI
 
 MCP_TIMEOUT_S = 14400.0
-LLM_TIMEOUT_S = 900.0
 
 
 def socket_dir() -> str:
@@ -79,14 +78,15 @@ def chat_model(model: str | None = None, **kwargs) -> ReasoningChatOpenAI:
 
     Both clients go over the socket: without an explicit sync client, a sync invoke()
     would try TCP localhost:80 and fail inside the container. Reasoning effort
-    is not set here: the gateway enforces OPENAI_EFFORT."""
+    is not set here: the gateway enforces OPENAI_EFFORT. No timeout here either: the gateway
+    has its own per try and retries, and answers with an error when it gives up."""
     sock = os.path.join(socket_dir(), "gateway.sock")
     return ReasoningChatOpenAI(model=model or default_model(), base_url="http://localhost/v1",
                                api_key=token(), use_responses_api=False, max_retries=0,
                                http_client=httpx.Client(transport=httpx.HTTPTransport(uds=sock),
-                                                        timeout=LLM_TIMEOUT_S),
+                                                        timeout=None),
                                http_async_client=httpx.AsyncClient(
-                                   transport=httpx.AsyncHTTPTransport(uds=sock), timeout=LLM_TIMEOUT_S),
+                                   transport=httpx.AsyncHTTPTransport(uds=sock), timeout=None),
                                **kwargs)
 
 
