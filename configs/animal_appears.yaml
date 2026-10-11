@@ -1,13 +1,12 @@
 # `ar run --config configs/animal_appears.yaml`: score the animal_appears skill benchmark instead of the default cases.
 # Only the keys that differ from kernel.yaml.
 eval:
-  data: ../SkillWBench/animal_appears/data
+  data: ../WBench/data_animal_appears
   cases: configs/animal_appears_cases.txt
   proxy_size: 60
   score_weights:
     event_edit_adherence: 16     # the skill: half the score, the 16 other metrics the cases list the rest
   target_skill:
-    metric: event_edit_adherence
-    name: a land animal appearing
-    sentence: a land animal comes into view
-    description: a land animal comes into view at the turn whose text calls for it, which can be any turn of the video, and it shows fully and with the right details
+    name: an animal appearing
+    sentence: an animal comes into view
+    description: the video starts with no animal in view, and when a turn's text says an animal appears, that animal should come into view during that turn and be clearly visible by the end of it. This can happen at any turn, including the first and the last, and at one or several turns of a video, each time with whichever land animal the text names

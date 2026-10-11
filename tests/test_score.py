@@ -215,8 +215,3 @@ def test_the_metric_guide_carries_dimension_weight_and_meaning_only():
     assert guide["frame_aesthetics"]["weight"] == 1.0
     text = " ".join(g["measures"] for g in guide.values()).lower()
     assert not any(word in text for word in ("judge", "question", "yes/no", "case", "frames per second"))
-    skill = metric_guide(["event_edit_adherence", "imaging_quality"], {"event_edit_adherence": 16},
-                         {"metric": "event_edit_adherence", "name": "rain starting", "description": "it starts to rain"})
-    assert skill == {"follows_event_instruction": {"dimension": "control", "weight": 16.0, "measures": "it starts to rain"},
-                     "frame_clarity": {"dimension": "quality", "weight": 1.0,
-                                       "measures": "frames free of blur, noise and compression artefacts"}}

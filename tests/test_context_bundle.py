@@ -67,7 +67,7 @@ def test_recipe_context_carries_rules_allowlists_and_retry(world, tmp_path):
                                parent_id="root", attempt=1, max_attempts=3, retry=None,
                                nodes_remaining=9, n_gpus=4, tools=[])
     assert sorted(skilled.target_skill) == ["description", "name", "sentence"] and skilled.target_skill["name"] == "rain starting"
-    assert skilled.metric_guide["follows_event_instruction"]["measures"] == skilled.target_skill["description"]
+    assert skilled.target_skill["description"] not in json.dumps(skilled.metric_guide)
     write_bundle(ctx, tmp_path / "ctx2")
     assert json.loads((tmp_path / "ctx2" / "retry.json").read_text()) == retry
 

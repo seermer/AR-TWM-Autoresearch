@@ -34,6 +34,17 @@ def render_proxy(cfg: KernelConfig, render_config: Path, gpus: list[int], node_i
     videos_dir = Path(yaml.safe_load(render_config.read_text())
                       ["validation"]["modes"]["wbench"]["wbench_output_dir"])
     videos_dir.mkdir(parents=True, exist_ok=True)
+    # The render runs with the text encoder off, so the cases' prompts not yet in the cache are encoded first.
+    proc = run_in_env(
+        "alayaworld",
+        ["python", "-m", "scripts.tools.precache_wbench_text_embeds", "--config", str(render_config),
+         "--device-map", "auto"],
+        cwd=cfg.worldmodel,
+        extra_env={"CUDA_VISIBLE_DEVICES": ",".join(str(g) for g in gpus[:2]),
+                   "ALAYA_GEMMA_MAX_MEMORY": "0=13GiB,1=13GiB"},
+        timeout=7200, recorder=recorder, node=node_id, phase="precache")
+    if proc.returncode != 0:
+        raise RuntimeError(f"prompt precache failed (rc={proc.returncode}): {output_tail(proc)}")
     with recorder.span("render", node=node_id, phase="render", payload={"cases": case_ids}):
         liveness = Liveness.from_config(cfg, float(cfg.get("timeouts.eval_s")),
                                         signals=[lambda: tree_mark(videos_dir, render_config.parent / "logs")])

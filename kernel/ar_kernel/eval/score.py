@@ -70,13 +70,10 @@ def agent_aggregates(aggregates: dict | None) -> dict | None:
                        for axis, groups in (aggregates.get("strata") or {}).items()}}
 
 
-def metric_guide(metric_set: list[str], weights: dict | None, target_skill: dict | None = None) -> dict:
-    """What each scored metric measures and how much it weighs in the score. Nothing about how it is judged.
-    The run's target skill (`eval.target_skill`) describes its own metric in place of the built-in text."""
-    skill = target_skill or {}
+def metric_guide(metric_set: list[str], weights: dict | None) -> dict:
+    """What each scored metric measures and how much it weighs in the score. Nothing about how it is judged."""
     return {AGENT_METRICS[name][0]: {"dimension": AGENT_METRICS[name][1], "weight": float((weights or {}).get(name, 1.0)),
-                                     "measures": skill["description"] if name == skill.get("metric")
-                                     else AGENT_METRICS[name][2]}
+                                     "measures": AGENT_METRICS[name][2]}
             for name in metric_set}
 
 

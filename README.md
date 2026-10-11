@@ -156,9 +156,10 @@ hf download Qwen/Qwen3.8-27B-FP8
 
 `401` or `403` errors mean the token is wrong or a licence in step 3 was not accepted.
 
-## 5. Build the text cache (once, about 4 minutes)
+## 5. Build the text cache (optional, about 4 minutes)
 
-The benchmark prompts are encoded once and reused by every evaluation.
+Every evaluation first encodes the prompts of its cases that are not in the cache yet, so this step only
+saves the first evaluation that time.
 
 ```bash
 cd ../WorldModel
@@ -201,7 +202,7 @@ mean of the metrics those cases list, all 22 here (`eval.score_weights` in `conf
 
 To score another benchmark, add `--config <file>` to `ar run`. The file holds only the `kernel.yaml`
 keys that differ, and the run keeps it, so `--resume` takes no `--config`. Two are provided, one per
-skill benchmark in `../SkillWBench`:
+skill benchmark (built by `../SkillWBench`, kept in `../WBench/data_<benchmark>`):
 
 | Config | Scores | Cases | Skill metric |
 |---|---|---|---|
