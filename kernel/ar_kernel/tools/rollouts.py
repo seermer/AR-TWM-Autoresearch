@@ -102,6 +102,7 @@ def render_config(cfg, *, rounds_per_turn: int, seed: int, indices: list[int], w
     mode["dataset"].update(root=str(work / "data"), case_ids=[str(i) for i in indices])
     mode["wbench_output_dir"] = str(work / "videos")
     mode["wbench_chunks_per_turn"] = int(rounds_per_turn)
+    mode["wbench_keep_last_frame"] = True      # the clip ends on a round boundary
     for (section, key), value in AR30.items():
         c[section][key] = value
     if node_lora is not None:
@@ -351,11 +352,10 @@ class AlayaWorldBackend(GpuJob):
             saved = z["cam_c2w"].astype(np.float64)
         if len(saved) != frames:
             raise ValueError(f"camera path has {len(saved)} frames, the video {frames}")
-        # Round r occupies mp4 frames [first + 32r, first + 32r + 32). The first latent of the
-        # rollout decodes to one frame, so the mp4 starts 7 frames into round 0 (first = -7,
-        # measured); turn_segments' frame ranges are nominal and ignore this.
+        # mp4 frame 0 is the input frame, so round r occupies mp4 frames [first + 32r, first + 32r + 32)
+        # with first = 1; turn_segments' frame ranges are nominal and ignore this.
         first = frames - ROUND_FRAMES * int(sidecar["output_rounds"])
-        if not -ROUND_FRAMES < first <= 0:
+        if first != 1:
             raise ValueError(f"{frames} frames for {sidecar['output_rounds']} rounds of {ROUND_FRAMES}")
         trim = (first - GRID) % ROUND_FRAMES
         trimmed = video if trim == 0 else out / f"{i}.trim.mp4"     # no re-encode when already aligned

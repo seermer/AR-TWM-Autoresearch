@@ -224,9 +224,9 @@ def test_limits_come_from_the_generator_config_block(tmp_path):
 
 # ---- finish: trim to the per_chunk grid, poses, segments ----
 
-def _render_output(out, i, *, rounds, cpt, prompts, first=-7):
-    """What produce leaves in out/ for one case. Measured layout: round r = mp4 frames
-    [first + 32r, first + 32r + 32) with first = -7, and nominal turn_segments (as WorldModel
+def _render_output(out, i, *, rounds, cpt, prompts, first=1):
+    """What produce leaves in out/ for one case: the input frame, then round r = mp4 frames
+    [first + 32r, first + 32r + 32) with first = 1, and nominal turn_segments (as WorldModel
     writes them, ignoring `first`)."""
     frames = first + rounds * 32
     make_mp4(out / f"{i}.mp4", seconds=frames / 24, fps=24, width=960, height=544)
@@ -263,9 +263,8 @@ def _check_boundaries(segments, frames):
 
 
 @pytest.mark.parametrize("cpt, prompts, first, trim", [
-    (3, ["walk", "walk and rain"], -7, 0),      # the measured layout: already on the grid
-    (1, ["a", "b", "c"], -7, 0),
-    (3, ["walk", "walk and rain"], 0, 7),       # a layout starting on a round boundary: trimmed
+    (3, ["walk", "walk and rain"], 1, 8),       # the input frame and 7 generated frames are trimmed
+    (1, ["a", "b", "c"], 1, 8),
 ])
 def test_finish_puts_round_boundaries_on_the_grid(tmp_path, cpt, prompts, first, trim):
     out = tmp_path / "out"
@@ -310,7 +309,7 @@ def test_finish_merges_equal_prompts_and_keeps_changes_on_round_boundaries(tmp_p
     segs = json.loads(Path(res["caption"]).read_text())["segments"]
     assert [s["prompt"] for s in segs] == ["a", "b", "a"]
     assert [round(s["time_range_s"][0] * 24) for s in segs] == [0, 57, 89]
-    _check_boundaries(segs, frames)
+    _check_boundaries(segs, frames - res["trim"])
 
 
 def test_finish_refuses_a_camera_path_of_the_wrong_length(tmp_path):

@@ -52,8 +52,8 @@ from pathlib import Path
 def wbench():
     """The precache (--precache: records its argv and env next to the config, exits 0) and
     run_wbench.py (--cases) without a model. For each case it writes what the eval writes, in the
-    measured layout: case_<id>_combined.mp4 of rounds x 32 - 7 frames
-    (960x544, 24 fps, round r = frames [32r - 7, 32r + 25)), the sidecar JSON (actions, nominal
+    layout: case_<id>_combined.mp4 of rounds x 32 + 1 frames
+    (960x544, 24 fps, the input frame then round r = frames [32r + 1, 32r + 33)), the sidecar JSON (actions, nominal
     turn_segments as WorldModel writes them, prompt_schedule) and the camera npz. A case prompt containing PRECACHE_HANG makes the
     precache hang (the timeout test) (one pose per frame, frame 0 identity). A case whose
     environment_prompt contains NO_VIDEO renders nothing."""
@@ -88,7 +88,7 @@ def wbench():
         for t in range(1, turns + 1):
             acc += [i["action"] for i in its if i["turn"] == t and i["type"] != "navigation"]
             prompts.append(" ".join(acc))
-        frames = turns * cpt * 32 - 7
+        frames = turns * cpt * 32 + 1
         stem = videos / f"case_{cid}_combined"
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i",
                         f"testsrc=size=960x544:rate=24", "-frames:v", str(frames), "-c:v", "libx264",
