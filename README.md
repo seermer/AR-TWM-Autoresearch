@@ -47,13 +47,13 @@ Check: `ls ../WBench/third_party/mega-sam/base/setup.py` prints the path.
 
 ## 2. Create the environments
 
-Ten conda environments, all created inside `AutoResearcher/.envs/`. Takes 30 to 60 minutes and about 55 GB.
+Nine conda environments, all created inside `AutoResearcher/.envs/`. Takes 30 to 60 minutes and about 55 GB.
 
 ```bash
 scripts/setup_envs.sh
 ```
 
-Check: `ls .envs` lists `alayaworld autoresearcher gen-lightx2v gen-ltx25 gen-wan22 gen-zimage panel vllm wbench-main wbench-vp`.
+Check: `ls .envs` lists `alayaworld autoresearcher gen-lightx2v gen-ltx25 gen-wan22 gen-zimage vllm wbench-main wbench-vp`.
 If it stops on an error, fix the cause and run it again: environments that already exist are skipped.
 To rebuild one, delete `.envs/<name>` and run `scripts/setup_envs.sh <name>`.
 
@@ -225,7 +225,7 @@ nvidia-smi                              # GPU use
 Web panel (every conversation, tool call, code edit, training curve, video and score), on a second terminal:
 
 ```bash
-.envs/panel/bin/python -m panel --run-id $RUN --no-share --port 7860
+.envs/autoresearcher/bin/python -m panel --run-id $RUN --no-share --port 7860
 ```
 
 Open http://127.0.0.1:7860 and log in with `PANEL_USER` / `PANEL_PASSWORD`.

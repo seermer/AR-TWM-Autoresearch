@@ -1,4 +1,3 @@
-"""Runs in the panel env: .envs/panel/bin/python -m pytest tests/test_panel_ui.py"""
 import os
 from pathlib import Path
 

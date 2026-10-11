@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds the project's conda envs into AutoResearcher/.envs/<name>.
 #   scripts/setup_envs.sh              # all nine, in order
-#   scripts/setup_envs.sh vllm panel   # only these
+#   scripts/setup_envs.sh vllm alayaworld   # only these
 # Candidate generator backends, built only when named: gen-vllm-omni gen-sglang
 # gen-sglang compiles kernels on first use; launch it with `conda run -p .envs/gen-sglang` and
 #   CUDA_HOME=<env> CPATH=<env>/targets/x86_64-linux/include SGLANG_CACHE_DIR=.cache/sglang
@@ -14,7 +14,7 @@ export CONDA_PKGS_DIRS=$PWD/.cache/conda/pkgs PIP_CACHE_DIR=$PWD/.cache/pip
 ROOT=$PWD
 mkdir -p .cache third_party
 
-ALL="autoresearcher panel vllm alayaworld wbench-main wbench-vp gen-zimage gen-wan22 gen-ltx25 gen-lightx2v"
+ALL="autoresearcher vllm alayaworld wbench-main wbench-vp gen-zimage gen-wan22 gen-ltx25 gen-lightx2v"
 run() { conda run --no-capture-output -p ".envs/$1" "${@:2}"; }
 # `configs/kernel.yaml` pins the Wan2.2, LTX-2 and LightX2V revisions; read them with the autoresearcher env's yaml
 pin() { .envs/autoresearcher/bin/python -c "import yaml; print(yaml.safe_load(open('configs/kernel.yaml'))['generators']['$1']['commit'])"; }
