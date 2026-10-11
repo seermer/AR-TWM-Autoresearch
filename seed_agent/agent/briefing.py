@@ -14,7 +14,7 @@ LINEAGE_SHOWN = 10          # most recent ancestors described; the root stays in
 SIBLINGS_SHOWN = 10         # most recent finished children of the parent described
 TEXT_CHARS = 4000           # safety cap on a free text quoted per node
 TOP_NODES = 5               # best nodes listed from the whole archive
-GROUP_AXES = ("instruction_kind", "viewpoint")     # groups in the group table; scene categories are in context.json
+GROUP_AXES = ("viewpoint",)     # groups in the group table; scene categories are in context.json
 POINTER = "Exact data: /context/context.json. What each finished node left behind: /nodes/<node>/."
 
 
@@ -134,6 +134,8 @@ def _hypothesis(rationale: str | None) -> str | None:
 def data_node(n: dict) -> str:
     """An earlier node as the data planner needs it: what data idea it tested, on what data, with which recipe."""
     lines = [f"### {n['node_id']}: {n.get('status')}, score {_cell(n.get('score'))}"]
+    if n["node_id"] == "root":
+        lines.append("- The root is the baseline: the model with no further fine-tuning.")
     if n.get("error"):
         lines.append(f"- Error: {clip(n['error'])}")
     if _hypothesis(n.get("rationale")):

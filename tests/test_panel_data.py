@@ -254,6 +254,9 @@ def test_roles_are_inferred_from_the_prompt_files():
     assert infer_role(PLANNER, files) == "planner"
     assert infer_role("A new role I invented.\nMore.", files) == "A new role I invented."
     assert infer_role(None, files) == "(no system prompt)"
+    slotted = {"planner": "# Mission\nPlan the data.\nThis run aims to improve {skill_name}.\n\n# Finish\n"}
+    assert infer_role("# Mission\nPlan the data.\nThis run aims to improve rain starting.\n\n# Finish\n", slotted) == "planner"
+    assert infer_role("# Mission\nPlan the data.\n\n# Finish\n", slotted) == "planner"
     assert infer_role("x", {}) == "x"
 
 from panel import views
@@ -394,13 +397,33 @@ def test_camera_path(run):
 def test_eval_view(run):
     ev = media.eval_view(run, "n1")
     [case] = ev["cases"]
-    assert case["case"] == "7" and case["scores"] == {"m1": 0.7, "m2": 0.8}
+    assert list(case["scores"].items()) == [("event_edit_adherence", 1.0), ("m1", 0.7), ("m2", 0.8)]   # judged first
     assert case["video"].endswith("videos/case_7_combined.mp4") and case["prompt_schedule"][0]["prompt"] == "a corridor"
     assert ev["aggregates"]["metrics"]["m1"] == 0.7
 
 
 def test_eval_view_without_eval(run):
     assert media.eval_view(run, "n2") == {"cases": [], "aggregates": None}
+    assert media.judge_view(run, "n2", "7") == []
+
+
+def test_judge_view_gives_each_answer_and_whether_it_is_the_expected_one(run, run_dir):
+    assert media.judge_view(run, "root", "7") == [
+        {"turn": "2: Rain begins.", "question": "Scene unchanged?", "answer": "no", "passed": True},
+        {"turn": "2: Rain begins.", "question": "Event visible?", "answer": "no", "passed": False}]
+    evaluation = run_dir / "nodes" / "n1" / "eval" / "work_dirs" / "ar_r1_n1" / "evaluation"
+    for metric, data in {
+            "perspective_switch_adherence": {"turn_details": [{"turn": 1, "action": "Switch to first person.",
+                                                               "q_results": {"Q1": True, "Q3": False, "Q4": True, "Q_cam": True}}]},
+            "causal_fidelity": {"track1": {"score": 1, "max": 3, "reason": "r"},
+                                "track2": {"details": [{"dim": "gravity", "dim_name": "Gravity", "score": 2, "max": 3}]}}}.items():
+        (evaluation / metric).mkdir()
+        (evaluation / metric / "case_7.json").write_text(json.dumps(data))
+    rows = media.judge_view(run, "n1", "7")
+    assert [(r["question"], r["answer"], r["passed"]) for r in rows[2:]] == [
+        ("Viewpoint changes?", "yes", True), ("Ends in the asked view?", "no", False), ("End view valid?", "yes", True),
+        ("Changed by the camera? (not scored)", "yes", True),
+        ("Causal fidelity: overall", "1/3", None), ("Causal fidelity: Gravity", "2/3", None)]
 
 
 def test_files_list_and_preview(run, run_dir):

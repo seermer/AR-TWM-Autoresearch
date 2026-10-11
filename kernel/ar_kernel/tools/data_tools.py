@@ -29,6 +29,14 @@ from ..process_digest import _shape
 from .server import FROM_FILE, SHOWN, ToolError, listed, publish, refuse
 
 
+def clip_id_list(caller, value) -> list[str]:
+    ids = listed(caller, value, "clip_ids")
+    if not all(isinstance(i, str) for i in ids):
+        raise ToolError("clip_ids: every item must be a clip id, a string. This list holds other things, e.g. "
+                        "whole clip records: pass each record's `clip_id` instead")
+    return ids
+
+
 class DataTools:
     def __init__(self, cfg, run_dir: Path, recorder, gpus: list[int], gpu_lock: threading.Lock,
                  require_free=lambda: None) -> None:
@@ -116,7 +124,7 @@ class DataTools:
         finally:
             conn.close()
         fmt, motion = filter.get("format"), filter.get("camera_motion")
-        wanted = set(listed(caller, filter.get("clip_ids"), "clip_ids"))
+        wanted = set(clip_id_list(caller, filter.get("clip_ids")))
         in_commit = None
         if filter.get("data_commit"):
             in_commit = {}                                  # clip id -> the commit's datasets that hold it
@@ -140,7 +148,7 @@ class DataTools:
                 "result_file": publish(caller, f"data_query-{uuid.uuid4().hex[:8]}", out)}
 
     def fetch(self, caller, clip_ids) -> dict:
-        wanted = list(dict.fromkeys(listed(caller, clip_ids, "clip_ids")))
+        wanted = list(dict.fromkeys(clip_id_list(caller, clip_ids)))
         conn = open_db(self.run_dir)
         try:
             pool = {clip["clip_id"]: clip for clip in pool_clips(conn)}

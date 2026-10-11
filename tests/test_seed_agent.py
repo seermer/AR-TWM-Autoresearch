@@ -273,6 +273,8 @@ def test_a_trained_node_with_an_empty_recipe_says_so():
             "data_commit": "c1"}
     assert data_node(node).endswith("- Recipe: all values kept default")
     assert "Recipe" not in data_node({**node, "data": {}})                    # the root trained nothing
+    baseline = "- The root is the baseline: the model with no further fine-tuning."
+    assert baseline in data_node({**node, "node_id": "root", "data": {}}) and baseline not in data_node(node)
 
 
 def test_file_tools_name_their_folder():
@@ -725,8 +727,28 @@ def test_the_system_prompt_is_the_role_prompt_file_and_nothing_else(monkeypatch)
     monkeypatch.setenv("AR_TOKEN", "t")
     from agent.orchestration import system_prompt
     for role in ROLES:
-        assert system_prompt(role) == (SEED / "agent" / "prompts" / f"{role}.md").read_text()
+        lines = (SEED / "agent" / "prompts" / f"{role}.md").read_text().splitlines(keepends=True)
+        assert system_prompt(role) == "".join(line for line in lines if "{skill_" not in line)
     assert not (SEED / "agent" / "knowledge").exists()
+
+
+def test_the_data_roles_are_told_the_runs_target_skill_in_their_system_prompt(tmp_path, monkeypatch):
+    monkeypatch.setenv("AR_TOKEN", "t")
+    from agent import orchestration
+    skill = {"name": "rain starting", "sentence": "rain begins to fall", "description": "rain begins at any turn"}
+    planner, engineer = (orchestration.system_prompt(role, skill) for role in ("planner", "data_engineer"))
+    assert "This run aims to improve rain starting: rain begins at any turn.\n" in planner
+    assert "help the model show that rain begins to fall.\n" in planner
+    assert "This run aims to improve rain starting.\n" in engineer and "shows about rain starting.\n" in engineer
+    assert "{skill_" not in planner + engineer
+    assert "This run aims" not in orchestration.system_prompt("planner") + orchestration.system_prompt("planner", {})
+    for role in ("edit_planner", "coder"):
+        assert orchestration.system_prompt(role, skill) == (SEED / "agent" / "prompts" / f"{role}.md").read_text()
+    (tmp_path / "prompts").mkdir()
+    (tmp_path / "prompts" / "planner.md").write_text("# Mission\nAn edit dropped the slot.\n")
+    monkeypatch.setattr(orchestration, "AGENT_PKG", tmp_path)
+    with pytest.raises(ValueError, match="skill_name"):
+        orchestration.system_prompt("planner")
 
 
 def test_every_role_prompt_has_the_same_four_parts_and_no_node_facts():

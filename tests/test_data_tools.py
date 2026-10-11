@@ -102,6 +102,10 @@ def test_rejections_are_summarised_with_counts_and_commit_takes_clip_ids_from_a_
                                                     "clips": "ids.json"}}, "ids from a file")
     assert done["datasets"]["from_file"]["clips"] == 4
     assert tools.query(caller, {"clip_ids": "/workspace/ids.json"})["total"] == 4
+    (caller.workspace_host / "records.json").write_text(json.dumps([{"clip_id": r["clip_id"]} for r in results]))
+    for call in (lambda: tools.fetch(caller, "records.json"), lambda: tools.query(caller, {"clip_ids": "records.json"})):
+        with pytest.raises(ToolError, match="every item must be a clip id"):
+            call()
 
 
 def test_probe_reports_display_geometry(env):

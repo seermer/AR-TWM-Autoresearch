@@ -33,6 +33,7 @@ class RecipeContext(_Ctx):
     base_recipe: dict[str, Any] = Field(default_factory=dict)
     recipe_guide: dict[str, Any] = Field(default_factory=dict)   # tunable key -> base, meaning
     metric_guide: dict[str, Any] = Field(default_factory=dict)   # metric -> dimension, weight, what it measures
+    target_skill: dict[str, str] = Field(default_factory=dict)   # the skill the run aims at: name, sentence, description
     tunable_rules: dict[str, Any] = Field(default_factory=dict)
     resolution_allowlist: list[list[int]] = Field(default_factory=list)
     lora_allowlist: list[list[int]] = Field(default_factory=list)

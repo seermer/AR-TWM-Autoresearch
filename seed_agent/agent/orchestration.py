@@ -47,6 +47,7 @@ REVIEW = ("The engineer finished. Check the result against your plan by looking 
 # read-only, but for data_fetch, which copies into staging
 PLANNING_KERNEL_TOOLS = {"hf_search", "hf_list_files", "data_query", "data_fetch", "ask", "read_skill"}
 EDIT_KERNEL_TOOLS = {"ask", "read_skill"}
+SKILL_ROLES = ("planner", "data_engineer")    # the roles whose prompts name the run's target skill
 
 # Where each component lives in this agent, in the order an edit should consider them.
 COMPONENTS = {
@@ -56,7 +57,8 @@ COMPONENTS = {
                      "and result schemas",
     "briefing": "agent/briefing.py -- what each role is told first, built from the kernel's context",
     "harness": "agent/harness.py -- the single-agent inner loop: ReAct graph, tool execution, auto-compaction",
-    "prompts": "agent/prompts/*.md -- each role's mission and general behaviour",
+    "prompts": "agent/prompts/*.md -- each role's mission and general behaviour; a line with a {skill_...} slot "
+               "is filled in with the skill the run aims to improve",
     "settings": "agent/entry.py -- limits: plans per phase, the context digest cap",
 }
 
@@ -68,8 +70,22 @@ def block(tag: str, text: str, **attrs) -> str:
     return f"<{tag}{attributes}>\n{text.strip()}\n</{tag}>"
 
 
-def system_prompt(name: str) -> str:
-    return (AGENT_PKG / "prompts" / f"{name}.md").read_text()
+def system_prompt(name: str, skill: dict | None = None) -> str:
+    """A role's prompt file. A line with a {skill_...} slot is filled from the run's target skill
+    (name, sentence, description), and left out when the run has none."""
+    text = (AGENT_PKG / "prompts" / f"{name}.md").read_text()
+    if name in SKILL_ROLES and "{skill_name}" not in text:
+        raise ValueError(f"agent/prompts/{name}.md must keep a line with {{skill_name}}: it is where the role "
+                         f"is told the skill the run aims to improve")
+    lines = []
+    for line in text.splitlines(keepends=True):
+        if "{skill_" in line:
+            if not skill:
+                continue
+            for key, value in skill.items():
+                line = line.replace(f"{{skill_{key}}}", value)
+        lines.append(line)
+    return "".join(lines)
 
 
 def brief(text: str) -> str:
@@ -83,12 +99,12 @@ def brief(text: str) -> str:
 class Role:
     """One role on the harness. Its conversation continues across calls to run()."""
 
-    def __init__(self, name: str, tools: list, submissions: list) -> None:
+    def __init__(self, name: str, tools: list, submissions: list, skill: dict | None = None) -> None:
         self.submissions = submissions            # the boxes of its submit tools
         self.messages: list = []
         model = chat_model(MODEL)
         model.bind_tools(tools)                   # a broken tool schema fails here, not at the first call
-        self.agent = build_react_agent(model, tools, system_prompt(name),
+        self.agent = build_react_agent(model, tools, system_prompt(name, skill),
                                        context_window=CONTEXT_WINDOW, compact_at=COMPACT_AT)
 
     def _submitted(self):
@@ -238,15 +254,16 @@ def recipe_team(ctx: RecipeContext | None, session, ktools: list) -> Team:
             raise ToolException(f"recipe_check failed: {check.get('failures')}")
 
     rounds: list[dict] = []
+    skill = ctx.target_skill if ctx else None
     plan_tool, plan = submit_tool("submit_plan", "Submit the data plan for this node.", DataPlan)
     done_tool, done = submit_tool("submit_data_and_recipe", "Submit the data commit and the recipe to train on. "
                                   "It is accepted only if recipe_check passes.", DataAndRecipe, recipe_passes)
     accept_t, accept = accept_tool(done)
     planner = Role("planner", [plan_tool, accept_t, *[t for t in ktools if t.name in PLANNING_KERNEL_TOOLS],
-                               *local_tools(WORKSPACE, papers=True)], [plan, accept])
+                               *local_tools(WORKSPACE, papers=True)], [plan, accept], skill)
     replan_t, replan = replan_tool(rounds)
     engineer = Role("data_engineer", [*ktools, *local_tools(WORKSPACE, papers=True), snap_timed_prompts,
-                                      done_tool, replan_t], [done, replan])
+                                      done_tool, replan_t], [done, replan], skill)
     return Team(planner, plan, accept, engineer, done, replan, rounds)
 
 

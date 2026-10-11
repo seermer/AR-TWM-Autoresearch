@@ -209,7 +209,7 @@ skill benchmark in `../SkillWBench`:
 | `configs/animal_appears.yaml` | a land animal appears | 60 | `event_edit_adherence`, half the score |
 
 Each sets the benchmark folder (`eval.data`), its case list (`eval.cases`, `eval.proxy_size`), the
-skill's weight, and the sentence agents read as what the skill metric measures (`eval.measures`). The
+skill's weight, and how the data roles are told the skill the run aims to improve (`eval.target_skill`). The
 other 16 metrics these cases list share the other half; a listed metric missing from an eval fails it.
 
 Run only one loop at a time on a machine.

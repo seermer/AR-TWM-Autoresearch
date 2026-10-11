@@ -147,6 +147,7 @@ def build_recipe_context(*, cfg, conn, run_dir: Path, repo, node_id: str, parent
     pool = pool_clips(conn)
     recipe_path = _node_file(run_dir, parent_id, "recipe.yaml")
     base = yaml.safe_load(run_config_path(cfg, run_dir, "base_recipe.yaml").read_text())
+    skill = cfg.get("eval.target_skill") or {}
     return RecipeContext(
         lineage=lineage(conn, run_dir, repo, parent_id, "improve_recipe"),
         siblings=siblings(conn, run_dir, repo, parent_id, "improve_recipe"),
@@ -158,7 +159,8 @@ def build_recipe_context(*, cfg, conn, run_dir: Path, repo, node_id: str, parent
         parent_recipe=yaml.safe_load(recipe_path.read_text()) if recipe_path.exists() else {},
         base_recipe=base, recipe_guide=recipe_guide(base),
         metric_guide=metric_guide(NodeStore(conn).get("root")["metric_set"],     # the run's: the root is scored first
-                                  cfg.get("eval.score_weights"), cfg.get("eval.measures")),
+                                  cfg.get("eval.score_weights"), skill),
+        target_skill={key: text for key, text in skill.items() if key != "metric"},     # agents see no real metric name
         tunable_rules={k: {"type": RECIPE_RULES[k][0], "min": RECIPE_RULES[k][1], "max": RECIPE_RULES[k][2]}
                        for k in sorted(TUNABLE_KEYS)},
         resolution_allowlist=[list(p) for p in cfg.get("train.resolution_allowlist")],

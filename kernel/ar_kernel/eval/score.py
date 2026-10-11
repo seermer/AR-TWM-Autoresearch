@@ -49,8 +49,7 @@ AGENT_METRICS = {
     "causal_fidelity": ("cause_and_effect", "physics", "objects and characters obey physics and cause and effect"),
 }
 AGENT_DIMENSIONS = {"interaction": "control", "setting": "description", "physical": "physics"}
-AGENT_AXES = {"interaction_type": "instruction_kind", "perspective": "viewpoint"}
-AGENT_GROUPS = {"navigation": "camera_move", "event_edit": "event", "perspective_switch": "viewpoint_change"}
+AGENT_AXES = {"perspective": "viewpoint"}
 
 
 def agent_metrics(metrics: dict) -> dict:
@@ -62,21 +61,22 @@ def _agent_dimensions(dimensions: dict) -> dict:
 
 
 def agent_aggregates(aggregates: dict | None) -> dict | None:
-    """`aggregates()` as an agent sees it: every metric, dimension, group axis and group renamed."""
+    """`aggregates()` as an agent sees it: every metric, dimension and group axis renamed."""
     if not aggregates:
         return None
     return {"metrics": agent_metrics(aggregates.get("metrics") or {}),
             "dimensions": _agent_dimensions(aggregates.get("dimensions") or {}),
-            "groups": {AGENT_AXES.get(axis, axis): {AGENT_GROUPS.get(name, name): _agent_dimensions(dims)
-                                                    for name, dims in groups.items()}
+            "groups": {AGENT_AXES.get(axis, axis): {name: _agent_dimensions(dims) for name, dims in groups.items()}
                        for axis, groups in (aggregates.get("strata") or {}).items()}}
 
 
-def metric_guide(metric_set: list[str], weights: dict | None, measures: dict | None = None) -> dict:
+def metric_guide(metric_set: list[str], weights: dict | None, target_skill: dict | None = None) -> dict:
     """What each scored metric measures and how much it weighs in the score. Nothing about how it is judged.
-    `measures` replaces a metric's built-in text, e.g. to name the one skill a benchmark scores."""
+    The run's target skill (`eval.target_skill`) describes its own metric in place of the built-in text."""
+    skill = target_skill or {}
     return {AGENT_METRICS[name][0]: {"dimension": AGENT_METRICS[name][1], "weight": float((weights or {}).get(name, 1.0)),
-                                     "measures": (measures or {}).get(name, AGENT_METRICS[name][2])}
+                                     "measures": skill["description"] if name == skill.get("metric")
+                                     else AGENT_METRICS[name][2]}
             for name in metric_set}
 
 
@@ -137,7 +137,7 @@ def _mean(values: list[float]) -> float:
 def aggregates(cfg: KernelConfig, report: dict, case_ids: list[str], metric_set: list[str]) -> dict:
     """Agent-facing aggregates of one node's WBench report, over the run's metric set:
     per-metric means, per-dimension means (WBench's grouping) and, for each group of cases
-    sharing an interaction type, scene category or perspective, the same per-dimension means
+    sharing a scene category or perspective, the same per-dimension means
     over that group's cases alone.
 
     navigation_trajectory is the mean of its two components' means, as WBench scores it (a case
@@ -162,14 +162,12 @@ def aggregates(cfg: KernelConfig, report: dict, case_ids: list[str], metric_set:
         return {dim: _mean([metrics[m] for m in names if m in metrics])
                 for dim, names in report["dimensions"].items() if any(m in metrics for m in names)}
 
-    groups: dict[str, dict[str, list[str]]] = {"interaction_type": {}, "category": {}, "perspective": {}}
+    groups: dict[str, dict[str, list[str]]] = {"category": {}, "perspective": {}}
     for case_id in case_ids:
         if not per_case.get(case_id):
             continue
         case = json.loads((cfg.eval_data / "cases" / f"case_{case_id}.json").read_text())
         settings = case.get("settings") or {}
-        for t in sorted({i.get("type") for i in case.get("interactions") or []}, key=str):
-            groups["interaction_type"].setdefault(str(t), []).append(case_id)
         groups["category"].setdefault(str((settings.get("scene") or {}).get("category")), []).append(case_id)
         groups["perspective"].setdefault(str(settings.get("perspective")), []).append(case_id)
     metrics = metric_means(per_case)

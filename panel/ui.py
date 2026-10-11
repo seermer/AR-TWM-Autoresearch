@@ -338,16 +338,34 @@ def h_eval(run, node):
     return df(rows, "cases"), gr.update(choices=cases, value=cases[0] if cases else None), ev["aggregates"]
 
 
-@guarded(5)
+def judge_table(mine: list[dict], theirs: list[dict]) -> str:
+    """The judge's answer per turn and question for both nodes: green when it is the expected one, red when not."""
+    def cell(row: dict | None) -> str:
+        colour = {True: "#1a7f37", False: "#cf222e"}.get((row or {}).get("passed"))
+        style = f' style="color: {colour}; font-weight: 600"' if colour else ""
+        return f"<td{style}>{html.escape(row['answer']) if row else ''}</td>"
+
+    by_key = [{(r["turn"], r["question"]): r for r in rows} for rows in (mine, theirs)]
+    body = "".join(f"<tr><td>{html.escape(turn)}</td><td>{html.escape(question)}</td>"
+                   f"{cell(by_key[0].get((turn, question)))}{cell(by_key[1].get((turn, question)))}</tr>"
+                   for turn, question in dict.fromkeys([*by_key[0], *by_key[1]]))
+    if not body:
+        return ""
+    return ("<table><tr><th>turn</th><th>question</th><th>this node</th><th>compared node</th></tr>"
+            f"{body}</table>")
+
+
+@guarded(6)
 def h_eval_case(run, node, other, case):
     mine = next((c for c in media.eval_view(run, node)["cases"] if c["case"] == case), None)
     theirs = next((c for c in media.eval_view(run, other)["cases"] if c["case"] == case), None) if other else None
     if mine is None:
-        return None, None, df([], "case_scores"), None, None
-    metrics = sorted(set(mine["scores"]) | set((theirs or {}).get("scores", {})))
+        return None, None, df([], "case_scores"), "", None, None
+    metrics = media.metric_order(set(mine["scores"]) | set((theirs or {}).get("scores", {})))
     table = [{"metric": m, "this node": mine["scores"].get(m),
               "compared node": (theirs or {}).get("scores", {}).get(m)} for m in metrics]
-    return (_abs(run, mine["video"]), _abs(run, theirs["video"]) if theirs else None, df(table, "case_scores"),
+    judge = judge_table(media.judge_view(run, node, case), media.judge_view(run, other, case) if other else [])
+    return (_abs(run, mine["video"]), _abs(run, theirs["video"]) if theirs else None, df(table, "case_scores"), judge,
             {"perspective": mine["perspective"], "actions": mine["actions"]}, mine["prompt_schedule"])
 
 
@@ -563,6 +581,7 @@ def build_app(run_dir) -> gr.Blocks:
                 with gr.Row():
                     ev_video, ev_video2 = gr.Video(label="This node"), gr.Video(label="Compared node")
                 ev_table = gr.Dataframe(headers=COLUMNS["case_scores"], label="Case scores", interactive=False)
+                ev_judge = gr.HTML(label="Judge answers")
                 with gr.Row():
                     ev_meta, ev_prompt = gr.JSON(label="Case"), gr.JSON(label="Prompt schedule")
                 ev_agg = gr.JSON(label="aggregates.json")
@@ -624,7 +643,7 @@ def build_app(run_dir) -> gr.Blocks:
         td_out = [td_head, td_sets, td_dataset, td_ingest, td_staging, td_video, td_caption, td_plot, td_info, td_err]
         clips_out = [td_clips, td_count, td_page, td_err]
         ev_out = [ev_cases, ev_case, ev_agg, ev_err]
-        ev_case_out = [ev_video, ev_video2, ev_table, ev_meta, ev_prompt, ev_err]
+        ev_case_out = [ev_video, ev_video2, ev_table, ev_judge, ev_meta, ev_prompt, ev_err]
         tn_out = [tn_head, tn_loss, tn_config, tn_gates, tn_gpu, tn_err]
         for trigger in (app.load, node.change):
             trigger(bind(h_attempts), node, [cv_attempt, cv_err]) \

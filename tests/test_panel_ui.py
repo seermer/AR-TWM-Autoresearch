@@ -42,6 +42,14 @@ def test_every_handler_runs_on_the_fake_run(run, tmp_path):
     _ok(ui.h_selection(run)), _ok(ui.h_cost(run)), _ok(ui.h_files(run, "")), _ok(ui.h_preview(run, "config/run.json"))
 
 
+def test_the_judge_table_colours_each_answer_by_whether_it_is_the_expected_one(run):
+    table = _ok(ui.h_eval_case(run, "n1", "root", "7"))[3]
+    assert "<th>this node</th><th>compared node</th>" in table and "reason" not in table
+    assert ('<td>2: Rain begins.</td><td>Event visible?</td><td style="color: #1a7f37; font-weight: 600">yes</td>'
+            '<td style="color: #cf222e; font-weight: 600">no</td>') in table
+    assert ui.judge_table([], []) == ""
+
+
 def test_a_broken_view_reports_in_its_tab(run, monkeypatch):
     monkeypatch.setattr(views, "node_detail", lambda *a: 1 / 0)
     out = ui.h_node(run, "n1")

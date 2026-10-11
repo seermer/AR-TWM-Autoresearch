@@ -120,25 +120,67 @@ def _case_key(name: str) -> int:
     return int(m.group(1)) if m else 0
 
 
-def eval_view(run: Run, node_id: str) -> dict:
-    aggregates = run.files.read_json(f"nodes/{node_id}/eval/aggregates.json")
+# The metrics a judge model grades, shown first; the rest follow by name.
+JUDGED = ("event_edit_adherence", "subject_action_adherence", "perspective_switch_adherence", "causal_fidelity")
+# A judge file saves only each question's id. These are short forms of the questions as the judge is asked them.
+QUESTIONS = {
+    "event_edit_adherence": {"Q1": "Scene unchanged?", "Q2": "Event visible?", "Q3": "Event completed?",
+                             "Q4": "Details correct?", "Q5": "Anything unrelated appears?"},
+    "subject_action_adherence": {"Q1": "Subject idle?", "Q2": "Action visible?", "Q3": "Action completed?",
+                                 "Q4": "Details correct?", "Q5": "Unnatural movement?"},
+    "perspective_switch_adherence": {"Q1": "Viewpoint changes?", "Q3": "Ends in the asked view?",
+                                     "Q4": "End view valid?", "Q_cam": "Changed by the camera? (not scored)"},
+}
+
+
+def metric_order(names) -> list[str]:
+    return sorted(names, key=lambda m: (JUDGED.index(m) if m in JUDGED else len(JUDGED), m))
+
+
+def _eval_root(run: Run, node_id: str):
     work = run.files.path(f"nodes/{node_id}/eval/work_dirs")
     roots = sorted(p.parent for p in work.glob("*/videos")) if work.is_dir() else []
-    if not roots:
+    return roots[0].relative_to(run.files.root) if roots else None
+
+
+def judge_view(run: Run, node_id: str, case: str) -> list[dict]:
+    """The judge's answers for one case: per turn and question, the answer and whether it is the expected
+    one. causal_fidelity has grades instead: `passed` is None."""
+    rel = _eval_root(run, node_id)
+    rows = []
+    for metric in JUDGED if rel else ():
+        d = run.files.read_json(f"{rel}/evaluation/{metric}/case_{case}.json")
+        if not d:
+            continue
+        if metric == "causal_fidelity":
+            grades = [("overall", d["track1"]), *[(g["dim_name"], g) for g in d["track2"]["details"]]]
+            rows += [{"turn": "", "question": f"Causal fidelity: {name}", "answer": f"{g['score']}/{g['max']}",
+                      "passed": None} for name, g in grades]
+            continue
+        for t in d["turn_details"]:
+            if metric == "perspective_switch_adherence":
+                answers = [(q, "yes" if ok else "no", ok) for q, ok in t["q_results"].items()]
+            else:
+                answers = [(q["sub_id"], q["answer"], q["correct"]) for q in t["questions"]]
+            rows += [{"turn": f"{t['turn']}: {t['action']}", "question": QUESTIONS[metric][q], "answer": answer,
+                      "passed": ok} for q, answer, ok in answers]
+    return rows
+
+
+def eval_view(run: Run, node_id: str) -> dict:
+    aggregates = run.files.read_json(f"nodes/{node_id}/eval/aggregates.json")
+    rel = _eval_root(run, node_id)
+    if rel is None:
         return {"cases": [], "aggregates": aggregates}
-    root = roots[0]
-    rel = root.relative_to(run.files.root)
-    per_case: dict[str, dict] = {}
-    for f in sorted((root / "evaluation").glob("*/case_*.json")):
-        d = loads(f.read_text(errors="replace"), {}) or {}
-        per_case.setdefault(str(d.get("case_id") or f.stem[5:]), {}).update(d.get("summary") or {})
+    root = run.files.path(rel)
+    per_case = (run.files.read_json(f"{rel}/evaluation/report.json") or {}).get("per_case") or {}
     cases = []
     for mp4 in sorted((root / "videos").glob("case_*_combined.mp4"), key=lambda p: _case_key(p.name)):
         cid = mp4.name[len("case_"):-len("_combined.mp4")]
         meta = run.files.read_json(f"{rel}/videos/case_{cid}_combined.json") or {}
         cases.append({"case": cid, "video": f"{rel}/videos/{mp4.name}", "perspective": meta.get("perspective"),
                       "actions": meta.get("actions"), "prompt_schedule": meta.get("prompt_schedule"),
-                      "scores": per_case.get(cid, {})})
+                      "scores": {name: per_case[cid][name] for name in metric_order(per_case.get(cid, {}))}})
     return {"cases": cases, "aggregates": aggregates}
 
 

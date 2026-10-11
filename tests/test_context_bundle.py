@@ -15,7 +15,7 @@ CFG = KernelConfig.load()
 METRIC_SET = ["aesthetic_quality", "event_edit_adherence", "causal_fidelity"]
 # The shape score.aggregates() returns and the loop writes to eval/aggregates.json.
 AGGREGATES = {"metrics": {"aesthetic_quality": 0.78}, "dimensions": {"quality": 0.78},
-              "strata": {"interaction_type": {"navigation": {"quality": 0.8}}, "category": {"Nature": {"quality": 0.8}},
+              "strata": {"category": {"Nature": {"quality": 0.8}},
                          "perspective": {"first_person": {"quality": 0.8}}}}
 
 
@@ -61,6 +61,13 @@ def test_recipe_context_carries_rules_allowlists_and_retry(world, tmp_path):
     assert ctx.base_recipe["optimizer"]["batch_size"] == 1
     assert not hasattr(ctx, "format_rules")
     assert ctx.metric_guide["cause_and_effect"]["weight"] == 4.5 and len(ctx.metric_guide) == len(METRIC_SET)
+    assert ctx.target_skill == {}
+    rain = KernelConfig.load(overlay=CFG.repo_root / "configs" / "rain_start.yaml")
+    skilled = build_recipe_context(cfg=rain, conn=conn, run_dir=run, repo=repo, node_id="n1",
+                               parent_id="root", attempt=1, max_attempts=3, retry=None,
+                               nodes_remaining=9, n_gpus=4, tools=[])
+    assert sorted(skilled.target_skill) == ["description", "name", "sentence"] and skilled.target_skill["name"] == "rain starting"
+    assert skilled.metric_guide["follows_event_instruction"]["measures"] == skilled.target_skill["description"]
     write_bundle(ctx, tmp_path / "ctx2")
     assert json.loads((tmp_path / "ctx2" / "retry.json").read_text()) == retry
 
@@ -115,7 +122,7 @@ def test_a_data_entry_carries_scores_under_agent_names_and_no_code_or_process(wo
     assert sorted(entry) == ["aggregates", "data", "data_commit", "error", "metrics", "node_id", "rationale", "recipe",
                              "score", "status"]
     assert entry["score"] == 0.78 and entry["metrics"] == {"frame_aesthetics": 0.78}
-    assert entry["aggregates"] == agent_aggregates(AGGREGATES) and "instruction_kind" in entry["aggregates"]["groups"]
+    assert entry["aggregates"] == agent_aggregates(AGGREGATES) and "viewpoint" in entry["aggregates"]["groups"]
     assert entry["rationale"] == "released checkpoint"
     assert json.loads((run / "nodes" / "root" / "eval" / "aggregates.json").read_text()) == AGGREGATES   # disk unchanged
 

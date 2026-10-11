@@ -176,7 +176,7 @@ def test_aggregates_strata_give_each_dimension_per_group_and_leak_no_case_ids():
     indoor = full["strata"]["category"]["Indoor"]
     assert sorted(indoor) == ["consistency", "interaction", "quality"]
     assert indoor["quality"] == pytest.approx(sum(per_case["136"][m] for m in quality) / len(quality))
-    assert sorted(full["strata"]["interaction_type"]) == ["navigation", "subject_action"]
+    assert sorted(full["strata"]) == ["category", "perspective"]
     assert sorted(full["strata"]["perspective"]) == ["first_person", "third_person"]
     assert not set(_keys(full)) & set(per_case)
 
@@ -191,18 +191,16 @@ def test_every_metric_has_one_alias_and_no_alias_is_a_real_name():
     assert {dim for _, dim, _ in AGENT_METRICS.values()} == {"quality", "consistency", "control", "description", "physics"}
 
 
-def test_agent_aggregates_alias_metrics_dimensions_axes_and_groups():
+def test_agent_aggregates_alias_metrics_dimensions_and_axes():
     from ar_kernel.eval.score import agent_aggregates
     real = {"metrics": {"event_edit_adherence": 0.4, "aesthetic_quality": 0.7},
             "dimensions": {"interaction": 0.4, "quality": 0.7, "setting": 0.5, "physical": 0.6},
-            "strata": {"interaction_type": {"event_edit": {"interaction": 0.4}, "navigation": {"quality": 0.7}},
-                       "category": {"Indoor": {"physical": 0.6}},
+            "strata": {"category": {"Indoor": {"physical": 0.6}},
                        "perspective": {"first_person": {"setting": 0.5}}}}
     assert agent_aggregates(real) == {
         "metrics": {"follows_event_instruction": 0.4, "frame_aesthetics": 0.7},
         "dimensions": {"control": 0.4, "quality": 0.7, "description": 0.5, "physics": 0.6},
-        "groups": {"instruction_kind": {"event": {"control": 0.4}, "camera_move": {"quality": 0.7}},
-                   "category": {"Indoor": {"physics": 0.6}},
+        "groups": {"category": {"Indoor": {"physics": 0.6}},
                    "viewpoint": {"first_person": {"description": 0.5}}}}
     assert agent_aggregates(None) is None
 
@@ -218,7 +216,7 @@ def test_the_metric_guide_carries_dimension_weight_and_meaning_only():
     text = " ".join(g["measures"] for g in guide.values()).lower()
     assert not any(word in text for word in ("judge", "question", "yes/no", "case", "frames per second"))
     skill = metric_guide(["event_edit_adherence", "imaging_quality"], {"event_edit_adherence": 16},
-                         {"event_edit_adherence": "it starts to rain"})
+                         {"metric": "event_edit_adherence", "name": "rain starting", "description": "it starts to rain"})
     assert skill == {"follows_event_instruction": {"dimension": "control", "weight": 16.0, "measures": "it starts to rain"},
                      "frame_clarity": {"dimension": "quality", "weight": 1.0,
                                        "measures": "frames free of blur, noise and compression artefacts"}}

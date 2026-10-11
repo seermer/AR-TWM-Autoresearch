@@ -269,12 +269,19 @@ def chat_items(chain: list[Segment], load: Load, awaiting: bool) -> list[dict]:
     return items
 
 
+def _fixed_start(text: str) -> str:
+    """A prompt file up to its first line with a {skill_...} slot: the agent fills such a line in or leaves it out."""
+    head = text.split("{skill_")[0]
+    return head if head == text else head[:head.rfind("\n") + 1]
+
+
 def infer_role(system_text: str | None, prompt_files: dict[str, str]) -> str:
     """The prompt file (in the agent code that ran) the system prompt starts with; else the
     system prompt's first line. Only a label: roles are the agent's own convention."""
     if not (system_text or "").strip():
         return "(no system prompt)"
-    matches = [name for name, text in prompt_files.items() if text and system_text.startswith(text)]
+    starts = {name: _fixed_start(text) for name, text in prompt_files.items()}
+    matches = [name for name, start in starts.items() if start and system_text.startswith(start)]
     if matches:
-        return max(matches, key=lambda n: len(prompt_files[n]))
+        return max(matches, key=lambda n: len(starts[n]))
     return system_text.strip().splitlines()[0][:80]

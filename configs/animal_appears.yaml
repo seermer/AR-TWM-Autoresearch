@@ -6,5 +6,8 @@ eval:
   proxy_size: 60
   score_weights:
     event_edit_adherence: 16     # the skill: half the score, the 16 other metrics the cases list the rest
-  measures:
-    event_edit_adherence: a land animal comes into view when instructed, fully and with the right details
+  target_skill:
+    metric: event_edit_adherence
+    name: a land animal appearing
+    sentence: a land animal comes into view
+    description: a land animal comes into view at the turn whose text calls for it, which can be any turn of the video, and it shows fully and with the right details

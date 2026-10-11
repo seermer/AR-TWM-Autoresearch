@@ -147,8 +147,14 @@ def make_run(base: Path, name: str = "r1") -> Path:
         _write(work / "videos" / "case_7_combined.json",
                {"case_id": "7", "perspective": "first_person", "actions": ["W"],
                 "prompt_schedule": [{"prompt": "a corridor"}]})
-        _write(work / "evaluation" / "m1" / "case_7.json", {"case_id": "7", "summary": {"m1": score}})
-        _write(work / "evaluation" / "m2" / "case_7.json", {"case_id": "7", "summary": {"m2": 0.8}})
+        seen = node == "n1"                     # the judge saw the event at n1 only
+        _write(work / "evaluation" / "report.json",
+               {"per_case": {"7": {"m1": score, "m2": 0.8, "event_edit_adherence": 1.0 if seen else 0.5}}})
+        _write(work / "evaluation" / "event_edit_adherence" / "case_7.json",
+               {"case_id": "7", "turn_details": [{"turn": 2, "action": "Rain begins.", "questions": [
+                   {"sub_id": "Q1", "correct": True, "answer": "no", "expected": "no", "reason": "r"},
+                   {"sub_id": "Q2", "correct": seen, "answer": "yes" if seen else "no", "expected": "yes",
+                    "reason": "r"}]}]})
         _write(run / "nodes" / node / "eval" / "aggregates.json", {"metrics": {"m1": score, "m2": 0.8}})
 
     # telemetry, in time order
