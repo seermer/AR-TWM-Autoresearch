@@ -31,12 +31,13 @@ If `nvcc` is not found: `export PATH=/usr/local/cuda-12.8/bin:$PATH` (add it to 
 ## 1. Get the code
 
 The three folders must sit side by side, with exactly these names.
+Branch `live-10-10` is a frozen copy of the code as it was on 2026-10-10, before the WBench eval standard change; do not switch branches.
 
 ```bash
 mkdir WM-AutoResearch && cd WM-AutoResearch
-git clone git@github.com:seermer/AR-TWM-Autoresearch.git AutoResearcher
-git clone git@github.com:seermer/AlayaWorld-TWM-Autoresearch.git WorldModel
-git clone --recurse-submodules git@github.com:seermer/WBench-TWM-Autoresearch.git WBench
+git clone -b live-10-10 git@github.com:seermer/AR-TWM-Autoresearch.git AutoResearcher
+git clone -b live-10-10 git@github.com:seermer/AlayaWorld-TWM-Autoresearch.git WorldModel
+git clone -b live-10-10 --recurse-submodules git@github.com:seermer/WBench-TWM-Autoresearch.git WBench
 git clone https://github.com/aigc3d/ViGeo WorldModel/third_party/ViGeo
 git -C WorldModel/third_party/ViGeo checkout 87ee8fb
 cd AutoResearcher
