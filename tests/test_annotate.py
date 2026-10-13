@@ -173,7 +173,6 @@ def test_real_vigeo_matches_the_example_poses(tmp_path):
     finally:
         q.shutdown()
     assert out["state"] == "done", out["error"]
-    ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
     rows, failures = [], []
     for item in job_result(out)["items"]:
         c = clips[item["index"]]
