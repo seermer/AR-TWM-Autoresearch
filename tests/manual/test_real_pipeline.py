@@ -1,7 +1,7 @@
 """GPU verification. Run explicitly:
    conda run -n autoresearcher python -m pytest tests/manual -v -s -m manual
 """
-import os, shutil, pytest
+import json, os, shutil, pytest
 from pathlib import Path
 from ar_kernel.archive.commits import CommitStore
 from ar_kernel.archive.db import open_db
@@ -14,50 +14,46 @@ from ar_kernel.train.runner import TrainRunner
 
 pytestmark = pytest.mark.manual
 CFG = KernelConfig.load()
-EXAMPLES = CFG.worldmodel / "data" / "examples"
+EXAMPLES = CFG.worldmodel / "data" / "examples" / "video_timed_prompts_camera"
 
-def _ingest_examples(ing, dataset: str, camera_motion: str, node_id="m1"):
-    # Stage each clip's files under the run's own directory before ingesting: BlobStore.put()
-    # moves/consumes its source, and Ingestor now refuses (by design, see
-    # ar_kernel.data.ingest.Ingestor._outside_run_dir) any candidate outside the run dir. Never
-    # hand ingest() a path inside the WorldModel checkout directly (this mirrors production,
-    # where agents only ever ingest files they produced in their own workspace).
-    root = EXAMPLES / dataset
-    staging = Path(ing.run_dir) / "staging" / dataset
+def _ingest_examples(ing, node_id="m1"):
+    """WorldModel's timed-prompt example clips (960x544, with poses), each with the annotation its
+    caption file stands for. Staged under the run first: ingest takes only staged files."""
+    staging = Path(ing.run_dir) / "staging" / "examples"
     clip_ids = []
-    for video in sorted((root / "videos").glob("*.mp4")):
+    for video in sorted((EXAMPLES / "videos").glob("*.mp4")):
         stem = video.stem
-        pose_src = root / "poses" / f"{stem}.npz"
         clip_dir = staging / stem
         clip_dir.mkdir(parents=True, exist_ok=True)
-        staged_video = Path(shutil.copy2(video, clip_dir / "video.mp4"))
-        staged_caption = Path(shutil.copy2(root / "captions" / f"{stem}.json", clip_dir / "caption.json"))
-        staged_pose = None
-        if camera_motion == "moving" and pose_src.exists():
-            staged_pose = Path(shutil.copy2(pose_src, clip_dir / "pose.npz"))
+        caption = json.loads((EXAMPLES / "captions" / f"{stem}.json").read_text())
+        scene = caption["caption"]
+        turns = []
+        for segment in caption["segments"]:
+            event = segment["prompt"].removeprefix(scene).strip()
+            turns.append({"start_s": segment["time_range_s"][0], **({"event": event} if event else {}),
+                          "perspective": "first_person"})
+        (clip_dir / "annotation.json").write_text(json.dumps({"scene_prompt": scene, "turns": turns}))
         result = ing.ingest([Candidate(
-            video=staged_video, caption=staged_caption, pose=staged_pose,
-            camera_motion=camera_motion,
-            provenance={"kind": "derived", "from": [], "transform": f"WorldModel example {dataset}"},
-        )], node_id=node_id)[0]
+            video=Path(shutil.copy2(video, clip_dir / "video.mp4")), annotation=clip_dir / "annotation.json",
+            pose=Path(shutil.copy2(EXAMPLES / "poses" / f"{stem}.npz", clip_dir / "pose.npz")),
+            derived_from={"kind": "dataset", "name": "WorldModel example clips"})], node_id=node_id)[0]
         assert result.accepted, result.reasons
         clip_ids.append(result.clip_id)
     return clip_ids
 
-def test_example_datasets_ingest_with_expected_formats(tmp_path):
+def test_the_example_clips_ingest_and_keep_their_training_text(tmp_path):
     ing = Ingestor(CFG, tmp_path, open_db(tmp_path), Recorder(tmp_path))
-    cam = _ingest_examples(ing, "video_caption_camera", "moving")
-    assert all("video_caption_camera" in ing.clips.get(c)["formats"] for c in cam)
-    timed = _ingest_examples(ing, "video_timed_prompts_camera", "moving")
-    assert all("video_timed_prompts_camera:per_chunk" in ing.clips.get(c)["formats"] for c in timed)
-    static = _ingest_examples(ing, "video_caption_static", "static")
-    assert all("video_caption_static" in ing.clips.get(c)["formats"] for c in static)
+    clips = _ingest_examples(ing)
+    assert len(clips) == 6
+    for clip_id, source in zip(clips, sorted((EXAMPLES / "captions").glob("*.json"))):
+        stored = json.loads(ing.blobs.path(ing.clips.get(clip_id)["caption_digest"], "caption").read_text())
+        assert [s["prompt"] for s in stored["segments"]] == [s["prompt"] for s in json.loads(source.read_text())["segments"]]
 
 def test_two_step_training_writes_a_checkpoint(tmp_path):
     ctx = bootstrap_run(CFG, run_id="manual_train", env=os.environ)
     conn = ctx.conn
     ing = Ingestor(CFG, ctx.run_dir, conn, ctx.recorder)
-    clips = _ingest_examples(ing, "video_caption_camera", "moving")
+    clips = _ingest_examples(ing)
     commits = CommitStore(conn, ing.blobs, ing.clips)
     commit = commits.commit(None, {"cam": {"weight": 1.0, "clips": clips}}, "manual", node_id="m1")
     node_dir = ctx.run_dir / "nodes" / "m1"
