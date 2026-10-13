@@ -1,11 +1,10 @@
 """rollout_alayaworld: clips rendered by AlayaWorld from the agent's own items, through WorldModel's
 turn-based render path (scripts/tools/run_wbench.py, configs/wbench_full.yaml).
 
-The agent writes items (first frame, viewpoint, scene and character text, per-turn camera move and
-instruction). The kernel stages them in the render script's input schema, pre-encodes their prompts,
-renders them, and publishes each clip with its round boundaries on the per_chunk grid (25 + 32k
-frames) and one caption segment per round from the prompts the render used. Nothing the agent sees
-names that script, its schema or the evaluation.
+The agent writes items (first frame, scene and subject text, seed, per-turn action, event and
+perspective). The kernel stages them in the render script's input schema, pre-encodes their prompts,
+renders them, and publishes each whole clip with its annotation: the item's texts and the frame each
+turn starts on. Nothing the agent sees names that script, its schema or the evaluation.
 
 No pose is published (user decision 2026-09-26): the renders follow the commanded translation
 but only weakly the commanded turns and orbits, so the commanded camera path is
@@ -27,6 +26,7 @@ from PIL import Image
 
 from ..archive.db import open_db
 from ..archive.nodes import NodeStore
+from ..data.annotation import ACTIONS, FPS, PERSPECTIVES, SWITCH
 from ..data.probe import aspect_ok, probe_video
 from ..subproc import file_tail, free_port, meminfo_gib
 from .gpu_jobs import (IMAGE_EXTS, GpuJob, check_item_seed, check_keyframes, check_listed_size, is_int, sizes_text,
@@ -42,48 +42,82 @@ LTX25_BRIDGE = Path(__file__).resolve().parents[1] / "bridges" / "ltx25_generate
 PRECACHE = ["-m", "scripts.tools.precache_wbench_text_embeds"]
 RUN_WBENCH = ["scripts/tools/run_wbench.py"]
 
-# Action tokens WorldModel understands, from alaya/trainer/rollout_trainer.py
-# (_wbench_action_to_nav: its `single` and `aliases` keys, lower-case wasd and the arrows).
-# An action is one token or several joined by "+" (or ","); WorldModel silently ignores an
-# unknown token, so it is refused here instead.
-ACTION_TOKENS = frozenset({
-    "W", "S", "A", "D", "w", "a", "s", "d", "left", "right", "up", "down", "stop",
-    "forward", "backward", "cam_left", "cam_right", "cam_up", "cam_down", "look_left", "look_right",
-    "look_up", "look_down", "pitch_up", "pitch_down", "yaw_left", "yaw_right", "->", "→", "<-", "←"})
-ITEM_KEYS = ("image", "viewpoint", "scene_prompt", "character_prompt", "subject_mask", "turns")
-# Item key of a turn's instruction -> the render script's interaction type.
-TURN_KEYS = {"subject_action": "subject_action", "event": "event_edit", "viewpoint_change": "perspective_switch"}
-VIEWPOINTS = ("first_person", "third_person")
+ITEM_KEYS = ("image", "scene_prompt", "character_prompt", "seed", "subject_mask", "turns")
+TURN_KEYS = ("action", "event", "perspective")
+SWITCH_CODE = {"third_person": "fp_to_tp", "first_person": "tp_to_fp"}
 # The AR teacher without the DMD LoRA, sampled as configs/infer_i2v_camera_ar.yaml does.
 AR30 = {("paths", "dmd_resume"): None, ("validation", "sampling_steps"): 30,
         ("validation", "scheduler"): "shift", ("validation", "cfg_scale"): 3.0}
-ROUND_FRAMES = 32           # one rollout round: 4 latents x temporal stride 8
-GRID = 25                   # per_chunk round boundaries sit at 25 + 32k frames
-FPS = 24
+SIZE = (960, 544)           # (width, height) both turn-based rollouts render
+TURN_FRAMES = 96            # one turn of the render path, as in the evaluation
 FFMPEG_TIMEOUT_S = 600      # a wedged/oversize ffmpeg must fail its item, not hang the job
 
 
-def valid_action(action) -> bool:
-    parts = str(action).replace(",", "+").split("+") if isinstance(action, str) else [""]
-    return all(p.strip() in ACTION_TOKENS for p in parts)
+def check_turn_item(item: dict, keys: tuple[str, ...], max_turns: int | None = None) -> None:
+    """The fields rollout_alayaworld and rollout_h3 share: scene and subject text, seed and turns."""
+    def bad(msg):
+        raise ToolError(msg)
+    unknown = sorted(set(item) - set(keys))
+    if unknown:
+        bad(f"{', '.join(unknown)} is not a field of an item: the fields are {', '.join(keys)}")
+    if not isinstance(item.get("scene_prompt"), str) or not item["scene_prompt"].strip():
+        bad("scene_prompt must be a non-empty string")
+    if not isinstance(item.get("character_prompt", ""), str):
+        bad("character_prompt must be a string")
+    check_item_seed(item)
+    turns = item.get("turns")
+    if not isinstance(turns, list) or not turns:
+        bad("turns must be a non-empty list")
+    if max_turns and len(turns) > max_turns:
+        bad(f"at most {max_turns} turns: got {len(turns)}")
+    previous = None
+    for t, turn in enumerate(turns, 1):
+        if not isinstance(turn, dict):
+            bad(f"turn {t} must be an object")
+        unknown = sorted(set(turn) - set(TURN_KEYS))
+        if unknown:
+            bad(f"turn {t}: {', '.join(unknown)} is not a field of a turn: the fields are {', '.join(TURN_KEYS)}")
+        if turn.get("action") not in ACTIONS:
+            bad(f"turn {t}: action must be one of {', '.join(ACTIONS)}: got {turn.get('action')!r}")
+        if turn.get("perspective") not in PERSPECTIVES:
+            bad(f"turn {t}: perspective must be one of {', '.join(PERSPECTIVES)}: got {turn.get('perspective')!r}")
+        if "event" in turn and (not isinstance(turn["event"], str) or not turn["event"].strip()):
+            bad(f"turn {t}: event must be one sentence; leave it out when nothing happens")
+        if previous and turn["perspective"] != previous and turn["action"] != "stop":
+            bad(f"turn {t} switches the perspective, so its action must be stop: got {turn['action']!r}")
+        previous = turn["perspective"]
+
+
+def item_annotation(item: dict, starts: list[int]) -> dict:
+    """The annotation of a rendered item: its texts, and each turn's planned first frame as seconds."""
+    turns = [{"start_s": start / FPS, **({"event": t["event"]} if t.get("event") else {}),
+              "perspective": t["perspective"]} for t, start in zip(item["turns"], starts)]
+    return {"scene_prompt": item["scene_prompt"],
+            **({"character_prompt": item["character_prompt"]} if item.get("character_prompt") else {}),
+            "turns": turns}
 
 
 def case_json(index: int, item: dict, image_rel: str, mask_rel: str | None) -> dict:
-    """One item in the render script's input schema: a navigation entry per turn, plus that turn's
-    instruction under the script's own type name."""
-    interactions = []
+    """One item in the render script's input schema: a navigation entry per turn, the turn's event,
+    and on a turn that changes the perspective the switch sentence as that entry's own prompt."""
+    interactions, previous = [], None
     for turn, t in enumerate(item["turns"], 1):
         interactions.append({"type": "navigation", "action": t["action"], "turn": turn})
-        interactions += [{"type": kind, "action": t[key], "turn": turn} for key, kind in TURN_KEYS.items() if t.get(key)]
-    return {"id": str(index), "environment_prompt": item["scene_prompt"],
+        if t.get("event"):
+            interactions.append({"type": "event_edit", "action": t["event"], "turn": turn})
+        if previous and t["perspective"] != previous:
+            interactions.append({"type": "perspective_switch", "action": SWITCH_CODE[t["perspective"]],
+                                 "prompt": SWITCH[t["perspective"]], "turn": turn})
+        previous = t["perspective"]
+    return {"id": str(index), "seed": item["seed"], "environment_prompt": item["scene_prompt"],
             "character_prompt": item.get("character_prompt", ""),
             "perspective_prompt": "",          # camera text: the render removes it before the model sees the prompt
-            "settings": {"perspective": item["viewpoint"], "subject": {"type": "unknown", "desc": ""},
+            "settings": {"perspective": item["turns"][0]["perspective"], "subject": {"type": "unknown", "desc": ""},
                          "tracking_object": None, "initial_image": image_rel, "subject_mask": mask_rel},
             "interactions": interactions, "metric_list": []}
 
 
-def render_config(cfg, *, rounds_per_turn: int, seed: int, indices: list[int], work: Path,
+def render_config(cfg, *, indices: list[int], work: Path,
                   text_cache: Path, node_lora: Path | None = None, node_rank: int = 0,
                   history_encoder: Path | None = None) -> dict:
     """configs/wbench_full.yaml as eval/render.py:build_render_config adapts it, pointed at this
@@ -95,14 +129,13 @@ def render_config(cfg, *, rounds_per_turn: int, seed: int, indices: list[int], w
     for key, value in c["paths"].items():
         if isinstance(value, str) and value:
             c["paths"][key] = str(wm / value)
-    c["run"].update(output_dir=str(work / "rollout"), log_dir=str(work / "logs"), seed=int(seed))
+    c["run"].update(output_dir=str(work / "rollout"), log_dir=str(work / "logs"))
     c["runtime"]["text_embed_cache_dir"] = str(text_cache)
-    c["validation"].update(per_sample_seed=True, save_joystick=False)
+    c["validation"]["save_joystick"] = False
     mode = c["validation"]["modes"]["wbench"]
     mode["dataset"].update(root=str(work / "data"), case_ids=[str(i) for i in indices])
     mode["wbench_output_dir"] = str(work / "videos")
-    mode["wbench_chunks_per_turn"] = int(rounds_per_turn)
-    mode["wbench_keep_last_frame"] = True      # the clip ends on a round boundary
+    mode["wbench_keep_last_frame"] = True      # every turn is TURN_FRAMES long, the last one too
     for (section, key), value in AR30.items():
         c[section][key] = value
     if node_lora is not None:
@@ -146,23 +179,6 @@ def check_published(info) -> None:
                          f"2% of 16:9 ({info.width}x{info.height})")
 
 
-def round_segments(schedule: list[dict], first: int, trim: int, frames: int) -> list[dict]:
-    """One caption segment per round (rounds start at mp4 frame first + 32r), in seconds of the
-    trimmed clip; adjacent equal prompts merged; spans [0, frames/24]."""
-    segs: list[dict] = []
-    for entry in sorted(schedule, key=lambda e: e["round"]):
-        start = max(0, first + ROUND_FRAMES * int(entry["round"]) - trim)
-        if start >= frames:
-            break
-        if segs and segs[-1]["prompt"] == entry["prompt"]:
-            continue
-        if segs:
-            segs[-1]["time_range_s"][1] = start / FPS
-        segs.append({"time_range_s": [0.0 if not segs else start / FPS, None], "prompt": entry["prompt"]})
-    segs[-1]["time_range_s"][1] = frames / FPS
-    return segs
-
-
 class AlayaWorldBackend(GpuJob):
     name = tool = "rollout_alayaworld"
     kind = "rollout"
@@ -173,24 +189,25 @@ class AlayaWorldBackend(GpuJob):
         "fine-tune. "
         "Render clips with AlayaWorld itself: the released model that every node fine-tunes, or with `node` a "
         "scored node's fine-tune. A GPU job: returns {job_id} at once; collect with job_wait. Each item is a "
-        "first frame, the scene and character text, and a list of turns. The first frame, and a subject mask, "
-        "must be exactly {size}: it is used as it is. A turn moves the camera and may add one "
-        "instruction: an event in the scene, an action of the subject, or a change of viewpoint. A turn keeps its "
-        "camera move and its text for all its rounds. Camera moves steer "
-        "translation reliably, rotation (turns, orbits) only weakly; an event or subject action may show up "
-        "early, late, weakly or not at all. Each result item gives a `candidate` (mp4, "
-        "caption with one segment per round, provenance) with NO pose and no camera_motion: run annotate_camera "
-        "on candidate.video, then data_ingest it with that pose and camera_motion 'moving' (eligible for "
-        "video_timed_prompts_camera:per_chunk). Metadata, not labels: `commanded_camera` (npz of the camera path "
-        "the moves commanded, one pose per frame; not what the video shows), `actions` and `turn_segments` "
-        "(frame ranges in the published clip). At most {max_turns} turns per item.")
+        "first frame, the scene and subject text, a seed and a list of turns. The first frame, and a subject mask, "
+        "must be exactly {size}: it is used as it is. A turn lasts 4 seconds. It has a navigation action, "
+        "a perspective, and may have one event: one sentence about something that happens during the turn. "
+        "The kernel writes each turn's text from the scene, the subject and the turn's event. A turn whose "
+        "perspective differs from the turn before it switches the view: the kernel adds the sentence that says "
+        "so, and that turn's action must be `stop`. The camera keeps the first turn's mode for the whole clip. "
+        "Actions steer translation reliably, rotation (turns, orbits) only weakly; an event may show up "
+        "early, late, weakly or not at all. Each result item gives a `candidate`: `video` ({size}, 24 fps), "
+        "`annotation` (a file: your scene and subject text and the turns, each with the time it starts in the "
+        "clip) and `derived_from`. It has no pose: run annotate_camera on candidate.video, then data_ingest the "
+        "video, the annotation and that pose. You may change a turn's start in the annotation to where its "
+        "event really happens (locate_events). Metadata, not labels: `commanded_camera` (npz of the camera path "
+        "the actions commanded, one pose per frame; not what the video shows) and `actions`. "
+        "At most {max_turns} turns per item.")
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.max_turns = int(self.block["max_turns"])
-        render = self.cfg.worldmodel / "configs" / "wbench_full.yaml"          # the size every clip is rendered at
-        sample = yaml.safe_load(render.read_text(encoding="utf-8"))["sample"]
-        self.size = sample["width"], sample["height"]
+        self.size = SIZE
         self.description = self.description.replace("{max_turns}", str(self.max_turns)).replace(
             "{size}", f"{self.size[0]}x{self.size[1]}")
 
@@ -198,47 +215,16 @@ class AlayaWorldBackend(GpuJob):
         return self.size
 
     def check_args(self, args):
-        args.setdefault("rounds_per_turn", 3)
-        args.setdefault("seed", 42)
-        rpt = args["rounds_per_turn"]
-        if not (is_int(rpt) and 1 <= rpt <= 3):
-            raise ToolError(f"rounds_per_turn must be an int in 1..3: got {rpt!r}")
-        if not is_int(args["seed"]):
-            raise ToolError(f"seed must be an int: got {args['seed']!r}")
         if "node" in args:
             self._node(args["node"])
 
     def check_item(self, item: dict) -> None:
-        def bad(msg):
-            raise ToolError(msg)
-        unknown = sorted(set(item) - set(ITEM_KEYS))
-        if unknown:
-            bad(f"{', '.join(unknown)} is not a field of an item: the fields are {', '.join(ITEM_KEYS)}")
         if not str(item.get("image", "")).lower().endswith(IMAGE_EXTS):
-            bad(f"image must be an image file ({', '.join(IMAGE_EXTS)}): got {item.get('image')!r}")
-        if item.get("viewpoint") not in VIEWPOINTS:
-            bad(f"viewpoint must be one of {VIEWPOINTS}: got {item.get('viewpoint')!r}")
-        if not isinstance(item.get("scene_prompt"), str) or not item["scene_prompt"].strip():
-            bad("scene_prompt must be a non-empty string")
-        if not isinstance(item.get("character_prompt", ""), str):
-            bad("character_prompt must be a string")
+            raise ToolError(f"image must be an image file ({', '.join(IMAGE_EXTS)}): got {item.get('image')!r}")
         mask = item.get("subject_mask")
         if mask is not None and not str(mask).lower().endswith(IMAGE_EXTS):
-            bad(f"subject_mask must be an image file ({', '.join(IMAGE_EXTS)}): got {mask!r}")
-        turns = item.get("turns")
-        if not isinstance(turns, list) or not turns:
-            bad("turns must be a non-empty list")
-        if len(turns) > self.max_turns:
-            bad(f"at most {self.max_turns} turns: got {len(turns)}")
-        for t, turn in enumerate(turns, 1):
-            if not isinstance(turn, dict):
-                bad(f"turn {t} must be an object")
-            if not valid_action(turn.get("action")):
-                bad(f"turn {t}: unknown action {turn.get('action')!r}; use W, A, S, D, left, right, up, "
-                    f"down or stop, alone or joined with '+'")
-            for key, value in turn.items():
-                if key != "action" and (key not in TURN_KEYS or not isinstance(value, str)):
-                    bad(f"turn {t}: {key!r} is not one of {tuple(TURN_KEYS)} with a text value")
+            raise ToolError(f"subject_mask must be an image file ({', '.join(IMAGE_EXTS)}): got {mask!r}")
+        check_turn_item(item, ITEM_KEYS, self.max_turns)
 
     def _node(self, node_id) -> dict:
         """The archive row of a node whose fine-tune can be rendered."""
@@ -265,7 +251,6 @@ class AlayaWorldBackend(GpuJob):
         indices = []
         for item in items:
             i = item["index"]
-            item["seed"] = job.args["seed"]         # provenance: cases are seeded from run.seed + case id
             try:
                 image = f"images/case_{i}{Path(item['image']).suffix.lower()}"
                 with Image.open(item["image"]) as im:
@@ -300,8 +285,7 @@ class AlayaWorldBackend(GpuJob):
                                  history_encoder=checkpoint / "history_encoder.pt")
             config = work / "render_config.yaml"
             config.write_text(yaml.safe_dump(render_config(
-                self.cfg, rounds_per_turn=job.args["rounds_per_turn"],
-                seed=job.args["seed"], indices=indices, work=work,
+                self.cfg, indices=indices, work=work,
                 text_cache=self.run_dir / "cache" / "text_embed", **fine_tune), sort_keys=True), encoding="utf-8")
             # The eval renders with the text encoder off (a 24 GB card cannot hold Gemma next to the
             # DiT), so every prompt of these cases is encoded first, into the run's prompt cache.
@@ -331,7 +315,6 @@ class AlayaWorldBackend(GpuJob):
                 src = videos / f"case_{i}_combined"
                 if src.with_suffix(".mp4").exists() and src.with_suffix(".json").exists():
                     shutil.move(src.with_suffix(".mp4"), out / f"{i}.mp4")
-                    shutil.move(src.with_suffix(".json"), out / f"{i}.sidecar.json")
                     camera = src.with_name(src.name + "_camera.npz")
                     if camera.exists():
                         shutil.move(camera, out / f"{i}.camera.npz")
@@ -345,47 +328,31 @@ class AlayaWorldBackend(GpuJob):
 
     def finish(self, job, item, out):
         i = item["index"]
-        sidecar = json.loads((out / f"{i}.sidecar.json").read_text(encoding="utf-8"))
         video = out / f"{i}.mp4"
-        frames = probe_video(video).frames
+        info = probe_video(video)
+        check_published(info)
+        turns = len(item["turns"])
+        # mp4 frame 0 is the input frame, so turn k starts on frame 1 + TURN_FRAMES * k (the first on 0)
+        if info.frames != 1 + TURN_FRAMES * turns:
+            raise ValueError(f"{info.frames} frames for {turns} turns of {TURN_FRAMES}")
         with np.load(out / f"{i}.camera.npz") as z:
-            saved = z["cam_c2w"].astype(np.float64)
-        if len(saved) != frames:
-            raise ValueError(f"camera path has {len(saved)} frames, the video {frames}")
-        # mp4 frame 0 is the input frame, so round r occupies mp4 frames [first + 32r, first + 32r + 32)
-        # with first = 1; turn_segments' frame ranges are nominal and ignore this.
-        first = frames - ROUND_FRAMES * int(sidecar["output_rounds"])
-        if first != 1:
-            raise ValueError(f"{frames} frames for {sidecar['output_rounds']} rounds of {ROUND_FRAMES}")
-        trim = (first - GRID) % ROUND_FRAMES
-        trimmed = video if trim == 0 else out / f"{i}.trim.mp4"     # no re-encode when already aligned
-        if trim:
-            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(video), "-vf",
-                            f"select='gte(n\\,{trim})',setpts=N/{FPS}/TB", "-r", str(FPS), "-c:v", "libx264",
-                            "-crf", "18", "-pix_fmt", "yuv420p", "-an", str(trimmed)],
-                           check=True, timeout=FFMPEG_TIMEOUT_S)
-        n = probe_video(trimmed).frames
-        poses = saved[trim:]
-        if n != len(poses):
-            raise ValueError(f"trimmed video has {n} frames, the poses {len(poses)}")
+            poses = z["cam_c2w"].astype(np.float64)
+        if len(poses) != info.frames:
+            raise ValueError(f"camera path has {len(poses)} frames, the video {info.frames}")
         commanded = out / f"{i}.commanded.npz"     # metadata, never the pose (see the module docstring)
         np.savez(commanded, cam_c2w=(np.linalg.inv(poses[0]) @ poses).astype(np.float32))
-        schedule = sidecar["prompt_schedule"]
-        caption = self.write_caption(out, item, {
-            "caption": schedule[0]["prompt"], "segments": round_segments(schedule, first, trim, n)})
-        turns = [{**t, "frame_start": max(0, first + ROUND_FRAMES * t["chunk_start"] - trim),
-                  "frame_end_exclusive": min(n, first + ROUND_FRAMES * t["chunk_end_exclusive"] - trim)}
-                 for t in sidecar["turn_segments"]]
-        turns = [{**t, "frame_count": t["frame_end_exclusive"] - t["frame_start"]} for t in turns]
-        return {"video": trimmed, "caption": caption, "commanded_camera": commanded, "frames": n, "trim": trim, "actions": sidecar["actions"], "turn_segments": turns}
+        starts = [0] + [1 + TURN_FRAMES * k for k in range(1, turns)]
+        return {"video": video, "annotation": self.write_annotation(out, item, item_annotation(item, starts)),
+                "commanded_camera": commanded, "frames": info.frames,
+                "actions": [t["action"] for t in item["turns"]]}
 
 
 class Wan22Backend(GpuJob):
     """rollout_wan22: training clips from Wan2.2 TI2V-5B, the official
     code in its own env. Text-to-video, or image-to-video when the item
     carries a first frame (the bridge fits it to 1280x704). Every render is 1280x704; the published
-    clip is center-cropped to 1248x704 and carries no pose/camera_motion: the agent adds one
-    (annotate_camera then 'moving', or 'static'), like a clip it shot itself."""
+    clip is center-cropped to 1248x704 and carries no pose and no annotation: the agent adds both,
+    like a clip it found itself."""
     name = tool = "rollout_wan22"
     kind = "rollout"
     generator = "wan2.2-ti2v-5b"
@@ -401,10 +368,11 @@ class Wan22Backend(GpuJob):
             f"`frames`: 4k+1, 1 < frames <= {maximum}, default {default} (one value "
             "for the whole job). Item: {'prompt': str, 'image'?: first frame under /workspace (any "
             "size; center-cropped and resized to 1280x704), 'seed': "
-            "int}. Each result item gives a `candidate` for data_ingest "
-            "(a 1248x704 (~16:9), 24 fps mp4 center-cropped from Wan's 1280x704, caption, provenance); it "
-            "carries no pose/camera_motion -- add one (annotate_camera then 'moving', or 'static') "
-            "before ingesting. Wan often ignores camera instructions like 'camera steady'; never label a clip 'static' from its prompt; run annotate_camera, or check the frames, first. Batch many prompts per call.")
+            "int}. Each result item gives a `candidate`: `video` (a 1248x704 (~16:9), 24 fps mp4 "
+            "center-cropped from Wan's 1280x704), the `prompt` used and `derived_from`. To ingest it, bring "
+            "the clip to 960x544, run annotate_camera on the result and write its annotation (skill "
+            "data_formats). Wan often ignores camera instructions like 'camera steady'. Batch many prompts "
+            "per call.")
 
     def check_args(self, args):
         default, maximum = self.block["frames"]
@@ -444,8 +412,7 @@ class Wan22Backend(GpuJob):
                         "-an", str(cropped)], check=True, timeout=FFMPEG_TIMEOUT_S)
         info = probe_video(cropped)
         check_published(info)
-        caption = self.write_caption(out, item, {"caption": item["prompt"]})
-        return {"video": cropped, "caption": caption, "frames": info.frames}
+        return {"video": cropped, "prompt": item["prompt"], "frames": info.frames}
 
 
 class Ltx25Backend(GpuJob):
@@ -455,7 +422,7 @@ class Ltx25Backend(GpuJob):
     fp8-cast weights and CPU offload, so each worker also holds the model in host RAM: the worker
     count shrinks to what MemAvailable holds (`worker_groups`), and a job that cannot fit one
     worker fails before any starts rather than meeting the host OOM killer. The clip carries no
-    pose/camera_motion, like Wan's."""
+    pose and no annotation, like Wan's."""
     name = tool = "rollout_ltx25"
     kind = "rollout"
     config_key = "generators.ltx25"      # timeout_s
@@ -477,10 +444,11 @@ class Ltx25Backend(GpuJob):
             f"{sizes_text(self.block['resolutions'])}; default {w}x{h}). Item: {{'prompt': str, "
             "'keyframes'?: [{'image': file under /workspace, 'frame': int}], 'seed': int}. A keyframe at "
             "frame 0 is the first frame and one at -1 the last; any frame in between also works. A keyframe "
-            "image must be exactly the job's width x height: it is used as it is. Each result item gives a `candidate` for "
-            "data_ingest (a 24 fps, 16:9, silent mp4, caption, provenance); it carries no "
-            "pose/camera_motion -- add one (annotate_camera then 'moving', or 'static') before ingesting. "
-            "LTX often ignores camera instructions like 'camera steady'; never label a clip 'static' from its prompt; run annotate_camera, or check the frames, first. Batch many prompts per call.")
+            "image must be exactly the job's width x height: it is used as it is. Each result item gives a `candidate`: "
+            "`video` (a 24 fps, 16:9, silent mp4), the `prompt` used and `derived_from`. To ingest it, bring "
+            "the clip to 960x544, run annotate_camera on the result and write its annotation (skill "
+            "data_formats). LTX often ignores camera instructions like 'camera steady'. Batch many prompts "
+            "per call.")
 
     def enabled_variants(self) -> list[str]:
         return list(self.block.get("variants") or [])          # __init__ refused unknown names
@@ -555,5 +523,4 @@ class Ltx25Backend(GpuJob):
         check_published(info)
         if info.frames != a["frames"]:
             raise ValueError(f"rendered clip has {info.frames} frames, not {a['frames']}")
-        caption = self.write_caption(out, item, {"caption": item["prompt"]})
-        return {"video": silent, "caption": caption, "frames": info.frames}
+        return {"video": silent, "prompt": item["prompt"], "frames": info.frames}

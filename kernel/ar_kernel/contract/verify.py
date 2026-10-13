@@ -20,6 +20,7 @@ from ..sandbox.runner import Mounts, container_name, run_container
 from ..services import RunServices, socket_dir_for
 from ..tools.ask import MockAsk, register_ask_tool
 from ..tools.captioner import TOOL as CAPTION_TOOL, register_caption_tool
+from ..tools.locate_events import TOOL as LOCATE_TOOL, register_locate_tool
 from ..tools.context import TokenRegistry
 from ..tools.data_tools import register_data_tools
 from ..tools.hf_tools import register_hf_tools
@@ -132,6 +133,16 @@ class _MockCaption:
                 "gpu_memory_mib": None, "gpu_memory_released": None}
 
 
+class _MockLocate:
+    """locate_events in smoke runs: a queued job like the real one, but it never starts vLLM."""
+    name = tool = LOCATE_TOOL
+
+    def run(self, job, cancel, report):
+        return {"clips": {i["video"]: {"events": [{"event": e, "start_s": 0.0, "end_s": 1.0, "disagreeing_pieces": 0}
+                                                  for e in i["events"]]} for i in job.args["items"]},
+                "load_s": 0.0, "gpu_memory_mib": None, "gpu_memory_released": None}
+
+
 class ContractHarness:
     def __init__(self, cfg, run_dir: Path, recorder) -> None:
         self.cfg, self.recorder = cfg, recorder
@@ -139,6 +150,7 @@ class ContractHarness:
         self.services = RunServices(socket_dir_for(Path(run_dir) / "contract-harness"))
         self.queue = JobQueue(recorder, threading.Lock(), wait_cap_s=5.0)
         self.queue.register(_MockCaption())
+        self.queue.register(_MockLocate())
 
     @property
     def socket_dir(self) -> Path:
@@ -150,6 +162,7 @@ class ContractHarness:
         register_hf_tools(mcp, kit, _MockHf())
         register_job_tools(mcp, kit, self.queue)
         register_caption_tool(mcp, kit, self.queue)
+        register_locate_tool(mcp, kit, self.queue)
         register_ask_tool(mcp, kit, MockAsk())
         register_skill_tool(mcp, kit)
         gateway = create_gateway_app(registry=self.registry, store=CallStore(self.recorder),

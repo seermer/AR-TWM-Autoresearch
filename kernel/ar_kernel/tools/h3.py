@@ -1,12 +1,13 @@
 """rollout_h3: clips rendered by MiniMax H3 (through LightX2V, in its own env) from the agent's
-per-turn prompts.
+scene, subject and turns.
 
-The agent gives a scene and a list of turns. The kernel puts the turn boundaries on the training
-round grid (frame 25 + 32j), writes one continuous shot in MiniMax's prompt format with an in-shot
-timestamp at each turn's start ("At 00:03.708, ..."), and publishes the clip with a caption of
-the scene only (the turns and their planned frame ranges are metadata). MiniMax's guide documents a timestamp only at a cut ("[Shot 2] At ..."); that
-keeps the timing but changes the scene, so the in-shot form is our own and its timing is loose.
-The clip carries no pose.
+The kernel writes the whole prompt: one continuous shot in MiniMax's prompt format, the scene and
+subject, the first turn's perspective, then each turn announced by the time it starts ("About 4.0
+seconds in, in the same continuous shot, ...") with its event, the camera sentence of its action and,
+when the perspective changes, the switch sentence. The clip is split into equal turns. MiniMax's guide
+documents a timestamp only at a cut ("[Shot 2] At ..."); that keeps the timing but changes the scene,
+so the in-shot form is our own and its timing is loose. The clip is published with its annotation
+(the planned start of each turn) and carries no pose.
 """
 from __future__ import annotations
 
@@ -14,43 +15,86 @@ import json
 import subprocess
 from pathlib import Path
 
+from ..data.annotation import FIRST_TURN_FRAMES, FPS, SWITCH
 from ..data.probe import probe_video
 from ..subproc import meminfo_gib
-from .gpu_jobs import GpuJob, check_item_seed, check_keyframes, check_listed_size, is_int, sizes_text
-from .rollouts import FFMPEG_TIMEOUT_S, check_published, checked_repo
+from .gpu_jobs import IMAGE_EXTS, GpuJob
+from .rollouts import FFMPEG_TIMEOUT_S, SIZE, check_published, check_turn_item, checked_repo, item_annotation
 from .server import ToolError
 
 H3_BRIDGE = Path(__file__).resolve().parents[1] / "bridges" / "h3_generate.py"
 MIN_FRAMES = 124
-FPS = 24
-HISTORY = 25                # the first round boundary
-ROUND = 32
-MIN_TURN_ROUNDS = 2         # 2.67 s: segments under 2.375 s are never trained, and H3's timing is loose
+ITEM_KEYS = ("scene_prompt", "character_prompt", "seed", "image", "seconds", "turns")
 NO_CUTS = "The whole video is one continuous shot with smooth motion and no cuts."
 FIRST = "For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced."
-BOTH = ("How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the "
-        "0.00-second mark of the target video; Picture 2 (from Shot 1) aligns with the {end}-second mark of "
-        "the target video.")
-LAST = ("How the reference pictures align with the target video — <Picture 1> (from [Shot 1]) aligns with the "
-        "{end}-second mark of the target video.")
+SOUNDSCAPE, MUSIC = "Natural ambient sound of the scene.", "N/A"
+VIEW = {"first_person": "First-person view.", "third_person": "Third-person view from behind the subject."}
+# The camera sentence of each action. The evaluation's own (WBench src/models/text/prompt_builder.py),
+# plus the three it lacks: `stop` in both perspectives and third-person S+A.
+CAMERA = {
+    "first_person": {
+        "W": "The camera pushes forward.",
+        "S": "The camera pulls back.",
+        "A": "The camera moves to the left.",
+        "D": "The camera moves to the right.",
+        "left": "The camera pans to the left.",
+        "right": "The camera pans to the right.",
+        "up": "The camera tilts up.",
+        "down": "The camera tilts down.",
+        "W+A": "The camera moves diagonally forward-left.",
+        "W+D": "The camera moves diagonally forward-right.",
+        "S+A": "The camera moves diagonally backward-left.",
+        "S+D": "The camera moves diagonally backward-right.",
+        "W+left": "The camera pushes forward while panning to the left.",
+        "W+right": "The camera pushes forward while panning to the right.",
+        "W+up": "The camera pushes forward while tilting up.",
+        "W+down": "The camera pushes forward while tilting down.",
+        "stop": "The camera holds still.",
+    },
+    "third_person": {
+        "W": "The subject moves forward. The camera follows, maintaining distance and framing.",
+        "S": "The subject moves backward. The camera follows, maintaining distance and framing.",
+        "A": "The subject moves to the left. The camera tracks left, keeping the subject centered.",
+        "D": "The subject moves to the right. The camera tracks right, keeping the subject centered.",
+        "left": "The camera orbits counterclockwise around the subject. The subject stays still.",
+        "right": "The camera orbits clockwise around the subject. The subject stays still.",
+        "up": "The camera cranes upward while tilting down to keep the subject centered.",
+        "down": "The camera cranes downward while tilting up to keep the subject centered.",
+        "W+A": "The subject moves diagonally forward-left. The camera follows along the same diagonal.",
+        "W+D": "The subject moves diagonally forward-right. The camera follows along the same diagonal.",
+        "S+A": "The subject moves backward-left. The camera retreats along the same diagonal.",
+        "S+D": "The subject moves backward-right. The camera retreats along the same diagonal.",
+        "W+left": "The subject moves forward. The camera arcs counterclockwise while following.",
+        "W+right": "The subject moves forward. The camera arcs clockwise while following.",
+        "W+up": "The subject moves forward. The camera cranes upward while following.",
+        "W+down": "The subject moves forward. The camera cranes downward while following.",
+        "stop": "The subject stays still. The camera holds its position.",
+    },
+}
+
+
+def clip_frames(seconds, default: int, maximum: int) -> int:
+    """The frame count H3 can render (17n+5) nearest to `seconds`; `default` when no length is given."""
+    if seconds is None:
+        return default
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+        raise ToolError(f"seconds must be a number: got {seconds!r}")
+    frames = 17 * round((seconds * FPS - 5) / 17) + 5
+    if not MIN_FRAMES <= frames <= maximum:
+        raise ToolError(f"seconds must be between {MIN_FRAMES / FPS:.1f} and {maximum / FPS:.1f}: got {seconds}")
+    return frames
 
 
 def turn_starts(frames: int, n_turns: int) -> list[int]:
-    """The first frame of each turn: frame 0, then round boundaries, each turn the same number of rounds."""
-    rounds = (frames - HISTORY) // ROUND
-    per = rounds // n_turns
-    if per < MIN_TURN_ROUNDS:
-        raise ToolError(f"a {frames}-frame clip holds at most {rounds // MIN_TURN_ROUNDS} turns "
-                        f"(a turn lasts at least {MIN_TURN_ROUNDS} rounds of {ROUND} frames): got {n_turns}")
-    return [0] + [HISTORY + ROUND * per * k for k in range(1, n_turns)]
+    """The first frame of each turn: the clip in equal turns, each boundary on a whole frame."""
+    if frames // n_turns < FIRST_TURN_FRAMES:
+        raise ToolError(f"a clip of {frames / FPS:.1f} seconds holds at most {frames // FIRST_TURN_FRAMES} "
+                        f"turns: got {n_turns}")
+    return [round(frames * k / n_turns) for k in range(n_turns)]
 
 
 def _line(text: str) -> str:
     return " ".join(text.split())
-
-
-def _says_something(text) -> bool:
-    return isinstance(text, str) and any(c.isalnum() for c in text)
 
 
 def _sentence(text: str) -> str:
@@ -58,21 +102,23 @@ def _sentence(text: str) -> str:
     return text if text.rstrip("\"')”’").endswith((".", "!", "?", "。", "！", "？", "…")) else text + "."
 
 
-def _stamp(frame: int) -> str:
-    seconds = frame / FPS
-    return f"{int(seconds // 60):02d}:{seconds % 60:06.3f}"
-
-
-def build_prompt(scene: str, turns: list[str], starts: list[int], frames: int, keyframes: list[int],
-                 soundscape: str, music: str) -> str:
+def build_prompt(item: dict, starts: list[int]) -> str:
     """The item as one continuous shot in MiniMax's base prompt format (alignment line, three fields)."""
-    body = f"[Shot 1] {_sentence(scene)} {NO_CUTS}"
-    for text, start in zip(turns, starts):
-        body += f" At {_stamp(start)}, {_sentence(text)}"
-    end = f"{frames / FPS:.2f}"
-    line = {(0,): FIRST, (-1, 0): BOTH, (-1,): LAST}.get(tuple(sorted(keyframes)), "").format(end=end)
-    return ((f"{line}\n\n" if line else "") + f"integrated_multimodal_description: {body}\n\n"
-            f"overall_soundscape: {_line(soundscape)}\n\nnon_diegetic_music: {_line(music)}")
+    turns = item["turns"]
+    body = " ".join(["[Shot 1]", _sentence(item["scene_prompt"]),
+                     *([_sentence(item["character_prompt"])] if item.get("character_prompt", "").strip() else []),
+                     VIEW[turns[0]["perspective"]], NO_CUTS])
+    previous = None
+    for turn, start in zip(turns, starts):
+        perspective = turn["perspective"]
+        parts = [*([_sentence(turn["event"])] if turn.get("event") else []), CAMERA[perspective][turn["action"]],
+                 *([SWITCH[perspective]] if previous and perspective != previous else [])]
+        when = "From the start," if start == 0 else f"About {start / FPS:.1f} seconds in, in the same continuous shot,"
+        body += f" {when} {' '.join(parts)}"
+        previous = perspective
+    line = f"{FIRST}\n\n" if item.get("image") else ""
+    return (f"{line}integrated_multimodal_description: {body}\n\n"
+            f"overall_soundscape: {SOUNDSCAPE}\n\nnon_diegetic_music: {MUSIC}")
 
 
 def launcher(ranks: int) -> list[str]:
@@ -85,85 +131,53 @@ class H3Backend(GpuJob):
     kind = "rollout"
     generator = "minimax-h3"
     config_key = "generators.h3"        # timeout_s, max_items
-    takes_keyframes = True
+    file_keys = frame_keys = ("image",)
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        default, maximum = self.block["frames"]
-        h, w = self.block["resolutions"][0]
+        self.default_frames, self.max_frames = self.block["frames"]
         self.description = (
             "MiniMax H3 is the most powerful video generation model of the rollout tools: use this tool for a new "
             "training clip unless the clip needs a feature that only another rollout tool has. Render training clips "
-            "with MiniMax H3 from a scene and a list of turns: one continuous shot with no cuts, in which each "
-            "turn's text is asked for at that turn's start. A GPU job: returns {job_id} at once; "
-            "collect with job_wait. Params (one value per job): `frames` (17n+5, "
-            f"{MIN_FRAMES} <= frames <= {maximum}, default {default}), `width`/`height` (one of "
-            f"{sizes_text(self.block['resolutions'])}; default {w}x{h}). Item: "
-            "{'scene_prompt': str, 'turns': [{'prompt': str}], 'overall_soundscape': str, 'non_diegetic_music': "
-            "str, 'keyframes'?: [{'image': file under /workspace, 'frame': 0 or -1}], 'seed': int}. Start "
-            "`scene_prompt` with the visual style, e.g. 'Live-action,'. `overall_soundscape`: 1-4 sentences on "
-            "the ambient and action sounds; `non_diegetic_music`: the background score, or 'N/A'. The kernel "
-            "builds the model prompt from these. Turns start on training round boundaries (frame 25, then every "
-            f"32 frames) and each lasts at least {MIN_TURN_ROUNDS} rounds, so a {maximum}-frame clip holds at most "
-            f"{((maximum - HISTORY) // ROUND) // MIN_TURN_ROUNDS} turns. Write a turn as what happens, camera "
-            "included, in phrases like: the camera pushes in / pulls out, pans left / right, trucks left / right, "
-            "tilts up / down, pedestals up / down, arcs around the subject, tracks the subject, holds a static "
-            "shot; add 'with small / large amplitude' or 'at slow / fast speed' when it matters. A keyframe at "
-            "frame 0 is the first frame and one at -1 the last; a keyframe image must be exactly the job's width x "
-            "height: it is used as it is. A last "
-            "keyframe must be a view the shot can reach from the first: an unrelated image is reached by a cut "
-            "in the final frames. Each "
-            "result item gives a `candidate` for data_ingest (a 24 fps, silent mp4, a caption holding "
-            "the scene only, provenance); it carries no pose/camera_motion -- add one (annotate_camera then "
-            "'moving', or 'static') before ingesting. An event may land a second or more earlier or later "
-            "than its turn, or not appear at all. The published caption therefore has no per-turn segments: "
-            "check the frames, then write the segments you ingest to match what the clip shows. Metadata, not "
-            "labels: `turn_segments` (each turn's prompt and its planned frame range) and `h3_prompt`.")
+            "with MiniMax H3 from a scene, a subject and a list of turns, as one continuous shot. A GPU job: "
+            "returns {job_id} at once; collect with job_wait. Each item is the scene and subject text, a seed and "
+            "a list of turns, and may have `image`, a first frame of exactly "
+            f"{SIZE[0]}x{SIZE[1]} (it is used as it is), and `seconds`, the clip's length: "
+            f"{MIN_FRAMES / FPS:.1f} to {self.max_frames / FPS:.1f}, default {self.default_frames / FPS:.1f}. The "
+            "clip gets the nearest length the model can render, which the result reports. A turn has a navigation "
+            "action, a perspective, and may have one event: one sentence about something that happens during the "
+            "turn. The kernel writes the whole model prompt from these: the scene and the subject, then each turn "
+            "at the time it starts, with its event and the camera move of its action. A turn whose perspective "
+            "differs from the turn before it switches the view: the kernel adds the sentence that says so, and "
+            "that turn's action must be `stop`. The clip is split into turns of equal length, each at least "
+            f"{FIRST_TURN_FRAMES / FPS:.1f} seconds. Start `scene_prompt` with the visual style, e.g. "
+            "'Live-action,'. Sound is not yours to describe. Each result item gives a `candidate`: `video` "
+            f"({SIZE[0]}x{SIZE[1]}, 24 fps, silent), `annotation` (a file: your scene and subject text and the "
+            "turns, each with the time it was asked to start) and `derived_from`. It has no pose: run "
+            "annotate_camera on candidate.video, then data_ingest the video, the annotation and that pose. An "
+            "event may land a second or more earlier or later than its turn's start, or not appear at all: find "
+            "when it happens (locate_events) and set the turn's start in the annotation to match what the clip "
+            "shows. Metadata, not labels: `h3_prompt`.")
 
-    def check_args(self, args):
-        default, maximum = self.block["frames"]
-        frames = args.setdefault("frames", default)
-        if not (is_int(frames) and MIN_FRAMES <= frames <= maximum and (frames - 5) % 17 == 0):
-            raise ToolError(f"frames must be 17n+5 with {MIN_FRAMES} <= frames <= {maximum}: got {frames!r}")
-        check_listed_size(self.cfg, args, self.block["resolutions"])
+    def frame_size(self, args):
+        return SIZE
 
     def check_item(self, item):
-        if "image" in item:
-            raise ToolError("image is not a field of this tool: use keyframes [{'image': path, 'frame': 0}]")
-        if not _says_something(item.get("scene_prompt")):
-            raise ToolError("scene_prompt must be a non-empty string")
-        turns = item.get("turns")
-        if not isinstance(turns, list) or not turns:
-            raise ToolError("turns must be a non-empty list")
-        for t, turn in enumerate(turns, 1):
-            if not (isinstance(turn, dict) and set(turn) == {"prompt"} and _says_something(turn["prompt"])):
-                raise ToolError(f"turn {t} must be {{'prompt': non-empty text}}: got {turn!r}")
-        for key in ("overall_soundscape", "non_diegetic_music"):
-            if not _says_something(item.get(key)):
-                raise ToolError(f"{key} must be a non-empty string")
-        check_keyframes(item)
-        if any(k["frame"] not in (0, -1) for k in item.get("keyframes") or []):
-            raise ToolError("a keyframe's frame must be frame 0 (the first frame) or -1 (the last)")
-        check_item_seed(item)
+        if item.get("image") is not None and not str(item["image"]).lower().endswith(IMAGE_EXTS):
+            raise ToolError(f"image must be an image file ({', '.join(IMAGE_EXTS)}): got {item['image']!r}")
+        check_turn_item(item, ITEM_KEYS)
+        turn_starts(clip_frames(item.get("seconds"), self.default_frames, self.max_frames), len(item["turns"]))
 
-    def check_item_for(self, item, args):
-        turn_starts(args["frames"], len(item["turns"]))
-
-    def _layout(self, job, item):
-        turns = [t["prompt"] for t in item["turns"]]
-        return turns, turn_starts(job.args["frames"], len(turns))
-
-    def _prompt(self, job, item) -> str:
-        turns, starts = self._layout(job, item)
-        return build_prompt(item["scene_prompt"], turns, starts, job.args["frames"],
-                            [k["frame"] for k in item.get("keyframes") or []],
-                            item["overall_soundscape"], item["non_diegetic_music"])
+    def _layout(self, item) -> tuple[int, list[int]]:
+        frames = clip_frames(item.get("seconds"), self.default_frames, self.max_frames)
+        return frames, turn_starts(frames, len(item["turns"]))
 
     def produce(self, job, items, work, out, cancel, report):
-        frames = job.args["frames"]
-        prompts = {str(item["index"]): self._prompt(job, item) for item in items}
-        (work / "prompts.json").write_text(json.dumps(prompts, ensure_ascii=False), encoding="utf-8")
-        h, w = job.args["height"], job.args["width"]
+        requests = {}
+        for item in items:
+            frames, starts = self._layout(item)
+            requests[str(item["index"])] = {"prompt": build_prompt(item, starts), "frames": frames}
+        (work / "requests.json").write_text(json.dumps(requests, ensure_ascii=False), encoding="utf-8")
         checked_repo(self.cfg, self.config_key, "LightX2V")
         avail, rss, reserve = meminfo_gib()["MemAvailable"], self.block["peak_rss_gib"], self.block["host_reserve_gib"]
         if avail - reserve < rss:
@@ -178,28 +192,23 @@ class H3Backend(GpuJob):
         (work / "lightx2v.json").write_text(json.dumps(config), encoding="utf-8")
         return self.run_workers(self.block["env"], lambda r, world: [
             *launcher(len(self.gpus)), str(H3_BRIDGE), "--items", str(work / "items.json"),
-            "--prompts", str(work / "prompts.json"), "--out", str(out),
+            "--requests", str(work / "requests.json"), "--out", str(out),
             "--weights", str(self.cfg.repo_root / self.block["weights"]), "--config", str(work / "lightx2v.json"),
-            "--frames", str(frames), "--height", str(h), "--width", str(w)],
+            "--height", str(SIZE[1]), "--width", str(SIZE[0])],
             [self.gpus], job=job, work=work, out=out, total=len(items), cancel=cancel, report=report,
             extra_env={"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True", "DTYPE": "BF16",
                        "TOKENIZERS_PARALLELISM": "false", "HF_HUB_OFFLINE": "1"})
 
     def finish(self, job, item, out):
-        frames = job.args["frames"]
-        h, w = job.args["height"], job.args["width"]
+        frames, starts = self._layout(item)
         silent = out / f"{item['index']}.silent.mp4"
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(out / f"{item['index']}.mp4"), "-an",
                         "-c:v", "copy", str(silent)], check=True, timeout=FFMPEG_TIMEOUT_S)
         info = probe_video(silent)
-        if (info.width, info.height) != (w, h):
-            raise ValueError(f"rendered clip is {info.width}x{info.height}, not {w}x{h}")
+        if (info.width, info.height) != SIZE:
+            raise ValueError(f"rendered clip is {info.width}x{info.height}, not {SIZE[0]}x{SIZE[1]}")
         check_published(info)
         if info.frames != frames:
             raise ValueError(f"rendered clip has {info.frames} frames, not {frames}")
-        turns, starts = self._layout(job, item)
-        caption = self.write_caption(out, item, {"caption": _sentence(item["scene_prompt"])})
-        segments = [{"turn_index": k, "prompt": t, "frame_start": s, "frame_end_exclusive": e}
-                    for k, (t, s, e) in enumerate(zip(turns, starts, [*starts[1:], frames]))]
-        return {"video": silent, "caption": caption, "frames": info.frames, "turn_segments": segments,
-                "h3_prompt": self._prompt(job, item)}
+        return {"video": silent, "annotation": self.write_annotation(out, item, item_annotation(item, starts)),
+                "frames": frames, "seconds": frames / FPS, "h3_prompt": build_prompt(item, starts)}

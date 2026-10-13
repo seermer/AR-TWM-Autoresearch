@@ -8,6 +8,9 @@ FPS = 24
 FIRST_TURN_FRAMES, LATER_TURN_FRAMES = 57, 32      # what one turn needs to be trained on
 FIRST_TURN_S, LATER_TURN_S = 2.4, 1.4              # the same, as agents are told
 PERSPECTIVES = ("first_person", "third_person")
+# The navigation actions of a rollout turn: the evaluation's sixteen, and `stop`.
+ACTIONS = ("W", "S", "A", "D", "left", "right", "up", "down", "W+A", "W+D", "S+A", "S+D",
+           "W+left", "W+right", "W+up", "W+down", "stop")
 DERIVED_KINDS = ("model", "dataset", "synthetic_method")
 SWITCH = {"third_person": "The view switches from first-person to third-person, revealing the character from behind.",
           "first_person": "The view switches back to first-person, returning to the character's own eyes."}

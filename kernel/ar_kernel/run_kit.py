@@ -15,6 +15,7 @@ from .isolation import censor_names, host_roots
 from .services import RunServices, socket_dir_for
 from .tools.ask import Ask, register_ask_tool
 from .tools.captioner import register_caption_tool
+from .tools.locate_events import register_locate_tool
 from .tools.context import TokenRegistry
 from .tools.data_tools import DataTools, register_data_tools
 from .tools.gpu_jobs import build_gpu_backends, register_gpu_tools
@@ -71,6 +72,7 @@ def build_run_kit(cfg, run_dir: Path, gpus: list[int], recorder, environ) -> Run
     register_job_tools(mcp, kit, queue)
     register_gpu_tools(mcp, kit, queue)
     register_caption_tool(mcp, kit, queue)
+    register_locate_tool(mcp, kit, queue)
     register_skill_tool(mcp, kit)
     model = environ["OPENAI_MODEL"]
     store = CallStore(recorder)

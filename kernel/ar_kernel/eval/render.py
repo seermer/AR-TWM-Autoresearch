@@ -19,7 +19,6 @@ def build_render_config(cfg: KernelConfig, eval_lora: Path | None, node_rank: in
         config["lora"]["alpha"] = config["lora"]["rank"]
     config["run"]["output_dir"] = str(Path(node_dir) / "eval" / "rollout")
     config["run"]["log_dir"] = str(Path(node_dir) / "eval" / "logs")
-    config["validation"]["per_sample_seed"] = True
     mode = config["validation"]["modes"]["wbench"]
     mode["dataset"]["root"] = str(cfg.eval_data)
     mode["dataset"]["case_ids"] = list(case_ids)

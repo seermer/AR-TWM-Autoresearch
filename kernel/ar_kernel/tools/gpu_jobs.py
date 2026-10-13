@@ -8,7 +8,6 @@ kernel write. A per-item failure is an item error, not a failed job.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import shutil
 import threading
@@ -21,8 +20,8 @@ from mcp.server.mcpserver import Context
 from PIL import Image
 from pydantic import Field, WithJsonSchema
 
-from ..archive.blobs import sha256_file
 from ..control import Control
+from ..data.annotation import ACTIONS, PERSPECTIVES
 from ..data.probe import TARGET_ASPECT
 from ..guards import alert
 from ..isolation import EXCLUDED_PROMPT, copies_held_out, strings
@@ -64,37 +63,32 @@ KEYFRAMES_SCHEMA = {"type": "array", "description": "images the clip must show a
 LtxItems = Annotated[list[dict[str, Any]] | str, items_schema(
     "the clips to render, one item each",
     {"prompt": _str("what the clip shows"), "keyframes": KEYFRAMES_SCHEMA, "seed": _SEED}, ["prompt", "seed"])]
+_TURN = {"type": "object", "additionalProperties": False, "required": ["action", "perspective"], "properties": {
+    "action": {"type": "string", "enum": list(ACTIONS),
+               "description": "the navigation action of this turn; `stop` holds still"},
+    "event": _str("one sentence: something that happens during this turn. Leave it out when nothing does"),
+    "perspective": {"type": "string", "enum": list(PERSPECTIVES),
+                    "description": "whose eyes the turn is seen through. A turn whose perspective differs from "
+                                   "the turn before it switches the view, and its action must be `stop`"}}}
+_SCENE = _str("the scene: place, objects, light")
+_CHARACTER = _str("the subject, if there is one")
+_TURNS = {"type": "array", "items": _TURN, "description": "the clip, turn by turn"}
 H3Items = Annotated[list[dict[str, Any]] | str, items_schema(
     "the clips to render, one item each",
-    {"scene_prompt": _str("the scene, starting with the visual style: 'Live-action, ...', then place, objects, "
-                          "light, viewpoint"),
-     "turns": {"type": "array", "description": "the clip, turn by turn, as one continuous shot",
-               "items": {"type": "object", "additionalProperties": False, "required": ["prompt"], "properties": {
-                   "prompt": _str("what happens during this turn, the camera move included")}}},
-     "overall_soundscape": _str("ambient and action sounds across the clip, 1-4 sentences"),
-     "non_diegetic_music": _str("the background score, or 'N/A' for none"),
-     "keyframes": KEYFRAMES_SCHEMA, "seed": _SEED},
-    ["scene_prompt", "turns", "overall_soundscape", "non_diegetic_music", "seed"])]
-_TURN = {"type": "object", "additionalProperties": False, "required": ["action"], "properties": {
-    "action": _str("camera move for this turn: W, A, S, D (translate), left, right, up, down (rotate), stop, "
-                   "or two joined with '+', e.g. 'W+left'"),
-    "event": _str("something that happens in the scene during this turn"),
-    "subject_action": _str("something the subject does during this turn"),
-    "viewpoint_change": _str("a change of viewpoint during this turn: 'fp_to_tp', 'tp_to_fp', 'fp_to_scope', "
-                             "or 'tp_to_tp: <the new view>'")}}
+    {"scene_prompt": _SCENE, "character_prompt": _CHARACTER, "seed": _SEED,
+     "image": _str("first frame: an image file under /workspace, exactly 960x544 (it is used as it is)"),
+     "seconds": {"type": "number", "description": "the clip's length in seconds; the tool description gives the range"},
+     "turns": _TURNS},
+    ["scene_prompt", "seed", "turns"])]
 WorldItems = Annotated[list[dict[str, Any]] | str, items_schema(
     "the clips to render, one item each",
-    {"image": _str("first frame: an image file under /workspace (.jpg, .png, ...), exactly the size the tool "
-                   "description gives (it is used as it is)"),
-     "viewpoint": {"type": "string", "enum": ["first_person", "third_person"],     # rollouts.VIEWPOINTS
-                   "description": "whose eyes the first frame is seen through"},
-     "scene_prompt": _str("the scene: place, objects, light"),
-     "character_prompt": _str("the subject, if there is one"),
+    {"image": _str("first frame: an image file under /workspace (.jpg, .png, ...), exactly 960x544 (it is "
+                   "used as it is)"),
+     "scene_prompt": _SCENE, "character_prompt": _CHARACTER, "seed": _SEED,
      "subject_mask": _str("an image under /workspace of the first frame's size, white where the subject is in "
                           "the first frame"),
-     "turns": {"type": "array", "items": _TURN,
-               "description": "the clip, turn by turn; each turn lasts `rounds_per_turn` rounds"}},
-    ["image", "viewpoint", "scene_prompt", "turns"])]
+     "turns": _TURNS},
+    ["image", "scene_prompt", "seed", "turns"])]
 
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")                 # alaya/data/wbench.py _IMAGE_EXTS
@@ -181,10 +175,6 @@ def check_frame_image(cfg, path: Path, size: tuple[int, int], what: str) -> None
                         f"image as it is: make it exactly that size")
 
 
-def canonical_hash(obj) -> str:
-    return hashlib.sha256(json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-
-
 UNFIT_EXIT = 78             # a worker's exit code for "this machine is too small": not the agent's to fix
 
 
@@ -195,12 +185,12 @@ def split_gpus(gpus: list[int], per_worker: int, workers: int | None) -> list[li
 
 class GpuJob:
     """Base JobQueue backend. Subclasses set name/tool, kind ("rollout" | "annotation" | "image"),
-    generator (provenance name), license, file_keys (item fields naming workspace files), frame_keys
+    generator (the name in `derived_from`), file_keys (item fields naming workspace files), frame_keys
     (those of them holding an image that must have the job's size, with `frame_size`),
-    optionally config_key (the kernel.yaml block, `self.block`, whose timeout_s and license override
-    the class defaults) and implement check_args, produce and finish. A job takes any number of items, or at most the block's
+    optionally config_key (the kernel.yaml block, `self.block`, whose timeout_s overrides
+    the class default) and implement check_args, produce and finish. A job takes any number of items, or at most the block's
     `max_items`."""
-    name = tool = kind = generator = license = description = config_key = ""
+    name = tool = kind = generator = description = config_key = ""
     file_keys: tuple[str, ...] = ()
     frame_keys: tuple[str, ...] = ()
     takes_keyframes = False     # items may carry `keyframes` (check_keyframes)
@@ -212,7 +202,6 @@ class GpuJob:
         self.registry, self.recorder, self.gpu_memory = registry, recorder, gpu_memory
         self.block = (cfg.get(self.config_key) if self.config_key else None) or {}
         self.timeout_s = self.block.get("timeout_s", self.timeout_s)
-        self.license = self.block.get("license", self.license)
         self.max_items = self.block.get("max_items")
 
     # ---- submit (tool call; fast; ToolError goes back to the agent) ----
@@ -318,7 +307,7 @@ class GpuJob:
     def _stage(self, caller, index: int, item: dict, inp: Path, args: dict) -> dict:
         """The item with its files copied into `inp`. The agent can change a file after submit, so a
         frame image's size is checked again on the copy the job uses."""
-        staged = {**item, "index": index, "hashes": {}}
+        staged = {**item, "index": index}
         for key in self.file_keys:
             if isinstance(item.get(key), str):
                 dst = inp / f"{index}_{key}{Path(item[key]).suffix}"
@@ -326,7 +315,6 @@ class GpuJob:
                 if key in self.frame_keys:
                     check_frame_image(self.cfg, dst, self.frame_size(args), key)
                 staged[key] = str(dst)
-                staged["hashes"][key] = sha256_file(dst)
         if self.takes_keyframes:
             staged["keyframes"] = []
             for n, k in enumerate(item.get("keyframes") or []):
@@ -335,7 +323,6 @@ class GpuJob:
                 check_frame_image(self.cfg, dst, self.frame_size(args),
                                   f"the keyframe at frame {k['frame']}")
                 staged["keyframes"].append({**k, "image": str(dst)})
-                staged["hashes"][f"keyframe{n}"] = sha256_file(dst)
         return staged
 
     def produce(self, job, items: list[dict], work: Path, out: Path, cancel, report):
@@ -344,7 +331,7 @@ class GpuJob:
         raise NotImplementedError
 
     def finish(self, job, item: dict, out: Path) -> dict:
-        """Post-process one finished item; return {"video": Path, "caption": Path, "pose"?: Path,
+        """Post-process one finished item; return {"video": Path, "annotation"?: Path, "pose"?: Path,
         plus any extra JSON-able fields}. Raise to report an item error."""
         raise NotImplementedError
 
@@ -361,43 +348,34 @@ class GpuJob:
                 return {"index": index, "error": status.get("error", "failed")}
             files = self.finish(job, item, out)
             published = {}
-            for role in ("video", "caption", "pose", "image", "commanded_camera"):
+            for role in ("video", "annotation", "pose", "image", "commanded_camera"):
                 if files.get(role):
                     src = Path(files[role])
                     # metadata files get their role in the name, so they never pass for a pose
-                    name = "" if role in ("video", "caption", "pose", "image") else f".{role}"
+                    name = "" if role in ("video", "pose", "image") else f".{role}"
                     rel = f"{self.kind}s/{job.id}/{index}{name}{src.suffix}"
                     move_into(src, caller.staging_host, rel)
                     published[role] = str(STAGING / rel)
         except Exception as exc:            # noqa: BLE001 -- a bad/truncated status or a finish()
             # bug must be this item's error, not a job failure that orphans the others.
             return {"index": index, "error": f"{type(exc).__name__}: {exc}"}
-        extra = {k: v for k, v in files.items() if k not in ("video", "caption", "pose", "commanded_camera")}
+        extra = {k: v for k, v in files.items() if k not in ("video", "annotation", "pose", "commanded_camera")}
         worker = {k: v for k, v in status.items() if k != "ok"}
         if self.kind == "annotation":
             return {"index": index, "video": job.args["items"][index]["video"], **published, **extra,
                     "worker": worker}
         if self.kind == "image":
             return {"index": index, "image": published["image"], "prompt": item.get("prompt"),
-                    "seed": item.get("seed"), "generator": self.generator_name(job), "license": self.license,
-                    "worker": worker}
-        params = {k: v for k, v in job.args.items() if k != "items"}
-        spec = {k: v for k, v in item.items() if k not in (*self.file_keys, "index", "hashes", "keyframes")}
-        if self.takes_keyframes:
-            spec["keyframe_frames"] = [k["frame"] for k in item["keyframes"]]
-        inputs_hash = canonical_hash({"generator": self.generator_name(job), "params": params,
-                                      "item": spec, "files": item["hashes"]})
-        candidate = {**published, "provenance": {"kind": "rollout", "generator": self.generator_name(job),
-                     "job_id": job.id, "inputs_hash": inputs_hash, "seed": item.get("seed")},
-                     "license": self.license}
-        return {"index": index, "candidate": {**candidate, **extra}, "worker": worker}
+                    "seed": item.get("seed"), "generator": self.generator_name(job), "worker": worker}
+        candidate = {**published, **extra, "derived_from": {"kind": "model", "name": self.generator_name(job)}}
+        return {"index": index, "candidate": candidate, "worker": worker}
 
     def generator_name(self, job) -> str:
         return self.generator
 
-    def write_caption(self, out: Path, item: dict, caption: dict) -> Path:
-        path = out / f"{item['index']}.caption.json"
-        path.write_text(json.dumps(caption, ensure_ascii=False), encoding="utf-8")
+    def write_annotation(self, out: Path, item: dict, annotation: dict) -> Path:
+        path = out / f"{item['index']}.annotation.json"
+        path.write_text(json.dumps(annotation, ensure_ascii=False, indent=1), encoding="utf-8")
         return path
 
     # ---- workers ----
@@ -504,12 +482,9 @@ def register_gpu_tools(mcp, kit, q) -> None:
         @mcp.tool(name="rollout_alayaworld", description=job_description(b["rollout_alayaworld"]))
         async def rollout_alayaworld(
                 items: WorldItems, ctx: Context,
-                rounds_per_turn: Annotated[int | None, Field(description="1..3, default 3; a round is 32 frames at 24 fps")] = None,
-                seed: Annotated[int | None, Field(description="default 42; one seed for the whole job")] = None,
                 node: Annotated[str | None, Field(description="render with this scored node's fine-tune instead of the released model")] = None,
         ) -> dict[str, Any]:
-            return await submit(ctx, "rollout_alayaworld", items=items,
-                                rounds_per_turn=rounds_per_turn, seed=seed, node=node)
+            return await submit(ctx, "rollout_alayaworld", items=items, node=node)
 
     if "generate_images" in b:
         @mcp.tool(name="generate_images", description=job_description(b["generate_images"]))
@@ -542,31 +517,27 @@ def register_gpu_tools(mcp, kit, q) -> None:
 
     if "rollout_h3" in b:
         @mcp.tool(name="rollout_h3", description=job_description(b["rollout_h3"]))
-        async def rollout_h3(
-                items: H3Items, ctx: Context,
-                frames: Annotated[int | None, Field(description="17n+5 frames at 24 fps; one value for the job")] = None,
-                height: Annotated[int | None, Field(description="with width, one of the listed resolutions")] = None,
-                width: Annotated[int | None, Field(description="with height, one of the listed resolutions")] = None,
-        ) -> dict[str, Any]:
-            return await submit(ctx, "rollout_h3", items=items, frames=frames, height=height, width=width)
+        async def rollout_h3(items: H3Items, ctx: Context) -> dict[str, Any]:
+            return await submit(ctx, "rollout_h3", items=items)
 
 
 def build_gpu_backends(cfg, run_dir: Path, gpus: list[int], registry, recorder) -> list:
-    """Every GPU data backend a run gets: the captioner always, the others only when
+    """Every GPU data backend a run gets: the captioner and locate_events always, the others only when
     their `annotate`/`images`/`generators` config enables them (a generator needs `enabled` or a listed
     variant). The caller registers each on the run's JobQueue, then calls `register_gpu_tools`
-    and `register_caption_tool`."""
+    `register_caption_tool` and `register_locate_tool`."""
     from .annotate import AnnotateBackend          # imports this module
     from .captioner import CaptionBackend
     from .h3 import H3Backend
     from .images import ImageBackend
+    from .locate_events import LocateEventsBackend
     from .rollouts import AlayaWorldBackend, Ltx25Backend, Wan22Backend
 
     def generator_on(name: str) -> bool:
         block = cfg.get(f"generators.{name}") or {}
         return bool(block.get("enabled") or block.get("variants"))
 
-    enabled = [(True, CaptionBackend), (cfg.get("annotate.enabled"), AnnotateBackend),
+    enabled = [(True, CaptionBackend), (True, LocateEventsBackend), (cfg.get("annotate.enabled"), AnnotateBackend),
                (cfg.get("images.enabled"), ImageBackend), (generator_on("alayaworld"), AlayaWorldBackend),
                (generator_on("wan22"), Wan22Backend), (generator_on("ltx25"), Ltx25Backend),
                (generator_on("h3"), H3Backend)]
