@@ -9,4 +9,4 @@ eval:
   target_skill:
     name: rain starting
     sentence: rain begins to fall
-    description: the video starts without rain, and when a turn's text says rain begins to fall, it should clearly start during that turn and be plainly falling by the end of it. This can happen at any turn, including the first and the last
+    description: the video starts without rain, and when a turn's text says rain begins to fall, rain starts during that turn. This can happen at any turn, including the first and the last

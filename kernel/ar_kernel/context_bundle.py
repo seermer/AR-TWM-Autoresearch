@@ -122,12 +122,10 @@ def archive_summary(conn, phase: str) -> dict:
 
 
 def clip_pool_stats(clips: list[dict]) -> dict:
-    """How many pool clips each node ingested, each source gave and each format can use. The clips
+    """How many pool clips each node ingested and each source gave. The clips
     themselves are listed by data_query: a record per clip made the context grow by megabytes."""
-    by_id = {c["clip_id"]: c for c in clips}
     counts = {"by_node": Counter(c.get("ingested_by") for c in clips),
-              "by_source": Counter(clip_source(c, by_id) for c in clips),
-              "by_format": Counter(f for c in clips for f in c["formats"])}
+              "by_source": Counter(clip_source(c) for c in clips)}
     return {key: dict(count.most_common()) for key, count in counts.items()}
 
 
@@ -162,7 +160,6 @@ def build_recipe_context(*, cfg, conn, run_dir: Path, repo, node_id: str, parent
         target_skill=cfg.get("eval.target_skill") or {},
         tunable_rules={k: {"type": RECIPE_RULES[k][0], "min": RECIPE_RULES[k][1], "max": RECIPE_RULES[k][2]}
                        for k in sorted(TUNABLE_KEYS)},
-        resolution_allowlist=[list(p) for p in cfg.get("train.resolution_allowlist")],
         lora_allowlist=[list(p) for p in cfg.get("train.lora_allowlist")],
         n_gpus=n_gpus, tools=list(tools))
 

@@ -5,10 +5,9 @@ from ar_kernel.config import KernelConfig
 from ar_kernel.data.ingest import Candidate, Ingestor
 from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.train.gate import Gate
-from conftest import make_mp4, write_caption, write_poses
+from conftest import DERIVED, staged_clip
 
 CFG = KernelConfig.load()
-PROV = {"kind": "derived", "from": [], "transform": "unit test fixture"}
 
 @pytest.fixture(scope="module")
 def _gate_store(tmp_path_factory):
@@ -24,15 +23,12 @@ def _gate_store(tmp_path_factory):
         # clip, which is how this fixture used to hand the gate a single clip listed
         # eight times and still pass the clips-vs-GPUs check.
         seconds = 4.0 + 0.5 * i
-        stage = tmp_path / "staging" / f"c{i}"
-        clip_ids.append(ing.ingest([Candidate(
-            video=make_mp4(stage / "v.mp4", seconds=seconds), caption=write_caption(stage / "c.json"),
-            pose=write_poses(stage / "p.npz", n_frames=int(seconds * 30)), camera_motion="moving",
-            provenance=PROV)], node_id="n1")[0].clip_id)
+        video, annotation, pose = staged_clip(tmp_path / "staging" / f"c{i}", seconds)
+        clip_ids.append(ing.ingest([Candidate(video=video, annotation=annotation, pose=pose, derived_from=DERIVED)],
+                                   node_id="n1")[0].clip_id)
     assert len(set(clip_ids)) == 8, "fixture must produce 8 distinct clips"
     commits = CommitStore(conn, ing.blobs, ing.clips)
-    commit = commits.commit(None, {"cam": {"format": "video_caption_camera", "prompt_mode": None,
-                                           "weight": 1.0, "clips": clip_ids}}, "v", node_id="n1")
+    commit = commits.commit(None, {"cam": {"weight": 1.0, "clips": clip_ids}}, "v", node_id="n1")
     return commits, commit
 
 
@@ -56,11 +52,11 @@ def test_non_tunable_key_is_rejected(gate_env):
                         tmp_path / "n1", tmp_path, [0, 1, 2, 3])
     assert not result.ok and any("not tunable" in f for f in result.failures)
 
-def test_resolution_outside_the_allowlist_is_rejected(gate_env):
+@pytest.mark.parametrize("key", ["sample.height", "sample.width", "data.overall_caption_prob"])
+def test_resolution_and_caption_probability_are_not_tunable(gate_env, key):
     gate, commit, tmp_path = gate_env
-    result = gate.check({"sample.height": 720, "sample.width": 1280}, commit, None, "n1",
-                        tmp_path / "n1", tmp_path, [0, 1, 2, 3])
-    assert not result.ok and any("resolution" in f for f in result.failures)
+    result = gate.check({key: 1}, commit, None, "n1", tmp_path / "n1", tmp_path, [0, 1, 2, 3])
+    assert not result.ok and any(f"{key} is not tunable" in f for f in result.failures)
 
 def test_lora_pair_outside_the_allowlist_is_rejected(gate_env):
     gate, commit, tmp_path = gate_env
@@ -85,28 +81,26 @@ def test_zero_steps_per_epoch_is_rejected(gate_env):
     gate, commit, tmp_path = gate_env
     result = gate.check({"optimizer.grad_accum_steps": 4, "optimizer.max_steps": 10},
                         commit, None, "n1", tmp_path / "n1", tmp_path, [0, 1, 2, 3])
-    assert not result.ok and any("steps_per_epoch" in f for f in result.failures)
+    assert not result.ok and any(f.startswith("too few clips for one optimizer step") for f in result.failures)
+    assert not any("window" in f for f in result.failures)
 
 def test_epoch_budget_below_max_steps_is_rejected(gate_env):
     gate, commit, tmp_path = gate_env
     result = gate.check({"optimizer.grad_accum_steps": 1, "optimizer.max_steps": 100,
                          "optimizer.epochs": 2},
                         commit, None, "n1", tmp_path / "n1", tmp_path, [0, 1, 2, 3])
-    assert not result.ok and any("epochs" in f for f in result.failures)
+    assert not result.ok and any(f.startswith("too few clips for the step count") for f in result.failures)
+    assert not any("window" in f for f in result.failures)
 
 def test_fewer_clips_than_gpus_is_rejected(tmp_path):
     conn = open_db(tmp_path)
     rec = Recorder(tmp_path)
     ing = Ingestor(CFG, tmp_path, conn, rec)
-    stage = tmp_path / "staging" / "solo"
-    clip_id = ing.ingest([Candidate(video=make_mp4(stage / "v.mp4"),
-                                    caption=write_caption(stage / "c.json"),
-                                    pose=write_poses(stage / "p.npz", n_frames=120),
-                                    camera_motion="moving", provenance=PROV)],
+    video, annotation, pose = staged_clip(tmp_path / "staging" / "solo")
+    clip_id = ing.ingest([Candidate(video=video, annotation=annotation, pose=pose, derived_from=DERIVED)],
                          node_id="n1")[0].clip_id
     commits = CommitStore(conn, ing.blobs, ing.clips)
-    commit = commits.commit(None, {"cam": {"format": "video_caption_camera", "prompt_mode": None,
-                                           "weight": 1.0, "clips": [clip_id]}}, "v", node_id="n1")
+    commit = commits.commit(None, {"cam": {"weight": 1.0, "clips": [clip_id]}}, "v", node_id="n1")
     result = Gate(CFG, commits, rec).check({}, commit, None, "n1", tmp_path / "n1",
                                            tmp_path, [0, 1, 2, 3])
     assert not result.ok and any("clips" in f for f in result.failures)
@@ -121,7 +115,6 @@ def test_fewer_clips_than_gpus_is_rejected(tmp_path):
     ("optimizer.lr", float("nan"), "lr"),
     ("optimizer.lr", float("inf"), "lr"),
     ("optimizer.lr", 0, "lr"),
-    ("data.overall_caption_prob", 1.5, "overall_caption_prob"),
     ("optimizer.warmup_steps", -1, "warmup_steps"),
 ])
 def test_invalid_recipe_values_fail_the_gate_instead_of_crashing(gate_env, key, value, fragment):

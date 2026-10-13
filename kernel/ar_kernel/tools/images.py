@@ -22,7 +22,6 @@ class ImageBackend(GpuJob):
     name = tool = "generate_images"
     kind = "image"
     generator = "z-image-turbo"
-    license = "Apache-2.0"
     config_key = "images"           # timeout_s
 
     def __init__(self, *args, **kwargs) -> None:

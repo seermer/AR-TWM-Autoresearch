@@ -2,7 +2,7 @@ from __future__ import annotations
 import hashlib, os, shutil, sqlite3, time, uuid
 from pathlib import Path
 
-KINDS = {"video": ".mp4", "caption": ".json", "pose": ".npz"}
+KINDS = {"video": ".mp4", "caption": ".json", "annotation": ".json", "pose": ".npz"}
 
 class BlobError(ValueError):
     """The blob cannot be stored."""

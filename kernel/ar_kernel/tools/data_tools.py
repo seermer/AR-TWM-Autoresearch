@@ -8,16 +8,17 @@ import tempfile
 import threading
 import uuid
 from pathlib import Path
-from typing import Annotated, Any, Literal, TypedDict
+from typing import Annotated, Any, TypedDict
 
 from mcp.server.mcpserver import Context
 from pydantic import Field
 
-from ..archive.blobs import BlobStore
+from ..archive.blobs import KINDS, BlobStore
 from ..archive.clips import ClipStore
 from ..archive.commits import BadClips, CommitError, CommitStore
 from ..archive.db import open_db
 from ..archive.nodes import NodeStore
+from ..data.annotation import DERIVED_KINDS
 from ..data.ingest import Candidate, Ingestor
 from ..data.leakage import LeakageChecker
 from ..data.probe import probe_video
@@ -72,31 +73,28 @@ class DataTools:
             if not isinstance(c, dict):
                 bad[i] = "not an object"
                 continue
-            missing = [key for key in ("video", "caption", "camera_motion", "provenance") if not c.get(key)]
+            missing = [key for key in ("video", "annotation", "pose", "derived_from") if not c.get(key)]
             if missing:
                 bad[i] = f"{', '.join(missing)} is required"
                 continue
             host = {}
-            for key in ("video", "caption", "pose"):
-                if c.get(key):
-                    if not isinstance(c[key], str):
-                        bad.setdefault(i, f"{key} must be the path of a file")      # the first problem of a candidate
-                        continue
-                    try:
-                        host[key] = to_host(caller, c[key])
-                    except PathError as exc:
-                        bad.setdefault(i, f"{key}: {exc}")
-                        continue
-                    if not host[key].is_relative_to(caller.staging_host):
-                        bad.setdefault(i, f"{key} {c[key]} is not under /workspace/staging: copy or move it there")
-                    elif not host[key].is_file():      # container paths only: host paths never reach the agent
-                        bad.setdefault(i, f"{key} {c[key]} does not exist")
+            for key in ("video", "annotation", "pose"):
+                if not isinstance(c[key], str):
+                    bad.setdefault(i, f"{key} must be the path of a file")      # the first problem of a candidate
+                    continue
+                try:
+                    host[key] = to_host(caller, c[key])
+                except PathError as exc:
+                    bad.setdefault(i, f"{key}: {exc}")
+                    continue
+                if not host[key].is_relative_to(caller.staging_host):
+                    bad.setdefault(i, f"{key} {c[key]} is not under /workspace/staging: copy or move it there")
+                elif not host[key].is_file():      # container paths only: host paths never reach the agent
+                    bad.setdefault(i, f"{key} {c[key]} does not exist")
             if bad:
                 continue
-            built.append(Candidate(
-                video=host["video"], caption=host["caption"], pose=host.get("pose"),
-                camera_motion=c["camera_motion"], provenance=c["provenance"],
-                license=c.get("license"), derived_from=list(c.get("derived_from") or [])))
+            built.append(Candidate(video=host["video"], annotation=host["annotation"], pose=host["pose"],
+                                   derived_from=c["derived_from"]))
         refuse(caller, "data_ingest", candidates, bad)
         conn = open_db(self.run_dir)
         try:
@@ -104,12 +102,12 @@ class DataTools:
             results = ingestor.ingest(built, node_id=caller.node)
         finally:
             conn.close()
-        rows = [{"index": i, "video": c["video"], "accepted": r.accepted, "clip_id": r.clip_id, "formats": r.formats,
+        rows = [{"index": i, "video": c["video"], "accepted": r.accepted, "clip_id": r.clip_id,
                  "warnings": r.warnings, "reasons": r.reasons} for i, (c, r) in enumerate(zip(candidates, results))]
         # the panel's ingest table: one row per candidate, with what the agent staged
         self.recorder.event("ingest.result", node=caller.node, phase=caller.phase, attempt=caller.attempt,
                             component="tools", payload={"rows": [
-                                {**row, **{key: c.get(key) for key in ("caption", "pose", "camera_motion")}}
+                                {**row, **{key: c.get(key) for key in ("annotation", "pose", "derived_from")}}
                                 for row, c in zip(rows, candidates)]})
         return {"accepted": sum(r["accepted"] for r in rows), "rejected": sum(not r["accepted"] for r in rows),
                 "rejected_for": _counted(r for row in rows if not row["accepted"] for r in row["reasons"]),
@@ -123,7 +121,6 @@ class DataTools:
             usage = scores_by_clip(conn)
         finally:
             conn.close()
-        fmt, motion = filter.get("format"), filter.get("camera_motion")
         wanted = set(clip_id_list(caller, filter.get("clip_ids")))
         in_commit = None
         if filter.get("data_commit"):
@@ -134,10 +131,6 @@ class DataTools:
         out = []
         for clip in clips:
             if in_commit is not None and clip["clip_id"] not in in_commit:
-                continue
-            if fmt and not any(f == fmt or f.startswith(fmt + ":") for f in clip["formats"]):
-                continue
-            if motion and clip["camera_motion"] != motion:
                 continue
             if wanted and clip["clip_id"] not in wanted:
                 continue
@@ -154,10 +147,8 @@ class DataTools:
             pool = {clip["clip_id"]: clip for clip in pool_clips(conn)}
             blobs = BlobStore(self.run_dir, conn)
             for clip in (pool[i] for i in wanted if i in pool):
-                files = [(blobs.path(clip["video_digest"], "video"), f"videos/{clip['clip_id']}.mp4"),
-                         (blobs.path(clip["caption_digest"], "caption"), f"captions/{clip['clip_id']}.json")]
-                if clip.get("pose_digest"):
-                    files.append((blobs.path(clip["pose_digest"], "pose"), f"poses/{clip['clip_id']}.npz"))
+                files = [(blobs.path(clip[f"{kind}_digest"], kind), f"{kind}s/{clip['clip_id']}{suffix}")
+                         for kind, suffix in KINDS.items()]
                 for blob, rel in files:             # a copy: a hard link would let the agent change the archive's file
                     # written through the open handle: the agent owns staging and could swap the name for a link
                     with tempfile.NamedTemporaryFile(dir=caller.staging_host, suffix=".tmp", delete=False) as handle, \
@@ -228,8 +219,6 @@ class DataTools:
 
 class Dataset(TypedDict, total=False):
     """Typed so that a number reaches the kernel as a number: values in an untyped map arrive as strings."""
-    format: str
-    prompt_mode: str | None
     weight: float
     clips: list[str] | str
 
@@ -272,43 +261,30 @@ def pool_clips(conn) -> list[dict]:
     return [c for c in ClipStore(conn).all() if c.get("ingested_by") not in hidden]
 
 
-def clip_source(clip: dict, by_id: dict[str, dict]) -> str:
-    """Where a clip's footage came from: `rollout:<generator>` or `hf:<repo>`. A derived clip takes
-    the source of the clips it names in derived_from; one that names none is just `derived`."""
-    provenance = clip["provenance"]
-    if provenance.get("kind") == "rollout":
-        return f"rollout:{provenance.get('generator')}"
-    if provenance.get("kind") == "hf_dataset":
-        return f"hf:{provenance.get('repo')}"
-    parents = [by_id[i] for i in clip.get("derived_from") or [] if i in by_id]
-    if parents:
-        return "+".join(sorted({clip_source(p, by_id) for p in parents}))
-    return str(provenance.get("kind"))
+def clip_source(clip: dict) -> str:
+    """What a clip was made from, as its `derived_from` says: `<kind>:<name>`."""
+    return f"{clip['derived_from']['kind']}:{clip['derived_from']['name']}"
 
 
 def dataset_stats(manifest: dict, clips: list[dict]) -> dict[str, dict]:
-    """Per-dataset summary of a commit manifest: format, prompt_mode, weight, clip count and
-    clip count per source (data_commit's result row and the context's lineage entries)."""
+    """Per-dataset summary of a commit manifest: weight, clip count and clip count per source
+    (data_commit's result row and the context's lineage entries)."""
     by_id = {c["clip_id"]: c for c in clips}
     out = {}
     for name, d in manifest["datasets"].items():
         sources: dict[str, int] = {}
         for clip_id in d["clips"]:
-            source = clip_source(by_id[clip_id], by_id)
+            source = clip_source(by_id[clip_id])
             sources[source] = sources.get(source, 0) + 1
-        out[name] = {"format": d["format"], "prompt_mode": d["prompt_mode"], "weight": d["weight"],
-                     "clips": len(d["clips"]), "sources": sources}
+        out[name] = {"weight": d["weight"], "clips": len(d["clips"]), "sources": sources}
     return out
 
 
 def clip_record(clip: dict, usage: dict[str, list[float]]) -> dict:
     """Shape one archive clip row for data_query's result (the context
     bundle reuses this instead of re-deriving it from ClipStore rows)."""
-    return {"clip_id": clip["clip_id"], "formats": clip["formats"],
-            "camera_motion": clip["camera_motion"], "metadata": clip["metadata"],
-            "warnings": clip["warnings"], "provenance": clip["provenance"],
-            "license": clip.get("license"), "derived_from": clip.get("derived_from"),
-            "ingested_by": clip.get("ingested_by"),
+    return {"clip_id": clip["clip_id"], "metadata": clip["metadata"], "warnings": clip["warnings"],
+            "derived_from": clip["derived_from"], "ingested_by": clip.get("ingested_by"),
             "used_by_scores": usage.get(clip["clip_id"], [])}
 
 
@@ -324,23 +300,18 @@ def scores_by_clip(conn) -> dict[str, list[float]]:
     return out
 
 
-_FORMATS = "video_caption_camera, video_timed_prompts_camera (prompt_mode per_chunk or segment), video_caption_static"
 _STAGED = "absolute container path under /workspace/staging/"
 Candidates = Annotated[list[dict[str, Any]] | str, items_schema("the clips to ingest, one candidate each", {
-    "video": {"type": "string", "description": f"the mp4: {_STAGED}"},
-    "caption": {"type": "string", "description": f"the caption JSON file (not the text): {_STAGED}. It holds "
-                                                 "{\"caption\": str} and, for timed prompts, \"segments\""},
-    "pose": {"type": "string", "description": f"the pose npz with cam_c2w: {_STAGED}. Required for 'moving', "
-                                              "forbidden for 'static'"},
-    "camera_motion": {"type": "string", "enum": ["moving", "static"],
-                      "description": "'static' only when a measurement shows the camera does not move"},
-    "provenance": {"type": "object", "description": "where the clip came from: the record hf_download returned, "
-                   "the one in a rollout's `candidate`, or for a clip you derived {\"kind\": \"derived\", "
-                   "\"from\": [...], \"transform\": \"what you did\"}"},
-    "license": {"type": "string", "description": "the source's license, when known"},
-    "derived_from": {"type": "array", "items": {"type": "string"},
-                     "description": "ids of archive clips this clip was made from"}},
-    ["video", "caption", "camera_motion", "provenance"])]
+    "video": {"type": "string", "description": f"the mp4, 960x544: {_STAGED}"},
+    "annotation": {"type": "string", "description": f"the annotation JSON file (not the text): {_STAGED}. Its "
+                                                    "shape is in skill data_formats"},
+    "pose": {"type": "string", "description": f"the pose npz with cam_c2w, as annotate_camera writes it: {_STAGED}"},
+    "derived_from": {"type": "object", "description": "what the clip was made from, for a person to read",
+                     "properties": {"kind": {"type": "string", "enum": list(DERIVED_KINDS)},
+                                    "name": {"type": "string", "description": "the model, the dataset or the "
+                                                                              "method, by name"}},
+                     "required": ["kind", "name"]}},
+    ["video", "annotation", "pose", "derived_from"])]
 
 
 def register_data_tools(mcp, kit, tools: DataTools) -> None:
@@ -351,11 +322,11 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
                           ctx: Context) -> dict:
         return await kit.call(ctx, "video_probe", {"path": path}, lambda c: tools.probe(c, path))
 
-    @mcp.tool(name="data_ingest", description="Ingest staged candidates into the run's clip pool. The formats "
-              "a clip must meet are in skill data_formats. Ingest copies each staged file into the archive and "
+    @mcp.tool(name="data_ingest", description="Ingest staged candidates into the run's clip pool. What "
+              "a clip must meet is in skill data_formats. Ingest copies each staged file into the archive and "
               "leaves yours where it is. Send every candidate in one call. Returns how many were accepted "
               "and rejected, the rejection reasons and warnings with counts, and `result_file`: a JSON array "
-              "under /workspace/staging/results/ with, per candidate, index, video, accepted, clip_id, formats, "
+              "under /workspace/staging/results/ with, per candidate, index, video, accepted, clip_id, "
               "warnings and reasons. Take the clip ids from that file with a script. Read the reasons and change "
               "the candidate; a clip the kernel excludes cannot be made acceptable.")
     async def data_ingest(candidates: Candidates, ctx: Context) -> dict:
@@ -363,26 +334,23 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
                               lambda c: tools.ingest(c, candidates))
 
     @mcp.tool(name="data_query", description="Search the clip pool of the whole run. Every argument narrows the "
-              "result; with none, all clips are listed. Each clip has its provenance, metadata, eligible formats "
+              "result; with none, all clips are listed. Each clip has what it was derived from, its metadata "
               "and the scores of the nodes that trained on it. The reply holds `total`, the first "
               f"{SHOWN} clips, and `result_file`: a JSON file with every match.")
     async def data_query(
             ctx: Context,
-            format: Annotated[str | None, Field(description="keep clips eligible for this format, e.g. "
-                              "'video_caption_camera' or 'video_timed_prompts_camera:per_chunk'")] = None,
-            camera_motion: Annotated[Literal["moving", "static"] | None, Field(description="keep clips with this camera motion")] = None,
             clip_ids: Annotated[list[str] | str | None, Field(description=f"keep only these clip ids, {FROM_FILE}")] = None,
             ingested_by: Annotated[str | None, Field(description="keep clips this node ingested, e.g. the id of the node being built")] = None,
             data_commit: Annotated[str | None, Field(description="keep the clips of this data commit; each clip then has `datasets`, the commit's datasets that hold it")] = None) -> dict:
-        given = dict(format=format, camera_motion=camera_motion, clip_ids=clip_ids, ingested_by=ingested_by,
-                     data_commit=data_commit)
+        given = dict(clip_ids=clip_ids, ingested_by=ingested_by, data_commit=data_commit)
         filter = {key: value for key, value in given.items() if value is not None}
         return await kit.call(ctx, "data_query", filter, lambda c: tools.query(c, filter))
 
     @mcp.tool(name="data_fetch", description="Copy the files of clips in the pool to /workspace/staging/pool_clips/, "
               "to look at them: any clip data_query lists, also one that no data commit holds. Each clip gives "
-              "videos/<clip_id>.mp4, captions/<clip_id>.json and, when it has a camera pose, poses/<clip_id>.npz: "
-              "the same layout a node's training view has. Returns the folder, the number of clips copied and "
+              "videos/<clip_id>.mp4, annotations/<clip_id>.json (the annotation it was ingested with), "
+              "captions/<clip_id>.json (the training text made from it, one prompt per turn) and "
+              "poses/<clip_id>.npz. Returns the folder, the number of clips copied and "
               "the ids that are not in the pool.")
     async def data_fetch(
             clip_ids: Annotated[list[str] | str, Field(description=f"the clips to copy: a list of clip ids, {FROM_FILE}")],
@@ -394,26 +362,26 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
               "`parent` is recorded as history and brings no data with it.")
     async def data_commit(
             parent: Annotated[str | None, Field(description="the commit this one follows (the parent node's data commit), or null. History only")],
-            datasets: Annotated[dict[str, Dataset], Field(description="{name: {format, prompt_mode, weight, clips}}. "
-                                f"clips is a list of clip ids, {FROM_FILE}. format is one of: {_FORMATS}. Set prompt_mode only for "
-                                "video_timed_prompts_camera; omit it otherwise. weight is the dataset's sampling "
+            datasets: Annotated[dict[str, Dataset], Field(description="{name: {weight, clips}}. "
+                                f"clips is a list of clip ids, {FROM_FILE}. weight is the dataset's sampling "
                                 "weight. Each dataset needs at least as many clips as training GPUs")],
             message: Annotated[str, Field(description="what this commit contains")],
             ctx: Context,
             include: Annotated[list[str] | None, Field(description="data commits of earlier nodes (the parent's, or any "
-                               "other finished node's) whose datasets this commit takes over as they are: name, format, "
+                               "other finished node's) whose datasets this commit takes over as they are: name, "
                                "weight and clips. A dataset in `datasets` with the same name replaces the inherited one whole; "
-                               "to stop training on one, pass it with its format and weight 0")] = None) -> dict:
+                               "to stop training on one, pass it with weight 0")] = None) -> dict:
         return await kit.call(ctx, "data_commit",
                               {"parent": parent, "datasets": datasets, "message": message, "include": include or []},
                               lambda c: tools.commit(c, parent, datasets, message, include or []))
 
     @mcp.tool(name="recipe_check", description="Run every pre-training check on a recipe and a data commit "
               "without using up an attempt. It uses the GPUs, so it is refused while a GPU job "
-              "runs. Returns ok and the failures. Among the checks: steps_per_epoch = "
-              "floor(floor(epoch_windows / n_gpus) / optimizer.grad_accum_steps) must be at least 1, and "
-              "optimizer.epochs * steps_per_epoch at least optimizer.max_steps, where epoch_windows is the "
-              "largest, over the commit's datasets, of ceil(clips / (weight / total_weight)).")
+              "runs. Returns ok and the failures. Among the checks: the commit must have "
+              "enough clips for the step count. One pass over the data draws, for the dataset that needs the "
+              "most, ceil(clips / (weight / total_weight)) clips; that many, divided by the GPU count and then "
+              "by optimizer.grad_accum_steps (each rounded down), is the optimizer steps of one pass. It must be "
+              "at least 1, and optimizer.epochs passes must give at least optimizer.max_steps steps.")
     async def recipe_check(
             recipe: Annotated[dict[str, int | float], Field(description="a flat {tunable key: value} map, e.g. "
                               "{\"optimizer.lr\": 1e-4}, with no wrapper key")],

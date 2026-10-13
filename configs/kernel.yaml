@@ -46,7 +46,6 @@ isolation:                       # keeps the evaluation set out of agents' reach
   audit_patterns: [wbench, meituan-longcat, "2605.25874"]   # the model writing one quarantines the node;
                                  #   the gateway drops the sentence around one in anything else it reads
 train:
-  resolution_allowlist: [[544, 960], [416, 736]]   # the base recipe's is the first
   lora_allowlist: [[16, 16], [32, 32], [64, 64]]
 eval:
   data: ../WBench/data           # the scored benchmark: cases/, images/, masks/
@@ -147,7 +146,6 @@ images:                           # generate_images GPU job (Z-Image-Turbo first
   offload: model                  # from the fit spike: `none` OOMs at 1920x1088 (peaks > 24 GB);
                                    # `model` (enable_model_cpu_offload) fits every allowed size, peak 12.8 GB
   timeout_s: 7200
-  license: Apache-2.0
 generators:                       # rollout_* GPU jobs; switched on only after a smoke run
   alayaworld:
     env: alayaworld
@@ -157,7 +155,6 @@ generators:                       # rollout_* GPU jobs; switched on only after a
     enabled: true
     max_turns: 9
     timeout_s: 43200
-    license: LTX-2 Community License (AlayaWorld is an LTX-2 derivative)
   wan22:
     env: .envs/gen-wan22           # a conda-prefix env inside the repo
     min_total_gpu_gib: 48
@@ -174,7 +171,6 @@ generators:                       # rollout_* GPU jobs; switched on only after a
     # decode; T5 on GPU is no faster (9:41 vs 9:24 wall). Peak 22.9 GiB allocated: the whole card.
     extra_args: {offload_model: true, t5_cpu: true}
     timeout_s: 43200
-    license: Apache-2.0
   ltx25:
     env: .envs/gen-ltx25           # a conda-prefix env inside the repo
     min_total_gpu_gib: 48
@@ -200,7 +196,6 @@ generators:                       # rollout_* GPU jobs; switched on only after a
                                   # within ingest.aspect_tolerance of 16:9
     timeout_s: 28800              # 8 h. Worst case from measurements: 100 cold 241-frame clips on 4 workers =
                                   # 25 per worker x ~900 s (2x the ~400 s cold 121-frame clip) ~ 6.3 h
-    license: LTX-2 Community License
   h3:
     env: .envs/gen-lightx2v         # a conda-prefix env inside the repo (LightX2V, SageAttention)
     repo: third_party/LightX2V      # relative to the AutoResearcher repo; gitignored
@@ -222,4 +217,3 @@ generators:                       # rollout_* GPU jobs; switched on only after a
     peak_rss_gib: 140               # host RAM of one job; a job starts only while
     host_reserve_gib: 60            # MemAvailable - host_reserve_gib >= peak_rss_gib
     timeout_s: 43200
-    license: MiniMax H3 Community License

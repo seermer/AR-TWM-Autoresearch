@@ -10,5 +10,4 @@ def test_guide_covers_every_tunable_key_with_base_values():
     g = recipe_guide(BASE)
     assert set(g) == set(TUNABLE_KEYS)
     assert g["optimizer.lr"]["base"] == 5e-5 and g["lora.rank"]["base"] == 64
-    assert g["data.overall_caption_prob"]["base"] is None            # absent from the base recipe
     assert all(set(g[k]) == {"base", "meaning"} and g[k]["meaning"] for k in g)

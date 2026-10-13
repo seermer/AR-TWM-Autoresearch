@@ -4,11 +4,9 @@ from pathlib import Path
 import yaml
 
 TUNABLE_KEYS = frozenset({
-    "data.overall_caption_prob",
     "optimizer.lr", "optimizer.weight_decay", "optimizer.max_grad_norm",
     "optimizer.warmup_steps", "optimizer.max_steps", "optimizer.epochs",
     "optimizer.grad_accum_steps",
-    "sample.height", "sample.width",
     "lora.rank", "lora.alpha",
 })
 
@@ -25,9 +23,6 @@ RECIPE_RULES = {
     "optimizer.lr": (_FLOAT, 0.0, None),            # strictly positive, see below
     "optimizer.weight_decay": (_FLOAT, 0.0, None),
     "optimizer.max_grad_norm": (_FLOAT, 0.0, None),  # strictly positive
-    "data.overall_caption_prob": (_FLOAT, 0.0, 1.0),
-    "sample.height": (_INT, 1, None),
-    "sample.width": (_INT, 1, None),
     "lora.rank": (_INT, 1, None),
     "lora.alpha": (_INT, 1, None),
 }
@@ -89,10 +84,8 @@ def build_resolved_config(base_recipe: Path, recipe: dict, roots: dict[str, Path
     for name, entry in manifest["datasets"].items():
         if entry["weight"] <= 0 or not entry["clips"]:
             continue
-        spec = {"root": str(roots[name]), "format": entry["format"], "weight": entry["weight"]}
-        if entry["prompt_mode"] is not None:
-            spec["prompt_mode"] = entry["prompt_mode"]
-        datasets[name] = spec
+        datasets[name] = {"root": str(roots[name]), "format": "video_timed_prompts_camera",
+                          "weight": entry["weight"]}
     resolved["data"]["sources"] = {}
     resolved["data"]["datasets"] = datasets
 

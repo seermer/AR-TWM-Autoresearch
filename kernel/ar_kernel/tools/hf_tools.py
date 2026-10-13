@@ -57,17 +57,6 @@ def move_into(src: Path, base: Path, rel: str) -> None:
         os.close(fd)
 
 
-def _license(obj) -> str | None:
-    card = getattr(obj, "card_data", None) or getattr(obj, "cardData", None) or {}
-    if isinstance(card, dict) and card.get("license"):
-        lic = card["license"]
-        return ",".join(lic) if isinstance(lic, list) else str(lic)
-    for tag in getattr(obj, "tags", None) or []:
-        if str(tag).startswith("license:"):
-            return str(tag).split(":", 1)[1]
-    return None
-
-
 class HfTools:
     def __init__(self, cfg, private_dir: Path, api=None, snapshot=None) -> None:
         # Downloads land here first: a kernel-only dir (under run_dir) never mounted into a container.
@@ -86,7 +75,7 @@ class HfTools:
         # The Hub matches one substring, so ask for the longest word and keep the hits holding every word.
         find = self.api.list_datasets if kind == "dataset" else self.api.list_models
         hits = find(search=max(words, key=len), limit=min(int(limit), 100) * 5, full=True)
-        rows = [{"id": d.id, "license": _license(d), "tags": list(d.tags or [])[:40],
+        rows = [{"id": d.id, "tags": list(d.tags or [])[:40],
                  "gated": getattr(d, "gated", False),
                  "downloads": getattr(d, "downloads", None),
                  "last_modified": str(getattr(d, "last_modified", None))}
@@ -123,7 +112,7 @@ class HfTools:
             accessible = True
         except (GatedRepoError, RepositoryNotFoundError):     # gated without access, or private
             accessible = False
-        return {"repo": repo, "revision": info.sha, "license": _license(info),
+        return {"repo": repo, "revision": info.sha,
                 "gated": getattr(info, "gated", False), "accessible": accessible,
                 "repo_files": len(info.siblings), "matching_files": len(files),
                 "matching_bytes": sum(size for _, size in files), "offset": offset,
@@ -171,16 +160,13 @@ class HfTools:
                                     f"{exc}") from None
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
-        out = {"repo": repo, "revision": info.sha, "bytes": total, "license": _license(info),
-               "files": [str(STAGING / rel / f) for f in files]}
-        if kind == "dataset":               # a model is not training data: no record for data_ingest
-            out["provenance"] = {"kind": "hf_dataset", "repo": repo, "revision": info.sha, "files": files}
-        return out
+        return {"repo": repo, "revision": info.sha, "bytes": total,
+                "files": [str(STAGING / rel / f) for f in files]}
 
 
 def register_hf_tools(mcp, kit, tools: HfTools) -> None:
     @mcp.tool(name="hf_search", description="Search Hugging Face datasets or models. Every word of `query` must "
-              "appear in the repo id or tags. Returns ids, license, tags and whether the repo is gated.")
+              "appear in the repo id or tags. Returns ids, tags and whether the repo is gated.")
     async def hf_search(
             query: Annotated[str, Field(description="words that must all appear in the repo id or tags")],
             ctx: Context,
@@ -192,7 +178,7 @@ def register_hf_tools(mcp, kit, tools: HfTools) -> None:
     @mcp.tool(name="hf_list_files", description="List a dataset or model repo's files with their sizes (bytes), "
               "without downloading: paths matching `pattern` (fnmatch; `*` also crosses folders, e.g. "
               "'videos/*.mp4'), sorted, one page of `limit` (default 200, at most 1000) from `offset`. "
-              "Also returns the pinned revision, license, the matching count and bytes, and `gated` / `accessible` "
+              "Also returns the pinned revision, the matching count and bytes, and `gated` / `accessible` "
               "(a gated repo with accessible false cannot be downloaded with this token).")
     async def hf_list_files(
             repo: Annotated[str, Field(description="repo id, 'owner/name'")],
@@ -208,8 +194,7 @@ def register_hf_tools(mcp, kit, tools: HfTools) -> None:
                               lambda c: tools.list_files(c, repo, revision, pattern, limit, offset, kind))
 
     @mcp.tool(name="hf_download", description="Download files matching glob patterns from a dataset or model "
-              "repo into /workspace/staging/hf/. The revision is pinned to a commit SHA; for a dataset the "
-              "result includes a ready-made provenance record for data_ingest.")
+              "repo into /workspace/staging/hf/. The revision is pinned to a commit SHA.")
     async def hf_download(
             repo: Annotated[str, Field(description="repo id, 'owner/name'")],
             revision: Annotated[str, Field(description="branch, tag or commit; the result pins it to a commit")],

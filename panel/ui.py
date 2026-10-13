@@ -40,8 +40,8 @@ COLUMNS = {
     "metrics": ["metric", "node", "parent", "root"],
     "attempts": ["phase", "attempt", "outcome", "time", "detail"],
     "datasets": ["dataset", "clips"],
-    "clips": ["clip_id", "camera_motion", "formats", "frames", "license", "leakage"],
-    "ingests": ["time", "phase", "attempt", "video", "caption", "pose", "camera_motion", "outcome", "clip_id",
+    "clips": ["clip_id", "derived_from", "turns", "frames", "leakage"],
+    "ingests": ["time", "phase", "attempt", "video", "annotation", "pose", "derived_from", "outcome", "clip_id",
                 "reasons", "host_video"],
     "staging": ["path", "bytes"],
     "gates": ["time", "result", "failures"],
@@ -283,8 +283,8 @@ def h_clips(run, node, dataset, page):
     if not dataset:
         return df([], "clips"), "", gr.update()
     got = media.clips(run, node, dataset, page=max(0, int(page or 1) - 1))
-    rows = [{"clip_id": r["clip_id"], "camera_motion": r["camera_motion"], "formats": r["formats"],
-             "frames": r["metadata"].get("frames"), "license": r["license"],
+    rows = [{"clip_id": r["clip_id"], "derived_from": media.origin(r["derived_from"]),
+             "turns": r["metadata"].get("turns"), "frames": r["metadata"].get("frames"),
              "leakage": "none" if not r["leakage"] else
              f"{len(r['leakage']['matches'] or [])} matches / {len(r['leakage']['near'] or [])} near"}
             for r in got["rows"]]
@@ -302,8 +302,8 @@ def h_clip(run, clip_id):
         path = media.camera_path(run, c["pose"])
         fig = go.Figure(go.Scatter(x=path["x"], y=path["z"], mode="lines+markers"))
         fig.update_layout(title="Camera path, top-down (x vs z)", height=350, yaxis_scaleanchor="x")
-    info = {k: c[k] for k in ("clip_id", "camera_motion", "metadata", "formats", "warnings", "provenance",
-                              "license", "derived_from", "ingested_by", "leakage")}
+    info = {k: c[k] for k in ("clip_id", "annotation", "metadata", "warnings", "derived_from",
+                              "ingested_by", "leakage")}
     return _abs(run, c["video"]), c["caption"], fig, info
 
 

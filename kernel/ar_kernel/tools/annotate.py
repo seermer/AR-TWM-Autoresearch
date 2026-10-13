@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
+from ..data.ingest import find_cut
 from ..data.probe import probe_video
 from .gpu_jobs import GpuJob, split_gpus
 from .server import ToolError
@@ -22,7 +23,9 @@ class AnnotateBackend(GpuJob):
                    "once; collect with job_wait. `paths`: mp4 files under /workspace, at most {max_frames} frames each. Each result item gives "
                    "`pose`: an npz in /workspace/staging/annotations/<job_id>/ holding cam_c2w [N,4,4] "
                    "(N = the clip's frame count, OpenCV camera-to-world, first frame identity) and pixel "
-                   "`intrinsics`; pass it as `pose` to data_ingest with camera_motion 'moving'.")
+                   "`intrinsics`; pass it as `pose` to data_ingest. Measure the clip you will ingest, at its final "
+                   "size. `cut` is null, or says where the clip cuts to another shot; data_ingest rejects a "
+                   "clip with a cut.")
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -49,4 +52,6 @@ class AnnotateBackend(GpuJob):
         if n != frames:
             raise ValueError(f"pose has {n} frames, the video {frames}")
         status = json.loads((out / f"{item['index']}.json").read_text())
-        return {"pose": pose, "frames": frames, "intrinsics": status["intrinsics"]}
+        with np.load(pose) as z:
+            cut = find_cut(z["cam_c2w"], Path(item["video"]))
+        return {"pose": pose, "frames": frames, "intrinsics": status["intrinsics"], "cut": cut}

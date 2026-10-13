@@ -32,10 +32,6 @@ class Gate:
         manifest = self.commits.manifest(commit_id)
         base_recipe = run_config_path(self.cfg, run_dir, "base_recipe.yaml")
         base = yaml.safe_load(base_recipe.read_text(encoding="utf-8"))
-        height = recipe.get("sample.height", base["sample"]["height"])
-        width = recipe.get("sample.width", base["sample"]["width"])
-        if [height, width] not in [list(p) for p in self.cfg.get("train.resolution_allowlist")]:
-            failures.append(f"resolution {height}x{width} is not in train.resolution_allowlist")
         rank = recipe.get("lora.rank", base["lora"]["rank"])
         alpha = recipe.get("lora.alpha", base["lora"]["alpha"])
         if [rank, alpha] not in [list(p) for p in self.cfg.get("train.lora_allowlist")]:
@@ -54,15 +50,16 @@ class Gate:
         grad_accum = int(recipe.get("optimizer.grad_accum_steps", base["optimizer"]["grad_accum_steps"]))
         max_steps = int(recipe.get("optimizer.max_steps", base["optimizer"]["max_steps"]))
         epochs = int(recipe.get("optimizer.epochs", base["optimizer"]["epochs"]))
-        windows, per_epoch = steps_per_epoch(manifest, n_gpus, grad_accum)
+        draws, per_epoch = steps_per_epoch(manifest, n_gpus, grad_accum)
         if per_epoch < 1:
             failures.append(
-                f"steps_per_epoch is 0 (epoch_windows={windows}, n_gpus={n_gpus}, "
-                f"grad_accum_steps={grad_accum}); need epoch_windows >= n_gpus * grad_accum_steps")
+                f"too few clips for one optimizer step: one pass over the data draws {draws} clips, and a step "
+                f"needs {n_gpus * grad_accum} ({n_gpus} GPUs x optimizer.grad_accum_steps={grad_accum})")
         elif epochs * per_epoch < max_steps:
             failures.append(
-                f"optimizer.epochs={epochs} x steps_per_epoch={per_epoch} < max_steps={max_steps} "
-                f"(epoch_windows={windows}); training would stop early")
+                f"too few clips for the step count: one pass over the data draws {draws} clips, which is "
+                f"{per_epoch} optimizer steps, so optimizer.epochs={epochs} passes give {epochs * per_epoch} "
+                f"steps, fewer than optimizer.max_steps={max_steps}")
 
         if failures:
             return self._failed(node_id, recipe, failures)

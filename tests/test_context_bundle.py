@@ -57,7 +57,7 @@ def test_recipe_context_carries_rules_allowlists_and_retry(world, tmp_path):
                                parent_id="root", attempt=2, max_attempts=3, retry=retry,
                                nodes_remaining=9, n_gpus=4, tools=["data_query", "data_commit"])
     assert "optimizer.max_steps" in ctx.tunable_rules
-    assert ctx.resolution_allowlist == [[544, 960], [416, 736]]
+    assert not hasattr(ctx, "resolution_allowlist")
     assert ctx.base_recipe["optimizer"]["batch_size"] == 1
     assert not hasattr(ctx, "format_rules")
     assert ctx.metric_guide["cause_and_effect"]["weight"] == 4.5 and len(ctx.metric_guide) == len(METRIC_SET)
@@ -169,9 +169,9 @@ def test_a_quarantined_node_is_in_no_context_and_its_clips_leave_the_pool(world)
     conn, repo, run = world
     nodes = NodeStore(conn)
     nodes.create("n2", "root", 1), nodes.set_status("n2", "quarantined")
-    clip = {"clip_id": "a" * 64, "video_digest": "v", "caption_digest": "c", "pose_digest": None,
-            "camera_motion": "static", "metadata": {}, "formats": [], "warnings": [],
-            "provenance": {"kind": "derived"}, "license": None, "derived_from": []}
+    clip = {"clip_id": "a" * 64, "video_digest": "v", "caption_digest": "c", "annotation_digest": "a",
+            "pose_digest": "p", "metadata": {}, "warnings": [],
+            "derived_from": {"kind": "model", "name": "alayaworld"}}
     ClipStore(conn).add({**clip, "ingested_by": "n2"})
     ClipStore(conn).add({**clip, "clip_id": "b" * 64, "ingested_by": "n1"})
     assert [c["clip_id"] for c in pool_clips(conn)] == ["b" * 64]
@@ -181,7 +181,7 @@ def test_a_quarantined_node_is_in_no_context_and_its_clips_leave_the_pool(world)
     ctx = build_recipe_context(cfg=CFG, conn=conn, run_dir=run, repo=repo, node_id="n1", parent_id="root",
                                attempt=1, max_attempts=3, retry=None, nodes_remaining=1, n_gpus=4, tools=[])
     assert ctx.clip_pool_size == 1 and not hasattr(ctx, "clip_pool")      # clips are listed by data_query
-    assert ctx.clip_pool_stats == {"by_node": {"n1": 1}, "by_source": {"derived": 1}, "by_format": {}}
+    assert ctx.clip_pool_stats == {"by_node": {"n1": 1}, "by_source": {"model:alayaworld": 1}}
     assert "/workspace/staging" in ctx.folders and "separate mount" in ctx.folders["/workspace/staging"]
     nodes = NodeStore(conn)
     nodes.create("n9", "root", 1), nodes.set_status("n9", "interrupted")

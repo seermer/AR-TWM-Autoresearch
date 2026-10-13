@@ -64,10 +64,10 @@ def env(tmp_path):
     return HfTools(CFG, tmp_path / "hf_tmp", api=FakeApi(), snapshot=fake_snapshot), caller
 
 
-def test_search_reports_license(env):
+def test_search_lists_matching_repos(env):
     tools, caller = env
     hits = tools.search(caller, "walks", "dataset", 5)
-    assert hits[0]["id"] == "org/walks" and hits[0]["license"] == "cc-by-4.0"
+    assert hits[0]["id"] == "org/walks" and "license" not in hits[0]
 
 
 def test_download_pins_revision_and_lands_in_staging(env):
@@ -76,9 +76,7 @@ def test_download_pins_revision_and_lands_in_staging(env):
     assert out["revision"] == SHA and out["bytes"] == 4000
     assert out["files"] == [f"/workspace/staging/hf/org__walks/{SHA}/videos/a.mp4",
                             f"/workspace/staging/hf/org__walks/{SHA}/videos/b.mp4"]
-    assert out["provenance"] == {"kind": "hf_dataset", "repo": "org/walks", "revision": SHA,
-                                 "files": ["videos/a.mp4", "videos/b.mp4"]}
-    assert out["license"] == "cc-by-4.0"
+    assert set(out) == {"repo", "revision", "bytes", "files"}
 
 
 def test_download_over_the_cap_is_refused_before_transfer(env):
@@ -240,7 +238,7 @@ def many(tmp_path):
 def test_list_files_pages_through_matching_paths_with_sizes(many):
     tools, caller = many
     out = tools.list_files(caller, "org/big", "main", "clips/*", limit=100, offset=100)
-    assert out["revision"] == SHA and out["license"] == "cc-by-4.0"
+    assert out["revision"] == SHA
     assert out["matching_files"] == 300 and out["matching_bytes"] == sum(1000 + i for i in range(300))
     assert out["offset"] == 100 and len(out["files"]) == 100
     assert out["files"][0] == {"path": "clips/part_0100.tar", "size": 1100}
@@ -331,7 +329,7 @@ def test_models_are_searched_listed_and_downloaded_like_datasets(env):
     assert tools.search(caller, "clip", "model", 5)[0]["id"] == "openai/clip"
     assert tools.list_files(caller, "openai/clip", "main", kind="model")["matching_files"] == 1
     out = tools.download(caller, "openai/clip", "main", ["*"], kind="model")
-    assert fake_snapshot.repo_type == "model" and "provenance" not in out
+    assert fake_snapshot.repo_type == "model"
     with pytest.raises(ToolError, match="kind must be"):
         tools.search(caller, "clip", "space", 5)
 

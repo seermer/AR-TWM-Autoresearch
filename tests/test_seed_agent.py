@@ -163,7 +163,7 @@ def test_check_roles_builds_every_role_and_the_selftest_uses_it(tmp_path, monkey
 
 def _data_lineage(depth):
     node = {"status": "scored", "score": 0.7, "error": None, "recipe": {"optimizer.lr": 1e-4},
-            "data": {"d": {"format": "video_caption_camera", "prompt_mode": None, "clips": 8, "weight": 1.0,
+            "data": {"d": {"clips": 8, "weight": 1.0,
                            "sources": {"hf:org/walks": 8}}},
             "rationale": 'why\n\nPlan: {"hypothesis": "more turning clips"}\nData: notes',
             "metrics": {"frame_aesthetics": 0.6},

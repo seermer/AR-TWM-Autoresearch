@@ -28,9 +28,8 @@ CREATE TABLE IF NOT EXISTS blobs (
 );
 CREATE TABLE IF NOT EXISTS clips (
   clip_id TEXT PRIMARY KEY,
-  video_digest TEXT NOT NULL, caption_digest TEXT NOT NULL, pose_digest TEXT,
-  camera_motion TEXT NOT NULL, metadata TEXT NOT NULL, formats TEXT NOT NULL,
-  warnings TEXT NOT NULL, provenance TEXT NOT NULL, license TEXT,
+  video_digest TEXT NOT NULL, caption_digest TEXT NOT NULL, annotation_digest TEXT NOT NULL,
+  pose_digest TEXT NOT NULL, metadata TEXT NOT NULL, warnings TEXT NOT NULL,
   derived_from TEXT NOT NULL, ingested_by TEXT NOT NULL, created_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS data_commits (

@@ -17,6 +17,5 @@ async def improve_recipe(ctx):
         ids = [c["clip_id"] for c in pool["clips"]][:4]
         made = json.loads((await tools.call_tool("data_commit", {
             "parent": None, "message": "from inside the sandbox",
-            "datasets": {"cam": {"format": "video_caption_camera", "prompt_mode": None,
-                                 "weight": 1.0, "clips": ids}}})).content[0].text)
+            "datasets": {"cam": {"weight": 1.0, "clips": ids}}})).content[0].text)
     return RecipeResult(data_commit=made["commit_id"], recipe={}, rationale=f"{len(ids)} clips")

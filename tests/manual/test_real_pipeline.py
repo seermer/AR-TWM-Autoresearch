@@ -59,8 +59,7 @@ def test_two_step_training_writes_a_checkpoint(tmp_path):
     ing = Ingestor(CFG, ctx.run_dir, conn, ctx.recorder)
     clips = _ingest_examples(ing, "video_caption_camera", "moving")
     commits = CommitStore(conn, ing.blobs, ing.clips)
-    commit = commits.commit(None, {"cam": {"format": "video_caption_camera", "prompt_mode": None,
-                                           "weight": 1.0, "clips": clips}}, "manual", node_id="m1")
+    commit = commits.commit(None, {"cam": {"weight": 1.0, "clips": clips}}, "manual", node_id="m1")
     node_dir = ctx.run_dir / "nodes" / "m1"
     gate = Gate(CFG, commits, ctx.recorder)
     result = gate.check({"optimizer.max_steps": 2, "optimizer.grad_accum_steps": 1,

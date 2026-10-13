@@ -27,7 +27,7 @@ class RecipeContext(_Ctx):
     workspace: str = "/workspace"
     node_id: str = ""                                               # the node being built
     clip_pool_size: int = 0                                         # all clips in the archive
-    clip_pool_stats: dict[str, Any] = Field(default_factory=dict)   # clips per ingesting node, source, format
+    clip_pool_stats: dict[str, Any] = Field(default_factory=dict)   # clips per ingesting node and source
     parent_data_commit: str | None = None
     parent_recipe: dict[str, Any] = Field(default_factory=dict)
     base_recipe: dict[str, Any] = Field(default_factory=dict)
@@ -35,7 +35,6 @@ class RecipeContext(_Ctx):
     metric_guide: dict[str, Any] = Field(default_factory=dict)   # metric -> dimension, weight, what it measures
     target_skill: dict[str, str] = Field(default_factory=dict)   # the skill the run aims at: name, sentence, description
     tunable_rules: dict[str, Any] = Field(default_factory=dict)
-    resolution_allowlist: list[list[int]] = Field(default_factory=list)
     lora_allowlist: list[list[int]] = Field(default_factory=list)
     n_gpus: int = 4
     tools: list[str] = Field(default_factory=list)   # enabled kernel tool names

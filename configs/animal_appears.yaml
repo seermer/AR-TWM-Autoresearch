@@ -9,4 +9,4 @@ eval:
   target_skill:
     name: an animal appearing
     sentence: an animal comes into view
-    description: the video starts with no animal in view, and when a turn's text says an animal appears, that animal should come into view during that turn and be clearly visible by the end of it. This can happen at any turn, including the first and the last, and at one or several turns of a video, each time with whichever land animal the text names
+    description: the video starts with no animal in view, and when a turn's text says an animal appears, that animal comes into view during that turn. This can happen at any turn, including the first and the last, and at one or several turns of a video, each time with whichever land animal the text names

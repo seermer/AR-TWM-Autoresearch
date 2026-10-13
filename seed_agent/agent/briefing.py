@@ -116,8 +116,7 @@ def _groups(aggregates: dict) -> dict:
 
 def _data(n: dict) -> str:
     return "- Data: " + "; ".join(
-        f"{name} ({d.get('format')}{'/' + d['prompt_mode'] if d.get('prompt_mode') else ''}): "
-        f"{d.get('clips')} clips, weight {d.get('weight')}"
+        f"{name}: {d.get('clips')} clips, weight {d.get('weight')}"
         + (", from " + ", ".join(f"{s} x{k}" for s, k in d["sources"].items()) if d.get("sources") else "")
         for name, d in n["data"].items())
 
@@ -252,8 +251,7 @@ def _node_and_recipe(ctx, previous_plans: list | None) -> list[str]:
         retry_section(ctx.retry, previous_plans),
         "## Recipe\n\nTunable keys, with the base recipe's and the parent's values:\n\n"
         + table(["key", "type", "min", "max", "base", "parent", "meaning"], keys)
-        + f"\n\nResolutions (height x width): {pairs(ctx.resolution_allowlist, 'x')}. "
-          f"LoRA (rank/alpha): {pairs(ctx.lora_allowlist, '/')}. The full base recipe is `base_recipe` "
+        + f"\n\nLoRA (rank/alpha): {pairs(ctx.lora_allowlist, '/')}. The full base recipe is `base_recipe` "
           f"in /context/context.json.",
         metric_section(ctx.metric_guide)]
 

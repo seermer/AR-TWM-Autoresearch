@@ -52,11 +52,10 @@ def clip_detail(run: Run, clip_id: str, leakage: dict | None = None) -> dict | N
     leakage = leakage_index(run) if leakage is None else leakage
     return {"clip_id": clip_id, "video": f"store/blobs/video/{c['video_digest']}.mp4",
             "caption": run.files.read_json(f"store/blobs/caption/{c['caption_digest']}.json"),
-            "pose": f"store/blobs/pose/{c['pose_digest']}.npz" if c["pose_digest"] else None,
-            "camera_motion": c["camera_motion"], "metadata": loads(c["metadata"], {}),
-            "formats": loads(c["formats"], []), "warnings": loads(c["warnings"], []),
-            "provenance": loads(c["provenance"], {}), "license": c["license"],
-            "derived_from": loads(c["derived_from"], []), "ingested_by": c["ingested_by"],
+            "annotation": run.files.read_json(f"store/blobs/annotation/{c['annotation_digest']}.json"),
+            "pose": f"store/blobs/pose/{c['pose_digest']}.npz",
+            "metadata": loads(c["metadata"], {}), "warnings": loads(c["warnings"], []),
+            "derived_from": loads(c["derived_from"], {}), "ingested_by": c["ingested_by"],
             "leakage": leakage.get(clip_id)}
 
 
@@ -79,6 +78,11 @@ def leakage_index(run: Run) -> dict[str, dict]:
     return out
 
 
+def origin(derived_from) -> str:
+    """A clip's `derived_from` in one cell: `<kind>: <name>`."""
+    return f"{derived_from.get('kind')}: {derived_from.get('name')}" if isinstance(derived_from, dict) else ""
+
+
 def ingest_calls(run: Run, node_id: str) -> list[dict]:
     """One row per candidate of every data_ingest call: the kernel records them as `ingest.result`."""
     rows = []
@@ -88,8 +92,8 @@ def ingest_calls(run: Run, node_id: str) -> list[dict]:
         for r in (run.log.payload(e.get("payload")) or {}).get("rows") or []:
             video = r.get("video") or ""
             rows.append({"time": fmt_ts(e["ts_wall"]), "phase": e.get("phase"), "attempt": e.get("attempt"),
-                         "video": video, "caption": r.get("caption"), "pose": r.get("pose"),
-                         "camera_motion": r.get("camera_motion"),
+                         "video": video, "annotation": r.get("annotation"), "pose": r.get("pose"),
+                         "derived_from": origin(r.get("derived_from")),
                          "outcome": "accepted" if r.get("accepted") else "rejected", "clip_id": r.get("clip_id"),
                          "reasons": "; ".join(r.get("reasons") or []),
                          "host_video": run.files.host_path(node_id, e.get("phase"), e.get("attempt"), video)})

@@ -29,6 +29,22 @@ def write_poses(path, n_frames, width=736, height=414, moving=True, intrinsics=T
     np.savez(path, cam_c2w=c2w, **({"intrinsics": k} if intrinsics else {}))
     return path
 
+def write_annotation(path, turns=None, scene="A camera moves slowly through a bright room.", character=None):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"scene_prompt": scene, "turns": turns if turns is not None else [{"start_s": 0.0}]}
+    if character is not None:
+        payload["character_prompt"] = character
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+def staged_clip(stage, seconds=4.0, fps=30, width=960, height=544, turns=None):
+    """(video, annotation, pose) of one ingestable clip under `stage`: 960x544, a moving camera."""
+    return (make_mp4(stage / "v.mp4", seconds=seconds, fps=fps, width=width, height=height),
+            write_annotation(stage / "a.json", turns),
+            write_poses(stage / "p.npz", n_frames=int(seconds * fps), width=width, height=height))
+
+DERIVED = {"kind": "synthetic_method", "name": "unit test fixture"}
+
 @pytest.fixture
 def clip_dir(tmp_path):
     """A one-clip standard root: 4 s, 30 fps, 16:9, moving camera."""

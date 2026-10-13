@@ -127,22 +127,21 @@ def test_query_returns_the_archive_wide_pool_with_provenance(env):
 
 def test_commit_returns_id_and_per_dataset_stats(env):
     tools, caller, results, _ = env
-    out = tools.commit(caller, None, {"cam": {"format": "video_caption_camera", "prompt_mode": None,
-                                              "weight": 1.0, "clips": [r["clip_id"] for r in results]}},
+    out = tools.commit(caller, None, {"cam": {"weight": 1.0, "clips": [r["clip_id"] for r in results]}},
                        "four clips")
     assert len(out["commit_id"]) == 64
     stats = out["datasets"]["cam"]
     assert sum(stats.pop("sources").values()) == 4
-    assert stats == {"format": "video_caption_camera", "prompt_mode": None, "weight": 1.0, "clips": 4}
+    assert stats == {"weight": 1.0, "clips": 4}
 
 
 def test_a_commit_takes_over_the_datasets_of_included_commits_and_a_query_reads_a_commit_back(env):
     from ar_kernel.tools.server import ToolError
     tools, caller, results, _ = env
     ids = [r["clip_id"] for r in results]
-    cam = {"format": "video_caption_camera", "prompt_mode": None, "weight": 2.0, "clips": ids[:3]}
+    cam = {"weight": 2.0, "clips": ids[:3]}
     first = tools.commit(caller, None, {"cam": cam}, "three clips")["commit_id"]
-    extra = {"format": "video_caption_camera", "prompt_mode": None, "weight": 1.0, "clips": ids[3:]}
+    extra = {"weight": 1.0, "clips": ids[3:]}
     second = tools.commit(caller, first, {"extra": extra}, "the parent's data and one clip", include=[first])
     assert {n: (d["clips"], d["weight"]) for n, d in second["datasets"].items()} == {"cam": (3, 2.0), "extra": (1, 1.0)}
     replaced = tools.commit(caller, first, {"cam": {**cam, "clips": ids[:2]}}, "one dropped", include=[first])
@@ -168,7 +167,7 @@ def test_a_clips_source_is_its_generator_or_repo_and_derived_clips_inherit_it():
     assert [clip_source(c, by_id) for c in clips] == [
         "rollout:alayaworld-dmd4", "hf:org/set", "rollout:alayaworld-dmd4",
         "hf:org/set+rollout:alayaworld-dmd4", "derived"]
-    manifest = {"datasets": {"x": {"format": "f", "prompt_mode": None, "weight": 1.0, "clips": ["a", "c", "e"]}}}
+    manifest = {"datasets": {"x": {"weight": 1.0, "clips": ["a", "c", "e"]}}}
     assert dataset_stats(manifest, clips)["x"]["sources"] == {"rollout:alayaworld-dmd4": 2, "derived": 1}
 
 
@@ -195,11 +194,9 @@ def test_fetch_copies_pool_clips_into_staging(env):
 def test_commit_validation_errors_become_tool_errors(env):
     tools, caller, results, _ = env
     with pytest.raises(ToolError, match="more than once"):
-        tools.commit(caller, None, {"cam": {"format": "video_caption_camera", "prompt_mode": None,
-                                            "weight": 1.0, "clips": [results[0]["clip_id"]] * 2}}, "dup")
+        tools.commit(caller, None, {"cam": {"weight": 1.0, "clips": [results[0]["clip_id"]] * 2}}, "dup")
     with pytest.raises(ToolError, match="weight must be a number"):            # one line, no file: not a list
-        tools.commit(caller, None, {"cam": {"format": "video_caption_camera", "prompt_mode": None,
-                                            "weight": "x", "clips": [results[0]["clip_id"]]}}, "w")
+        tools.commit(caller, None, {"cam": {"weight": "x", "clips": [results[0]["clip_id"]]}}, "w")
 
 
 def test_every_bad_clip_of_a_commit_is_named_in_one_refusal_with_a_file(env):
@@ -207,7 +204,7 @@ def test_every_bad_clip_of_a_commit_is_named_in_one_refusal_with_a_file(env):
     tools, caller, results, _ = env
     ids = [r["clip_id"] for r in results]
     with pytest.raises(ToolError) as refused:
-        tools.commit(caller, None, {"still": {"format": "video_caption_static", "prompt_mode": None, "weight": 1.0,
+        tools.commit(caller, None, {"still": {"weight": 1.0,
                                               "clips": [*ids, "nope"]}}, "bad")
     text = str(refused.value)
     assert f"{len(ids) + 1} of {len(ids) + 1} items are bad" in text and "item 0: not eligible" in text
@@ -230,8 +227,7 @@ def test_recipe_check_reports_gate_failures_without_leaving_a_view(env, monkeypa
     clip files -- proving recipe_check's cleanup has something real to remove.
     """
     tools, caller, results, _ = env
-    commit = tools.commit(caller, None, {"cam": {"format": "video_caption_camera", "prompt_mode": None,
-                                                 "weight": 1.0, "clips": [r["clip_id"] for r in results]}},
+    commit = tools.commit(caller, None, {"cam": {"weight": 1.0, "clips": [r["clip_id"] for r in results]}},
                           "for check")["commit_id"]
 
     seen_populated_view = []
@@ -259,8 +255,7 @@ def test_recipe_check_reports_gate_failures_without_leaving_a_view(env, monkeypa
 
 def test_recipe_check_is_refused_at_once_while_a_gpu_job_holds_the_gpus(env):
     tools, caller, results, _ = env
-    commit = tools.commit(caller, None, {"cam": {"format": "video_caption_camera", "prompt_mode": None,
-                                                 "weight": 1.0, "clips": [r["clip_id"] for r in results]}},
+    commit = tools.commit(caller, None, {"cam": {"weight": 1.0, "clips": [r["clip_id"] for r in results]}},
                           "for check")["commit_id"]
     with tools.gpu_lock, pytest.raises(ToolError, match="a GPU job is running"):
         tools.recipe_check(caller, {}, commit)

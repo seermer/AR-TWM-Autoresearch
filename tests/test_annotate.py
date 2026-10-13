@@ -10,9 +10,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ar_kernel.archive.db import open_db
 from ar_kernel.config import KernelConfig, resolve_gpus
-from ar_kernel.data.ingest import Candidate, Ingestor
 from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools import annotate
 from ar_kernel.tools.annotate import AnnotateBackend
@@ -66,6 +64,7 @@ def test_pose_is_published_and_names_the_agents_clip(env):
     assert item["video"] == "/workspace/a.mp4"
     assert item["pose"] == f"/workspace/staging/annotations/{job}/0.npz"
     assert item["frames"] == 48 and item["intrinsics"] == [500.0, 500.0, 368.0, 207.0]
+    assert item["cut"] is None
     with np.load(staging / "annotations" / job / "0.npz") as z:
         assert z["cam_c2w"].shape == (48, 4, 4) and z["intrinsics"].shape == (3, 3)
     assert not (staging / "annotations" / job / "0.mp4").exists()     # the video is never re-published
@@ -188,22 +187,10 @@ def test_real_vigeo_matches_the_example_poses(tmp_path):
         path = float(np.linalg.norm(np.diff(gt[:, :3, 3], axis=0), axis=1).sum())
         ate = _umeyama_ate(pred[:, :3, 3], gt[:, :3, 3]) / path
         f_err = [float(k[i, i] / k_gt[i, i] - 1) for i in (0, 1)] if k_gt is not None else None
-        # (a) the kernel ingest checker accepts the published pose with the example caption
-        stage = staging / "ingest" / c
-        stage.mkdir(parents=True)
-        shutil.copy(examples / "videos" / f"{c}.mp4", stage / "v.mp4")
-        shutil.copy(examples / "captions" / f"{c}.json", stage / "c.json")
-        shutil.copy(pose, stage / "p.npz")
-        [res] = ing.ingest([Candidate(video=stage / "v.mp4", caption=stage / "c.json", pose=stage / "p.npz",
-                                      camera_motion="moving", provenance={"kind": "derived", "from": [],
-                                      "transform": "annotate_camera gpu test"})], node_id="gpu")
         row = {"clip": c, "frames": item["frames"], "rot_err_deg": round(rot, 4), "ate_frac": round(ate, 4),
                "f_err": f_err and [round(e, 4) for e in f_err], "intrinsics": item["intrinsics"],
-               "seconds": item["worker"].get("seconds"), "peak_mem_mib": item["worker"].get("peak_mem_mib"),
-               "ingest_ok": res.accepted and "video_caption_camera" in res.formats}
+               "seconds": item["worker"].get("seconds"), "peak_mem_mib": item["worker"].get("peak_mem_mib")}
         rows.append(row)
-        if not row["ingest_ok"]:
-            failures.append(f"{c}: ingest {res.reasons}")
         if rot >= 1.0:
             failures.append(f"{c}: rotation error {rot:.3f} deg >= 1")
         if ate >= 0.10:

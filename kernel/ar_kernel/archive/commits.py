@@ -2,8 +2,6 @@ from __future__ import annotations
 import hashlib, json, math, os, re, shutil, sqlite3, time
 from pathlib import Path
 
-FORMATS = {"video_caption_camera", "video_timed_prompts_camera", "video_caption_static"}
-PROMPT_MODES = {"segment", "per_chunk"}
 BUILTIN_NAMES = {"sekai_real_hq", "spatialvid_hq", "sekai_game_walking", "sekai_real_walking",
                  "mugen_v2", "RealEstate10K", "spatialvid", "veo3", "OpenVid", "mp4_frame_game_3",
                  "sekai_real_mini"}
@@ -37,15 +35,6 @@ class CommitStore:
                 raise CommitError(f"dataset name {name!r} must match {NAME_RE.pattern}")
             if name in BUILTIN_NAMES:
                 raise CommitError(f"dataset name {name!r} is a built-in source name")
-            fmt = entry.get("format")
-            if fmt not in FORMATS:
-                raise CommitError(f"{name}.format must be one of {sorted(FORMATS)}, got {fmt!r}")
-            mode = entry.get("prompt_mode")
-            if fmt == "video_timed_prompts_camera":
-                if mode not in PROMPT_MODES:
-                    raise CommitError(f"{name}.prompt_mode must be one of {sorted(PROMPT_MODES)}")
-            elif mode is not None:
-                raise CommitError(f"{name}.prompt_mode only applies to video_timed_prompts_camera")
             raw_weight = entry.get("weight", 1.0)
             if isinstance(raw_weight, bool) or not isinstance(raw_weight, (int, float)):
                 raise CommitError(f"{name}.weight must be a number, got {raw_weight!r}")
@@ -54,7 +43,6 @@ class CommitStore:
                 # inf/nan used to pass here and then crash steps_per_epoch in the gate.
                 raise CommitError(f"{name}.weight must be finite and >= 0, got {raw_weight!r}")
             clip_ids = list(entry.get("clips") or [])
-            key = fmt if mode is None else f"{fmt}:{mode}"
             bad, seen = {}, set()
             for n, clip_id in enumerate(clip_ids):
                 if not isinstance(clip_id, str):
@@ -67,18 +55,14 @@ class CommitStore:
                     continue
                 seen.add(clip_id)
                 try:
-                    clip = self.clips.get(clip_id)
+                    self.clips.get(clip_id)
                 except KeyError:
                     bad[n] = "unknown clip"
-                    continue
-                if key not in clip["formats"]:
-                    bad[n] = f"not eligible for {key}; it is eligible for {', '.join(clip['formats'])}"
             if bad:
                 raise BadClips(name, clip_ids, bad)
             if weight > 0 and clip_ids:
                 usable += 1
-            normalized[name] = {"format": fmt, "prompt_mode": mode, "weight": weight,
-                                "clips": sorted(clip_ids)}
+            normalized[name] = {"weight": weight, "clips": sorted(clip_ids)}
         if usable == 0:
             raise CommitError("no dataset has both weight > 0 and clips")
         return {"datasets": dict(sorted(normalized.items()))}
@@ -145,19 +129,14 @@ class CommitStore:
             if entry["weight"] <= 0 or not entry["clips"]:
                 continue
             root = dest / name
-            (root / "videos").mkdir(parents=True, exist_ok=True)
-            (root / "captions").mkdir(parents=True, exist_ok=True)
-            needs_poses = entry["format"] != "video_caption_static"
-            if needs_poses:
-                (root / "poses").mkdir(parents=True, exist_ok=True)
+            for sub in ("videos", "captions", "poses"):
+                (root / sub).mkdir(parents=True, exist_ok=True)
             for clip_id in entry["clips"]:
                 clip = self.clips.get(clip_id)
-                links = [(self.blobs.path(clip["video_digest"], "video"), root / "videos" / f"{clip_id}.mp4"),
-                         (self.blobs.path(clip["caption_digest"], "caption"), root / "captions" / f"{clip_id}.json")]
-                if needs_poses and clip["pose_digest"]:
-                    links.append((self.blobs.path(clip["pose_digest"], "pose"),
-                                  root / "poses" / f"{clip_id}.npz"))
-                for source, target in links:
+                for source, target in (
+                        (self.blobs.path(clip["video_digest"], "video"), root / "videos" / f"{clip_id}.mp4"),
+                        (self.blobs.path(clip["caption_digest"], "caption"), root / "captions" / f"{clip_id}.json"),
+                        (self.blobs.path(clip["pose_digest"], "pose"), root / "poses" / f"{clip_id}.npz")):
                     os.link(source, target)
             roots[name] = root
         return roots
