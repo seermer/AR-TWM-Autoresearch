@@ -61,7 +61,7 @@ def test_image_is_published_with_the_requested_size(env):
     item = by[0]
     assert item["image"] == f"/workspace/staging/images/{job}/0.png"
     assert item["prompt"] == "a red fox in snow" and item["seed"] == 1
-    assert item["generator"] == "z-image-turbo" and item["license"] == "Apache-2.0"
+    assert item["generator"] == "z-image-turbo" and "license" not in item
     with _open(staging, item) as im:
         assert im.size == DEFAULT
 

@@ -172,12 +172,13 @@ class Ingestor:
         except ValueError as exc:
             return self._reject(candidate, node_id, [f"the annotation is not valid JSON: {exc}"])
         problems = ann.check_annotation(annotation)
-        if not problems and annotation["turns"][-1]["start_s"] >= info.duration:
+        duration = info.frames / info.fps if info.fps else info.duration        # to the frame, not ffprobe's rounding
+        if not problems and annotation["turns"][-1]["start_s"] >= duration:
             problems = [f"turn {len(annotation['turns'])} starts at {annotation['turns'][-1]['start_s']} s, "
-                        f"at or after the end of the video ({info.duration:.2f} s)"]
+                        f"at or after the end of the video ({duration:.2f} s)"]
         if problems:
             return self._reject(candidate, node_id, [f"annotation: {p}" for p in problems])
-        caption_json = ann.caption_file(annotation, info.duration)
+        caption_json = ann.caption_file(annotation, duration)
         held["caption"] = held["video"].with_name("caption.json")
         held["caption"].write_text(json.dumps(caption_json, indent=1), encoding="utf-8")
 

@@ -12,7 +12,7 @@ import pytest
 from ar_kernel.config import KernelConfig
 from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools.context import TokenRegistry
-from ar_kernel.tools.gpu_jobs import GpuJob, canonical_hash, register_gpu_tools, split_gpus
+from ar_kernel.tools.gpu_jobs import GpuJob, register_gpu_tools, split_gpus
 from ar_kernel.tools.jobs import JobQueue
 from ar_kernel.tools.server import ToolError, ToolKit, new_mcp
 from tests.conftest import make_mp4
@@ -22,7 +22,7 @@ FAKE = Path(__file__).parent / "fixtures" / "fake_gen_worker.py"
 
 class FakeJob(GpuJob):
     name = tool = "rollout_fake"
-    kind, generator, license = "rollout", "fake-gen", "test-license"
+    kind, generator = "rollout", "fake-gen"
     file_keys = ("src",)
 
     def check_args(self, args):
@@ -37,7 +37,7 @@ class FakeJob(GpuJob):
 
     def finish(self, job, item, out):
         return {"video": out / f"{item['index']}.mp4",
-                "caption": self.write_caption(out, item, {"caption": item.get("prompt", "x")})}
+                "annotation": self.write_annotation(out, item, {"scene_prompt": item.get("prompt", "x")})}
 
 
 @pytest.fixture
@@ -97,22 +97,13 @@ def test_items_fan_out_one_worker_per_gpu_and_publish_candidates(env):
     job = out["id"]
     assert c["video"] == f"/workspace/staging/rollouts/{job}/0.mp4"
     assert (staging / "rollouts" / job / "0.mp4").is_file()
-    assert json.loads((staging / "rollouts" / job / "0.json").read_text()) == {"caption": "p0"}
-    assert c["provenance"] == {"kind": "rollout", "generator": "fake-gen", "job_id": job,
-                               "inputs_hash": c["provenance"]["inputs_hash"], "seed": 0}
-    assert c["license"] == "test-license" and "pose" not in c
+    assert c["annotation"] == f"/workspace/staging/rollouts/{job}/0.annotation.json"
+    assert json.loads((staging / "rollouts" / job / "0.annotation.json").read_text()) == {"scene_prompt": "p0"}
+    assert c["derived_from"] == {"kind": "model", "name": "fake-gen"}
+    assert set(c) == {"video", "annotation", "derived_from"}
     assert got[0]["worker"]["gpus"] == "0" and got[1]["worker"]["gpus"] == "1" and got[4]["worker"]["gpus"] == "0"
     assert not (run / "jobs" / job / "in").exists() and not (run / "jobs" / job / "out").exists()
     assert job_result(out)["gpu_memory_released"] is True
-
-
-def test_inputs_hash_depends_on_file_content_not_path(env):
-    q, caller, rec, ws, staging, run = env
-    (ws / "b.mp4").write_bytes((ws / "a.mp4").read_bytes())
-    out = q.wait(caller, submit(q, caller, [{"src": "a.mp4", "seed": 1}, {"src": "b.mp4", "seed": 1},
-                                           {"src": "a.mp4", "seed": 2}])["job_id"], 120)
-    h = [i["candidate"]["provenance"]["inputs_hash"] for i in job_result(out)["items"]]
-    assert h[0] == h[1] != h[2]
 
 
 def test_a_worker_that_finds_the_machine_too_small_stops_the_run(env):
@@ -257,7 +248,7 @@ def test_build_gpu_backends_returns_exactly_the_enabled_backends_plus_the_captio
     rec = Recorder(tmp_path / "run")
     names = [b.name for b in build_gpu_backends(toggled_cfg(**kw), tmp_path / "run", [0, 1, 2, 3],
                                                 TokenRegistry(rec), rec)]
-    assert sorted(names) == sorted(expected | {"caption_videos"})     # the captioner is always present
+    assert sorted(names) == sorted(expected | {"caption_videos", "locate_events"})     # always present
 
 
 def test_the_default_config_has_wan_off_and_ltx_distilled_only(tmp_path):
@@ -321,20 +312,23 @@ def test_listed_item_schemas_type_every_field(tmp_path):
     assert tools["rollout_wan22"].input_schema["properties"]["items"]["anyOf"][0]["items"]["properties"]["image"]["type"] == "string"
     key = tools["rollout_ltx25"].input_schema["properties"]["items"]["anyOf"][0]["items"]["properties"]["keyframes"]
     assert key["items"]["properties"]["frame"]["type"] == "integer" and key["items"]["required"] == ["image", "frame"]
+    from ar_kernel.data.annotation import ACTIONS, PERSPECTIVES
     h3 = tools["rollout_h3"].input_schema["properties"]["items"]["anyOf"][0]["items"]
-    assert set(h3["required"]) == {"scene_prompt", "turns", "overall_soundscape", "non_diegetic_music", "seed"}
-    assert h3["properties"]["turns"]["items"]["required"] == ["prompt"]
-    assert h3["properties"]["keyframes"] == tools["rollout_ltx25"].input_schema["properties"]["items"]["anyOf"][0]["items"]["properties"]["keyframes"]
+    assert set(h3["properties"]) == {"scene_prompt", "character_prompt", "seed", "image", "seconds", "turns"}
+    assert set(h3["required"]) == {"scene_prompt", "seed", "turns"}
+    assert set(tools["rollout_h3"].input_schema["properties"]) == {"items"}
     alaya = tools["rollout_alayaworld"].input_schema["properties"]["items"]["anyOf"][0]["items"]
-    from ar_kernel.tools.rollouts import VIEWPOINTS
-    assert alaya["properties"]["viewpoint"]["enum"] == list(VIEWPOINTS)
-    assert set(alaya["required"]) == {"image", "viewpoint", "scene_prompt", "turns"}
+    assert set(alaya["properties"]) == {"image", "scene_prompt", "character_prompt", "seed", "subject_mask", "turns"}
+    assert set(alaya["required"]) == {"image", "scene_prompt", "seed", "turns"}
+    assert set(tools["rollout_alayaworld"].input_schema["properties"]) == {"items", "node"}
     turn = alaya["properties"]["turns"]["items"]
-    assert set(turn["properties"]) == {"action", "event", "subject_action", "viewpoint_change"}
-    for field in (*alaya["properties"].values(), *turn["properties"].values()):
+    assert turn == h3["properties"]["turns"]["items"]                  # one turn shape for both tools
+    assert set(turn["properties"]) == {"action", "event", "perspective"}
+    assert turn["properties"]["action"]["enum"] == list(ACTIONS) and len(ACTIONS) == 17
+    assert turn["properties"]["perspective"]["enum"] == list(PERSPECTIVES)
+    assert turn["required"] == ["action", "perspective"]
+    for field in (*alaya["properties"].values(), *h3["properties"].values(), *turn["properties"].values()):
         assert field["description"]                    # every item field says what it is
-    assert tools["rollout_alayaworld"].input_schema["properties"]["rounds_per_turn"]["description"]
-    assert turn["properties"]["action"]["type"] == "string" and turn["required"] == ["action"]
 
 
 @pytest.mark.parametrize("name", ["generate_images", "rollout_wan22", "rollout_ltx25"])
@@ -471,7 +465,7 @@ def test_bad_keyframes_are_refused_at_submit(keyed, keyframes, match):
         backend.submit(q, caller, {"items": [{"keyframes": keyframes, "seed": 1}]})
 
 
-def test_keyframe_images_are_staged_and_hashed_by_content(keyed):
+def test_keyframe_images_are_staged_in_clip_order(keyed):
     q, caller, backend, run = keyed
     items = [{"keyframes": [{"image": "a.png", "frame": 0}, {"image": "b.png", "frame": -1}], "seed": 1},
              {"keyframes": [{"image": "a.png", "frame": 0}, {"image": "b.png", "frame": 5}], "seed": 1},
@@ -483,11 +477,6 @@ def test_keyframe_images_are_staged_and_hashed_by_content(keyed):
     assert [k["frame"] for k in staged] == [0, -1]             # in clip order whatever order was given
     assert all(f"/jobs/{out['id']}/in/0_keyframe" in k["image"] for k in staged)
     assert got[2]["worker"]["keyframes"] == []
-    h = [g["candidate"]["provenance"]["inputs_hash"] for g in got]
-    assert len(set(h)) == 3                              # the frame index and the images are part of the hash
-    swapped = [{"keyframes": items[0]["keyframes"][::-1], "seed": 1}]
-    again = job_result(q.wait(caller, backend.submit(q, caller, {"items": swapped})["job_id"], 120))["items"]
-    assert again[0]["candidate"]["provenance"]["inputs_hash"] == h[0]      # the order given does not matter
 
 
 # ---- descriptions name only their own tool ----

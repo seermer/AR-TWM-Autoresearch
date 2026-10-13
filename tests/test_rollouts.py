@@ -41,19 +41,22 @@ def small_cfg(env="autoresearcher", enabled=True):
     return KernelConfig(raw=raw, repo_root=REAL.repo_root)
 
 
+FP, TP = "first_person", "third_person"
+
+
 def first_person(**over):
-    return {"image": "frame.png", "viewpoint": "first_person",
+    return {"image": "frame.png", "seed": 5,
             "scene_prompt": "A wet city street at night with neon signs.",
-            "character_prompt": "",
-            "turns": [{"action": "W"}, {"action": "left", "event": "It starts to rain heavily."}], **over}
+            "turns": [{"action": "W", "perspective": FP},
+                      {"action": "left", "event": "It starts to rain heavily.", "perspective": FP}], **over}
 
 
 def third_person(**over):
-    return {"image": "frame.png", "viewpoint": "third_person", "subject_mask": "mask.png",
+    return {"image": "frame.png", "seed": 9, "subject_mask": "mask.png",
             "scene_prompt": "A mountain trail above a valley.",
             "character_prompt": "A hiker in a red jacket.",
-            "turns": [{"action": "W+left", "subject_action": "The hiker raises a hand and waves."},
-                      {"action": "stop", "viewpoint_change": "tp_to_fp"}], **over}
+            "turns": [{"action": "W+left", "event": "The hiker raises a hand and waves.", "perspective": TP},
+                      {"action": "stop", "perspective": FP}], **over}
 
 
 # ---- case writer: WorldModel's own loader reads it back ----
@@ -68,6 +71,7 @@ for i in range(len(ds)):
     m = ds[i]["metadata"]
     out[m["wbench_case_id"]] = {"schedule": m["wbench_prompt_schedule"], "actions": m["wbench_turn_actions"],
                                 "perspective": m["wbench_perspective"], "mask": m["wbench_subject_mask"],
+                                "seed": m["wbench_seed"],
                                 "turns": ds.full_turn_counts[i]}
 print("===AR===" + json.dumps(out) + "===AR===")
 """
@@ -87,6 +91,11 @@ def test_case_files_load_with_the_worldmodel_loader(tmp_path):
     assert proc.returncode == 0, proc.stderr[-3000:]
     got = json.loads(proc.stdout.split("===AR===")[1])
 
+    # the render assembles each turn's text exactly as the kernel's own assembler does
+    from ar_kernel.data.annotation import turn_texts
+    for case_id, item in (("3", first_person()), ("4", third_person())):
+        assert got[case_id]["schedule"] == turn_texts(item["scene_prompt"], item.get("character_prompt"), item["turns"])
+        assert got[case_id]["seed"] == item["seed"]
     fp = got["3"]
     base = "A wet city street at night with neon signs."
     assert fp["schedule"] == [base, f"{base} It starts to rain heavily."]
@@ -94,24 +103,25 @@ def test_case_files_load_with_the_worldmodel_loader(tmp_path):
     assert fp["mask"] == ""
 
     tp = got["4"]
-    scene = "A hiker in a red jacket. A mountain trail above a valley. The hiker raises a hand and waves."
-    assert tp["schedule"][0] == scene
-    assert tp["schedule"][1].startswith(scene + " The view switches from third-person to first-person")
+    scene = "A mountain trail above a valley. A hiker in a red jacket."
+    assert tp["schedule"] == [f"{scene} The hiker raises a hand and waves.",
+                              f"{scene} The view switches back to first-person, returning to the character's own eyes."]
     assert tp["actions"] == ["W+left", "stop"] and tp["perspective"] == "third_person"
     assert tp["mask"] == str(data / "masks" / "case_4_mask.png")
 
 
 def test_case_json_uses_the_wbench_schema():
     case = case_json(7, third_person(), "images/case_7.jpg", "masks/case_7_mask.png")
-    assert case["id"] == "7" and case["metric_list"] == []
+    assert case["id"] == "7" and case["metric_list"] == [] and case["seed"] == 9
     assert case["settings"]["initial_image"] == "images/case_7.jpg"
     assert case["settings"]["subject_mask"] == "masks/case_7_mask.png"
     assert case["settings"]["perspective"] == "third_person"
     assert case["interactions"] == [
         {"type": "navigation", "action": "W+left", "turn": 1},
-        {"type": "subject_action", "action": "The hiker raises a hand and waves.", "turn": 1},
+        {"type": "event_edit", "action": "The hiker raises a hand and waves.", "turn": 1},
         {"type": "navigation", "action": "stop", "turn": 2},
-        {"type": "perspective_switch", "action": "tp_to_fp", "turn": 2}]
+        {"type": "perspective_switch", "action": "tp_to_fp", "turn": 2,
+         "prompt": "The view switches back to first-person, returning to the character's own eyes."}]
 
 
 # ---- render config ----
@@ -127,17 +137,15 @@ def _flat(d, prefix=()):
 
 
 def test_render_config_has_the_listed_fields(tmp_path):
-    c = render_config(REAL, rounds_per_turn=1, seed=7, indices=[0, 2], work=tmp_path,
-                      text_cache=tmp_path / "te")
+    c = render_config(REAL, indices=[0, 2], work=tmp_path, text_cache=tmp_path / "te")
     mode = c["validation"]["modes"]["wbench"]
     assert mode["dataset"]["root"] == str(tmp_path / "data")
     assert mode["dataset"]["case_ids"] == ["0", "2"]
     assert mode["dataset"]["include_non_navigation"] is True
     assert mode["wbench_output_dir"] == str(tmp_path / "videos")
-    assert mode["wbench_chunks_per_turn"] == 1
+    assert mode["wbench_chunks_per_turn"] * 32 == rollouts.TURN_FRAMES and mode["wbench_keep_last_frame"] is True
     assert c["run"]["output_dir"] == str(tmp_path / "rollout") and c["run"]["log_dir"] == str(tmp_path / "logs")
-    assert c["run"]["seed"] == 7
-    assert c["validation"]["per_sample_seed"] is True and c["validation"]["save_joystick"] is False
+    assert "per_sample_seed" not in c["validation"] and c["validation"]["save_joystick"] is False
     assert c["runtime"]["text_embed_cache_dir"] == str(tmp_path / "te")
     for key, value in c["paths"].items():
         if isinstance(value, str):
@@ -149,7 +157,7 @@ def test_render_config_has_the_listed_fields(tmp_path):
 
 
 def test_render_config_uses_the_ar_teacher(tmp_path):
-    c = render_config(REAL, rounds_per_turn=3, seed=1, indices=[0], work=tmp_path, text_cache=tmp_path / "te")
+    c = render_config(REAL, indices=[0], work=tmp_path, text_cache=tmp_path / "te")
     assert c["paths"]["dmd_resume"] is None
     v = c["validation"]
     assert (v["sampling_steps"], v["scheduler"], v["cfg_scale"]) == (30, "shift", 3.0)
@@ -184,21 +192,29 @@ def submit(q, caller, items, **params):
     return q.backends["rollout_alayaworld"].submit(q, caller, {"items": items, **params})
 
 
+def _turn(**over):
+    return {"action": "W", "perspective": FP, **over}
+
+
 @pytest.mark.parametrize("item, params, match", [
-    (first_person(turns=[{"action": "jump"}]), {}, "unknown action"),
-    (first_person(turns=[{"action": "W+fly"}]), {}, "unknown action"),
-    (first_person(turns=[{"action": ""}]), {}, "unknown action"),
+    (first_person(turns=[_turn(action="jump")]), {}, "turn 1: action must be one of"),
+    (first_person(turns=[_turn(action="W+S")]), {}, "turn 1: action must be one of"),
+    (first_person(turns=[_turn(action="w")]), {}, "turn 1: action must be one of"),
+    (first_person(turns=[{"perspective": FP}]), {}, "turn 1: action must be one of"),
     (first_person(turns=[]), {}, "turns"),
-    (first_person(turns=[{"action": "W"}] * 10), {}, "at most 9 turns"),
-    (first_person(), {"rounds_per_turn": 0}, "rounds_per_turn"),
-    (first_person(), {"rounds_per_turn": 4}, "rounds_per_turn"),
+    (first_person(turns=[_turn()] * 10), {}, "at most 9 turns"),
+    (first_person(turns=[{"action": "W"}]), {}, "turn 1: perspective must be one of"),
+    (first_person(turns=[_turn(perspective="top_down")]), {}, "turn 1: perspective must be one of"),
+    (first_person(turns=[_turn(), _turn(perspective=TP)]), {}, "turn 2 switches the perspective, so its action must be stop"),
+    (first_person(turns=[_turn(event=" ")]), {}, "turn 1: event must be one sentence"),
+    (first_person(turns=[_turn(subject_action="waves")]), {}, "subject_action is not a field of a turn"),
+    (first_person(turns=[_turn(viewpoint_change="fp_to_tp")]), {}, "viewpoint_change is not a field of a turn"),
     (third_person(subject_mask="mask.txt"), {}, "subject_mask"),
-    (first_person(viewpoint="top_down"), {}, "viewpoint"),
-    (first_person(viewpoint_prompt="from above"), {}, "viewpoint_prompt is not a field of an item"),
+    (first_person(viewpoint="first_person"), {}, "viewpoint is not a field of an item"),
     (first_person(scene_prompt=""), {}, "scene_prompt"),
     (first_person(image="frame.txt"), {}, "image"),
-    (first_person(turns=[{"action": "W", "camera": "fly"}]), {}, "camera"),
-    (first_person(), {"seed": "x"}, "seed"),
+    ({k: v for k, v in first_person().items() if k != "seed"}, {}, "seed"),
+    (first_person(seed="x"), {}, "seed"),
 ])
 def test_submit_refuses(env, item, params, match):
     q, caller, _, _ = env
@@ -206,13 +222,15 @@ def test_submit_refuses(env, item, params, match):
         submit(q, caller, [item], **params)
 
 
-def test_submit_accepts_every_action_and_fills_defaults(tmp_path):
+def test_every_listed_action_is_accepted(tmp_path):
+    from ar_kernel.data.annotation import ACTIONS
     rec = Recorder(tmp_path / "run")
     b = AlayaWorldBackend(small_cfg(), tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
-    actions = ["W", "S", "A", "D", "left", "right", "up", "down", "stop", "W+left", "S+D", "W+down", "w"]
-    args = {"items": [first_person(turns=[{"action": a}]) for a in actions]}
+    for action in ACTIONS:
+        b.check_item(first_person(turns=[_turn(action=action)]))
+    args = {"items": []}
     b.check_args(args)
-    assert (args["rounds_per_turn"], args["seed"]) == (3, 42) and "variant" not in args
+    assert args == {"items": []}                      # no job-wide parameter is filled in
 
 
 def test_limits_come_from_the_generator_config_block(tmp_path):
@@ -222,29 +240,21 @@ def test_limits_come_from_the_generator_config_block(tmp_path):
     assert (b.timeout_s, b.max_turns) == (a["timeout_s"], a["max_turns"])
 
 
-# ---- finish: trim to the per_chunk grid, poses, segments ----
+# ---- finish: the whole clip, the commanded camera, the annotation ----
 
-def _render_output(out, i, *, rounds, cpt, prompts, first=1):
-    """What produce leaves in out/ for one case: the input frame, then round r = mp4 frames
-    [first + 32r, first + 32r + 32) with first = 1, and nominal turn_segments (as WorldModel
-    writes them, ignoring `first`)."""
-    frames = first + rounds * 32
+def _render_output(out, i, *, turns, extra=0):
+    """What produce leaves in out/ for one case: the input frame, then 96 frames per turn."""
+    frames = 1 + rollouts.TURN_FRAMES * turns + extra
     make_mp4(out / f"{i}.mp4", seconds=frames / 24, fps=24, width=960, height=544)
     c2w = np.tile(np.eye(4), (frames, 1, 1))
-    c2w[:, 0, 3] = np.arange(frames) * 0.02
+    c2w[:, 0, 3] = 3.0 + np.arange(frames) * 0.02
     np.savez(out / f"{i}.camera.npz", cam_c2w=c2w.astype(np.float32))
-    segs = [{"turn_index": t, "action": "W", "chunk_start": t * cpt, "chunk_end_exclusive": (t + 1) * cpt,
-             "chunk_count": cpt, "frame_start": t * cpt * 32, "frame_end_exclusive": min(frames, (t + 1) * cpt * 32),
-             "frame_count": min(frames, (t + 1) * cpt * 32) - t * cpt * 32} for t in range(rounds // cpt)]
-    (out / f"{i}.sidecar.json").write_text(json.dumps({
-        "actions": ["W"] * (rounds // cpt), "turn_segments": segs, "output_rounds": rounds, "num_frames": frames,
-        "prompt_schedule": [{"round": r, "turn": r // cpt, "prompt": prompts[r // cpt]} for r in range(rounds)]}))
     (out / f"{i}.json").write_text(json.dumps({"ok": True}))
     return frames
 
 
 def _job(**args):
-    return type("Job", (), {"id": "j1", "node": "n1", "args": {"seed": 42, **args}})()
+    return type("Job", (), {"id": "j1", "node": "n1", "args": args})()
 
 
 def _backend(tmp_path):
@@ -252,92 +262,59 @@ def _backend(tmp_path):
     return AlayaWorldBackend(small_cfg(), tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
 
 
-def _check_boundaries(segments, frames):
-    assert segments[0]["time_range_s"][0] == 0.0
-    assert abs(segments[-1]["time_range_s"][1] * 24 - frames) < 1e-6
-    for a, b in zip(segments, segments[1:]):
-        t = a["time_range_s"][1]
-        assert t == b["time_range_s"][0]
-        k = round((t * 24 - 25) / 32)
-        assert abs(t * 24 - (25 + 32 * k)) <= 0.5, t
-
-
-@pytest.mark.parametrize("cpt, prompts, first, trim", [
-    (3, ["walk", "walk and rain"], 1, 8),       # the input frame and 7 generated frames are trimmed
-    (1, ["a", "b", "c"], 1, 8),
-])
-def test_finish_puts_round_boundaries_on_the_grid(tmp_path, cpt, prompts, first, trim):
+def test_finish_publishes_the_whole_clip_with_exact_turn_starts(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
-    rounds = len(prompts) * cpt
-    frames = _render_output(out, 0, rounds=rounds, cpt=cpt, prompts=prompts, first=first)
-    res = _backend(tmp_path).finish(_job(rounds_per_turn=cpt), {"index": 0}, out)
-    assert res["trim"] == trim and res["frames"] == frames - trim
-    from ar_kernel.data.probe import probe_video
-    assert probe_video(res["video"]).frames == frames - trim
-    assert "pose" not in res and "camera_motion" not in res      # commanded path is metadata only
+    item = {"index": 0, **third_person(turns=[
+        {"action": "W", "perspective": TP}, {"action": "stop", "event": "A goat climbs onto the rock.", "perspective": TP},
+        {"action": "stop", "perspective": FP}])}
+    frames = _render_output(out, 0, turns=3)
+    res = _backend(tmp_path).finish(_job(), item, out)
+    assert res["video"] == out / "0.mp4" and res["frames"] == frames == 289       # nothing is trimmed
+    assert res["actions"] == ["W", "stop", "stop"]
+    assert json.loads(Path(res["annotation"]).read_text()) == {
+        "scene_prompt": "A mountain trail above a valley.", "character_prompt": "A hiker in a red jacket.",
+        "turns": [{"start_s": 0.0, "perspective": TP},
+                  {"start_s": 97 / 24, "event": "A goat climbs onto the rock.", "perspective": TP},
+                  {"start_s": 193 / 24, "perspective": FP}]}
     with np.load(res["commanded_camera"]) as z:
-        c2w = z["cam_c2w"]
-    assert len(c2w) == frames - trim and np.allclose(c2w[0], np.eye(4))
-    assert np.allclose(c2w[:, 0, 3], np.arange(frames - trim) * 0.02, atol=1e-5)   # saved[trim:], re-based
-    cap = json.loads(Path(res["caption"]).read_text())
-    assert cap["caption"] == prompts[0]
-    assert [s["prompt"] for s in cap["segments"]] == prompts                     # one per turn, merged
-    _check_boundaries(cap["segments"], frames - trim)
-    assert res["actions"] == ["W"] * len(prompts)
-    # turn_segments come back in published-clip frames, on the same grid
-    starts = [t["frame_start"] for t in res["turn_segments"]]
-    assert starts[0] == 0 and all((f - 25) % 32 == 0 for f in starts[1:])
-    assert res["turn_segments"][-1]["frame_end_exclusive"] == frames - trim
+        assert len(z["cam_c2w"]) == frames and np.allclose(z["cam_c2w"][0], np.eye(4))      # relative to frame 0
 
 
-def test_finish_refuses_a_frame_count_off_the_round_layout(tmp_path):
+def test_finish_refuses_a_frame_count_off_the_turn_layout(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
-    _render_output(out, 0, rounds=3, cpt=3, prompts=["a"])
-    side = json.loads((out / "0.sidecar.json").read_text())
-    (out / "0.sidecar.json").write_text(json.dumps({**side, "output_rounds": 5}))
-    with pytest.raises(ValueError, match="5 rounds"):
-        _backend(tmp_path).finish(_job(rounds_per_turn=3), {"index": 0}, out)
-
-
-def test_finish_merges_equal_prompts_and_keeps_changes_on_round_boundaries(tmp_path):
-    out = tmp_path / "out"
-    out.mkdir()
-    frames = _render_output(out, 0, rounds=4, cpt=1, prompts=["a", "a", "b", "a"])
-    res = _backend(tmp_path).finish(_job(rounds_per_turn=1), {"index": 0}, out)
-    segs = json.loads(Path(res["caption"]).read_text())["segments"]
-    assert [s["prompt"] for s in segs] == ["a", "b", "a"]
-    assert [round(s["time_range_s"][0] * 24) for s in segs] == [0, 57, 89]
-    _check_boundaries(segs, frames - res["trim"])
+    _render_output(out, 0, turns=2, extra=3)
+    with pytest.raises(ValueError, match="196 frames for 2 turns of 96"):
+        _backend(tmp_path).finish(_job(), {"index": 0, **first_person()}, out)
 
 
 def test_finish_refuses_a_camera_path_of_the_wrong_length(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
-    _render_output(out, 0, rounds=3, cpt=3, prompts=["a"])
-    np.savez(out / "0.camera.npz", cam_c2w=np.tile(np.eye(4), (95, 1, 1)))
-    with pytest.raises(ValueError, match="95 frames"):
-        _backend(tmp_path).finish(_job(rounds_per_turn=3), {"index": 0}, out)
+    frames = _render_output(out, 0, turns=2)
+    np.savez(out / "0.camera.npz", cam_c2w=np.tile(np.eye(4, dtype=np.float32), (frames - 1, 1, 1)))
+    with pytest.raises(ValueError, match="camera path has 192 frames, the video 193"):
+        _backend(tmp_path).finish(_job(), {"index": 0, **first_person()}, out)
 
 
-def test_finished_candidate_passes_the_real_ingestor_as_per_chunk(tmp_path):
-    from ar_kernel.archive.db import open_db
+def test_finished_candidate_passes_the_real_ingestor(tmp_path):
     from ar_kernel.data.ingest import Candidate, Ingestor
-    run_dir = tmp_path / "run"
-    out = run_dir / "staging" / "rollouts"          # ingest only takes files staged under the run
-    out.mkdir(parents=True)
-    _render_output(out, 0, rounds=6, cpt=3, prompts=["A forest trail.", "A forest trail. Rain starts."])
-    res = _backend(tmp_path).finish(_job(rounds_per_turn=3), {"index": 0}, out)
-    # the agent's next step: annotate_camera gives a ViGeo-shaped pose, one per published frame
     from tests.conftest import write_poses
+    run_dir = tmp_path / "run"
+    out = run_dir / "staging" / "rollouts"
+    out.mkdir(parents=True)
+    _render_output(out, 0, turns=2)
+    res = _backend(tmp_path).finish(_job(), {"index": 0, **first_person()}, out)
     pose = write_poses(out / "vigeo.npz", n_frames=res["frames"], width=960, height=544)
     ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
-    [r] = ing.ingest([Candidate(video=Path(res["video"]), caption=Path(res["caption"]), pose=pose,
-                                camera_motion="moving", provenance={"kind": "rollout", "generator": "alayaworld-ar30",
-                                "job_id": "j1", "inputs_hash": "x", "seed": 42})], node_id="n1")
+    [r] = ing.ingest([Candidate(video=Path(res["video"]), annotation=Path(res["annotation"]), pose=pose,
+                                derived_from={"kind": "model", "name": "alayaworld-ar30"})], node_id="n1")
     assert r.accepted, r.reasons
-    assert "video_timed_prompts_camera:per_chunk" in r.formats
+    caption = json.loads(ing.blobs.path(ing.clips.get(r.clip_id)["caption_digest"], "caption").read_text())
+    base = "A wet city street at night with neon signs."
+    assert caption["segments"] == [{"time_range_s": [0.0, 97 / 24], "prompt": base},
+                                   {"time_range_s": [97 / 24, 193 / 24], "prompt": f"{base} It starts to rain heavily."}]
 
 
 # ---- the real produce/run_workers/_collect with the fake worker ----
@@ -350,24 +327,22 @@ def run_job(q, caller, items, **params):
 
 def test_produce_renders_and_publishes_candidates(env):
     q, caller, staging, run_dir = env
-    job, by = run_job(q, caller, [first_person(), third_person()], seed=5)
+    job, by = run_job(q, caller, [first_person(), third_person()])
     for i, item in by.items():
         c = item["candidate"]
+        assert set(c) == {"video", "annotation", "commanded_camera", "derived_from", "frames", "actions"}
         assert c["video"] == f"/workspace/staging/rollouts/{job}/{i}.mp4"
-        assert c["caption"] == f"/workspace/staging/rollouts/{job}/{i}.json"
-        assert "pose" not in c and "camera_motion" not in c
+        assert c["annotation"] == f"/workspace/staging/rollouts/{job}/{i}.annotation.json"
         assert c["commanded_camera"] == f"/workspace/staging/rollouts/{job}/{i}.commanded_camera.npz"
-        assert c["license"] == REAL.get("generators.alayaworld.license")
-        assert c["provenance"]["generator"] == "alayaworld-ar30" and c["provenance"]["seed"] == 5
-        assert c["frames"] == 2 * 3 * 32 - 7
+        assert c["derived_from"] == {"kind": "model", "name": "alayaworld-ar30"}
+        assert c["frames"] == 1 + 2 * 96
         with np.load(staging / "rollouts" / job / f"{i}.commanded_camera.npz") as z:
             assert len(z["cam_c2w"]) == c["frames"]
         assert not (staging / "rollouts" / job / f"{i}.npz").exists()
-        cap = json.loads((staging / "rollouts" / job / f"{i}.json").read_text())
-        assert len(cap["segments"]) == 2
+        annotation = json.loads((staging / "rollouts" / job / f"{i}.annotation.json").read_text())
+        assert [t["start_s"] for t in annotation["turns"]] == [0.0, 97 / 24]
     assert by[0]["candidate"]["actions"] == ["W", "left"]
     assert by[1]["candidate"]["actions"] == ["W+left", "stop"]
-    assert len(by[1]["candidate"]["turn_segments"]) == 2
     assert q.status(caller, job)["progress"] == {"done": 2, "total": 2}
     work = run_dir / "jobs" / job
     wb = json.loads((work / "fake_wbench.json").read_text())
@@ -377,7 +352,7 @@ def test_produce_renders_and_publishes_candidates(env):
     pre = json.loads((work / "fake_precache.json").read_text())
     assert pre["gpus"] == "0,1" and pre["gemma"] and "--device-map" in pre["argv"]
     cfg = yaml.safe_load((work / "render_config.yaml").read_text())
-    assert cfg["run"]["seed"] == 5 and cfg["runtime"]["text_embed_cache_dir"] == str(run_dir / "cache" / "text_embed")
+    assert cfg["runtime"]["text_embed_cache_dir"] == str(run_dir / "cache" / "text_embed")
     assert not (work / "data").exists() and not (work / "videos").exists()
 
 
@@ -392,14 +367,6 @@ def test_precache_is_charged_to_the_job_timeout(env):
     assert out["state"] == "failed" and "timed out" in out["error"], out
     assert time.monotonic() - t0 < 30
     assert not (run_dir / "jobs" / job / "fake_wbench.json").exists()        # never reached the render
-
-
-def test_rounds_per_turn_1_gives_a_segment_per_round(env):
-    q, caller, staging, _ = env
-    job, by = run_job(q, caller, [third_person()], rounds_per_turn=1)
-    assert by[0]["candidate"]["frames"] == 2 * 32 - 7
-    cap = json.loads((staging / "rollouts" / job / "0.json").read_text())
-    assert len(cap["segments"]) == 2 and cap["segments"][1]["time_range_s"][0] * 24 == pytest.approx(25)
 
 
 def test_a_case_without_video_fails_alone(env):
@@ -433,7 +400,7 @@ def test_an_image_changed_after_submit_fails_only_its_own_item(env):
     q, caller, staging, run_dir = env
     Image.new("RGB", (1024, 576), (1, 2, 3)).save(staging.parent / "ws" / "other.png")
     job = SimpleNamespace(id="j1", token=caller.token, node="n1", args={
-        "items": [first_person(image="other.png"), first_person()], "rounds_per_turn": 3, "seed": 42})
+        "items": [first_person(image="other.png"), first_person()]})
     out = q.backends["rollout_alayaworld"].run(job, threading.Event(), lambda progress: None)
     assert out["items"][0]["error"].startswith("input: image is 1024x576, but the job renders 960x544")
     assert "candidate" in out["items"][1]
@@ -441,8 +408,8 @@ def test_an_image_changed_after_submit_fails_only_its_own_item(env):
 
 def test_a_job_renders_with_the_ar_teacher(env):
     q, caller, _, run_dir = env
-    job, by = run_job(q, caller, [first_person(turns=[{"action": "W"}])])
-    assert by[0]["candidate"]["provenance"]["generator"] == "alayaworld-ar30"
+    job, by = run_job(q, caller, [first_person(turns=[_turn()])])
+    assert by[0]["candidate"]["derived_from"]["name"] == "alayaworld-ar30"
     cfg = yaml.safe_load((run_dir / "jobs" / job / "render_config.yaml").read_text())
     assert cfg["validation"]["sampling_steps"] == 30 and cfg["paths"]["dmd_resume"] is None
 
@@ -450,7 +417,7 @@ def test_a_job_renders_with_the_ar_teacher(env):
 # ---- a node's fine-tune ----
 
 def test_render_config_with_a_node_adds_its_lora_and_history_encoder(tmp_path):
-    kw = dict(rounds_per_turn=3, seed=1, indices=[0], work=tmp_path, text_cache=tmp_path / "te")
+    kw = dict(indices=[0], work=tmp_path, text_cache=tmp_path / "te")
     node = dict(node_lora=tmp_path / "lora", node_rank=32, history_encoder=tmp_path / "ckpt" / "history_encoder.pt")
     plain, tuned = (_flat(render_config(REAL, **kw, **extra)) for extra in ({}, node))
     assert {k: tuned[k] for k in plain if plain[k] != tuned[k]} == {
@@ -486,8 +453,8 @@ def test_submit_refuses_a_node_without_a_fine_tune(env, node):
 def test_a_node_job_renders_with_the_nodes_fine_tune(env):
     q, caller, _, run_dir = env
     checkpoint = _scored_node(run_dir)
-    job, by = run_job(q, caller, [first_person(turns=[{"action": "W"}])], node="n2")
-    assert by[0]["candidate"]["provenance"]["generator"] == "alayaworld-ar30@n2"
+    job, by = run_job(q, caller, [first_person(turns=[_turn()])], node="n2")
+    assert by[0]["candidate"]["derived_from"] == {"kind": "model", "name": "alayaworld-ar30@n2"}
     cfg = yaml.safe_load((run_dir / "jobs" / job / "render_config.yaml").read_text())
     assert cfg["paths"]["dmd_resume"] == str(checkpoint) and cfg["lora"]["rank"] == 32
     assert cfg["paths"]["history_encoder"] == str(checkpoint / "history_encoder.pt")
@@ -527,6 +494,27 @@ def _wait(q, caller, job_id):
     return out
 
 
+def _ingest_as_an_agent(q, caller, ing, staging, candidate, name):
+    """What an agent does with an LTX or Wan clip: bring it to 960x544, measure the camera on the
+    result, write the annotation from the prompt, ingest."""
+    import subprocess
+    from ar_kernel.data.ingest import Candidate
+    host = lambda p: staging / Path(p).relative_to("/workspace/staging")
+    stage = staging / "ingest" / name
+    stage.mkdir(parents=True)
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(host(candidate["video"])), "-vf", "scale=960:544",
+                    "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p", str(stage / "v.mp4")], check=True)
+    ann = _wait(q, caller, q.backends["annotate_camera"].submit(
+        q, caller, {"items": [{"video": f"/workspace/staging/ingest/{name}/v.mp4"}]})["job_id"])
+    assert ann["state"] == "done", ann.get("error")
+    pose = job_result(ann)["items"][0]
+    assert "error" not in pose, pose
+    (stage / "a.json").write_text(json.dumps({"scene_prompt": candidate["prompt"], "turns": [{"start_s": 0.0}]}))
+    [res] = ing.ingest([Candidate(video=stage / "v.mp4", annotation=stage / "a.json", pose=host(pose["pose"]),
+                                  derived_from=candidate["derived_from"])], node_id="gpu")
+    return res
+
+
 def _peak_sampler(gpus):
     """Peak nvidia-smi memory per GPU while the job runs (the worker's own peak is not visible
     through run_wbench)."""
@@ -553,8 +541,8 @@ def test_real_alayaworld_rollout(tmp_path):
     """AR_TEST_GPUS=0,1,2,3 pytest tests/test_rollouts.py -m gpu -s --basetemp=.cache/pytest/gpu
 
     First person: frame 0 of an example clip. Third person: a generate_images (Z-Image) frame with a
-    hand-drawn mask (the tools chain). The candidates carry no pose; each must ingest as per_chunk
-    with the pose annotate_camera (ViGeo) gives it. Agreement with the commanded camera path is
+    hand-drawn mask (the tools chain). The candidates carry no pose; each must ingest with its
+    annotation and the pose annotate_camera (ViGeo) gives it. Agreement with the commanded camera path is
     printed as a diagnostic only."""
     import os
     import shutil
@@ -591,23 +579,23 @@ def test_real_alayaworld_rollout(tmp_path):
         assert img["state"] == "done", img.get("error")
         hiker = job_result(img)["items"][0]["image"]
         items = [
-            {"image": "street.png", "viewpoint": "first_person",
+            {"image": "street.png", "seed": 42,
              "scene_prompt": "A rainy city street lined with parked cars and trees, wet asphalt reflecting "
                                    "the grey daylight, apartment blocks in the distance.",
-             "turns": [{"action": "W", "event": "A red umbrella blows across the street in the wind."},
-                       {"action": "left", "subject_action": "A cyclist in a yellow raincoat rides past."}]},
-            {"image": hiker, "subject_mask": "hiker_mask.png", "viewpoint": "third_person",
+             "turns": [{"action": "W", "event": "A red umbrella blows across the street in the wind.", "perspective": FP},
+                       {"action": "left", "event": "A cyclist in a yellow raincoat rides past.", "perspective": FP}]},
+            {"image": hiker, "subject_mask": "hiker_mask.png", "seed": 42,
              "scene_prompt": "A narrow dirt trail along a green mountain ridge above a wide valley, "
                                    "distant peaks under a clear afternoon sky.",
              "character_prompt": "A hiker in a bright red jacket and grey backpack.",
-             "turns": [{"action": "W", "subject_action": "The hiker raises the right arm and waves."},
-                       {"action": "right", "event": "Low clouds roll over the ridge."}]},
+             "turns": [{"action": "W", "event": "The hiker raises the right arm and waves.", "perspective": TP},
+                       {"action": "right", "event": "Low clouds roll over the ridge.", "perspective": TP}]},
         ]
         peak, stop = _peak_sampler(gpus)
         t0 = time.monotonic()
         try:
             out = _wait(q, caller, q.backends["rollout_alayaworld"].submit(
-                q, caller, {"items": items, "seed": 42})["job_id"])
+                q, caller, {"items": items})["job_id"])
         finally:
             stop.set()
         wall = time.monotonic() - t0
@@ -623,7 +611,7 @@ def test_real_alayaworld_rollout(tmp_path):
     ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
     rows, failures = [], []
     for i, c in enumerate(cands):
-        assert "pose" not in c and "camera_motion" not in c, c
+        assert "pose" not in c, c
         a = job_result(ann)["items"][i]
         assert "error" not in a, a
         with np.load(host(a["pose"])) as z:
@@ -640,23 +628,16 @@ def test_real_alayaworld_rollout(tmp_path):
         path = float(np.linalg.norm(np.diff(cmd[:, :3, 3], axis=0), axis=1).sum())
         ate = _umeyama_ate(est[:, :3, 3], cmd[:, :3, 3]) / path if path > 0 else None
         heading = lambda m: round(float(np.degrees(np.arctan2(m[-1, 0, 2], m[-1, 2, 2]))), 1)
-        # the agent's route: ViGeo's pose + camera_motion 'moving' (copies: ingest moves files)
-        stage = staging / "ingest" / str(i)
-        stage.mkdir(parents=True)
-        shutil.copy(host(c["video"]), stage / "v.mp4")
-        shutil.copy(host(c["caption"]), stage / "c.json")
-        shutil.copy(host(a["pose"]), stage / "p.npz")
-        [res] = ing.ingest([Candidate(video=stage / "v.mp4", caption=stage / "c.json", pose=stage / "p.npz",
-                                      camera_motion="moving", provenance=c["provenance"], license=c["license"])],
-                           node_id="gpu")
-        caption = json.loads(host(c["caption"]).read_text())
-        rows.append({"item": i, "frames": c["frames"], "trim": c["trim"],
+        # the agent's route: the published annotation with ViGeo's pose
+        [res] = ing.ingest([Candidate(video=host(c["video"]), annotation=host(c["annotation"]), pose=host(a["pose"]),
+                                      derived_from=c["derived_from"])], node_id="gpu")
+        annotation = json.loads(host(c["annotation"]).read_text())
+        rows.append({"item": i, "frames": c["frames"], "cut": a["cut"],
                      "diag_vs_commanded": {"rot_err_deg": round(rot, 4), "ate_frac": ate and round(ate, 4),
                                            "heading_deg_commanded_vs_vigeo": [heading(cmd), heading(est)]},
-                     "segments": [[round(t * 24, 2) for t in s["time_range_s"]] for s in caption["segments"]],
-                     "ingest_formats": res.formats, "ingest_reasons": res.reasons,
-                     "generator": c["provenance"]["generator"]})
-        if not (res.accepted and "video_timed_prompts_camera:per_chunk" in res.formats):
+                     "turn_starts": [round(t["start_s"] * 24) for t in annotation["turns"]],
+                     "ingest_reasons": res.reasons, "derived_from": c["derived_from"]})
+        if not res.accepted:
             failures.append(f"{i}: ingest {res.reasons}")
     print(json.dumps({"gpus": gpus, "wall_s": round(wall, 1), "peak_mib": peak,
                       "gpu_memory_mib": job_result(out)["gpu_memory_mib"], "rows": rows}, indent=1))
@@ -694,19 +675,19 @@ def test_real_alayaworld_rollout_of_a_node(tmp_path):
     q = JobQueue(rec, threading.Lock(), wait_cap_s=3600)
     q.register(AlayaWorldBackend(cfg, run_dir, gpus, reg, rec))
     caller = reg.issue(node="gpu", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
-    item = {"image": "street.png", "viewpoint": "first_person",
+    item = {"image": "street.png", "seed": 42,
             "scene_prompt": "A rainy city street lined with parked cars and trees.",
-            "turns": [{"action": "W"}]}
+            "turns": [{"action": "W", "perspective": FP}]}
     frames = {}
     try:
         for node in (None, "n2"):
-            args = {"items": [dict(item)], "seed": 42, "rounds_per_turn": 1}
+            args = {"items": [dict(item)]}
             out = _wait(q, caller, q.backends["rollout_alayaworld"].submit(
                 q, caller, args if node is None else {**args, "node": node})["job_id"])
             assert out["state"] == "done", out.get("error")
             [got] = job_result(out)["items"]
             assert "candidate" in got, got
-            assert got["candidate"]["provenance"]["generator"] == "alayaworld-ar30" + (f"@{node}" if node else "")
+            assert got["candidate"]["derived_from"]["name"] == "alayaworld-ar30" + (f"@{node}" if node else "")
             assert job_result(out)["gpu_memory_released"] is True
             assert not (run_dir / "jobs" / out["id"] / "eval").exists()
             video = staging / Path(got["candidate"]["video"]).relative_to("/workspace/staging")
@@ -788,7 +769,7 @@ def test_wan_limits_come_from_the_generator_config_block(tmp_path):
     assert b.timeout_s == w["timeout_s"]
 
 
-def test_wan_produces_and_publishes_a_cropped_candidate_with_no_pose_or_camera_motion(wan_env):
+def test_wan_produces_and_publishes_a_cropped_candidate_with_its_prompt(wan_env):
     q, caller, staging = wan_env
     prompts = ["a walk in the woods", "a hiker on a ridge"]
     job, by = run_wan(q, caller, [{"prompt": prompts[0], "seed": 1},
@@ -796,14 +777,11 @@ def test_wan_produces_and_publishes_a_cropped_candidate_with_no_pose_or_camera_m
     for i, item in by.items():
         c = item["candidate"]
         assert c["video"] == f"/workspace/staging/rollouts/{job}/{i}.mp4"
-        assert c["caption"] == f"/workspace/staging/rollouts/{job}/{i}.json"
-        assert "pose" not in c and "camera_motion" not in c
-        assert c["provenance"]["generator"] == "wan2.2-ti2v-5b" and c["provenance"]["seed"] == i + 1
-        assert c["license"] == REAL.get("generators.wan22.license")
+        assert set(c) == {"video", "prompt", "frames", "derived_from"}          # no annotation and no pose
+        assert c["prompt"] == prompts[i] and c["derived_from"] == {"kind": "model", "name": "wan2.2-ti2v-5b"}
         info = probe_video(staging / "rollouts" / job / f"{i}.mp4")
         assert (info.width, info.height) == (1248, 704) and round(info.fps) == 24
-        cap = json.loads((staging / "rollouts" / job / f"{i}.json").read_text())
-        assert cap == {"caption": prompts[i]}
+        assert not list((staging / "rollouts" / job).glob("*.json"))
     assert by[1]["worker"]["image"].endswith("_image.png")     # the staged copy, not the workspace path
     assert by[0]["worker"]["image"] is None
 
@@ -921,7 +899,7 @@ def test_finish_refuses_a_render_off_the_1280x704_working_size(tmp_path):
         _wan_backend(tmp_path).finish(None, {"index": 0, "prompt": "p"}, out)
 
 
-def test_finish_crops_to_1248x704_and_writes_the_prompt_caption(tmp_path):
+def test_finish_crops_to_1248x704_and_passes_the_prompt_on(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
     make_mp4(out / "0.mp4", seconds=2, fps=24, width=1280, height=704)
@@ -929,7 +907,7 @@ def test_finish_crops_to_1248x704_and_writes_the_prompt_caption(tmp_path):
     info = probe_video(res["video"])
     assert (info.width, info.height) == (1248, 704) and round(info.fps) == 24
     assert res["frames"] == info.frames
-    assert json.loads(Path(res["caption"]).read_text()) == {"caption": "hello there"}
+    assert res["prompt"] == "hello there" and set(res) == {"video", "prompt", "frames"}
 
 
 # ---- real Wan 2.2 TI2V-5B gpu smoke ----
@@ -939,9 +917,8 @@ def test_real_wan22_rollout(tmp_path):
     """AR_TEST_GPUS=0,1,2,3 pytest tests/test_rollouts.py -m gpu -k wan22 -s --basetemp=.cache/pytest/gpu
 
     2 T2V + 2 I2V items, one worker per GPU in AR_TEST_GPUS (frames = the configured default). The I2V
-    item's image is a generate_images (Z-Image) frame -- the tools chain. Each candidate then
-    ingests as video_caption_static (camera_motion: static), and one of them, after
-    annotate_camera, ingests as video_caption_camera (camera_motion: moving)."""
+    item's image is a generate_images (Z-Image) frame -- the tools chain. One candidate then goes
+    the agent's route into the pool (_ingest_as_an_agent)."""
     import os
     import shutil
     import time
@@ -985,37 +962,10 @@ def test_real_wan22_rollout(tmp_path):
         assert all("candidate" in by[i] for i in range(4)), by
         cands = [by[i]["candidate"] for i in range(4)]
         ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
-        static_rows, failures = [], []
-        for i, c in enumerate(cands):
-            stage = staging / "ingest" / f"static{i}"
-            stage.mkdir(parents=True)
-            shutil.copy(host(c["video"]), stage / "v.mp4")
-            shutil.copy(host(c["caption"]), stage / "c.json")
-            [res] = ing.ingest([Candidate(video=stage / "v.mp4", caption=stage / "c.json", pose=None,
-                                          camera_motion="static", provenance=c["provenance"],
-                                          license=c["license"])], node_id="gpu")
-            static_rows.append({"item": i, "frames": c["frames"], "worker": by[i]["worker"],
-                                "accepted": res.accepted, "formats": res.formats, "reasons": res.reasons})
-            if not (res.accepted and "video_caption_static" in res.formats):
-                failures.append(f"static {i}: {res.reasons}")
-        # one candidate through annotate_camera -> moving -> video_caption_camera
-        ann = _wait(q, caller, q.backends["annotate_camera"].submit(
-            q, caller, {"items": [{"video": cands[0]["video"]}]})["job_id"])
-        assert ann["state"] == "done", ann.get("error")
-        a = job_result(ann)["items"][0]
-        assert "error" not in a, a
-        stage = staging / "ingest" / "moving0"
-        stage.mkdir(parents=True)
-        shutil.copy(host(cands[0]["video"]), stage / "v.mp4")
-        shutil.copy(host(cands[0]["caption"]), stage / "c.json")
-        shutil.copy(host(a["pose"]), stage / "p.npz")
-        [mres] = ing.ingest([Candidate(video=stage / "v.mp4", caption=stage / "c.json", pose=stage / "p.npz",
-                                       camera_motion="moving", provenance=cands[0]["provenance"],
-                                       license=cands[0]["license"])], node_id="gpu")
-        if not (mres.accepted and "video_caption_camera" in mres.formats):
-            failures.append(f"moving 0: {mres.reasons}")
+        res = _ingest_as_an_agent(q, caller, ing, staging, cands[0], "wan0")
+        failures = [] if res.accepted else [f"ingest: {res.reasons}"]
         print(json.dumps({"gpus": gpus, "wall_s": round(wall, 1), "gpu_memory_mib": job_result(out)["gpu_memory_mib"],
-                          "static_rows": static_rows, "moving_formats": mres.formats}, indent=1))
+                          "workers": [by[i]["worker"] for i in range(4)]}, indent=1))
     finally:
         q.shutdown()
     assert job_result(out)["gpu_memory_released"] is True
@@ -1127,7 +1077,7 @@ def test_ltx_limits_come_from_the_generator_config_block(tmp_path):
     assert b.timeout_s == blk["timeout_s"]
 
 
-def test_ltx_produces_and_publishes_a_silent_24fps_candidate_with_no_pose_or_camera_motion(ltx_env):
+def test_ltx_produces_and_publishes_a_silent_24fps_candidate_with_its_prompt(ltx_env):
     make, caller, staging = ltx_env
     q = make()
     prompts = ["a walk in the woods", "a hiker on a ridge"]
@@ -1137,10 +1087,8 @@ def test_ltx_produces_and_publishes_a_silent_24fps_candidate_with_no_pose_or_cam
     for i, item in by.items():
         c = item["candidate"]
         assert c["video"] == f"/workspace/staging/rollouts/{job}/{i}.mp4"
-        assert c["caption"] == f"/workspace/staging/rollouts/{job}/{i}.json"
-        assert "pose" not in c and "camera_motion" not in c
-        assert c["provenance"]["generator"] == "ltx-2.5-distilled" and c["provenance"]["seed"] == i + 1
-        assert c["license"] == "LTX-2 Community License"
+        assert set(c) == {"video", "prompt", "frames", "derived_from"}          # no annotation and no pose
+        assert c["prompt"] == prompts[i] and c["derived_from"] == {"kind": "model", "name": "ltx-2.5-distilled"}
         path = staging / "rollouts" / job / f"{i}.mp4"
         info = probe_video(path)
         assert (info.width, info.height, info.frames) == (w, h, default) and round(info.fps) == 24
@@ -1148,7 +1096,7 @@ def test_ltx_produces_and_publishes_a_silent_24fps_candidate_with_no_pose_or_cam
         streams = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0",
                                   str(path)], capture_output=True, text=True, check=True).stdout.split()
         assert streams == ["video"]                      # the fake's audio track is stripped
-        assert json.loads((staging / "rollouts" / job / f"{i}.json").read_text()) == {"caption": prompts[i]}
+        assert not list((staging / "rollouts" / job).glob("*.json"))
         wk = item["worker"]
         assert wk["weights"] == str(REAL.repo_root / REAL.get("generators.ltx25.weights"))
         assert (wk["variant"], wk["quantization"], wk["offload"]) == ("distilled", "fp8-cast", "cpu")
@@ -1188,7 +1136,7 @@ def test_ltx_dev_job_is_named_after_its_variant(ltx_env):
     make, caller, _ = ltx_env
     q = make()
     _, by = run_ltx(q, caller, [{"prompt": "p", "seed": 1}], variant="dev", frames=9)
-    assert by[0]["candidate"]["provenance"]["generator"] == "ltx-2.5-dev"
+    assert by[0]["candidate"]["derived_from"]["name"] == "ltx-2.5-dev"
     assert by[0]["worker"]["variant"] == "dev" and by[0]["worker"]["frames"] == 9
 
 
@@ -1302,21 +1250,13 @@ def test_ltx_finish_refuses_a_render_off_the_requested_size(tmp_path):
         _ltx_backend(tmp_path).finish(_ltx_job(), {"index": 0, "prompt": "p"}, out)
 
 
-def test_ltx_finished_candidate_passes_the_real_ingestor_as_static(tmp_path):
-    from ar_kernel.archive.db import open_db
-    from ar_kernel.data.ingest import Candidate, Ingestor
-    run_dir = tmp_path / "run"
-    out = run_dir / "staging" / "rollouts"
-    out.mkdir(parents=True)
+def test_ltx_finish_passes_the_prompt_on(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
     make_mp4(out / "0.mp4", seconds=121 / 24, fps=24, width=1024, height=576)
     frames = probe_video(out / "0.mp4").frames
     res = _ltx_backend(tmp_path).finish(_ltx_job(frames=frames), {"index": 0, "prompt": "A quiet forest path at dawn."}, out)
-    ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
-    [r] = ing.ingest([Candidate(video=Path(res["video"]), caption=Path(res["caption"]), pose=None,
-                                camera_motion="static", provenance={"kind": "rollout", "generator": "ltx-2.5-distilled",
-                                "job_id": "j1", "inputs_hash": "x", "seed": 1})], node_id="n1")
-    assert r.accepted, r.reasons
-    assert "video_caption_static" in r.formats
+    assert res["prompt"] == "A quiet forest path at dawn." and set(res) == {"video", "prompt", "frames"}
 
 
 # ---- real LTX-2.5 gpu smoke ----
@@ -1329,12 +1269,14 @@ def test_real_ltx25_rollout(tmp_path, variant):
     Per enabled variant: 2 T2V items, one with a first keyframe and one with first and last
     keyframes (default frames and size; four, so four workers run at once when the host-RAM rule
     allows), workers per that rule over AR_TEST_GPUS. The keyframes are generate_images (Z-Image)
-    frames -- the tools chain. Each candidate must ingest as video_caption_static (camera_motion: static)."""
+    frames -- the tools chain. One candidate then goes the agent's route into the pool
+    (_ingest_as_an_agent)."""
     import os
     import shutil
     import time
     from ar_kernel.archive.db import open_db
-    from ar_kernel.data.ingest import Candidate, Ingestor
+    from ar_kernel.data.ingest import Ingestor
+    from ar_kernel.tools.annotate import AnnotateBackend
     from ar_kernel.tools.images import ImageBackend
 
     if variant not in REAL.get("generators.ltx25.variants"):
@@ -1346,7 +1288,7 @@ def test_real_ltx25_rollout(tmp_path, variant):
     rec = Recorder(run_dir)
     reg = TokenRegistry(rec)
     q = JobQueue(rec, threading.Lock(), wait_cap_s=3600)
-    for b in (ImageBackend, Ltx25Backend):
+    for b in (ImageBackend, Ltx25Backend, AnnotateBackend):
         q.register(b(REAL, run_dir, gpus, reg, rec))
     caller = reg.issue(node="gpu", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
     host = lambda p: staging / Path(p).relative_to("/workspace/staging")
@@ -1372,20 +1314,10 @@ def test_real_ltx25_rollout(tmp_path, variant):
         by = {i["index"]: i for i in job_result(out)["items"]}
         assert all("candidate" in by[i] for i in range(4)), by
         ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
-        rows, failures = [], []
-        for i in range(4):
-            c = by[i]["candidate"]
-            stage = staging / "ingest" / f"static{i}"
-            stage.mkdir(parents=True)
-            shutil.copy(host(c["video"]), stage / "v.mp4")
-            shutil.copy(host(c["caption"]), stage / "c.json")
-            [res] = ing.ingest([Candidate(video=stage / "v.mp4", caption=stage / "c.json", pose=None,
-                                          camera_motion="static", provenance=c["provenance"],
-                                          license=c["license"])], node_id="gpu")
-            rows.append({"item": i, "video": c["video"], "frames": c["frames"], "worker": by[i]["worker"],
-                         "accepted": res.accepted, "formats": res.formats, "reasons": res.reasons})
-            if not (res.accepted and "video_caption_static" in res.formats):
-                failures.append(f"{i}: {res.reasons}")
+        res = _ingest_as_an_agent(q, caller, ing, staging, by[0]["candidate"], "ltx0")
+        failures = [] if res.accepted else [f"ingest: {res.reasons}"]
+        rows = [{"item": i, "video": by[i]["candidate"]["video"], "frames": by[i]["candidate"]["frames"],
+                 "worker": by[i]["worker"]} for i in range(4)]
         print(json.dumps({"variant": variant, "gpus": gpus, "wall_s": round(wall, 1), "peak_mib": peak,
                           "gpu_memory_mib": job_result(out)["gpu_memory_mib"], "rows": rows}, indent=1))
     finally:
