@@ -63,8 +63,8 @@ def decode(video: Path, width: int) -> list[Image.Image]:
     info = probe_video(video)
     height = round(info.height * width / info.width / 2) * 2
     raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(video), "-vf", f"scale={width}:{height}",
-                          "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, check=True,
-                         timeout=600).stdout
+                          "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                         capture_output=True, check=True, timeout=600).stdout
     size = width * height * 3
     return [Image.frombytes("RGB", (width, height), raw[i:i + size]) for i in range(0, len(raw) - size + 1, size)]
 

@@ -23,7 +23,8 @@ CUT_STEP_RATIO, CUT_TURN_DEG, CUT_PICTURE_RATIO, CUT_NEAR = 12.0, 10.0, 5.0, 3
 def picture_steps(video: Path) -> np.ndarray:
     """Mean absolute difference between consecutive frames, grey at 160x90."""
     raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(video), "-vf", "scale=160:90:flags=area,format=gray",
-                          "-f", "rawvideo", "-"], capture_output=True, check=True, timeout=600).stdout
+                          "-fps_mode", "passthrough", "-f", "rawvideo", "-"],      # the clip's own frames, none repeated
+                         capture_output=True, check=True, timeout=600).stdout
     grey = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 90, 160).astype(np.float32)
     return np.abs(np.diff(grey, axis=0)).mean(axis=(1, 2))
 
