@@ -376,6 +376,7 @@ def test_training_data_and_clips(run):
     got = media.clips(run, "n1", "ds1")
     [clip] = got["rows"]
     assert clip["video"] == "store/blobs/video/vd1.mp4" and clip["caption"]["caption"] == "a hallway"
+    assert clip["annotation"]["turns"] == [{"start_s": 0.0}] and clip["derived_from"] == {"kind": "dataset", "name": "org/ds"}
     assert clip["leakage"] == {"matches": [], "near": [{"case_id": "7"}]}
     assert media.training_data(run, "root")["datasets"] == []
     assert media.clip_detail(run, "nope") is None
@@ -385,6 +386,7 @@ def test_ingest_calls_and_staging(run):
     rows = media.ingest_calls(run, "n1")
     assert [(r["outcome"], r["clip_id"]) for r in rows] == [("accepted", "clip1"), ("rejected", None)]
     assert rows[1]["reasons"] == "aspect 4:3" and rows[1]["video"] == "/workspace/staging/work/v2.mp4"
+    assert rows[0]["annotation"] == "/workspace/staging/work/v1.json" and rows[0]["derived_from"] == "dataset: org/ds"
     assert rows[1]["host_video"] == "staging/n1/improve_recipe-1/work/v2.mp4"
     assert media.staging_files(run, "n1") == [{"path": "staging/n1/improve_recipe-1/work/v2.mp4", "bytes": 9}]
 

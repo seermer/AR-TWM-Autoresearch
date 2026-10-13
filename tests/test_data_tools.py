@@ -12,10 +12,9 @@ from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools.context import TokenRegistry
 from ar_kernel.tools.data_tools import DataTools
 from ar_kernel.tools.server import ToolError
-from conftest import make_mp4, write_caption, write_poses
+from conftest import DERIVED, make_mp4, staged_clip
 
 CFG = KernelConfig.load()
-PROV = {"kind": "derived", "from": [], "transform": "unit test"}
 
 
 @pytest.fixture(scope="module")
@@ -35,14 +34,10 @@ def env(tmp_path_factory):
     cands = []
     for i in range(4):
         seconds = 4.0 + 0.5 * i                      # distinct content -> distinct clips
-        d = st / f"c{i}"
-        make_mp4(d / "v.mp4", seconds=seconds)
-        write_caption(d / "c.json")
-        write_poses(d / "p.npz", n_frames=int(seconds * 30))
+        staged_clip(st / f"c{i}", seconds)
         cands.append({"video": f"/workspace/staging/c{i}/v.mp4",
-                      "caption": f"/workspace/staging/c{i}/c.json",
-                      "pose": f"/workspace/staging/c{i}/p.npz",
-                      "camera_motion": "moving", "provenance": PROV})
+                      "annotation": f"/workspace/staging/c{i}/a.json",
+                      "pose": f"/workspace/staging/c{i}/p.npz", "derived_from": DERIVED})
     (ws / "cands.json").write_text(json.dumps(cands[2:]))        # a list may also come from a file
     results = _rows(caller, tools.ingest(caller, cands[:2])) + _rows(caller, tools.ingest(caller, "cands.json"))
     return tools, caller, results, run
@@ -60,46 +55,48 @@ def test_ingest_accepts_staged_candidates_by_container_path(env):
     _, _, results, _ = env
     assert all(r["accepted"] for r in results), results
     assert len({r["clip_id"] for r in results}) == 4
-    assert all("video_caption_camera" in r["formats"] for r in results)
+    assert all(set(r) == {"index", "video", "accepted", "clip_id", "warnings", "reasons"} for r in results)
 
 
 def test_ingest_refuses_paths_outside_the_workspace(env):
     tools, caller, _, _ = env
     with pytest.raises(ToolError, match="outside /workspace"):
-        tools.ingest(caller, [{"video": "/etc/passwd", "caption": "/workspace/staging/x.json",
-                               "camera_motion": "moving", "provenance": PROV}])
+        tools.ingest(caller, [{"video": "/etc/passwd", "annotation": "/workspace/staging/x.json",
+                               "pose": "/workspace/staging/x.npz", "derived_from": DERIVED}])
 
 
 def test_ingest_rejects_a_malformed_candidate_as_a_tool_error(env):
     tools, caller, _, _ = env
-    with pytest.raises(ToolError, match="provenance"):
-        tools.ingest(caller, [{"video": "/workspace/staging/x.mp4",
-                               "caption": "/workspace/staging/x.json", "camera_motion": "moving"}])
+    with pytest.raises(ToolError, match="pose, derived_from is required"):
+        tools.ingest(caller, [{"video": "/workspace/staging/x.mp4", "annotation": "/workspace/staging/x.json"}])
 
 
 def test_every_bad_candidate_is_named_in_one_refusal(env):
     tools, caller, _, _ = env
     with pytest.raises(ToolError) as refused:
-        tools.ingest(caller, [{"video": "/workspace/staging/no1.mp4", "caption": "/workspace/staging/no1.json",
-                               "camera_motion": "moving", "provenance": PROV},
-                              {"video": "/workspace/staging/no2.mp4", "camera_motion": "moving", "provenance": PROV}])
+        tools.ingest(caller, [{"video": "/workspace/staging/no1.mp4", "annotation": "/workspace/staging/no1.json",
+                               "pose": "/workspace/staging/no1.npz", "derived_from": DERIVED},
+                              {"video": "/workspace/staging/no2.mp4", "pose": "/workspace/staging/no2.npz",
+                               "derived_from": DERIVED}])
     text = str(refused.value)
     assert "item 0: video /workspace/staging/no1.mp4 does not exist" in text
-    assert "item 1: caption is required" in text and "nothing was submitted" in text
+    assert "item 1: annotation is required" in text and "nothing was submitted" in text
     assert "/workspace/staging/results/data_ingest-refused-" in text
 
 
 def test_rejections_are_summarised_with_counts_and_commit_takes_clip_ids_from_a_file(env):
     tools, caller, results, _ = env
     for name in ("r1", "r2"):
-        (caller.staging_host / f"{name}.mp4").write_bytes(b"x"), (caller.staging_host / f"{name}.json").write_text("{}")
-    out = tools.ingest(caller, [{"video": f"/workspace/staging/{n}.mp4", "caption": f"/workspace/staging/{n}.json",
-                                 "camera_motion": "sideways", "provenance": PROV} for n in ("r1", "r2")])
+        for suffix in ("mp4", "json", "npz"):
+            (caller.staging_host / f"{name}.{suffix}").write_bytes(b"x")
+    out = tools.ingest(caller, [{"video": f"/workspace/staging/{n}.mp4", "annotation": f"/workspace/staging/{n}.json",
+                                 "pose": f"/workspace/staging/{n}.npz", "derived_from": {"kind": "rollout", "name": n}}
+                                for n in ("r1", "r2")])
     assert (out["accepted"], out["rejected"]) == (0, 2)
-    assert out["rejected_for"] == [{"count": 2, "example": "camera_motion must be moving or static, got 'sideways'"}]
+    assert out["rejected_for"] == [{"count": 2, "example": "derived_from must be {kind, name} with kind one of "
+                                                           "model, dataset, synthetic_method"}]
     (caller.workspace_host / "ids.json").write_text(json.dumps([r["clip_id"] for r in results]))
-    done = tools.commit(caller, None, {"from_file": {"format": "video_caption_camera", "weight": 1.0,
-                                                    "clips": "ids.json"}}, "ids from a file")
+    done = tools.commit(caller, None, {"from_file": {"weight": 1.0, "clips": "ids.json"}}, "ids from a file")
     assert done["datasets"]["from_file"]["clips"] == 4
     assert tools.query(caller, {"clip_ids": "/workspace/ids.json"})["total"] == 4
     (caller.workspace_host / "records.json").write_text(json.dumps([{"clip_id": r["clip_id"]} for r in results]))
@@ -116,13 +113,14 @@ def test_probe_reports_display_geometry(env):
     assert tools.probe(caller, "staging/probe_me.mp4") == info      # relative to /workspace, like caption_videos
 
 
-def test_query_returns_the_archive_wide_pool_with_provenance(env):
+def test_query_returns_the_archive_wide_pool_with_what_each_clip_was_derived_from(env):
     tools, caller, results, _ = env
-    out = tools.query(caller, {"format": "video_caption_camera"})
+    out = tools.query(caller, {})
     ids = {c["clip_id"] for c in out["clips"]}
     assert {r["clip_id"] for r in results} <= ids
     clip = next(c for c in out["clips"] if c["clip_id"] == results[0]["clip_id"])
-    assert clip["provenance"] == PROV and clip["ingested_by"] == "n1" and clip["used_by_scores"] == []
+    assert clip["derived_from"] == DERIVED and clip["ingested_by"] == "n1" and clip["used_by_scores"] == []
+    assert set(clip) == {"clip_id", "metadata", "warnings", "derived_from", "ingested_by", "used_by_scores"}
 
 
 def test_commit_returns_id_and_per_dataset_stats(env):
@@ -131,7 +129,7 @@ def test_commit_returns_id_and_per_dataset_stats(env):
                        "four clips")
     assert len(out["commit_id"]) == 64
     stats = out["datasets"]["cam"]
-    assert sum(stats.pop("sources").values()) == 4
+    assert stats.pop("sources") == {"synthetic_method:unit test fixture": 4}
     assert stats == {"weight": 1.0, "clips": 4}
 
 
@@ -156,19 +154,14 @@ def test_a_commit_takes_over_the_datasets_of_included_commits_and_a_query_reads_
         tools.commit(caller, None, {}, "m", include=[first, replaced["commit_id"]])
 
 
-def test_a_clips_source_is_its_generator_or_repo_and_derived_clips_inherit_it():
+def test_a_clips_source_is_what_it_was_derived_from():
     from ar_kernel.tools.data_tools import clip_source, dataset_stats
-    clips = [{"clip_id": "a", "provenance": {"kind": "rollout", "generator": "alayaworld-dmd4"}},
-             {"clip_id": "b", "provenance": {"kind": "hf_dataset", "repo": "org/set"}},
-             {"clip_id": "c", "provenance": {"kind": "derived"}, "derived_from": ["a"]},
-             {"clip_id": "d", "provenance": {"kind": "derived"}, "derived_from": ["c", "b"]},
-             {"clip_id": "e", "provenance": {"kind": "derived"}, "derived_from": []}]
-    by_id = {c["clip_id"]: c for c in clips}
-    assert [clip_source(c, by_id) for c in clips] == [
-        "rollout:alayaworld-dmd4", "hf:org/set", "rollout:alayaworld-dmd4",
-        "hf:org/set+rollout:alayaworld-dmd4", "derived"]
-    manifest = {"datasets": {"x": {"weight": 1.0, "clips": ["a", "c", "e"]}}}
-    assert dataset_stats(manifest, clips)["x"]["sources"] == {"rollout:alayaworld-dmd4": 2, "derived": 1}
+    clips = [{"clip_id": "a", "derived_from": {"kind": "model", "name": "alayaworld-ar30"}},
+             {"clip_id": "b", "derived_from": {"kind": "dataset", "name": "org/set"}},
+             {"clip_id": "c", "derived_from": {"kind": "model", "name": "alayaworld-ar30"}}]
+    assert [clip_source(c) for c in clips] == ["model:alayaworld-ar30", "dataset:org/set", "model:alayaworld-ar30"]
+    manifest = {"datasets": {"x": {"weight": 1.0, "clips": ["a", "b", "c"]}}}
+    assert dataset_stats(manifest, clips)["x"]["sources"] == {"model:alayaworld-ar30": 2, "dataset:org/set": 1}
 
 
 def test_query_writes_every_match_to_a_file(env):
@@ -187,7 +180,9 @@ def test_fetch_copies_pool_clips_into_staging(env):
     assert out == {"folder": "/workspace/staging/pool_clips", "copied": 1, "not_in_pool": ["nope"]}
     video = caller.staging_host / "pool_clips" / "videos" / f"{wanted}.mp4"
     assert video.stat().st_size > 0 and video.stat().st_nlink == 1          # a copy, not a link into the archive
-    assert json.loads((caller.staging_host / "pool_clips" / "captions" / f"{wanted}.json").read_text())
+    caption = json.loads((caller.staging_host / "pool_clips" / "captions" / f"{wanted}.json").read_text())
+    annotation = json.loads((caller.staging_host / "pool_clips" / "annotations" / f"{wanted}.json").read_text())
+    assert annotation == {"scene_prompt": caption["caption"], "turns": [{"start_s": 0.0}]}
     assert (caller.staging_host / "pool_clips" / "poses" / f"{wanted}.npz").is_file()
 
 
@@ -207,10 +202,10 @@ def test_every_bad_clip_of_a_commit_is_named_in_one_refusal_with_a_file(env):
         tools.commit(caller, None, {"still": {"weight": 1.0,
                                               "clips": [*ids, "nope"]}}, "bad")
     text = str(refused.value)
-    assert f"{len(ids) + 1} of {len(ids) + 1} items are bad" in text and "item 0: not eligible" in text
+    assert f"1 of {len(ids) + 1} items are bad" in text and f"item {len(ids)}: unknown clip" in text
     [file] = (caller.staging_host / "results").glob("data_commit-still-refused-*.json")
     rows = json.loads(file.read_text())
-    assert [r["item"] for r in rows] == [*ids, "nope"] and rows[-1]["error"] == "unknown clip"
+    assert [r["item"] for r in rows] == ["nope"] and rows[-1]["error"] == "unknown clip"
 
 
 def test_recipe_check_reports_gate_failures_without_leaving_a_view(env, monkeypatch):
@@ -292,13 +287,13 @@ def test_leakage_checker_is_built_once_across_concurrent_ingests(tmp_path, monke
     ws.mkdir(), st.mkdir(parents=True)
     caller = TokenRegistry(rec).issue(node="n1", phase="improve_recipe", attempt=1,
                                       workspace_host=ws, staging_host=st)
-    (st / "v.mp4").write_bytes(b"x"), (st / "c.json").write_text("{}")
-    # An invalid camera_motion is rejected before any file is touched: this exercises only setup.
+    (st / "v.mp4").write_bytes(b"x"), (st / "c.json").write_text("{}"), (st / "p.npz").write_bytes(b"x")
+    # An invalid derived_from is rejected before any file is touched: this exercises only setup.
     # Distinct values keep the two rejection payloads distinct (the recorder writes identical
     # payloads through one shared tmp name, a separate race).
-    def ingest(motion):
-        cand = {"video": "/workspace/staging/v.mp4", "caption": "/workspace/staging/c.json",
-                "camera_motion": motion, "provenance": PROV}
+    def ingest(kind):
+        cand = {"video": "/workspace/staging/v.mp4", "annotation": "/workspace/staging/c.json",
+                "pose": "/workspace/staging/p.npz", "derived_from": {"kind": kind, "name": "x"}}
         results.extend(_rows(caller, tools.ingest(caller, [cand])))
     results = []
     threads = [threading.Thread(target=ingest, args=(m,)) for m in ("sideways", "upways")]
@@ -312,36 +307,36 @@ def test_leakage_checker_is_built_once_across_concurrent_ingests(tmp_path, monke
 
 def test_a_staged_file_stays_and_ingesting_it_again_gives_the_same_clip(env):
     tools, caller, results, run = env
-    out = tools.ingest(caller, [{"video": "/workspace/staging/c0/v.mp4", "caption": "/workspace/staging/c0/c.json",
-                                 "pose": "/workspace/staging/c0/p.npz", "camera_motion": "moving", "provenance": PROV}])
+    out = tools.ingest(caller, [{"video": "/workspace/staging/c0/v.mp4", "annotation": "/workspace/staging/c0/a.json",
+                                 "pose": "/workspace/staging/c0/p.npz", "derived_from": DERIVED}])
     assert out["accepted"] == 1
     [row] = json.loads((caller.staging_host / "results" / Path(out["result_file"]).name).read_text())
     assert row["clip_id"] == results[0]["clip_id"]
     with pytest.raises(ToolError, match=r"/workspace/staging/gone/v.mp4 does not exist") as exc:
-        tools.ingest(caller, [{"video": "/workspace/staging/gone/v.mp4", "caption": "/workspace/staging/c0/c.json",
-                               "camera_motion": "moving", "provenance": PROV}])
+        tools.ingest(caller, [{"video": "/workspace/staging/gone/v.mp4", "annotation": "/workspace/staging/c0/a.json",
+                               "pose": "/workspace/staging/c0/p.npz", "derived_from": DERIVED}])
     assert str(run) not in str(exc.value)
 
 
 def test_a_path_that_is_not_text_or_not_staged_is_that_candidates_error(env):
-    """A caption given as the object itself crashed the call; a file outside staging was named by its host path."""
+    """An annotation given as the object itself crashed the call; a file outside staging was named by its host path."""
     tools, caller, _, _ = env
     (caller.workspace_host / "loose.mp4").write_bytes(b"x"), (caller.staging_host / "a.mp4").write_bytes(b"x")
     with pytest.raises(ToolError) as refused:
-        tools.ingest(caller, [{"video": "/workspace/staging/a.mp4", "caption": {"caption": "a room"},
-                               "camera_motion": "static", "provenance": PROV},
-                              {"video": "/workspace/loose.mp4", "caption": "/workspace/staging/a.json",
-                               "camera_motion": "static", "provenance": PROV}])
+        tools.ingest(caller, [{"video": "/workspace/staging/a.mp4", "annotation": {"scene_prompt": "a room"},
+                               "pose": "/workspace/staging/a.mp4", "derived_from": DERIVED},
+                              {"video": "/workspace/loose.mp4", "annotation": "/workspace/staging/a.mp4",
+                               "pose": "/workspace/staging/a.mp4", "derived_from": DERIVED}])
     text = str(refused.value)
-    assert "item 0: caption must be the path of a file" in text
+    assert "item 0: annotation must be the path of a file" in text
     assert "item 1: video /workspace/loose.mp4 is not under /workspace/staging" in text
     assert str(caller.workspace_host) not in text
 
 
 def test_messages_that_differ_in_quoted_text_and_numbers_count_as_one():
     from ar_kernel.tools.data_tools import _counted
-    texts = [f"the caption file: segment {t!r} lasts {d} s < one window (2.375 s), so segment mode never trains on it"
-             for t, d in (("A person reaches", 1.04), ("The knife chops", 1.33))] + ["fps 12.0 is below 24"]
+    texts = [f"turn {n} lasts {d} s; a turn after the first must last at least 1.4 s"
+             for n, d in ((2, 1.04), (3, 1.33))] + ["fps 12.0 is below 24"]
     assert [row["count"] for row in _counted(texts)] == [2, 1]
 
 
@@ -357,5 +352,5 @@ def test_recipe_and_dataset_numbers_are_typed():
         "anyOf": [{"type": "integer"}, {"type": "number"}]}
     assert "number" in json.dumps(listed["data_commit"]["$defs"]["Dataset"]["properties"]["weight"])
     model = mcp._tool_manager.get_tool("recipe_check").fn_metadata.arg_model
-    assert model.model_validate({"recipe": {"lora.rank": "64", "optimizer.lr": "1e-4", "sample.width": 736},
-                                 "data_commit": "c"}).recipe == {"lora.rank": 64, "optimizer.lr": 1e-4, "sample.width": 736}
+    assert model.model_validate({"recipe": {"lora.rank": "64", "optimizer.lr": "1e-4", "optimizer.max_steps": 400},
+                                 "data_commit": "c"}).recipe == {"lora.rank": 64, "optimizer.lr": 1e-4, "optimizer.max_steps": 400}

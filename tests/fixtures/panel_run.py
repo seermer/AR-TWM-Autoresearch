@@ -108,11 +108,10 @@ def make_run(base: Path, name: str = "r1") -> Path:
     conn.execute("INSERT INTO data_commits VALUES (?,?,?,?,?,?,?)",
                  ("dc1", None, "n1", 1, json.dumps({"datasets": {"ds1": {"clips": ["clip1"]}}}),
                   "ds1: one clip", 1.0))
-    conn.execute("INSERT INTO clips VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                 ("clip1", "vd1", "cd1", "pd1", "moving",
-                  json.dumps({"frames": 5, "fps": 24.0, "width": 1280, "height": 720}),
-                  json.dumps(["video_caption_camera"]), json.dumps([]),
-                  json.dumps({"kind": "hf", "repo": "org/ds"}), "mit", json.dumps([]), "n1", 1.0))
+    conn.execute("INSERT INTO clips VALUES (?,?,?,?,?,?,?,?,?,?)",
+                 ("clip1", "vd1", "cd1", "ad1", "pd1",
+                  json.dumps({"frames": 5, "fps": 24.0, "width": 960, "height": 544, "turns": 1}),
+                  json.dumps([]), json.dumps({"kind": "dataset", "name": "org/ds"}), "n1", 1.0))
     conn.execute("INSERT INTO selection_events (child_id, chosen, seed, candidates, created_at) "
                  "VALUES (?,?,?,?,?)", ("n1", "root", 7, json.dumps(
                      [{"node_id": "root", "value": 0.7, "penalty": 1.0, "P": 1.0}]), 1.0))
@@ -121,7 +120,9 @@ def make_run(base: Path, name: str = "r1") -> Path:
     # stored clip blobs
     _write(run / "store" / "blobs" / "video" / "vd1.mp4", b"\x00mp4")
     _write(run / "store" / "blobs" / "caption" / "cd1.json",
-           {"caption": "a hallway", "segments": [{"time_range_s": [0, 1], "text": "walk"}]})
+           {"caption": "a hallway", "segments": [{"time_range_s": [0, 1], "prompt": "a hallway"}]})
+    _write(run / "store" / "blobs" / "annotation" / "ad1.json",
+           {"scene_prompt": "a hallway", "turns": [{"start_s": 0.0}]})
     c2w = np.tile(np.eye(4), (5, 1, 1))
     c2w[:, 0, 3] = np.arange(5)
     c2w[:, 2, 3] = np.arange(5) * 2
@@ -195,23 +196,21 @@ def make_run(base: Path, name: str = "r1") -> Path:
 
     span = rec.event("tool.call", node="n1", phase="improve_recipe", attempt=1, component="tools",
                      tool="data_ingest", payload={"tool": "data_ingest", "args": {"candidates": [
-                         {"video": "/workspace/staging/work/v1.mp4", "caption": "/workspace/staging/work/v1.json",
-                          "camera_motion": "moving"},
-                         {"video": "/workspace/staging/work/v2.mp4", "caption": "/workspace/staging/work/v2.json",
-                          "camera_motion": "static"}]}})
+                         {"video": "/workspace/staging/work/v1.mp4", "annotation": "/workspace/staging/work/v1.json"},
+                         {"video": "/workspace/staging/work/v2.mp4", "annotation": "/workspace/staging/work/v2.json"}]}})
     staged = str(run / "staging" / "n1" / "improve_recipe-1" / "work")
-    cand1 = {"video": f"{staged}/v1.mp4", "caption": f"{staged}/v1.json", "pose": None}
-    cand2 = {"video": f"{staged}/v2.mp4", "caption": f"{staged}/v2.json", "pose": None}
+    cand1 = {"video": f"{staged}/v1.mp4", "annotation": f"{staged}/v1.json", "pose": f"{staged}/v1.npz"}
+    cand2 = {"video": f"{staged}/v2.mp4", "annotation": f"{staged}/v2.json", "pose": f"{staged}/v2.npz"}
     rec.event("ingest.leakage", node="n1", phase="ingest", payload={"candidate": cand1, "matches": [], "near": [{"case_id": "7"}]})
     rec.event("ingest.accepted", node="n1", phase="ingest", payload={"candidate": cand1, "clip_id": "clip1",
-                                                                    "formats": ["video_caption_camera"], "warnings": []})
+                                                                    "warnings": []})
     rec.event("ingest.rejected", node="n1", phase="ingest", payload={"candidate": cand2, "reasons": ["aspect 4:3"]})
     rec.event("ingest.result", node="n1", phase="improve_recipe", attempt=1, component="tools", payload={"rows": [
-        {"index": 0, "video": "/workspace/staging/work/v1.mp4", "caption": "/workspace/staging/work/v1.json",
-         "camera_motion": "moving", "accepted": True, "clip_id": "clip1", "formats": ["video_caption_camera"],
+        {"index": 0, "video": "/workspace/staging/work/v1.mp4", "annotation": "/workspace/staging/work/v1.json",
+         "derived_from": {"kind": "dataset", "name": "org/ds"}, "accepted": True, "clip_id": "clip1",
          "warnings": [], "reasons": []},
-        {"index": 1, "video": "/workspace/staging/work/v2.mp4", "caption": "/workspace/staging/work/v2.json",
-         "camera_motion": "static", "accepted": False, "clip_id": None, "formats": [], "warnings": [],
+        {"index": 1, "video": "/workspace/staging/work/v2.mp4", "annotation": "/workspace/staging/work/v2.json",
+         "derived_from": {"kind": "dataset", "name": "org/ds"}, "accepted": False, "clip_id": None, "warnings": [],
          "reasons": ["aspect 4:3"]}]})
     rec.event("tool.result", node="n1", phase="improve_recipe", attempt=1, component="tools", tool="data_ingest",
               parent_span_id=span, duration_s=2.0, payload={"tool": "data_ingest", "result": {
