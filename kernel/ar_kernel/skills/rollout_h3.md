@@ -6,6 +6,8 @@ description: Use when planning or writing rollout_h3 items: what the tool takes 
 
 # How the model prompt is built from an item
 
-- The tool writes one prompt for the whole clip: `scene_prompt` as a sentence, then "The whole video is one continuous shot with smooth motion and no cuts.", then every turn as "At MM:SS.mmm, <the turn's prompt>." with that turn's start time.
-- So write a turn's `prompt` as words that read on after "At 00:03.708,": what happens from then on, the camera included. The first turn gets "At 00:00.000,".
-- Turn starts: the first turn starts at frame 0. The clip holds `(frames - 25) // 32` rounds, every turn gets the same whole number of them (n), and turn k (counting from 0) starts at frame `25 + 32 * n * k`. The last turn runs to the end of the clip. A 243-frame clip has 6 rounds: 2 turns start at frames 0 and 121, 3 turns at 0, 89 and 153.
+- The tool writes one prompt for the whole clip, as one continuous shot: `scene_prompt`, then `character_prompt`, then the first turn's perspective, then every turn at the time it starts.
+- A turn is written as its `event`, then the camera move of its `action` in its `perspective`, then, when the perspective differs from the turn before it, the sentence that says the view switches. That turn's `action` must be `stop`.
+- So write `scene_prompt` and `character_prompt` as descriptions of what is there, and each `event` as one sentence about what happens. Do not describe the camera: the action does.
+- The clip is split into turns of equal length. A clip of the default length holds up to 4 turns.
+- The published annotation holds your texts and, for each turn, the time it was asked to start. The model follows those times loosely: find when each event happens (locate_events), set the turns' starts to match, and leave out an event the clip does not show.

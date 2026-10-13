@@ -1,5 +1,5 @@
-"""The agent's tools: file/shell tools bound to one root, arXiv search and reading, the timed-prompt
-helper, the kernel tools (the MCP tool server) as LangChain tools, and submit_<x> result tools.
+"""The agent's tools: file/shell tools bound to one root, arXiv search and reading,
+the kernel tools (the MCP tool server) as LangChain tools, and submit_<x> result tools.
 Captioning is the kernel's caption_videos GPU job."""
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections import Counter
 from html.parser import HTMLParser
 from pathlib import Path
 from xml.etree import ElementTree
@@ -26,8 +25,6 @@ from pydantic import BaseModel
 # Past a limit, show much less than the limit: an output that large is better searched than read.
 READ_LIMIT, READ_SHOWN = 100_000, 20_000          # read_file: chars, head shown
 OUTPUT_LIMIT, OUTPUT_SHOWN = 20_000, 6_000        # run_command: chars, tail shown
-FIRST_ROUND_END = 25 / 24          # the 25 history frames
-ROUND = 32 / 24                    # one rollout round
 
 
 # ---- files and shell (root is /agent for edit_self, /workspace for improve_recipe) ----
@@ -233,40 +230,6 @@ def arxiv_read(arxiv_id: str) -> dict:
 def local_tools(root: str, papers: bool) -> list:
     """File and shell tools bound to `root`; `papers` adds arXiv search and reading."""
     return [*make_file_tools(root), *([arxiv_search, arxiv_read] if papers else [])]
-
-
-# ---- timed prompts ----
-
-def snap_segments(segments: list[dict], duration: float) -> list[dict]:
-    """Snap internal boundaries to 25/24 + k*32/24 s (per_chunk rule), stretch the first and last segment
-    to the clip's ends, close gaps, and drop any segment that collapses to zero length. Overlaps raise."""
-    bounds, t = [], FIRST_ROUND_END
-    while t < duration:
-        bounds.append(t)
-        t += ROUND
-    ordered = sorted(segments, key=lambda s: s["time_range_s"][0])
-    for a, b in zip(ordered, ordered[1:]):
-        if b["time_range_s"][0] < a["time_range_s"][1] - 1e-9:
-            raise ValueError(f"segments overlap: {a['prompt']!r} ends after {b['prompt']!r} starts")
-    cuts = [0.0]
-    for seg in ordered[:-1]:
-        end = seg["time_range_s"][1]
-        cuts.append(min(bounds, key=lambda b: abs(b - end)) if bounds else end)
-    cuts.append(float(duration))
-    return [{"time_range_s": [start, end], "prompt": seg["prompt"]}
-            for seg, start, end in zip(ordered, cuts, cuts[1:]) if end - start > 1e-9]
-
-
-@tool(description="Snap timed-prompt segment boundaries to rollout-round boundaries. Input and output: a JSON list of "
-                  '{"time_range_s": [start, end], "prompt": str}. Overlapping segments are refused, gaps are closed, '
-                  "and a segment that shrinks to nothing is dropped and named.")
-def snap_timed_prompts(segments_json: str, duration: float) -> str:
-    segments = json.loads(segments_json)
-    snapped = snap_segments(segments, duration)
-    # counted, not looked up by text: a dropped segment may share its prompt with a kept one
-    dropped = list((Counter(s["prompt"] for s in segments) - Counter(s["prompt"] for s in snapped)).elements())
-    out = json.dumps(snapped)
-    return f"{out}\nDropped, shorter than a round after snapping: {json.dumps(dropped)}" if dropped else out
 
 
 # ---- kernel tools over one MCP session (MCP 2.x: is_error, structured_content, input_schema) ----

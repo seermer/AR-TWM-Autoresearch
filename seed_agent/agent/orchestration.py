@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 from .entry import AGENT_ROOT, BRIEF_CHARS, COMPACT_AT, CONTEXT_WINDOW, MAX_ROUNDS, MODEL, WORKSPACE
 from .briefing import coder_context, edit_context, engineer_context, recipe_context
 from .harness import build_react_agent
-from .tools import kernel_tools, local_tools, result_text, snap_timed_prompts, submit_tool
+from .tools import kernel_tools, local_tools, result_text, submit_tool
 
 AGENT_PKG = Path(__file__).resolve().parent
 SCRATCH = Path(WORKSPACE) / "scratch"         # every role's throwaway files; emptied when its turn ends
@@ -262,8 +262,8 @@ def recipe_team(ctx: RecipeContext | None, session, ktools: list) -> Team:
     planner = Role("planner", [plan_tool, accept_t, *[t for t in ktools if t.name in PLANNING_KERNEL_TOOLS],
                                *local_tools(WORKSPACE, papers=True)], [plan, accept], skill)
     replan_t, replan = replan_tool(rounds)
-    engineer = Role("data_engineer", [*ktools, *local_tools(WORKSPACE, papers=True), snap_timed_prompts,
-                                      done_tool, replan_t], [done, replan], skill)
+    engineer = Role("data_engineer", [*ktools, *local_tools(WORKSPACE, papers=True), done_tool, replan_t],
+                    [done, replan], skill)
     return Team(planner, plan, accept, engineer, done, replan, rounds)
 
 

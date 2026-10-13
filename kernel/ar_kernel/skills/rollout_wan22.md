@@ -6,6 +6,6 @@ description: Use when planning or writing rollout_wan22 items: what the tool tak
 
 # What the published clip carries
 
-- The caption published with a clip is the item's `prompt`, word for word. It says what was asked for, not what was rendered: check the clip against it, and caption the clip again where they differ (caption_videos).
-- One prompt covers the whole clip, so a clip has no segments. For a clip that changes partway, render a continuation from the clip's last frame and write the segments yourself.
-- Frame counts of 57, 89 and 121 are allowed here and are also 25 + 32k, so such a clip ends on a training round boundary.
+- A result gives the clip and the item's `prompt`, word for word. The prompt says what was asked for, not what was rendered: check the clip against it.
+- The clip has no annotation and no pose. Bring it to 960x544, run annotate_camera on the result, and write the annotation yourself (skill `data_formats`).
+- One prompt covers the whole clip. For a clip in which something happens partway, find when it happens (locate_events) and start a turn there.

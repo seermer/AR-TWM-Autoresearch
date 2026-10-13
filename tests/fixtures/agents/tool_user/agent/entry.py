@@ -12,8 +12,7 @@ def edit_self(ctx):
 
 async def improve_recipe(ctx):
     async with mcp_session() as tools:
-        pool = json.loads((await tools.call_tool("data_query",
-                                                  {"filter": {"format": "video_caption_camera"}})).content[0].text)
+        pool = json.loads((await tools.call_tool("data_query", {})).content[0].text)
         ids = [c["clip_id"] for c in pool["clips"]][:4]
         made = json.loads((await tools.call_tool("data_commit", {
             "parent": None, "message": "from inside the sandbox",

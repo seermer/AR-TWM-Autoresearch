@@ -1,0 +1,15 @@
+---
+name: locate_events
+tool: locate_events
+description: Use when a clip's events need times: what locate_events takes and gives, and how to turn its spans into the turns of an annotation.
+---
+
+# From spans to turns
+
+- Give each event as the sentence you would write in the annotation. The model looks at every second of the clip and says, for each event, whether it is happening or has already happened with its result visible.
+- A span is where that holds: `start_s` is when the event starts, `end_s` is the end of the last second in which it still holds. An event whose result stays visible has a span that runs to the end of the clip.
+- Both are null when the event was not found. Leave such an event out of the annotation, or look at the clip yourself.
+- `disagreeing_pieces` counts the seconds of the clip that contradict the span. A count that is large for the clip's length means the model was unsure: look at the frames around `start_s` before you rely on it.
+- The tool returns spans only. You write the annotation: start a turn at an event's `start_s` and give that turn the event. A turn runs until the next turn starts, and the last runs to the end of the clip.
+- The first turn lasts at least 2.4 s and every later turn at least 1.4 s. An event that starts earlier than 2.4 s into the clip belongs to the first turn.
+- A turn has one event. When two spans overlap, decide which turn each event belongs to, or leave one out.

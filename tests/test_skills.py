@@ -13,6 +13,8 @@ from ar_kernel.tools.server import ToolKit, new_mcp
 from ar_kernel.tools.skills import load_skills, register_skill_tool
 
 SKILLS = {"container", "data_formats", "clip_quality", "retries", "node_files", "large_files", "training_text"}
+AGENT_TEXT_NEVER_SAYS = ("window", "per_chunk", "prompt_mode", "camera_motion", "provenance", "license", "round grid",
+                         "rounds", "close-up", "clearly visible")
 
 
 def _tools(tmp_path):
@@ -38,7 +40,7 @@ def test_every_skill_has_a_name_a_use_and_a_body():
     for name, skill in skills.items():
         assert skill["description"].startswith("Use when") and len(skill["text"]) > 200, name
         assert "wbench" not in skill["text"].lower()
-    assert "57 frames" in skills["data_formats"]["text"] and "cam_c2w" in skills["data_formats"]["text"]
+    assert "2.4 s" in skills["data_formats"]["text"] and "cam_c2w" in skills["data_formats"]["text"]
 
 
 def test_a_tool_skill_exists_only_with_its_tool_and_starts_with_the_tools_description(tmp_path):
@@ -58,7 +60,7 @@ def test_a_tool_skill_exists_only_with_its_tool_and_starts_with_the_tools_descri
     listed = tools["read_skill"].description
     assert "- caption_videos: Use when" in listed and "rollout_alayaworld" not in listed
     for name in ("rollout_alayaworld", "rollout_h3", "rollout_ltx25", "rollout_wan22", "generate_images",
-                 "annotate_camera", "caption_videos"):
+                 "annotate_camera", "caption_videos", "locate_events"):
         text = load_skills({name: tool})[name]["text"]
         assert "wbench" not in text.lower() and "evaluation" not in text.lower()
 
@@ -72,11 +74,40 @@ def test_read_skill_lists_every_skill_in_its_description(tmp_path):
 def test_every_kernel_tool_argument_is_described(tmp_path):
     tools = _tools(tmp_path)
     assert "filter" not in tools["data_query"].input_schema["properties"]
-    assert set(tools["data_query"].input_schema["properties"]) == {
-        "format", "camera_motion", "clip_ids", "ingested_by", "data_commit"}
+    assert set(tools["data_query"].input_schema["properties"]) == {"clip_ids", "ingested_by", "data_commit"}
     for name, tool in tools.items():
         for arg, schema in tool.input_schema["properties"].items():
             assert schema.get("description"), f"{name}.{arg} has no description"
     candidate = tools["data_ingest"].input_schema["properties"]["candidates"]["anyOf"][0]["items"]
-    assert set(candidate["required"]) == {"video", "caption", "camera_motion", "provenance"}
+    assert set(candidate["required"]) == {"video", "annotation", "pose", "derived_from"}
     assert all(p.get("description") for p in candidate["properties"].values())
+
+
+def test_nothing_an_agent_reads_speaks_of_training_windows_rounds_or_removed_fields(tmp_path):
+    """Skills, and every description of the kernel's tools and of their arguments (the GPU tools with the
+    real config)."""
+    import json
+    from ar_kernel.config import KernelConfig
+    from ar_kernel.tools.gpu_jobs import build_gpu_backends, register_gpu_tools
+    from ar_kernel.tools.locate_events import register_locate_tool
+    rec = Recorder(tmp_path / "run")
+    reg = TokenRegistry(rec)
+    queue = JobQueue(rec, threading.Lock(), wait_cap_s=5.0)
+    try:
+        for backend in build_gpu_backends(KernelConfig.load(), tmp_path / "run", [0, 1, 2, 3], reg, rec):
+            queue.register(backend)
+        kit, mcp = ToolKit(reg, rec), new_mcp()
+        register_gpu_tools(mcp, kit, queue)
+        register_locate_tool(mcp, kit, queue)
+        gpu_tools = {t.name: t for t in asyncio.run(mcp.list_tools())}
+    finally:
+        queue.shutdown()
+    tools = {**_tools(tmp_path), **gpu_tools}
+    texts = {f"skill {name}": skill["text"] for name, skill in load_skills(tools).items()}
+    assert "skill rollout_h3" in texts and "skill locate_events" in texts
+    for name, tool in tools.items():
+        if name != "read_skill":                    # it lists the skills, checked above
+            texts[f"tool {name}"] = tool.description + json.dumps(tool.input_schema)
+    assert "rollout_h3" in gpu_tools and "locate_events" in gpu_tools
+    found = [(where, word) for where, text in texts.items() for word in AGENT_TEXT_NEVER_SAYS if word in text.lower()]
+    assert found == []

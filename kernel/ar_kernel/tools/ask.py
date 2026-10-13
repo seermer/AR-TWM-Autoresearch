@@ -41,7 +41,8 @@ class Ask:
                 f"{self.per_call} image files under /workspace per call (relative paths resolve against "
                 f"/workspace), each downscaled to at most {self.max_side} px on its longer side. At most "
                 f"{self.per_phase} images in this phase, shared by every role working in it; a question without images "
-                "is not limited. "
+                "is not limited. The model sees still images only: it cannot judge motion, or whether a clip has "
+                "a cut, from frames picked out of it. "
                 "Returns {answer, images_left}.")
 
     def _image(self, caller, path: str) -> dict:

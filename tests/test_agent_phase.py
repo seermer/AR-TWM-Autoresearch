@@ -511,19 +511,16 @@ def test_container_commits_data_through_the_real_tool_server(tmp_path):
     from ar_kernel.tools.jobs import register_job_tools
     from ar_kernel.tools.server import ToolKit, build_tool_app, new_mcp
     from ar_kernel.tools.context import TokenRegistry
-    from conftest import make_mp4, write_caption, write_poses
+    from conftest import DERIVED, staged_clip
     from ar_kernel.data.ingest import Candidate, Ingestor
 
     run = tmp_path / "run"
     rec, conn = Recorder(run), open_db(run)
     for i in range(4):                                   # seed the pool with 4 distinct clips
         d = run / "staging" / "seed" / f"c{i}"
-        secs = 4.0 + 0.5 * i
-        make_mp4(d / "v.mp4", seconds=secs), write_caption(d / "c.json"), write_poses(d / "p.npz", int(secs * 30))
-        Ingestor(CFG, run, conn, rec).ingest([Candidate(video=d / "v.mp4", caption=d / "c.json",
-                                                       pose=d / "p.npz", camera_motion="moving",
-                                                       provenance={"kind": "derived", "from": [], "transform": "t"})],
-                                             node_id="root")
+        video, annotation, pose = staged_clip(d, 4.0 + 0.5 * i)
+        Ingestor(CFG, run, conn, rec).ingest([Candidate(video=video, annotation=annotation, pose=pose,
+                                                       derived_from=DERIVED)], node_id="root")
     repo = AgentsRepo(run / "agents.git")
     commit = repo.init(Path(__file__).parent / "fixtures" / "agents" / "tool_user")
     nodes = NodeStore(conn)

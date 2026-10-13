@@ -18,24 +18,6 @@ SEED = REPO / "seed_agent"
 sys.path.insert(0, str(SEED))
 
 
-def test_snap_segments_puts_boundaries_on_rounds():
-    from agent.tools import snap_segments
-    segs = [{"time_range_s": [0.0, 3.1], "prompt": "walk"}, {"time_range_s": [3.1, 8.0], "prompt": "turn"}]
-    out = snap_segments(segs, duration=8.0)
-    boundary = out[0]["time_range_s"][1]
-    k = (boundary - 25 / 24) / (32 / 24)
-    assert abs(k - round(k)) < 1e-9                         # on 25/24 + k*32/24
-    assert out[0]["time_range_s"][0] == 0.0 and out[-1]["time_range_s"][1] == 8.0
-    assert out[1]["time_range_s"][0] == boundary            # contiguous
-
-
-def test_snap_segments_drops_segments_that_collapse():
-    from agent.tools import snap_segments
-    segs = [{"time_range_s": [0.0, 1.0], "prompt": "a"}, {"time_range_s": [1.0, 1.1], "prompt": "b"},
-            {"time_range_s": [1.1, 6.0], "prompt": "c"}]
-    assert [s["prompt"] for s in snap_segments(segs, duration=6.0)] == ["a", "c"]
-
-
 @pytest.mark.parametrize("bad", ["../../etc/passwd", "/etc/passwd", "sub/../../x"])
 def test_file_tools_stay_inside_their_root(tmp_path, bad):
     from agent.tools import resolve_inside
@@ -122,20 +104,6 @@ def test_run_command_timeout_kills_what_the_shell_started(tmp_path, monkeypatch)
     assert not (tmp_path / "late.txt").exists()
 
 
-def test_snap_timed_prompts_refuses_overlaps_and_names_dropped_segments():
-    from agent.tools import snap_segments, snap_timed_prompts
-    with pytest.raises(ValueError, match="overlap"):
-        snap_segments([{"time_range_s": [0, 3], "prompt": "a"}, {"time_range_s": [2.9, 8], "prompt": "c"}], 8)
-    out = snap_timed_prompts.invoke({"segments_json": json.dumps(
-        [{"time_range_s": [0.0, 1.0], "prompt": "a"}, {"time_range_s": [1.0, 1.1], "prompt": "b"},
-         {"time_range_s": [1.1, 6.0], "prompt": "c"}]), "duration": 6.0})
-    assert out.endswith('Dropped, shorter than a round after snapping: ["b"]')
-    same = snap_timed_prompts.invoke({"segments_json": json.dumps(     # the dropped one shares its text with a kept one
-        [{"time_range_s": [0.0, 1.0], "prompt": "a"}, {"time_range_s": [1.0, 1.1], "prompt": "c"},
-         {"time_range_s": [1.1, 6.0], "prompt": "c"}]), "duration": 6.0})
-    assert same.endswith('Dropped, shorter than a round after snapping: ["c"]')
-
-
 def test_long_tool_results_go_to_a_file(tmp_path, monkeypatch):
     from agent.harness import TOOL_RESULT_LIMIT, TOOL_RESULT_SHOWN, cap_result
     monkeypatch.setenv("AR_WORKSPACE", str(tmp_path))
@@ -199,7 +167,7 @@ def _recipe_ctx(**over):
         nodes_remaining=1, attempt=1, max_attempts=3, n_gpus=4, metric_guide=GUIDE,
         tunable_rules={"optimizer.lr": {"type": "float", "min": 0, "max": None}},
         recipe_guide={"optimizer.lr": {"base": 1e-4, "meaning": "peak rate"}},
-        resolution_allowlist=[[416, 736]], lora_allowlist=[[64, 64]]), **over})
+        lora_allowlist=[[64, 64]]), **over})
 
 
 def test_the_data_digest_has_scores_the_metric_guide_and_the_recent_lineage():
@@ -269,7 +237,7 @@ def test_engineers_get_what_they_act_on_and_not_the_history():
 def test_a_trained_node_with_an_empty_recipe_says_so():
     from agent.briefing import data_node
     node = {"node_id": "n1", "status": "scored", "score": 0.5, "rationale": None, "recipe": {},
-            "data": {"d": {"format": "video_caption_camera", "weight": 1.0, "clips": 4, "sources": {"hf:o/s": 4}}},
+            "data": {"d": {"weight": 1.0, "clips": 4, "sources": {"dataset:o/s": 4}}},
             "data_commit": "c1"}
     assert data_node(node).endswith("- Recipe: all values kept default")
     assert "Recipe" not in data_node({**node, "data": {}})                    # the root trained nothing
@@ -426,7 +394,7 @@ def _scripts():
     recipe = [
         [_call("submit_plan", {**PLAN, "data": "x" * 4001})],                       # planner: over the cap
         [_call("submit_plan", PLAN)],
-        [_call("data_query", {"format": "video_caption_camera"}), _call("no_such_tool", {}),     # engineer
+        [_call("data_query", {}), _call("no_such_tool", {}),     # engineer
          _call("hf_download", {"repo": "x/y", "revision": "main", "patterns": ["*.mp4"]})],
         [_call("request_replan", {"report": "downloads are disabled; the pool has clips"})],
         [_call("submit_plan", {**PLAN, "hypothesis": "pool clips suffice"})],                    # planner
@@ -577,7 +545,7 @@ def test_dry_run_against_the_kernel_services(kernel, tmp_path, kind):
 def test_improve_recipe_full_flow(kernel, tmp_path):
     rec = kernel[0]
     ctx = {**BASE, "tunable_rules": {"optimizer.max_steps": {"type": "int"}, "optimizer.lr": {"type": "float"}},
-           "resolution_allowlist": [[352, 640]]}
+           "lora_allowlist": [[48, 48]]}
     proc, body, _ = _run(kernel, tmp_path, "improve_recipe", "recipe", "n-recipe", ctx)
     assert proc.returncode == 0 and body["ok"], (body, proc.stderr[-2000:])
     assert body["result"]["data_commit"] == C0
@@ -594,7 +562,7 @@ def test_improve_recipe_full_flow(kernel, tmp_path):
     tasks = {str(m["content"]) for e in rec.read_events("n-recipe") if e["type"] == "llm.request"
              for m in rec.load_payload(e["payload"])["body"]["messages"] if m.get("role") == "user"}
     first = [t for t in tasks if t.startswith("<plan>")]
-    assert first and all("Resolutions (height x width): 352x640." in t for t in first)
+    assert first and all("LoRA (rank/alpha): 48/48." in t for t in first)
     assert any(t.startswith("<engineer_report>\ndownloads are disabled") for t in tasks)      # back to the planner
     assert any(t.startswith("The planner revised the plan.") and "pool clips suffice" in t for t in tasks)
     rounds = json.loads((tmp_path / "ws" / "plans.json").read_text())
@@ -669,7 +637,7 @@ def test_seed_agent_passes_contract_verification(tmp_path):
                                n_gpus=4, clip_pool_size=7,
                                tunable_rules={"optimizer.lr": {"type": "float", "min": 0, "max": None}},
                                recipe_guide={"optimizer.lr": {"base": 1e-4, "meaning": "peak rate"}},
-                               resolution_allowlist=[[416, 736]], lora_allowlist=[[64, 64]])
+                               lora_allowlist=[[64, 64]])
         report = verify_contract(cfg=KernelConfig.load(), run_dir=tmp_path / "run", run_id="seed", repo=repo,
                                  commit=commit, harness=harness, recorder=Recorder(tmp_path / "run"),
                                  node="root", attempt=1,
