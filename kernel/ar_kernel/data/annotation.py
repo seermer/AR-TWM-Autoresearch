@@ -51,8 +51,10 @@ def check_annotation(annotation) -> list[str]:
         start = turn.get("start_s")
         if isinstance(start, bool) or not isinstance(start, (int, float)) or not math.isfinite(start):
             problems.append(f"turn {n}: start_s is required: a number of seconds")
-        elif previous is None and start != 0:
-            problems.append(f"turn 1 must start at 0, not at {start}")
+        elif n == 1:
+            if start != 0:
+                problems.append(f"turn 1 must start at 0, not at {start}")
+            previous = start
         elif previous is not None and start <= previous:
             problems.append(f"turn {n} starts at {start} s, not after turn {n - 1} ({previous} s)")
         else:
