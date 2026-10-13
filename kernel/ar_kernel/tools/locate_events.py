@@ -117,8 +117,8 @@ def spans(events: list[str], cut: list[tuple[float, float]], answers: list[dict]
             continue
         first, last, off = found
         picked = SHEET_TIMES.get(per[first]["start"], 0.0)
-        out.append({"event": text, "start_s": round(cut[first][0] + picked, 3),
-                    "end_s": round(cut[last][1], 3), "disagreeing_pieces": off})
+        out.append({"event": text, "start_s": round(cut[first][0] + picked, 4),
+                    "end_s": round(cut[last][1], 4), "disagreeing_pieces": off})
     return out
 
 

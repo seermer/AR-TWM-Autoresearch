@@ -5,6 +5,10 @@ during startup), hang (never becomes ready), slow (every caption takes 60 s), se
 start with BAD gets a 400, like a video the server cannot decode. Writes its pid to fake_vllm.pid
 and its argv to fake_vllm.argv.json in its working directory; refuses to start without
 HF_HUB_OFFLINE=1; captions name the CUDA_VISIBLE_DEVICES it was given.
+
+A request with a `response_format` is a locate_events sheet: the reply is JSON in the asked shape.
+An event whose sentence holds NEVER is not there; any other is happening, and starts at the sheet's
+third caption. A request whose events hold BROKEN gets text that is not JSON.
 """
 import argparse
 import json
@@ -33,7 +37,7 @@ if args.fake_mode == "exit":
     sys.exit(3)
 if args.fake_mode == "hang":
     time.sleep(3600)
-allowed = Path(args.allowed_local_media_path).resolve()
+allowed = Path(args.allowed_local_media_path).resolve() if args.allowed_local_media_path else None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -53,6 +57,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if "response_format" in body:
+            return self.locate(body)
         video, text = body["messages"][0]["content"]
         assert body["reasoning_effort"] == "medium" and "max_tokens" not in body and "chat_template_kwargs" not in body
         path = Path(unquote(urlparse(video["video_url"]["url"]).path)).resolve()
@@ -69,6 +75,22 @@ class Handler(BaseHTTPRequestHandler):
                    f"gpus={os.environ['CUDA_VISIBLE_DEVICES']}]")
         self.reply(200, {"choices": [{"message": {"role": "assistant", "content": caption,
                                                   "reasoning_content": f"thinking about {len(data)} bytes"}}]})
+
+
+    def locate(self, body):
+        image, text = body["messages"][0]["content"]
+        assert body["reasoning_effort"] == "low" and image["image_url"]["url"].startswith("data:image/jpeg;base64,")
+        schema = body["response_format"]["json_schema"]["schema"]
+        captions = schema["$defs"]["Event"]["properties"]["start"]["anyOf"][0]["enum"]
+        events = [line.split(". ", 1)[1] for line in text["text"].split("Events:\n")[1].splitlines()]
+        answer = {f"event_{n}": {"happening_now": "NEVER" not in e, "already_happened": False,
+                                 "start": None if "NEVER" in e else captions[min(2, len(captions) - 1)]}
+                  for n, e in enumerate(events, 1)}
+        content = "I cannot tell." if any("BROKEN" in e for e in events) else json.dumps(answer)
+        self.reply(200, {"id": "x", "object": "chat.completion", "created": 0, "model": body["model"],
+                         "choices": [{"index": 0, "finish_reason": "stop",
+                                      "message": {"role": "assistant", "content": content,
+                                                  "reasoning_content": f"looked at {len(captions)} frames"}}]})
 
 
 ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()
