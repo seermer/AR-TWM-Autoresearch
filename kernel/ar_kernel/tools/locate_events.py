@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import shutil
 import subprocess
 import threading
@@ -135,7 +136,9 @@ class LocateEventsBackend:
         self.max_items = self.block.get("max_items")
 
     def server_command(self, port: int) -> list[str]:
-        return serve_command(self.cfg.get("captioner"), self.gpus, port, "locator", mm_limits={"image": 1, "video": 0})
+        # compact answers: with whitespace allowed the server can pad an answer with spaces without end
+        return serve_command(self.cfg.get("captioner"), self.gpus, port, "locator", mm_limits={"image": 1, "video": 0}) + [
+            "--structured-outputs-config", json.dumps({"backend": "xgrammar", "disable_any_whitespace": True})]
 
     def ask(self, client, image: Image.Image, events: list[str], times: list[float]) -> tuple[dict, str | None]:
         """(the parsed answer of one piece, the model's reasoning)."""
