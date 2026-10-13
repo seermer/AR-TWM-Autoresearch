@@ -39,8 +39,8 @@ QUESTION = (
     "Under each frame is its time in seconds. For each event below, answer three things.\n"
     "- happening_now: is the event happening in these frames?\n"
     "- already_happened: has the event already happened before these frames, with its result visible in them?\n"
-    "- start: the time under the first frame in which the event is happening, or null when the event does "
-    "not start in these frames.\n\nEvents:\n{events}")
+    "- start: the time under the first frame in which the event is happening, written in quotes like \"0.56\", "
+    "or null when the event does not start in these frames.\n\nEvents:\n{events}")
 
 
 def pieces(frames: int, fps: float) -> list[tuple[float, float]]:
