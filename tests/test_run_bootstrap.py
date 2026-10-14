@@ -235,11 +235,11 @@ def test_proxy_is_the_first_n_cases_of_the_ordered_list(tmp_path, monkeypatch):
     _runs(tmp_path, monkeypatch)
     ordered = (CFG.repo_root / "configs" / "proxy_cases.txt").read_text().strip().split(",")
     assert bootstrap_run(CFG, run_id="r50", env=ENV4).case_ids == ordered[:50]
-    def sized(n):
-        return KernelConfig(raw={**CFG.raw, "eval": {**CFG.raw["eval"], "proxy_size": n}}, repo_root=CFG.repo_root)
-    assert bootstrap_run(sized(8), run_id="r8", env=ENV4).case_ids == ordered[:8]
+    monkeypatch.setitem(CFG.raw["eval"], "proxy_size", 8)
+    assert bootstrap_run(CFG, run_id="r8", env=ENV4).case_ids == ordered[:8]
+    monkeypatch.setitem(CFG.raw["eval"], "proxy_size", len(ordered) + 1)
     with pytest.raises(PreflightError, match="proxy_size"):
-        bootstrap_run(sized(len(ordered) + 1), run_id="rbig", env=ENV4)
+        bootstrap_run(CFG, run_id="rbig", env=ENV4)
 
 
 def test_bootstrap_records_universal_counts_and_attach_reads_them(tmp_path, monkeypatch):

@@ -245,14 +245,9 @@ def test_clips_are_captioned_concurrently_up_to_max_num_seqs(make):
 
 
 def test_unreadable_gpu_memory_is_none_not_a_crash(monkeypatch):
-    import pynvml
-
-    def unsupported(*a, **k):
-        raise pynvml.NVMLError(pynvml.NVML_ERROR_NOT_SUPPORTED)
-    monkeypatch.setattr(pynvml, "nvmlInit", lambda: None)
-    monkeypatch.setattr(pynvml, "nvmlDeviceGetCount", lambda: 2)
-    monkeypatch.setattr(pynvml, "nvmlDeviceGetHandleByIndex", lambda i: i)
-    monkeypatch.setattr(pynvml, "nvmlDeviceGetMemoryInfo", unsupported)
+    import subprocess
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
+        a, 0, "0, [N/A]\n1, [Not Supported]\n", ""))
     assert vllm_server.gpu_memory_mib([0, 1]) is None
 
 

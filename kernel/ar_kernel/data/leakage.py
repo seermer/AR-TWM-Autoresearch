@@ -1,4 +1,5 @@
 from __future__ import annotations
+import subprocess, tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -7,7 +8,7 @@ import numpy as np
 from PIL import Image
 
 from ..config import KernelConfig
-from .probe import probe_video, video_frames
+from .probe import probe_video
 
 SAMPLE_FRACTIONS = (0.0, 0.25, 0.5, 0.75)
 NCC_SIZE = 32
@@ -28,10 +29,11 @@ def _entropy(image: Image.Image) -> float:
     return image.convert("L").entropy()
 
 def _extract(video: Path, timestamp: float) -> Image.Image:
-    frame = next(video_frames(video, ["format=rgb24"], start=round(timestamp, 3)), None)
-    if frame is None:
-        raise ValueError(f"the video has no frame at {timestamp:.3f} s")
-    return frame.to_image()
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "frame.png"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{timestamp:.3f}",
+                        "-i", str(video), "-frames:v", "1", str(out)], check=True, timeout=120)
+        return Image.open(out).copy()
 
 class LeakageChecker:
     def __init__(self, cfg: KernelConfig) -> None:

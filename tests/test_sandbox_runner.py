@@ -324,6 +324,33 @@ def test_a_wait_that_fails_without_an_exit_code_waits_again(tmp_path, mounts, mo
     assert container.waits == [] and not container.killed and client.removed == ["ar-t-n1-test-1-abc"]
 
 
+def test_no_docker_daemon_is_a_failed_launch(tmp_path, mounts, monkeypatch):
+    def unreachable():
+        raise docker.errors.DockerException("Error while fetching server API version")
+    monkeypatch.setattr(docker, "from_env", unreachable)
+    recorder = Recorder(tmp_path / "run")
+    res = run_container(image="unused:tag", name="ar-t-n1-test-1-abc", mounts=mounts, command=["true"], env={},
+                        cpus=2, memory_gb=2, timeout_s=60, recorder=recorder,
+                        node="n1", phase="test", attempt=1, stats_every_s=60)
+    assert res.exit_code is None and "server API version" in res.stderr
+    assert [e for e in recorder.read_events("n1") if e["type"] == "sandbox.error"]
+
+
+def test_a_failed_removal_still_restores_owner_access(tmp_path, mounts, monkeypatch):
+    from ar_kernel.sandbox import runner
+    def daemon_gone(name, force):
+        raise requests.ConnectionError("daemon gone")
+    client = _FakeClient(_FakeContainer())
+    client.api.remove_container = daemon_gone
+    monkeypatch.setattr(docker, "from_env", lambda: client)
+    restored = []
+    monkeypatch.setattr(runner, "restore_owner_access", restored.append)
+    res = run_container(image="unused:tag", name="ar-t-n1-test-1-abc", mounts=mounts, command=["true"], env={},
+                        cpus=2, memory_gb=2, timeout_s=60, recorder=Recorder(tmp_path / "run"),
+                        node="n1", phase="test", attempt=1, stats_every_s=60, poll_s=0.01)
+    assert res.exit_code == 0 and restored == [mounts.agent, mounts.workspace, mounts.staging]
+
+
 _SIGINT_CHILD = r"""
 import json, signal, sys
 from pathlib import Path

@@ -12,8 +12,6 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable
 
-from fastapi.security.utils import get_authorization_scheme_param
-
 WORKSPACE = PurePosixPath("/workspace")
 STAGING = WORKSPACE / "staging"
 
@@ -72,8 +70,10 @@ class TokenRegistry:
 
 
 def bearer(header: str | None) -> str | None:
-    scheme, value = get_authorization_scheme_param(header)
-    return value or None if scheme.lower() == "bearer" else None
+    if not header:
+        return None
+    scheme, _, value = header.partition(" ")
+    return value.strip() or None if scheme.lower() == "bearer" else None
 
 
 def to_host(caller: Caller, container_path: str) -> Path:

@@ -350,6 +350,16 @@ def test_kernel_results_prefer_structured_content():
         result_text(NS(is_error=True, structured_content=None, content=text))
 
 
+def test_arxiv_search_refuses_fewer_than_one_result_without_a_request(monkeypatch):
+    import arxiv
+    from langchain_core.tools import ToolException
+    from agent.tools import arxiv_search
+    monkeypatch.setattr(arxiv, "Client", None)                  # any request would fail differently
+    for n in (0, -1):
+        with pytest.raises(ToolException, match="^max_results must be at least 1$"):
+            arxiv_search.invoke({"query": "q", "max_results": n})
+
+
 def test_every_listed_component_exists_in_the_seed():
     from agent.orchestration import COMPONENTS
     for component, where in COMPONENTS.items():

@@ -108,7 +108,7 @@ def to_messages(items: list[dict]) -> list[dict]:
 def diff_html(text: str | None) -> str:
     if not text:
         return "<p><i>no changes</i></p>"
-    return highlight(text, DiffLexer(), HtmlFormatter(noclasses=True, prestyles="white-space:pre-wrap;font-size:12px"))
+    return highlight(text, DiffLexer(), HtmlFormatter(noclasses=True, nobackground=True, prestyles="white-space:pre-wrap;font-size:12px"))
 
 
 def _abs(run: views.Run, rel: str | None) -> str | None:

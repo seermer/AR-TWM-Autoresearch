@@ -158,6 +158,8 @@ def _fetch(url: str) -> str:
 @tool(description="Search arXiv with the arXiv API query syntax, for example 'all:\"world model\" AND cat:cs.CV' or "
                   "'ti:camera AND abs:\"video generation\"'. Returns id, title, first published date and abstract.")
 def arxiv_search(query: str, max_results: int = 10) -> list[dict]:
+    if int(max_results) < 1:
+        raise ToolException("max_results must be at least 1")
     n = min(int(max_results), 50)
     search = arxiv.Search(query=query, max_results=n, sort_by=arxiv.SortCriterion.Relevance)
     return [{"id": r.get_short_id(), "title": " ".join(r.title.split()),

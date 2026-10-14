@@ -2,9 +2,7 @@
 wait for idle GPUs."""
 from __future__ import annotations
 
-import math
-
-import pynvml
+import subprocess
 
 from .config import GpuPolicyError
 
@@ -14,29 +12,17 @@ def alert(recorder, kind: str, message: str, *, level: str = "error", **payload)
                    kind=kind, level=level, message=message)
 
 
-_nvml_ready = False
-
-
-def nvml(read):
-    """`read()` through NVML (initialised on first use), or None when the driver cannot be reached.
-    NVML indices are nvidia-smi's, i.e. PCI bus order."""
-    global _nvml_ready
+def smi(args: list[str]) -> str | None:
     try:
-        if not _nvml_ready:
-            pynvml.nvmlInit()
-            _nvml_ready = True
-        return read()
-    except pynvml.NVMLError:
+        r = subprocess.run(["nvidia-smi", *args], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
         return None
-
-
-def memory_used_mib(handle) -> int:
-    """Used memory as nvidia-smi reports it: the v2 count, rounded up to whole MiB."""
-    return math.ceil(pynvml.nvmlDeviceGetMemoryInfo(handle, version=pynvml.nvmlMemory_v2).used / 2**20)
+    return r.stdout if r.returncode == 0 else None
 
 
 def visible_gpus() -> set[int] | None:
-    return nvml(lambda: set(range(pynvml.nvmlDeviceGetCount())))
+    out = smi(["--query-gpu=index", "--format=csv,noheader"])
+    return None if out is None else {int(x) for x in out.split() if x.strip().isdigit()}
 
 
 def check_visible(gpus: list[int], visible=visible_gpus) -> None:
@@ -50,8 +36,12 @@ def check_visible(gpus: list[int], visible=visible_gpus) -> None:
 
 def gpu_total_gib(gpus: list[int]) -> dict[int, int] | None:
     """Each card's memory in whole GiB (a 24 GB card reports 23.99)."""
-    return nvml(lambda: {g: round(pynvml.nvmlDeviceGetMemoryInfo(pynvml.nvmlDeviceGetHandleByIndex(g)).total / 2**30)
-                         for g in gpus if g < pynvml.nvmlDeviceGetCount()})
+    out = smi(["--query-gpu=index,memory.total", "--format=csv,noheader,nounits"])
+    if out is None:
+        return None
+    rows = [[x.strip() for x in line.split(",")] for line in out.splitlines()]
+    total = {int(r[0]): round(int(r[1]) / 1024) for r in rows if len(r) == 2 and r[0].isdigit() and r[1].isdigit()}
+    return {g: total[g] for g in gpus if g in total}
 
 
 def check_tools_fit(cfg, gpus: list[int], totals=gpu_total_gib) -> None:

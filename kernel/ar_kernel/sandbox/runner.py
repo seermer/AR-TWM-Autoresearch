@@ -75,7 +75,7 @@ def kill_run_containers(run_id: str, node: str | None = None) -> list[str]:
 def _remove(client, name: str) -> None:
     try:
         client.api.remove_container(name, force=True)
-    except docker.errors.APIError:                     # already gone
+    except (docker.errors.DockerException, requests.RequestException):     # already gone, or no daemon
         pass
 
 
@@ -181,7 +181,7 @@ def run_container(*, image: str, name: str, mounts: Mounts, command: list[str], 
     started = time.monotonic()
     stats: list[dict] = []
     stop = threading.Event()
-    client = docker.from_env()
+    client = None
 
     def sample(container) -> None:
         while not stop.wait(stats_every_s):
@@ -198,6 +198,7 @@ def run_container(*, image: str, name: str, mounts: Mounts, command: list[str], 
         # error or a bad bind source): a `Created` container named `name` is left behind
         # unless the removal below also covers this path.
         try:
+            client = docker.from_env()
             container = client.containers.run(**kwargs)
         except (docker.errors.DockerException, requests.RequestException) as exc:
             recorder.event("sandbox.error", payload={"stderr": str(exc)}, container=name, **base)
@@ -235,7 +236,8 @@ def run_container(*, image: str, name: str, mounts: Mounts, command: list[str], 
             pass
     finally:
         stop.set()
-        _remove(client, name)
+        if client is not None:
+            _remove(client, name)
         for root in (mounts.agent, mounts.workspace, mounts.staging):   # everything the agent can write
             restore_owner_access(root)
     result = RunResult(exit_code, timed_out, stdout, stderr, time.monotonic() - started, stats, name)

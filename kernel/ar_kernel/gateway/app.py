@@ -9,7 +9,6 @@ from collections.abc import Mapping
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from tenacity import AsyncRetrying, retry_if_result, stop_after_attempt, wait_exponential
 
 from ..budget import Budget
 from ..isolation import censor_request
@@ -115,32 +114,32 @@ class Upstream:
         return {**body, "reasoning": {**reasoning, "effort": self.effort}}
 
     async def post(self, path: str, body: dict) -> tuple[int, dict, int]:
+        attempts, status, payload = 0, 599, {"error": "no attempt made"}
         async with httpx.AsyncClient(transport=self._transport, timeout=self._timeout) as client:
-            async def once() -> tuple[int, dict]:
+            for attempt in range(self._retries + 1):
+                attempts = attempt + 1
                 try:
                     r = await client.post(self._base + path, json=body, headers=self._headers)
+                    status = r.status_code
+                    try:
+                        payload = r.json() if r.content else {}
+                    except ValueError:        # e.g. an HTML error page from a proxy in front of the API
+                        # No truncation of telemetry: the full body is recorded,
+                        # even though it never reaches the agent JSON-encoded verbatim either way.
+                        payload = {"error": {"message": f"upstream returned HTTP {status} with a "
+                                                        f"non-JSON body", "body": r.text}}
+                        status = status if status >= 400 else 502   # never pass garbage on as success
+                    error = upstream_error(payload)
+                    if status < 400 and error:                      # a router's 200 around the provider's error
+                        code = error.get("code")
+                        status = code if isinstance(code, int) and 400 <= code <= 599 else 502
                 except httpx.HTTPError as exc:
-                    return 599, {"error": f"{type(exc).__name__}: {exc}"}
-                status = r.status_code
-                try:
-                    payload = r.json() if r.content else {}
-                except ValueError:        # e.g. an HTML error page from a proxy in front of the API
-                    # No truncation of telemetry: the full body is recorded,
-                    # even though it never reaches the agent JSON-encoded verbatim either way.
-                    payload = {"error": {"message": f"upstream returned HTTP {status} with a "
-                                                    f"non-JSON body", "body": r.text}}
-                    status = status if status >= 400 else 502   # never pass garbage on as success
-                error = upstream_error(payload)
-                if status < 400 and error:                      # a router's 200 around the provider's error
-                    code = error.get("code")
-                    status = code if isinstance(code, int) and 400 <= code <= 599 else 502
-                return status, payload
-
-            retrying = AsyncRetrying(stop=stop_after_attempt(self._retries + 1), wait=wait_exponential(),
-                                     retry=retry_if_result(lambda r: r[0] in RETRYABLE or r[0] == 599),
-                                     sleep=self._sleep, retry_error_callback=lambda state: state.outcome.result())
-            status, payload = await retrying(once)
-        return status, payload, retrying.statistics["attempt_number"]
+                    status, payload = 599, {"error": f"{type(exc).__name__}: {exc}"}
+                if status not in RETRYABLE and status != 599:
+                    break
+                if attempt < self._retries:
+                    await self._sleep(2 ** attempt)
+        return status, payload, attempts
 
 
 def create_gateway_app(*, registry, store: CallStore, allowed_models: set[str],

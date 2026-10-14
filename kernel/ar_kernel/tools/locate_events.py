@@ -9,17 +9,17 @@ from __future__ import annotations
 import base64
 import io
 import shutil
+import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Annotated, Any, Literal, Optional
 
-import av
 from mcp.server.mcpserver import Context
 from PIL import Image, ImageDraw, ImageFont
 from pydantic import create_model
 
-from ..data.probe import probe_video, video_frames
+from ..data.probe import probe_video
 from ..subproc import free_port
 from .captioner import clip_host_path, container_path, stage_clip
 from .context import PathError
@@ -64,7 +64,11 @@ def decode(video: Path, width: int) -> list[Image.Image]:
     """Every frame of the clip, `width` pixels wide."""
     info = probe_video(video)
     height = round(info.height * width / info.width / 2) * 2
-    return [frame.to_image() for frame in video_frames(video, [f"scale={width}:{height}", "format=rgb24"])]
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(video), "-vf", f"scale={width}:{height}",
+                          "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                         capture_output=True, check=True, timeout=600).stdout
+    size = width * height * 3
+    return [Image.frombytes("RGB", (width, height), raw[i:i + size]) for i in range(0, len(raw) - size + 1, size)]
 
 
 def sheet(frames: list[Image.Image], fps: float, start: float, times: list[float]) -> Image.Image:
@@ -185,7 +189,7 @@ class LocateEventsBackend:
                     times = sheet_times(start, end)
                     url = data_url(sheet(frames, info.fps, start, times))
                     calls += [(video, n, k, url, times) for n in range(len(item["events"]))]
-            except (PathError, OSError, av.FFmpegError, ValueError) as exc:
+            except (PathError, OSError, subprocess.SubprocessError, ValueError) as exc:
                 results[video] = {"error": f"{type(exc).__name__}: {exc}"[:500]}
         if not calls:
             return {"clips": results, "load_s": None, "gpu_memory_mib": None, "gpu_memory_released": None}

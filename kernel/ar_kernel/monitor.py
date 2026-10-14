@@ -9,32 +9,36 @@ import time
 from pathlib import Path
 
 import psutil
-import pynvml
 
-from .guards import alert, memory_used_mib, nvml
+from .guards import alert, smi
 from .liveness import tree_mark
 
 
-def _field(read):
-    try:
-        return read()
-    except pynvml.NVMLError_NotSupported:
-        return None
+def _num(value: str) -> float | None:
+    return float(value) if value.replace(".", "", 1).isdigit() else None     # "[N/A]" -> None
 
 
 def gpu_usage_detailed() -> dict[int, dict] | None:
-    """Per-GPU utilization, memory, power, temperature and compute pids from NVML."""
-    def read():
-        out = {}
-        for i in range(pynvml.nvmlDeviceGetCount()):
-            h = pynvml.nvmlDeviceGetHandleByIndex(i)
-            out[i] = {"util": _field(lambda: float(pynvml.nvmlDeviceGetUtilizationRates(h).gpu)),
-                      "memory_mib": _field(lambda: float(memory_used_mib(h))),
-                      "power_w": _field(lambda: round(pynvml.nvmlDeviceGetPowerUsage(h) / 1000, 2)),
-                      "temp_c": _field(lambda: float(pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_GPU))),
-                      "pids": [p.pid for p in pynvml.nvmlDeviceGetComputeRunningProcesses(h)]}
-        return out
-    return nvml(read)
+    """Per-GPU utilization, memory, power, temperature and compute pids from nvidia-smi."""
+    table = smi(["--query-gpu=index,uuid,utilization.gpu,memory.used,power.draw,temperature.gpu",
+                  "--format=csv,noheader,nounits"])
+    apps = smi(["--query-compute-apps=pid,gpu_uuid", "--format=csv,noheader"])
+    if table is None or apps is None:
+        return None
+    out, by_uuid = {}, {}
+    for line in table.splitlines():
+        if not line.strip():
+            continue
+        index, uuid, util, mem, power, temp = (s.strip() for s in line.split(","))
+        by_uuid[uuid] = int(index)
+        out[int(index)] = {"util": _num(util), "memory_mib": _num(mem), "power_w": _num(power),
+                           "temp_c": _num(temp), "pids": []}
+    for line in apps.splitlines():
+        if line.strip():
+            pid, uuid = (s.strip() for s in line.split(","))
+            if uuid in by_uuid:
+                out[by_uuid[uuid]]["pids"].append(int(pid))
+    return out
 
 
 def _descends_from(pid: int, ancestor: int) -> bool:

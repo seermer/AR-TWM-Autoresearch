@@ -8,8 +8,7 @@ dependencies = [
     "mcp==2.2.0",
     "langgraph==1.2.11", "langchain-core==1.6.3", "langchain-openai==1.6.2", "openai>=1.92",
     "huggingface_hub>=1.32", "zstandard>=0.25",
-    "psutil>=7.2", "nvidia-ml-py>=13.615", "omegaconf>=2.4", "av>=19.0", "python-dotenv>=1.2",
-    "docker>=7.2", "tenacity>=9.1",
+    "psutil>=7.2", "python-dotenv>=1.2", "docker>=7.2",
 ]
 
 [project.optional-dependencies]

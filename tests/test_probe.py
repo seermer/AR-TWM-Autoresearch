@@ -56,3 +56,12 @@ def test_square_pixel_four_by_three_still_fails(tmp_path):
 def test_unrotated_clip_reports_zero_rotation(tmp_path):
     info = probe_video(make_mp4(tmp_path / "plain.mp4"))
     assert info.rotation == 0 and info.sar == 1.0
+
+
+def test_damage_ffprobe_reads_past_fails_the_probe(tmp_path):
+    clip = make_mp4(tmp_path / "z.mp4")
+    data = bytearray(clip.read_bytes())
+    data[len(data) // 2:len(data) // 2 + 2000] = bytes(2000)
+    clip.write_bytes(bytes(data))
+    with pytest.raises(ValueError, match="^the video is damaged: "):
+        probe_video(clip)
