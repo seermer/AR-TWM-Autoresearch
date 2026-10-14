@@ -8,6 +8,8 @@ import threading
 import time
 from pathlib import Path
 
+import psutil
+
 from .guards import alert, smi
 from .liveness import tree_mark
 
@@ -40,16 +42,12 @@ def gpu_usage_detailed() -> dict[int, dict] | None:
 
 
 def _descends_from(pid: int, ancestor: int) -> bool:
-    for _ in range(64):
-        if pid == ancestor:
-            return True
-        if pid <= 1:
-            return False
-        try:
-            pid = int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
-        except (OSError, ValueError, IndexError):
-            return False
-    return False
+    if pid == ancestor:
+        return True
+    try:
+        return ancestor in {p.pid for p in psutil.Process(pid).parents()}
+    except psutil.Error:
+        return False
 
 
 class Monitor:

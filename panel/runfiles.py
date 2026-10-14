@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ar_kernel.subproc import proc_start_time
+
 HEAD_TAIL = 256 * 1024
 
 
@@ -136,7 +138,6 @@ class RunFiles:
         try:
             pid_s, started = (self.root / "control" / "loop.pid").read_text().split()
             pid = int(pid_s)
-            now = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
-        except (OSError, ValueError, IndexError):
+        except (OSError, ValueError):
             return None
-        return pid if now == started else None
+        return pid if proc_start_time(pid) == started else None

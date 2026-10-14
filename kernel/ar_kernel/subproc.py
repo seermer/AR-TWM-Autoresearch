@@ -2,6 +2,8 @@ from __future__ import annotations
 import os, signal, socket, subprocess, threading, time
 from pathlib import Path
 
+import psutil
+
 from .config import REPO_ROOT
 
 KILL_GRACE_SECONDS = 30
@@ -236,6 +238,6 @@ def file_tail(path: Path, limit: int) -> str:
 
 
 def meminfo_gib() -> dict[str, float]:
-    """/proc/meminfo's MemTotal and MemAvailable, in GiB."""
-    fields = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
-    return {k: int(fields[k].split()[0]) / 2**20 for k in ("MemTotal", "MemAvailable")}
+    """MemTotal and MemAvailable, in GiB."""
+    mem = psutil.virtual_memory()
+    return {"MemTotal": mem.total / 2**30, "MemAvailable": mem.available / 2**30}
