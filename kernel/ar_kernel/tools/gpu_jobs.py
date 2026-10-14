@@ -69,7 +69,8 @@ _TURN = {"type": "object", "additionalProperties": False, "required": ["action",
     "event": _str("one sentence: something that happens during this turn. Leave it out when nothing does"),
     "perspective": {"type": "string", "enum": list(PERSPECTIVES),
                     "description": "whose eyes the turn is seen through. A turn whose perspective differs from "
-                                   "the turn before it switches the view, and its action must be `stop`"}}}
+                                   "the turn before it switches the view: the kernel adds the sentence that says so, "
+                                   "and its action must be `stop`"}}}
 _SCENE = _str("the scene: place, objects, light")
 _CHARACTER = _str("the subject, if there is one")
 _TURNS = {"type": "array", "items": _TURN, "description": "the clip, turn by turn"}

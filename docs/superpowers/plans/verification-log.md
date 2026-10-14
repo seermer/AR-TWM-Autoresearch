@@ -365,7 +365,7 @@ The deterministic band is deliberately tight — it is what would catch a real
 regression in the render path. The test also asserts that no metric the
 reference recorded has gone missing, which is the failure mode that started this.
 
-**Open item:** the reference's `geometric`/`photometric` values were produced
+**Closed item (user, 2026-10-14):** the reference's `geometric`/`photometric` values were produced
 with the unseeded code, so comparing seeded results to them carries a one-time
 offset inside the old noise. Regenerating the reference under the seeded code
 (~105 min) would remove it. Current tolerances cover it either way.

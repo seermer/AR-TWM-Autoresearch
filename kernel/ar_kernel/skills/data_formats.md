@@ -17,7 +17,7 @@ A candidate is a video, an annotation, a pose file and `derived_from`.
   {"scene_prompt": "A dry savanna at noon, an acacia tree on the left, low yellow grass.",
    "character_prompt": "A hiker in a red jacket.",
    "turns": [{"start_s": 0.0, "perspective": "first_person"},
-             {"start_s": 4.0, "event": "A camel steps out from behind the acacia tree.", "perspective": "first_person"}]}
+             {"start_s": 4.0, "event": "...", "perspective": "first_person"}]}
   ```
 
   - `scene_prompt` is required. `character_prompt` is the subject, when the clip has one.

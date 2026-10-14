@@ -244,6 +244,8 @@ Reading:
 - The 24 AlayaWorld clips of live-09-29 are all two renders joined into one 121-frame clip (57 frames first-person, then 64 third-person). In 21 of the 24 the largest pose step is at the join, frame 56 to 57; in the other three it is at frame 63 or 95. Its size is 0.26 to 5.3 units, a median 50 times the clip's normal per-frame step (13 to 260 times the eval's 0.020), with rotations at that frame up to 111 degrees. These clips were the training data of n1, and n2 and n3 reused them.
 - So the training clips of the nodes whose `navigation_consistency` fell contained a camera jump of about one scene unit in a single frame, which the spatial memory then used to warp earlier frames. This is a plausible cause of the drop and a more direct one than scale. It is not proven: no node was trained on the same clips without the joins.
 
+> **Status (user, 2026-10-14): the stricter ingest option below is closed.** The cut detector at ingest (`find_cut`) replaced it.
+
 Nothing to change in code from this. The knowledge file now states that poses estimated across a cut are not valid (Fix 15). A stricter option, not done and for the user to decide: have the kernel's ingest reject or warn on a clip whose pose has a single-frame step many times its median.
 
 
