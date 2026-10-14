@@ -45,12 +45,24 @@ def test_enabled_tools_must_fit_the_runs_cards():
     check_tools_fit(bare, [0], totals=lambda g: {0: 1})                    # no estimate: not checked
 
 
-def test_card_sizes_are_whole_gib_and_unreadable_output_means_no_check(monkeypatch):
+def test_card_sizes_are_whole_gib_and_unreadable_nvml_means_no_check(monkeypatch):
+    import pynvml
+    from types import SimpleNamespace
     from ar_kernel import guards
-    monkeypatch.setattr(guards, "smi", lambda args: "0, 24564\n1, 24564\n2, 11264\n")
+    totals = [24564, 24564, 11264]
+
+    def lost(*a, **k):
+        raise pynvml.NVMLError(pynvml.NVML_ERROR_GPU_IS_LOST)
+    monkeypatch.setattr(pynvml, "nvmlInit", lambda: None)
+    monkeypatch.setattr(pynvml, "nvmlDeviceGetCount", lambda: len(totals))
+    monkeypatch.setattr(pynvml, "nvmlDeviceGetHandleByIndex", lambda i: i)
+    monkeypatch.setattr(pynvml, "nvmlDeviceGetMemoryInfo", lambda h, version=None: SimpleNamespace(total=totals[h] * 2**20))
     assert guards.gpu_total_gib([0, 2, 7]) == {0: 24, 2: 11}
-    for text in ("0, [N/A]\n", "No devices were found\n", ""):
-        monkeypatch.setattr(guards, "smi", lambda args, text=text: text)
-        assert not guards.gpu_total_gib([0])
-    monkeypatch.setattr(guards, "smi", lambda args: None)
+    monkeypatch.setattr(pynvml, "nvmlDeviceGetCount", lambda: 0)
+    assert not guards.gpu_total_gib([0])
+    monkeypatch.setattr(pynvml, "nvmlDeviceGetCount", lambda: len(totals))
+    monkeypatch.setattr(pynvml, "nvmlDeviceGetMemoryInfo", lost)
     assert guards.gpu_total_gib([0]) is None
+    monkeypatch.setattr(guards, "_nvml_ready", False)
+    monkeypatch.setattr(pynvml, "nvmlInit", lost)
+    assert guards.gpu_total_gib([0]) is None and guards.visible_gpus() is None

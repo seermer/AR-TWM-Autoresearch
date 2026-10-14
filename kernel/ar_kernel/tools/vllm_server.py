@@ -3,15 +3,16 @@ from __future__ import annotations
 
 import json
 import logging
-import subprocess
 import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
+import pynvml
 from openai import OpenAI
 
+from ..guards import memory_used_mib, nvml
 from ..subproc import file_tail
 from .jobs import run_cancellable
 
@@ -26,14 +27,9 @@ def local_client(base_url: str, timeout_s: float) -> OpenAI:
 
 
 def gpu_memory_mib(gpus: list[int]) -> dict[int, int] | None:
-    """memory.used per GPU (nvidia-smi indices, i.e. PCI bus order), or None when it cannot be read."""
-    try:
-        out = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used", "--format=csv,noheader,nounits"],
-                             capture_output=True, text=True, timeout=30, check=True).stdout
-        used = {int(i): int(m) for i, m in (line.split(",") for line in out.strip().splitlines())}
-    except (OSError, subprocess.SubprocessError, ValueError):    # ValueError: "[N/A]", "[Not Supported]"
-        return None
-    return {g: used[g] for g in gpus if g in used}
+    """Used memory per GPU (nvidia-smi indices, i.e. PCI bus order), or None when it cannot be read."""
+    return nvml(lambda: {g: memory_used_mib(pynvml.nvmlDeviceGetHandleByIndex(g))
+                         for g in gpus if g < pynvml.nvmlDeviceGetCount()})
 
 
 FREE_WAITS_S = (4, 8, 16, 32, 64)        # before a job: a job that just ended may still be giving memory back
