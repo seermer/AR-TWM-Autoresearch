@@ -11,14 +11,13 @@ import subprocess
 import threading
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
-from xml.etree import ElementTree
 from types import SimpleNamespace
 from typing import Any
 
+import arxiv
 from langchain_core.tools import StructuredTool, ToolException, tool
 from pydantic import BaseModel
 
@@ -149,9 +148,6 @@ def make_file_tools(root: str) -> list:
 
 # ---- arXiv ----
 
-ARXIV_API = "http://export.arxiv.org/api/query"
-ATOM = {"a": "http://www.w3.org/2005/Atom"}
-
 
 def _fetch(url: str) -> str:
     request = urllib.request.Request(url, headers={"User-Agent": "autoresearcher-agent"})
@@ -162,14 +158,11 @@ def _fetch(url: str) -> str:
 @tool(description="Search arXiv with the arXiv API query syntax, for example 'all:\"world model\" AND cat:cs.CV' or "
                   "'ti:camera AND abs:\"video generation\"'. Returns id, title, first published date and abstract.")
 def arxiv_search(query: str, max_results: int = 10) -> list[dict]:
-    url = ARXIV_API + "?" + urllib.parse.urlencode(
-        {"search_query": query, "max_results": min(int(max_results), 50), "sortBy": "relevance"})
-    feed = ElementTree.fromstring(_fetch(url))
-    return [{"id": entry.findtext("a:id", "", ATOM).rsplit("/abs/", 1)[-1],
-             "title": " ".join(entry.findtext("a:title", "", ATOM).split()),
-             "published": entry.findtext("a:published", "", ATOM)[:10],
-             "abstract": " ".join(entry.findtext("a:summary", "", ATOM).split())}
-            for entry in feed.findall("a:entry", ATOM)]
+    n = min(int(max_results), 50)
+    search = arxiv.Search(query=query, max_results=n, sort_by=arxiv.SortCriterion.Relevance)
+    return [{"id": r.get_short_id(), "title": " ".join(r.title.split()),
+             "published": r.published.strftime("%Y-%m-%d"), "abstract": " ".join(r.summary.split())}
+            for r in arxiv.Client(page_size=n, num_retries=0).results(search)]
 
 
 class _PaperText(HTMLParser):
