@@ -15,16 +15,20 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Annotated, Any
 
-import httpx
+import openai
 from mcp.server.mcpserver import Context
 from pydantic import Field
 
 from .context import WORKSPACE, PathError, to_container, to_host
 from ..subproc import free_port
 from .server import FROM_FILE, ToolError, listed, refuse
-from .vllm_server import VllmServer, gpu_memory_mib, serve_command, wait_gpu_release
+from .vllm_server import VllmServer, gpu_memory_mib, local_client, serve_command, wait_gpu_release
 
 TOOL = "caption_videos"
+SYSTEM = (
+    "You are the video reader of a research pipeline. Each request gives one video clip and says what to "
+    "say about it. Answer that request about this clip, in plain text: no preamble, no markdown, no mention "
+    "of these instructions. Your text is used as it stands, so write exactly what the request asks for.")
 
 
 def container_path(path: str) -> str:
@@ -117,7 +121,7 @@ class CaptionBackend:
         base, load_s, outcome = server.base_url, None, "failed"
         try:
             load_s = server.start(float(c["startup_timeout_s"]), cancel, on_poll=sample)
-            with httpx.Client(timeout=float(c["clip_timeout_s"]), trust_env=False) as http:
+            with local_client(base, float(c["clip_timeout_s"])) as client:
                 if load_s is not None:
                     self.recorder.event("caption.server_ready", node=job.node, component="tools",
                                         job_id=job.id, load_s=load_s,
@@ -130,7 +134,7 @@ class CaptionBackend:
                     if cancel.is_set():
                         return
                     t0 = time.monotonic()
-                    recorded = self._caption(http, base, file, job.args["prompt"], c)
+                    recorded = self._caption(client, file, job.args["prompt"], c)
                     result = {k: v for k, v in recorded.items() if k != "reasoning"}   # the agent gets the caption
                     latency = time.monotonic() - t0
                     with done_lock:
@@ -167,24 +171,20 @@ class CaptionBackend:
                 "gpu_memory_mib": {"before": before, "peak": peak or None, "after": after},
                 "gpu_memory_released": released}
 
-    def _caption(self, http: httpx.Client, base: str, file: Path, prompt: str, c: dict) -> dict:
+    def _caption(self, client: openai.OpenAI, file: Path, prompt: str, c: dict) -> dict:
         # No max_tokens: the model reasons first, and a cap could cut the caption off.
-        body = {"model": "captioner", "temperature": 0.0, "reasoning_effort": c["reasoning_effort"],
-                "messages": [{"role": "user", "content": [
-                    {"type": "video_url", "video_url": {"url": file.as_uri()}},
-                    {"type": "text", "text": prompt}]}]}
         try:
-            r = http.post(f"{base}/v1/chat/completions", json=body)
-        except httpx.HTTPError as exc:
-            return {"error": f"{type(exc).__name__}: {exc}"}
-        if r.status_code != 200:
-            return {"error": f"HTTP {r.status_code}: {r.text[-2000:]}"}
-        try:
-            message = r.json()["choices"][0]["message"]
-            text, reasoning = message["content"], message.get("reasoning") or message.get("reasoning_content")
-        except (ValueError, KeyError, IndexError, TypeError) as exc:
-            return {"error": f"unexpected response ({type(exc).__name__}): {r.text[-2000:]}"}
-        out = {"caption": text.strip()} if text and text.strip() else {"error": "empty caption"}
+            done = client.chat.completions.create(
+                model="captioner", temperature=0.0, reasoning_effort=c["reasoning_effort"],
+                messages=[{"role": "system", "content": SYSTEM},
+                          {"role": "user", "content": [{"type": "video_url", "video_url": {"url": file.as_uri()}},
+                                                       {"type": "text", "text": prompt}]}])
+        except openai.OpenAIError as exc:
+            return {"error": f"{type(exc).__name__}: {exc}"[:2000]}
+        message = done.choices[0].message
+        reasoning = getattr(message, "reasoning", None) or getattr(message, "reasoning_content", None)
+        text = (message.content or "").strip()
+        out = {"caption": text} if text else {"error": "empty caption"}
         return {**out, "reasoning": reasoning} if reasoning else out
 
 

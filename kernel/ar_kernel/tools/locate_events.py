@@ -1,14 +1,13 @@
 """locate_events: when each of a clip's events happens, from a local vision model, as a GPU job.
 
 The clip is cut into one-second pieces. Each piece becomes one sheet of its frames with the time
-under each, and the model answers one question set per sheet. Each job starts `vllm serve` (the
+under each, and the model answers one question per event and sheet. Each job starts `vllm serve` (the
 `captioner` model, serving images), asks about every piece of every clip, and always stops it again.
 """
 from __future__ import annotations
 
 import base64
 import io
-import json
 import shutil
 import subprocess
 import threading
@@ -16,9 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Annotated, Any, Literal, Optional
 
-import httpx
 from mcp.server.mcpserver import Context
-from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont
 from pydantic import create_model
 
@@ -28,19 +25,23 @@ from .captioner import clip_host_path, container_path, stage_clip
 from .context import PathError
 from .gpu_jobs import items_schema
 from .server import ToolError, listed, refuse
-from .vllm_server import VllmServer, gpu_memory_mib, serve_command, wait_gpu_release
+from .vllm_server import VllmServer, gpu_memory_mib, local_client, serve_command, wait_gpu_release
 
 TOOL = "locate_events"
 SHEET_FPS, GRID = 16, 4             # a piece's sheet: 16 frames a second, 4 x 4
 GAP, CAPTION_H = 12, 28             # white space between frames, and the caption strip under each
 SHEET_TIMES = {f"{i / SHEET_FPS:.2f}": i / SHEET_FPS for i in range(SHEET_FPS)}     # a caption -> its time
-QUESTION = (
-    "The sheet shows {n} consecutive frames of a video, in reading order (left to right, top to bottom). "
-    "Under each frame is its time in seconds. For each event below, answer three things.\n"
-    "- happening_now: is the event happening in these frames?\n"
-    "- already_happened: has the event already happened before these frames, with its result visible in them?\n"
-    "- start: the time under the first frame in which the event is happening, written in quotes like \"0.56\", "
-    "or null when the event does not start in these frames.\n\nEvents:\n{events}")
+SYSTEM = (
+    "You are the frame reader of a video research pipeline. Each request gives one sheet and names one event. "
+    "The sheet shows up to 16 consecutive frames of a video, 1/16 of a second apart, in reading order (left to "
+    "right, top to bottom); under each frame is its time in seconds, such as 0.56. Say what the sheet shows "
+    "about the event.\n\n"
+    "Answer with one JSON object and nothing else, with these fields:\n"
+    "- happening_now: true when the event is happening in these frames, otherwise false.\n"
+    "- already_happened: true when the event happened before these frames and its result is visible in "
+    "them, otherwise false.\n"
+    "- start: the time under the first frame in which the event is happening, as a string such as \"0.56\"; "
+    "null when the event does not start in these frames.")
 
 
 def pieces(frames: int, fps: float) -> list[tuple[float, float]]:
@@ -84,12 +85,17 @@ def sheet(frames: list[Image.Image], fps: float, start: float, times: list[float
     return out
 
 
-def answer_model(n_events: int, times: list[float]):
-    """What one piece's answer must look like: per event two yes/no answers and a start that is one of
-    the sheet's captions, or none."""
+def data_url(image: Image.Image) -> str:
+    data = io.BytesIO()
+    image.save(data, format="JPEG", quality=92)
+    return "data:image/jpeg;base64," + base64.b64encode(data.getvalue()).decode()
+
+
+def answer_model(times: list[float]):
+    """What one answer must look like: two yes/no answers and a start that is one of the sheet's
+    captions, or none."""
     start = Optional[Literal[tuple(f"{t:.2f}" for t in times)]]
-    event = create_model("Event", happening_now=(bool, ...), already_happened=(bool, ...), start=(start, ...))
-    return create_model("Answer", **{f"event_{i + 1}": (event, ...) for i in range(n_events)})
+    return create_model("Answer", happening_now=(bool, ...), already_happened=(bool, ...), start=(start, ...))
 
 
 def best_span(there: list[bool]) -> tuple[int, int, int] | None:
@@ -107,11 +113,11 @@ def best_span(there: list[bool]) -> tuple[int, int, int] | None:
     return best
 
 
-def spans(events: list[str], cut: list[tuple[float, float]], answers: list[dict]) -> list[dict]:
-    """Per event: when it starts and ends in the clip (or null), and how many pieces disagree."""
+def spans(events: list[str], cut: list[tuple[float, float]], answers: list[list[dict]]) -> list[dict]:
+    """Per event: when it starts and ends in the clip (or null), and how many pieces disagree.
+    `answers[n][k]` is the answer about event n in piece k."""
     out = []
-    for n, text in enumerate(events, start=1):
-        per = [a[f"event_{n}"] for a in answers]
+    for text, per in zip(events, answers):
         found = best_span([p["happening_now"] or p["already_happened"] for p in per])
         if found is None:
             out.append({"event": text, "start_s": None, "end_s": None, "disagreeing_pieces": 0})
@@ -136,21 +142,16 @@ class LocateEventsBackend:
         self.max_items = self.block.get("max_items")
 
     def server_command(self, port: int) -> list[str]:
-        # compact answers: with whitespace allowed the server can pad an answer with spaces without end
-        return serve_command(self.cfg.get("captioner"), self.gpus, port, "locator", mm_limits={"image": 1, "video": 0}) + [
-            "--structured-outputs-config", json.dumps({"backend": "xgrammar", "disable_any_whitespace": True})]
+        return serve_command(self.cfg.get("captioner"), self.gpus, port, "locator", mm_limits={"image": 1, "video": 0})
 
-    def ask(self, client, image: Image.Image, events: list[str], times: list[float]) -> tuple[dict, str | None]:
-        """(the parsed answer of one piece, the model's reasoning)."""
-        data = io.BytesIO()
-        image.save(data, format="JPEG", quality=92)
-        url = "data:image/jpeg;base64," + base64.b64encode(data.getvalue()).decode()
-        question = QUESTION.format(n=len(times), events="\n".join(f"{i}. {e}" for i, e in enumerate(events, 1)))
+    def ask(self, client, url: str, event: str, times: list[float]) -> tuple[dict, str | None]:
+        """(the parsed answer about one event in one piece, the model's reasoning). `url` is the sheet."""
         done = client.chat.completions.parse(
             model="locator", temperature=0.0, reasoning_effort=self.block["reasoning_effort"],
-            response_format=answer_model(len(events), times),
-            messages=[{"role": "user", "content": [{"type": "image_url", "image_url": {"url": url}},
-                                                   {"type": "text", "text": question}]}])
+            response_format=answer_model(times),
+            messages=[{"role": "system", "content": SYSTEM},
+                      {"role": "user", "content": [{"type": "image_url", "image_url": {"url": url}},
+                                                   {"type": "text", "text": f"Event: {event}"}]}])
         message = done.choices[0].message
         if message.parsed is None:
             raise ValueError(f"the model gave no answer in the asked shape: {message.content!r}"[:500])
@@ -165,7 +166,7 @@ class LocateEventsBackend:
         media = work / "media"
         media.mkdir(parents=True)
         results: dict[str, dict] = {}
-        calls = []                                  # (video, events, piece number, sheet, its times)
+        calls = []                                  # (video, event number, piece number, the sheet as a data URL, its times)
         cuts: dict[str, list] = {}
         for i, item in enumerate(job.args["items"]):
             video = item["video"]
@@ -177,7 +178,8 @@ class LocateEventsBackend:
                 cuts[video] = pieces(len(frames), info.fps)
                 for k, (start, end) in enumerate(cuts[video]):
                     times = sheet_times(start, end)
-                    calls.append((video, item["events"], k, sheet(frames, info.fps, start, times), times))
+                    url = data_url(sheet(frames, info.fps, start, times))
+                    calls += [(video, n, k, url, times) for n in range(len(item["events"]))]
             except (PathError, OSError, subprocess.SubprocessError, ValueError) as exc:
                 results[video] = {"error": f"{type(exc).__name__}: {exc}"[:500]}
         if not calls:
@@ -186,29 +188,27 @@ class LocateEventsBackend:
         server = VllmServer(c["env"], self.server_command(port), self.gpus, port, cwd=work,
                             log_path=work / "vllm.log", recorder=self.recorder, node=job.node,
                             phase=TOOL, poll_s=self.poll_s, label="locate server")
+        events = {item["video"]: item["events"] for item in job.args["items"]}
         load_s, answers, failed, lock, done = None, {}, {}, threading.Lock(), [0]
         try:
             load_s = server.start(float(c["startup_timeout_s"]), cancel)
-            # no proxy lookup: the server is on this machine
-            with httpx.Client(timeout=float(self.block["request_timeout_s"]), trust_env=False) as http:
-                client = OpenAI(base_url=f"{server.base_url}/v1", api_key="none", http_client=http, max_retries=0)
-
-                def one(video, events, k, image, times) -> None:
+            with local_client(server.base_url, float(self.block["request_timeout_s"])) as client:
+                def one(video, n, k, url, times) -> None:
                     if cancel.is_set() or load_s is None:
                         return
                     try:
-                        answer, reasoning = self.ask(client, image, events, times)
+                        answer, reasoning = self.ask(client, url, events[video][n], times)
                     except Exception as exc:        # noqa: BLE001 -- one piece's failure is its clip's error
                         answer, reasoning = None, f"{type(exc).__name__}: {exc}"[:2000]
                     with lock:
                         if answer is None:
                             failed[video] = reasoning
                         else:
-                            answers.setdefault(video, {})[k] = answer
+                            answers.setdefault(video, {})[n, k] = answer
                         done[0] += 1
                         self.recorder.event("locate.piece", node=job.node, component="tools", job_id=job.id,
                                             ok=answer is not None,
-                                            payload={"video": video, "piece": k, "answer": answer, "reasoning": reasoning})
+                                            payload={"video": video, "event": n, "piece": k, "answer": answer, "reasoning": reasoning})
                         report({"asked": done[0], "total": len(calls)})
 
                 with ThreadPoolExecutor(max_workers=max(1, min(int(c["max_num_seqs"]), len(calls)))) as pool:
@@ -223,9 +223,9 @@ class LocateEventsBackend:
             video = item["video"]
             if video in failed:
                 results[video] = {"error": failed[video]}
-            elif len(answers.get(video, {})) == len(cuts.get(video, [])) and video in cuts:
-                results[video] = {"events": spans(item["events"], cuts[video],
-                                                  [answers[video][k] for k in range(len(cuts[video]))])}
+            elif video in cuts and len(answers.get(video, {})) == len(item["events"]) * len(cuts[video]):
+                results[video] = {"events": spans(item["events"], cuts[video], [
+                    [answers[video][n, k] for k in range(len(cuts[video]))] for n in range(len(item["events"]))])}
             else:
                 results.setdefault(video, {"error": "not asked (cancelled)"})
         timeout = float(c["memory_release_timeout_s"])

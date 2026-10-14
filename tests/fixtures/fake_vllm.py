@@ -8,7 +8,7 @@ HF_HUB_OFFLINE=1; captions name the CUDA_VISIBLE_DEVICES it was given.
 
 A request with a `response_format` is a locate_events sheet: the reply is JSON in the asked shape.
 An event whose sentence holds NEVER is not there; any other is happening, and starts at the sheet's
-third caption. A request whose events hold BROKEN gets text that is not JSON.
+third caption. A request whose event holds BROKEN gets text that is not JSON.
 """
 import argparse
 import json
@@ -59,7 +59,9 @@ class Handler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         if "response_format" in body:
             return self.locate(body)
-        video, text = body["messages"][0]["content"]
+        system, user = body["messages"]
+        assert system["role"] == "system" and "video reader" in system["content"]
+        video, text = user["content"]
         assert body["reasoning_effort"] == "medium" and "max_tokens" not in body and "chat_template_kwargs" not in body
         path = Path(unquote(urlparse(video["video_url"]["url"]).path)).resolve()
         if allowed not in path.parents:
@@ -78,15 +80,15 @@ class Handler(BaseHTTPRequestHandler):
 
 
     def locate(self, body):
-        image, text = body["messages"][0]["content"]
+        system, user = body["messages"]
+        assert system["role"] == "system" and "frame reader" in system["content"]
+        image, text = user["content"]
         assert body["reasoning_effort"] == "low" and image["image_url"]["url"].startswith("data:image/jpeg;base64,")
-        schema = body["response_format"]["json_schema"]["schema"]
-        captions = schema["$defs"]["Event"]["properties"]["start"]["anyOf"][0]["enum"]
-        events = [line.split(". ", 1)[1] for line in text["text"].split("Events:\n")[1].splitlines()]
-        answer = {f"event_{n}": {"happening_now": "NEVER" not in e, "already_happened": False,
-                                 "start": None if "NEVER" in e else captions[min(2, len(captions) - 1)]}
-                  for n, e in enumerate(events, 1)}
-        content = "I cannot tell." if any("BROKEN" in e for e in events) else json.dumps(answer)
+        captions = body["response_format"]["json_schema"]["schema"]["properties"]["start"]["anyOf"][0]["enum"]
+        event = text["text"].removeprefix("Event: ")
+        answer = {"happening_now": "NEVER" not in event, "already_happened": False,
+                  "start": None if "NEVER" in event else captions[min(2, len(captions) - 1)]}
+        content = "I cannot tell." if "BROKEN" in event else json.dumps(answer)
         self.reply(200, {"id": "x", "object": "chat.completion", "created": 0, "model": body["model"],
                          "choices": [{"index": 0, "finish_reason": "stop",
                                       "message": {"role": "assistant", "content": content,

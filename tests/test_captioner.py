@@ -139,7 +139,7 @@ def test_a_clip_the_server_rejects_is_a_per_clip_error_not_a_failed_job(make):
     assert out["state"] == "done", out
     clips = job_result(out)["clips"]
     assert "caption" in clips["/workspace/good.mp4"]
-    assert "HTTP 400" in clips["/workspace/bad.mp4"]["error"] and "decode" in clips["/workspace/bad.mp4"]["error"]
+    assert "Error code: 400" in clips["/workspace/bad.mp4"]["error"] and "decode" in clips["/workspace/bad.mp4"]["error"]
     assert out["summary"]["failed"] == 1 and out["summary"]["errors"][0]["item"] == "/workspace/bad.mp4"
 
 

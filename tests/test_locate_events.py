@@ -41,11 +41,10 @@ def test_a_sheet_shows_sixteen_frames_a_second_with_times_from_zero():
 
 
 def test_an_answer_takes_only_the_sheets_own_times_or_none():
-    model = le.answer_model(2, [0.0, 0.0625, 0.125])
+    model = le.answer_model([0.0, 0.0625, 0.125])
     ok = {"happening_now": True, "already_happened": False, "start": "0.06"}
-    assert model.model_validate({"event_1": ok, "event_2": {**ok, "start": None}}).event_1.start == "0.06"
-    for bad in ({"event_1": ok}, {"event_1": ok, "event_2": {**ok, "start": "0.50"}},
-                {"event_1": ok, "event_2": {"happening_now": True, "start": None}}):
+    assert model.model_validate(ok).start == "0.06" and model.model_validate({**ok, "start": None}).start is None
+    for bad in ({**ok, "start": "0.50"}, {"happening_now": True, "start": None}):
         with pytest.raises(ValueError):
             model.model_validate(bad)
 
@@ -64,14 +63,14 @@ def test_the_span_is_the_run_of_pieces_that_fits_best(there, span):
 
 def test_spans_use_the_picked_start_and_end_with_the_last_piece():
     def a(now, done, start=None):
-        return {"event_1": {"happening_now": now, "already_happened": done, "start": start},
-                "event_2": {"happening_now": False, "already_happened": False, "start": None}}
+        return {"happening_now": now, "already_happened": done, "start": start}
     cut = [(0.0, 1.0), (1.0, 2.0), (2.0, 3.0), (2.5, 3.5)]
+    none = [a(False, False)] * 4
     got = le.spans(["A dog walks in.", "Rain begins to fall."], cut,
-                   [a(False, False), a(True, False, "0.44"), a(False, True), a(False, True)])
+                   [[a(False, False), a(True, False, "0.44"), a(False, True), a(False, True)], none])
     assert got == [{"event": "A dog walks in.", "start_s": 1.4375, "end_s": 3.5, "disagreeing_pieces": 0},
                    {"event": "Rain begins to fall.", "start_s": None, "end_s": None, "disagreeing_pieces": 0}]
-    no_pick = le.spans(["A dog walks in."], cut[:2], [a(False, False), a(False, True)])
+    no_pick = le.spans(["A dog walks in."], cut[:2], [[a(False, False), a(False, True)]])
     assert no_pick[0]["start_s"] == 1.0 and no_pick[0]["end_s"] == 2.0       # the piece's own start
 
 
@@ -103,7 +102,7 @@ def env(tmp_path):
     q.shutdown()
 
 
-def test_a_job_asks_about_every_piece_and_returns_spans_only(env):
+def test_a_job_asks_about_every_event_in_every_piece_and_returns_spans_only(env):
     q, caller, rec, run = env
     items = [{"video": "a.mp4", "events": ["A dog  walks in.", "NEVER a cat."]}, {"video": "b.mp4", "events": ["Rain."]}]
     out = q.wait(caller, le.submit(q, caller, items)["job_id"], 120)
@@ -115,8 +114,8 @@ def test_a_job_asks_about_every_piece_and_returns_spans_only(env):
             {"event": "NEVER a cat.", "start_s": None, "end_s": None, "disagreeing_pieces": 0}]},
         "/workspace/b.mp4": {"events": [{"event": "Rain.", "start_s": 0.125, "end_s": 1.0, "disagreeing_pieces": 0}]}}
     pieces = [rec.load_payload(e["payload"]) for e in rec.read_events("n1") if e["type"] == "locate.piece"]
-    assert sorted((p["video"], p["piece"]) for p in pieces) == [
-        ("/workspace/a.mp4", 0), ("/workspace/a.mp4", 1), ("/workspace/a.mp4", 2), ("/workspace/b.mp4", 0)]
+    assert sorted((p["video"], p["event"], p["piece"]) for p in pieces) == [      # each event on its own
+        ("/workspace/a.mp4", n, k) for n in (0, 1) for k in (0, 1, 2)] + [("/workspace/b.mp4", 0, 0)]
     assert all(p["reasoning"] == "looked at 16 frames" for p in pieces)          # recorded, not returned
     argv = json.loads((run / "jobs" / out["id"] / "fake_vllm.argv.json").read_text())
     assert json.loads(argv[argv.index("--limit-mm-per-prompt") + 1]) == {"image": 1, "video": 0}

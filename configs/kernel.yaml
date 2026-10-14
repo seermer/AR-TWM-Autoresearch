@@ -104,7 +104,7 @@ captioner:                       # caption_videos GPU job: a local vLLM server, 
   extra_args: []                 # more `vllm serve` flags
 locate_events:                   # locate_events GPU job: the captioner's model, served for images
   reasoning_effort: low          # sent with each request (low / medium / xhigh)
-  frame_width: 320               # pixels of one frame on a sheet (4 x 4 frames, a second of the clip)
+  frame_width: 960               # pixels of one frame on a sheet (4 x 4 frames, a second of the clip)
   request_timeout_s: 300         # one sheet
 gateway:
   model_allowlist: []            # OPENAI_MODEL from the environment is always allowed too
