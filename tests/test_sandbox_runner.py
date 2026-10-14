@@ -6,8 +6,11 @@ import socket
 import subprocess
 import threading
 import time
+from types import SimpleNamespace
 
+import docker
 import pytest
+import requests
 
 from ar_kernel.config import KernelConfig
 from ar_kernel.liveness import Liveness
@@ -30,48 +33,78 @@ def test_container_prefix_matches_container_name():
     assert container_prefix("r:1") == "ar-r-1-"
 
 
-def test_kill_run_containers_removes_only_the_prefix(monkeypatch):
-    calls = []
+class _FakeContainer:
+    """`wait` answers from `waits` in order: an exception is raised, anything else returned."""
+    def __init__(self, waits=({"StatusCode": 0},)):
+        self.waits, self.killed = list(waits), False
 
-    def fake_run(args, **kw):
-        calls.append(args)
-        out = "ar-r1-n2-edit_self-1-abc\nar-r10-n2-edit_self-1-def\nother\n" if args[1] == "ps" else ""
-        return subprocess.CompletedProcess(args, 0, out, "")
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    def wait(self, timeout=None):
+        w = self.waits.pop(0)
+        if isinstance(w, BaseException):
+            raise w
+        return w
+
+    def stats(self, stream=False):
+        raise requests.ConnectionError("no stats in tests")
+
+    def logs(self, stdout=True, stderr=False):
+        return b"out" if stdout else b"err"
+
+    def kill(self):
+        self.killed = True
+
+
+class _FakeClient:
+    def __init__(self, container=None, launch_error=None, listed=()):
+        self.container, self.launch_error, self.ran, self.removed = container, launch_error, [], []
+        self.containers = SimpleNamespace(run=self._run)
+        self.api = SimpleNamespace(remove_container=lambda name, force: self.removed.append(name),
+                                   containers=lambda all, filters: [{"Names": [f"/{n}"]} for n in listed])
+
+    def _run(self, **kw):
+        self.ran.append(kw)
+        if self.launch_error is not None:
+            raise self.launch_error
+        return self.container
+
+
+def test_kill_run_containers_removes_only_the_prefix(monkeypatch):
+    client = _FakeClient(listed=["ar-r1-n2-edit_self-1-abc", "ar-r10-n2-edit_self-1-def", "other"])
+    monkeypatch.setattr(docker, "from_env", lambda: client)
     assert kill_run_containers("r1", "n2") == ["ar-r1-n2-edit_self-1-abc"]
-    assert ["docker", "rm", "-f", "ar-r1-n2-edit_self-1-abc"] in calls
+    assert client.removed == ["ar-r1-n2-edit_self-1-abc"]
 
 
 def test_finished_nodes_are_mounted_read_only_with_eval_hidden(tmp_path):
-    from ar_kernel.sandbox.runner import _docker_args
+    from ar_kernel.sandbox.runner import _run_kwargs
     n1, root = tmp_path / "n1", tmp_path / "root"
     (n1 / "eval").mkdir(parents=True)
     root.mkdir()
     m = Mounts(agent=tmp_path, workspace=tmp_path, staging=tmp_path, context=tmp_path,
                contract=tmp_path, sockets=tmp_path, nodes={"n1": n1, "root": root})
-    args = _docker_args("img", "c", m, ["true"], {}, 1, 1)
-    assert f"{n1}:/nodes/n1:ro" in args and f"{root}:/nodes/root:ro" in args
-    assert "/nodes/n1/eval:ro,size=4k" in args and not any(a.startswith("/nodes/root/eval") for a in args)
+    kw = _run_kwargs("img", "c", m, ["true"], {}, 1, 1)
+    assert f"{n1}:/nodes/n1:ro" in kw["volumes"] and f"{root}:/nodes/root:ro" in kw["volumes"]
+    assert kw["tmpfs"]["/nodes/n1/eval"] == "ro,size=4k" and "/nodes/root/eval" not in kw["tmpfs"]
 
 
 def test_the_run_gpus_reach_the_container_through_the_nvidia_runtime(tmp_path):
-    from ar_kernel.sandbox.runner import _docker_args
+    from ar_kernel.sandbox.runner import _run_kwargs
     m = Mounts(agent=tmp_path, workspace=tmp_path, staging=tmp_path, context=tmp_path,
                contract=tmp_path, sockets=tmp_path)
-    args = _docker_args("img", "c", m, ["true"], {}, 1, 1, gpus=[0, 2, 5])
-    assert args[args.index("--runtime") + 1] == "nvidia" and "NVIDIA_VISIBLE_DEVICES=0,2,5" in args
-    plain = _docker_args("img", "c", m, ["true"], {}, 1, 1)
-    assert "--runtime" not in plain and "NVIDIA_VISIBLE_DEVICES=void" in plain
+    kw = _run_kwargs("img", "c", m, ["true"], {}, 1, 1, gpus=[0, 2, 3])
+    assert kw["runtime"] == "nvidia" and kw["environment"]["NVIDIA_VISIBLE_DEVICES"] == "0,2,3"
+    plain = _run_kwargs("img", "c", m, ["true"], {}, 1, 1)
+    assert "runtime" not in plain and plain["environment"]["NVIDIA_VISIBLE_DEVICES"] == "void"
 
 
 def test_separate_running_code_is_mounted_read_only_and_named_in_the_env(tmp_path):
-    from ar_kernel.sandbox.runner import _docker_args
+    from ar_kernel.sandbox.runner import _run_kwargs
     m = Mounts(agent=tmp_path, workspace=tmp_path, staging=tmp_path, context=tmp_path,
                contract=tmp_path, sockets=tmp_path, code=tmp_path / "code")
-    args = _docker_args("img", "c", m, ["true"], {}, 1, 1)
-    assert f"{tmp_path / 'code'}:/code:ro" in args and "AR_CODE_DIR=/code" in args
+    kw = _run_kwargs("img", "c", m, ["true"], {}, 1, 1)
+    assert f"{tmp_path / 'code'}:/code:ro" in kw["volumes"] and kw["environment"]["AR_CODE_DIR"] == "/code"
     m.code = None
-    assert not any("AR_CODE_DIR" in a for a in _docker_args("img", "c", m, ["true"], {}, 1, 1))
+    assert "AR_CODE_DIR" not in _run_kwargs("img", "c", m, ["true"], {}, 1, 1)["environment"]
 
 
 def test_snapshot_diff_reports_changes(tmp_path):
@@ -104,8 +137,8 @@ def _run(tmp_path, mounts, script, timeout_s=120, env=None, liveness=None, poll_
                          node="n1", phase="test", attempt=1, stats_every_s=1, liveness=liveness, poll_s=poll_s)
 
 
-def test_failed_launch_is_still_removed_and_only_the_recorded_argv_is_redacted(tmp_path, mounts, monkeypatch):
-    """`docker run -d` can fail *after* creating
+def test_failed_launch_is_still_removed_and_only_the_recorded_settings_are_redacted(tmp_path, mounts, monkeypatch):
+    """A launch can fail *after* creating
     the container (OCI runtime error, bad bind source, missing executable),
     leaving a `Created` container behind. The removal must still run on that
     path -- "the container is removed on every exit path" wins over the code
@@ -114,31 +147,21 @@ def test_failed_launch_is_still_removed_and_only_the_recorded_argv_is_redacted(t
     Also: the runner must not record the
     AR_TOKEN value in telemetry, regardless of which Recorder is used (no
     add_redaction call here) -- but that redaction must only touch the
-    recorded copy, never the real argv handed to the actual `docker run`
-    subprocess call.
+    recorded copy, never the real settings handed to docker.
     """
-    calls: list[list[str]] = []
-
-    def fake_run(args, **kwargs):
-        calls.append(list(args))
-        if args[:2] == ["docker", "run"]:
-            return subprocess.CompletedProcess(args, returncode=1, stdout="", stderr="oci runtime error")
-        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    client = _FakeClient(launch_error=docker.errors.APIError("oci runtime error"))
+    monkeypatch.setattr(docker, "from_env", lambda: client)
     secret = "ar-super-secret-token-value"
     recorder = Recorder(tmp_path / "run")
     name = container_name("t", "n1", "test", 1)
-    run_container(image="unused:tag", name=name, mounts=mounts,
-                  command=["python", "-c", "pass"], env={"AR_TOKEN": secret},
-                  cpus=2, memory_gb=2, timeout_s=5, recorder=recorder,
-                  node="n1", phase="test", attempt=1, stats_every_s=1)
+    res = run_container(image="unused:tag", name=name, mounts=mounts,
+                        command=["python", "-c", "pass"], env={"AR_TOKEN": secret},
+                        cpus=2, memory_gb=2, timeout_s=5, recorder=recorder,
+                        node="n1", phase="test", attempt=1, stats_every_s=1)
+    assert res.exit_code is None and "oci runtime error" in res.stderr
 
-    run_call = next(c for c in calls if c[:2] == ["docker", "run"])
-    assert f"AR_TOKEN={secret}" in run_call, "the real docker invocation must still get the real token"
-
-    rm_calls = [c for c in calls if c[:3] == ["docker", "rm", "-f"]]
-    assert rm_calls == [["docker", "rm", "-f", name]], "a failed launch must still be removed"
+    assert client.ran[0]["environment"]["AR_TOKEN"] == secret, "the real launch must still get the real token"
+    assert client.removed == [name], "a failed launch must still be removed"
 
     events = recorder.read_events("n1")
     start_events = [e for e in events if e["type"] == "sandbox.start"]
@@ -146,7 +169,7 @@ def test_failed_launch_is_still_removed_and_only_the_recorded_argv_is_redacted(t
     payload = recorder.load_payload(start_events[0]["payload"])
     dumped = json.dumps(payload)
     assert secret not in dumped
-    assert "AR_TOKEN=<redacted>" in dumped
+    assert payload["kwargs"]["environment"]["AR_TOKEN"] == "<redacted>"
     raw_events_text = recorder.events_path("n1").read_text()
     assert secret not in raw_events_text
 
@@ -290,45 +313,15 @@ def test_container_runs_restore_owner_access_on_every_writable_mount(tmp_path, m
     shutil.rmtree(mounts.workspace)
 
 
-class _FakeWaiter:
-    """`docker wait`: the first one dies of a Ctrl-C with no exit code, the second reports 0."""
-    made: list = []
-
-    def __init__(self, args, **kw):
-        self.kw, self.killed = kw, False
-        self.result = ("", "context canceled\n") if not _FakeWaiter.made else ("0\n", "")
-        _FakeWaiter.made.append(self)
-
-    def communicate(self, timeout=None):
-        return self.result
-
-    def poll(self):
-        return None if not self.killed else -9
-
-    def kill(self):
-        self.killed = True
-
-    def wait(self, timeout=None):
-        return -9
-
-
-def test_a_docker_wait_that_dies_without_an_exit_code_waits_again(tmp_path, mounts, monkeypatch):
-    from types import SimpleNamespace
-    import ar_kernel.sandbox.runner as runner
-    calls = []
-
-    def fake_run(args, **kw):
-        calls.append(list(args))
-        return subprocess.CompletedProcess(args, 0, "", "")
-    _FakeWaiter.made = []
-    monkeypatch.setattr(runner, "subprocess", SimpleNamespace(
-        run=fake_run, Popen=_FakeWaiter, PIPE=subprocess.PIPE, TimeoutExpired=subprocess.TimeoutExpired))
+def test_a_wait_that_fails_without_an_exit_code_waits_again(tmp_path, mounts, monkeypatch):
+    container = _FakeContainer([requests.ConnectionError("read timed out"), {"StatusCode": 0}])
+    client = _FakeClient(container)
+    monkeypatch.setattr(docker, "from_env", lambda: client)
     res = run_container(image="unused:tag", name="ar-t-n1-test-1-abc", mounts=mounts, command=["true"], env={},
                         cpus=2, memory_gb=2, timeout_s=60, recorder=Recorder(tmp_path / "run"),
                         node="n1", phase="test", attempt=1, stats_every_s=60, poll_s=0.01)
-    assert res.exit_code == 0 and not res.timed_out
-    assert len(_FakeWaiter.made) == 2 and all(w.kw.get("start_new_session") for w in _FakeWaiter.made)
-    assert ["docker", "kill", "ar-t-n1-test-1-abc"] not in calls
+    assert res.exit_code == 0 and not res.timed_out and (res.stdout, res.stderr) == ("out", "err")
+    assert container.waits == [] and not container.killed and client.removed == ["ar-t-n1-test-1-abc"]
 
 
 _SIGINT_CHILD = r"""
@@ -351,7 +344,7 @@ print(json.dumps({"exit_code": res.exit_code, "stdout": res.stdout}))
 @pytest.mark.docker
 def test_a_ctrl_c_to_the_process_group_does_not_end_the_container(tmp_path, mounts):
     """The first Ctrl-C is graceful. The terminal sends SIGINT to the whole foreground
-    process group; `docker wait` and `docker stats` must not be in it."""
+    process group; the wait for the container must survive it."""
     name = container_name("sigint", "n1", "test", 1)
     arg = json.dumps({"name": name, "run": str(tmp_path / "run"),
                       "mounts": {k: str(v) for k, v in vars(mounts).items() if k not in ("agent_readonly", "nodes")}})
@@ -378,14 +371,15 @@ def test_a_ctrl_c_to_the_process_group_does_not_end_the_container(tmp_path, moun
 
 def test_every_phase_sees_the_same_node_files_and_only_eval_is_hidden(tmp_path):
     """edit_self reads what improve_recipe reads: only prompts and tools differ."""
-    from ar_kernel.sandbox.runner import Mounts, _docker_args
+    from ar_kernel.sandbox.runner import Mounts, _run_kwargs
     node = tmp_path / "n1"
     for folder in ("eval", "attempts/improve_recipe-1/context", "contract/attempt-1"):
         (node / folder).mkdir(parents=True)
-    args = _docker_args("img", "c", Mounts(agent=tmp_path, workspace=tmp_path, staging=tmp_path, context=tmp_path,
-                                           contract=tmp_path, sockets=tmp_path, nodes={"n1": node}), ["true"], {}, 1, 1)
-    assert [a for a in args if a.startswith("/nodes/")] == ["/nodes/n1/eval:ro,size=4k"]
-    assert "NVIDIA_VISIBLE_DEVICES=void" in args and not any(":/store" in a for a in args)
+    kw = _run_kwargs("img", "c", Mounts(agent=tmp_path, workspace=tmp_path, staging=tmp_path, context=tmp_path,
+                                        contract=tmp_path, sockets=tmp_path, nodes={"n1": node}), ["true"], {}, 1, 1)
+    assert [v for v in kw["volumes"] if ":/nodes/" in v] == [f"{node}:/nodes/n1:ro"]
+    assert [k for k in kw["tmpfs"] if k.startswith("/nodes/")] == ["/nodes/n1/eval"]
+    assert kw["environment"]["NVIDIA_VISIBLE_DEVICES"] == "void" and not any(":/store" in v for v in kw["volumes"])
 
 
 @pytest.mark.gpu
