@@ -9,5 +9,5 @@ RUN pip install --no-cache-dir \
       "langgraph==1.2.11" "langchain-core==1.6.3" "langchain-openai==1.6.2" \
       "mcp==2.2.0" "httpx==0.28.1" "httpx2==2.13.0" \
       "pydantic>=2.12,<3" "numpy>=1.26" "opencv-python-headless>=4.9" "Pillow>=10" \
-      "pandas>=2.2" "pyarrow>=17"
+      "pandas>=2.2" "pyarrow>=17" "arxiv==4.0.1"
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
