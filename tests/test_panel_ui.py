@@ -72,7 +72,7 @@ def test_chat_items_become_chatbot_messages():
 
 def test_diff_html_colours_lines():
     html = ui.diff_html("--- a\n+++ b\n@@ -1 +1 @@\n-old <x>\n+new\n")
-    assert "&lt;x&gt;" in html and "#cf222e" in html and "#1a7f37" in html
+    assert "&lt;x&gt;" in html and 'style="color: #A00000">-old' in html and 'style="color: #008400">+new' in html
     assert "no changes" in ui.diff_html("")
 
 

@@ -1,7 +1,6 @@
 """hf_search / hf_list_files / hf_download, for dataset and model repos. The kernel downloads, with its own token."""
 from __future__ import annotations
 
-import fnmatch
 import os
 import re
 import shutil
@@ -11,6 +10,7 @@ from pathlib import Path, PurePosixPath
 from typing import Annotated, Any
 
 from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
+from huggingface_hub.utils import filter_repo_objects
 from mcp.server.mcpserver import Context
 from pydantic import Field
 
@@ -104,8 +104,8 @@ class HfTools:
                    limit: int = LIST_PAGE, offset: int = 0, kind: str = "dataset") -> dict:
         """One page of the repo's files matching `pattern` (fnmatch; `*` crosses folders), with sizes."""
         info = self._info(repo, revision, kind)
-        files = sorted((s.rfilename, int(s.size or 0)) for s in info.siblings
-                       if fnmatch.fnmatch(s.rfilename, pattern))
+        files = sorted((s.rfilename, int(s.size or 0))
+                       for s in filter_repo_objects(info.siblings, allow_patterns=pattern, key=lambda s: s.rfilename))
         offset, limit = max(0, int(offset)), max(1, min(int(limit), LIST_MAX))
         try:
             self.api.auth_check(repo, repo_type=kind)
@@ -122,8 +122,8 @@ class HfTools:
                  max_bytes: int | None = None, kind: str = "dataset") -> dict:
         info = self._info(repo, revision, kind)
         patterns = listed(caller, patterns, "patterns")
-        files = sorted(s.rfilename for s in info.siblings
-                       if any(fnmatch.fnmatch(s.rfilename, p) for p in patterns))
+        files = sorted(s.rfilename
+                       for s in filter_repo_objects(info.siblings, allow_patterns=patterns, key=lambda s: s.rfilename))
         if not files:
             raise ToolError(f"no files match {patterns} in {repo}@{revision}. The repo has "
                             f"{len(info.siblings)} files; {_layout([s.rfilename for s in info.siblings])}. "

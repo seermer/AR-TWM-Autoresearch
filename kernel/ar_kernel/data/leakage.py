@@ -25,10 +25,7 @@ def _grayscale_vector(image: Image.Image) -> np.ndarray:
     return centered / norm if norm > 0 else centered
 
 def _entropy(image: Image.Image) -> float:
-    hist = np.asarray(image.convert("L").histogram(), dtype=np.float64)
-    probabilities = hist / hist.sum()
-    probabilities = probabilities[probabilities > 0]
-    return float(-(probabilities * np.log2(probabilities)).sum())
+    return image.convert("L").entropy()
 
 def _extract(video: Path, timestamp: float) -> Image.Image:
     frame = next(video_frames(video, ["format=rgb24"], start=round(timestamp, 3)), None)

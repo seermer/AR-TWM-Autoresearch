@@ -6,18 +6,9 @@ import os
 import sys
 from pathlib import Path
 
+from dotenv import dotenv_values
+
 REPO = Path(__file__).resolve().parents[1]
-
-
-def read_dotenv(path: Path) -> dict[str, str]:
-    out = {}
-    if path.is_file():
-        for line in path.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                key, value = line.split("=", 1)
-                out[key.strip()] = value.strip().strip("'\"")
-    return out
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -27,7 +18,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-share", action="store_true", help="serve locally only, no public link")
     parser.add_argument("--host", default="127.0.0.1", help="address to bind (0.0.0.0: every interface)")
     args = parser.parse_args(argv)
-    env = {**read_dotenv(REPO / ".env"), **{k: v for k, v in os.environ.items() if k.startswith("PANEL_")}}
+    env = {**dotenv_values(REPO / ".env", interpolate=False), **{k: v for k, v in os.environ.items() if k.startswith("PANEL_")}}
     user, password = env.get("PANEL_USER", ""), env.get("PANEL_PASSWORD", "")
     if not user or not password:
         print("error: set PANEL_USER and PANEL_PASSWORD in AutoResearcher/.env; the panel never runs "

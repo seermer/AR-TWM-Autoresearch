@@ -11,6 +11,9 @@ from pathlib import Path
 import gradio as gr
 import pandas as pd
 import plotly.graph_objects as go
+from pygments import highlight
+from pygments.formatters import HtmlFormatter
+from pygments.lexers import DiffLexer
 
 from . import media, problems, views
 
@@ -105,14 +108,7 @@ def to_messages(items: list[dict]) -> list[dict]:
 def diff_html(text: str | None) -> str:
     if not text:
         return "<p><i>no changes</i></p>"
-    lines = []
-    for line in text.splitlines():
-        colour = ("#1a7f37" if line.startswith("+") and not line.startswith("+++") else
-                  "#cf222e" if line.startswith("-") and not line.startswith("---") else
-                  "#8250df" if line.startswith("@@") else None)
-        escaped = html.escape(line)
-        lines.append(f'<span style="color:{colour}">{escaped}</span>' if colour else escaped)
-    return '<pre style="white-space:pre-wrap;font-size:12px">' + "\n".join(lines) + "</pre>"
+    return highlight(text, DiffLexer(), HtmlFormatter(noclasses=True, prestyles="white-space:pre-wrap;font-size:12px"))
 
 
 def _abs(run: views.Run, rel: str | None) -> str | None:

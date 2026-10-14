@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 import yaml
+from dotenv import dotenv_values
 from omegaconf import OmegaConf
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -109,18 +110,8 @@ def load_dotenv(path: Path, env: "dict | os._Environ") -> list[str]:
     Shell variables always win and empty values are skipped, so the
     placeholder .env shipped in the repo enables nothing. Returns the keys set.
     """
-    path = Path(path)
-    if not path.is_file():
-        return []
     applied = []
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key, value = key.strip().removeprefix("export ").strip(), value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-            value = value[1:-1]
+    for key, value in dotenv_values(path, interpolate=False).items():
         if not key.isidentifier() or not value or env.get(key):
             continue
         env[key] = value
