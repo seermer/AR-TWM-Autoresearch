@@ -62,7 +62,7 @@ class Handler(BaseHTTPRequestHandler):
         system, user = body["messages"]
         assert system["role"] == "system" and "video reader" in system["content"]
         video, text = user["content"]
-        assert body["reasoning_effort"] == "medium" and "max_tokens" not in body and "chat_template_kwargs" not in body
+        assert body["reasoning_effort"] == "low" and "temperature" not in body and "max_tokens" not in body and "chat_template_kwargs" not in body
         path = Path(unquote(urlparse(video["video_url"]["url"]).path)).resolve()
         if allowed not in path.parents:
             return self.reply(400, {"error": {"message": f"{path} is outside the allowed media path"}})
@@ -83,7 +83,7 @@ class Handler(BaseHTTPRequestHandler):
         system, user = body["messages"]
         assert system["role"] == "system" and "frame reader" in system["content"]
         image, text = user["content"]
-        assert body["reasoning_effort"] == "low" and image["image_url"]["url"].startswith("data:image/jpeg;base64,")
+        assert body["reasoning_effort"] == "low" and "temperature" not in body and image["image_url"]["url"].startswith("data:image/jpeg;base64,")
         captions = body["response_format"]["json_schema"]["schema"]["properties"]["start"]["anyOf"][0]["enum"]
         event = text["text"].removeprefix("Event: ")
         answer = {"happening_now": "NEVER" not in event, "already_happened": False,

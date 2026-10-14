@@ -175,7 +175,7 @@ class CaptionBackend:
         # No max_tokens: the model reasons first, and a cap could cut the caption off.
         try:
             done = client.chat.completions.create(
-                model="captioner", temperature=0.0, reasoning_effort=c["reasoning_effort"],
+                model="captioner", reasoning_effort=c["reasoning_effort"],
                 messages=[{"role": "system", "content": SYSTEM},
                           {"role": "user", "content": [{"type": "video_url", "video_url": {"url": file.as_uri()}},
                                                        {"type": "text", "text": prompt}]}])

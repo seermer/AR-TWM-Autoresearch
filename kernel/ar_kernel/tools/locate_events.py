@@ -147,7 +147,7 @@ class LocateEventsBackend:
     def ask(self, client, url: str, event: str, times: list[float]) -> tuple[dict, str | None]:
         """(the parsed answer about one event in one piece, the model's reasoning). `url` is the sheet."""
         done = client.chat.completions.parse(
-            model="locator", temperature=0.0, reasoning_effort=self.block["reasoning_effort"],
+            model="locator", reasoning_effort=self.block["reasoning_effort"],
             response_format=answer_model(times),
             messages=[{"role": "system", "content": SYSTEM},
                       {"role": "user", "content": [{"type": "image_url", "image_url": {"url": url}},
