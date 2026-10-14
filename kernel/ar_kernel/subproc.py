@@ -22,7 +22,7 @@ def free_port() -> int:
 
 def cache_dir() -> Path:
     """Where model downloads, compile caches and package caches go: inside the project
-    (AutoResearcher/.cache), or AR_CACHE_DIR. The user's rule: large files stay in the project."""
+    (AutoResearcher/.cache), or AR_CACHE_DIR."""
     return Path(os.environ.get("AR_CACHE_DIR") or REPO_ROOT / ".cache")
 
 

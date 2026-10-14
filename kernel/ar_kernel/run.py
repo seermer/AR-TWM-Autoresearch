@@ -159,8 +159,7 @@ def root_key(ctx: RunContext, cfg: KernelConfig) -> str:
 def attach_run(cfg: KernelConfig, run_id: str, env: Mapping[str, str]) -> RunContext:
     """Open an existing run without modifying its snapshot or appending run.start.
 
-    For resuming. A missing run is an error -- it used to be created silently, so a
-    typo'd run id made a fresh run.
+    For resuming. A missing run is an error, so a mistyped run id cannot make a fresh run.
     """
     run_dir = cfg.runs_dir / run_id
     meta_path = run_dir / "config" / "run.json"

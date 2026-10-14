@@ -94,7 +94,7 @@ captioner:                       # caption_videos GPU job: a local vLLM server, 
   reasoning_parser: qwen3        # the model reasons; its reasoning is recorded per clip, not returned
   reasoning_effort: low          # sent with each request (the chat template takes low / medium / xhigh)
   mm_encoder_tp_mode: data       # each GPU runs the vision encoder on its share of the videos
-  speculative_config: null       # e.g. {method: mtp, num_speculative_tokens: 3}; off in the verified launch
+  speculative_config: null       # e.g. {method: mtp, num_speculative_tokens: 3}; off by default
   media_io_kwargs: {video: {num_frames: 64, fps: 2}}   # vLLM's Qwen3-VL loader ignores num_frames: it samples
                                  # 2 frames/s (4..768) and resizes frames to the model's video pixel budget
   startup_timeout_s: 1200        # model load + warm-up

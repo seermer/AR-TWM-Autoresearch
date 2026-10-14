@@ -1,10 +1,7 @@
 """Portability checks must FAIL on a non-portable tree.
 
 A check that only ever passes proves nothing, so every case here builds the
-broken condition and asserts it is caught. The motivating incident: WBench's
-MegaSAM weight symlinks still pointed at a previous checkout after the tree
-moved, every navigation case failed, the tool exited 0 anyway, and the run
-produced a report silently missing five metrics.
+broken condition and asserts it is caught.
 """
 import os
 import subprocess

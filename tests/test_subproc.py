@@ -1,10 +1,8 @@
 """run_in_env must be safe to use from an unattended multi-day loop.
 
-subprocess.run(timeout=) killed only the `conda run` process, so
-torchrun ranks and WBench multiprocessing workers were orphaned and kept holding
-GPUs -- the failure a real run hit, where two orphaned spawn
-workers held ~19 GB for 35 minutes and made the next job OOM. A timeout also
-wrote no event and dropped the output captured so far.
+subprocess.run(timeout=) kills only the `conda run` process and orphans torchrun ranks and
+WBench multiprocessing workers, which keep holding GPUs. A timeout therefore stops the whole
+process group, writes an event and keeps the output captured so far.
 """
 import os
 import threading
