@@ -2,6 +2,8 @@
 and what each key does."""
 from __future__ import annotations
 
+from omegaconf import OmegaConf
+
 from .recipe import TUNABLE_KEYS
 
 _MEANING = {
@@ -15,15 +17,7 @@ _MEANING = {
     "lora.rank": "LoRA rank; must pair with lora.alpha from the allowlist.",
     "lora.alpha": "LoRA scaling; must pair with lora.rank from the allowlist.",
 }
-def _dig(recipe: dict, dotted: str):
-    node = recipe
-    for part in dotted.split("."):
-        if not isinstance(node, dict) or part not in node:
-            return None
-        node = node[part]
-    return node
-
-
 def recipe_guide(base_recipe: dict) -> dict:
     assert set(_MEANING) == TUNABLE_KEYS, "every tunable key needs guide text"
-    return {key: {"base": _dig(base_recipe, key), "meaning": meaning} for key, meaning in sorted(_MEANING.items())}
+    tree = OmegaConf.create(base_recipe)
+    return {key: {"base": OmegaConf.select(tree, key), "meaning": meaning} for key, meaning in sorted(_MEANING.items())}

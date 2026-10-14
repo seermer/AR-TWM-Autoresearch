@@ -2,6 +2,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 import yaml
+from omegaconf import OmegaConf
 
 TUNABLE_KEYS = frozenset({
     "optimizer.lr", "optimizer.weight_decay", "optimizer.max_grad_norm",
@@ -59,13 +60,6 @@ def validate_recipe_values(recipe: dict) -> list[str]:
     return failures
 
 
-def _assign(tree: dict, dotted: str, value) -> None:
-    node = tree
-    parts = dotted.split(".")
-    for part in parts[:-1]:
-        node = node.setdefault(part, {})
-    node[parts[-1]] = value
-
 def steps_per_epoch(manifest: dict, n_gpus: int, grad_accum: int) -> tuple[int, int]:
     enabled = {n: d for n, d in manifest["datasets"].items() if d["weight"] > 0 and d["clips"]}
     total_weight = sum(d["weight"] for d in enabled.values())
@@ -76,9 +70,10 @@ def steps_per_epoch(manifest: dict, n_gpus: int, grad_accum: int) -> tuple[int, 
 
 def build_resolved_config(base_recipe: Path, recipe: dict, roots: dict[str, Path], manifest: dict,
                           node_id: str, node_dir: Path, run_dir: Path) -> dict:
-    resolved = yaml.safe_load(Path(base_recipe).read_text(encoding="utf-8"))
+    tree = OmegaConf.create(yaml.safe_load(Path(base_recipe).read_text(encoding="utf-8")))
     for dotted, value in recipe.items():
-        _assign(resolved, dotted, value)
+        OmegaConf.update(tree, dotted, value, merge=False)
+    resolved = OmegaConf.to_container(tree, resolve=False)
 
     datasets = {}
     for name, entry in manifest["datasets"].items():

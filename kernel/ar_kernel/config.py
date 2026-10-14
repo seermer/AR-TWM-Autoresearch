@@ -1,10 +1,11 @@
 from __future__ import annotations
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 import yaml
+from omegaconf import OmegaConf
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -13,14 +14,17 @@ class GpuPolicyError(ValueError):
 
 
 def _merged(base: dict, over: dict) -> dict:
-    return {**base, **{key: _merged(base[key], value) if isinstance(value, dict) and isinstance(base.get(key), dict)
-                       else value for key, value in over.items()}}
+    return OmegaConf.to_container(OmegaConf.merge(base, over), resolve=False)
 
 @dataclass(frozen=True)
 class KernelConfig:
     raw: dict
     repo_root: Path
     overlay: Path | None = None
+    _node: Any = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_node", OmegaConf.create(self.raw))
 
     @classmethod
     def load(cls, path: Path | None = None, overlay: Path | None = None) -> "KernelConfig":
@@ -51,12 +55,8 @@ class KernelConfig:
         return cls(raw=raw, repo_root=REPO_ROOT)
 
     def get(self, dotted: str, default: Any = None) -> Any:
-        node: Any = self.raw
-        for part in dotted.split("."):
-            if not isinstance(node, dict) or part not in node:
-                return default
-            node = node[part]
-        return node
+        value = OmegaConf.select(self._node, dotted, default=default)
+        return OmegaConf.to_container(value, resolve=False) if OmegaConf.is_config(value) else value
 
     def _path(self, dotted: str) -> Path:
         value = Path(self.get(dotted))
