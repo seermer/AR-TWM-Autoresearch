@@ -1,7 +1,9 @@
 from __future__ import annotations
-import json, subprocess
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+
+import av
 
 TARGET_ASPECT = 16 / 9
 
@@ -24,40 +26,45 @@ class VideoInfo:
         return width / height
 
 
-def _ratio(text: str | None) -> float:
-    if not text or ":" not in text:
-        return 1.0
-    num, den = (float(x) for x in text.split(":"))
-    return num / den if num > 0 and den > 0 else 1.0     # "0:1" / "N/A" mean square pixels
+def _upright(rotation: int) -> list[str]:
+    """The filters the ffmpeg CLI puts first to show a rotated video upright."""
+    return {90: ["transpose=cclock"], 180: ["hflip", "vflip"], 270: ["transpose=clock"]}.get(rotation % 360, [])
 
 
-def _rotation(stream: dict) -> int:
-    raw = 0.0
-    for side in stream.get("side_data_list") or []:
-        if "rotation" in side:
-            raw = float(side["rotation"])
-    if not raw:
-        raw = float((stream.get("tags") or {}).get("rotate") or 0)   # pre-6.0 muxers
-    return int(round(raw)) % 360
+def video_frames(path: Path, chain: list[str], start: float = 0.0) -> Iterator[av.VideoFrame]:
+    """The first video stream's frames, upright as the ffmpeg CLI shows them, through the filter `chain`;
+    with `start`, only those at or after `start` seconds."""
+    with av.open(str(path)) as container:
+        stream = container.streams.video[0]
+        if start:
+            container.seek(int(start / stream.time_base), stream=stream)        # the keyframe before `start`
+        graph = None
+        for frame in container.decode(stream):
+            if start and frame.time < start:
+                continue
+            if graph is None:
+                graph = av.filter.Graph()
+                nodes = [graph.add_buffer(template=stream)]
+                for spec in _upright(frame.rotation) + chain:
+                    name, _, args = spec.partition("=")
+                    nodes.append(graph.add(name, args or None))
+                graph.link_nodes(*nodes, graph.add("buffersink")).configure()
+            graph.push(frame)
+            yield graph.pull()
 
 
 def probe_video(path: Path) -> VideoInfo:
-    proc = subprocess.run(
-        ["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
-         "-show_entries",
-         "stream=nb_read_frames,avg_frame_rate,width,height,duration,sample_aspect_ratio"
-         ":stream_tags=rotate:stream_side_data=rotation",
-         "-of", "json", str(path)],
-        capture_output=True, text=True, check=True,
-    )
-    stream = json.loads(proc.stdout)["streams"][0]
-    num, den = (int(x) for x in stream["avg_frame_rate"].split("/"))
-    fps = num / den if den else 0.0
-    frames = int(stream["nb_read_frames"])
-    duration = float(stream.get("duration") or (frames / fps if fps else 0.0))
-    return VideoInfo(frames=frames, fps=fps, width=int(stream["width"]),
-                     height=int(stream["height"]), duration=duration,
-                     rotation=_rotation(stream), sar=_ratio(stream.get("sample_aspect_ratio")))
+    with av.open(str(path)) as container:
+        stream = container.streams.video[0]
+        count, rotation = 0, 0
+        for frame in container.decode(stream):
+            rotation = rotation if count else frame.rotation % 360
+            count += 1
+        fps = float(stream.average_rate or 0)
+        duration = (round(float(stream.duration * stream.time_base), 6) if stream.duration is not None
+                    else count / fps if fps else 0.0)
+        return VideoInfo(frames=count, fps=fps, width=stream.width, height=stream.height, duration=duration,
+                         rotation=rotation, sar=float(stream.sample_aspect_ratio or 1))
 
 
 def aspect_ok(info: VideoInfo, tolerance: float) -> bool:

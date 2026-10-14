@@ -143,7 +143,7 @@ def _envs(cfg: KernelConfig) -> list[Finding]:
 def _tools() -> list[Finding]:
     return [Finding("ok", f"tool.{t}", shutil.which(t)) if shutil.which(t)
             else Finding("fail", f"tool.{t}", "not on PATH")
-            for t in ("ffprobe", "ffmpeg", "conda", "git")]
+            for t in ("ffmpeg", "conda", "git")]
 
 
 def _gpus(cfg: KernelConfig) -> list[Finding]:

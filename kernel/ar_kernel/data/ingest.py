@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import av
 import numpy as np
 
 from ..archive.blobs import BlobStore
@@ -13,7 +14,7 @@ from ..isolation import EXCLUDED_CLIP, copies_held_out
 from . import annotation as ann
 from .checker import CheckerError, check_clip
 from .leakage import LeakageChecker
-from .probe import probe_video
+from .probe import probe_video, video_frames
 
 SIZE = (960, 544)       # the only frame size ingest takes
 # A cut: a jump of the measured camera and a jump of the picture no more than CUT_NEAR frames apart.
@@ -22,10 +23,8 @@ CUT_STEP_RATIO, CUT_TURN_DEG, CUT_PICTURE_RATIO, CUT_NEAR = 12.0, 10.0, 5.0, 3
 
 def picture_steps(video: Path) -> np.ndarray:
     """Mean absolute difference between consecutive frames, grey at 160x90."""
-    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(video), "-vf", "scale=160:90:flags=area,format=gray",
-                          "-fps_mode", "passthrough", "-f", "rawvideo", "-"],      # the clip's own frames, none repeated
-                         capture_output=True, check=True, timeout=600).stdout
-    grey = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 90, 160).astype(np.float32)
+    grey = np.stack([frame.to_ndarray() for frame in video_frames(video, ["scale=160:90:flags=area", "format=gray"])]
+                    ).astype(np.float32)
     return np.abs(np.diff(grey, axis=0)).mean(axis=(1, 2))
 
 
@@ -145,8 +144,8 @@ class Ingestor:
             for key, qpath in held.items():
                 self._take(staged[key], qpath)
             checked = self._check_files(candidate, held, node_id)
-        except (subprocess.SubprocessError, OSError, ValueError, IndexError, KeyError, CheckerError) as exc:
-            # A file ffprobe, decoding or the checker bridge cannot handle: record a rejection
+        except (av.FFmpegError, subprocess.SubprocessError, OSError, ValueError, IndexError, KeyError, CheckerError) as exc:
+            # A file probing, decoding or the checker bridge cannot handle: record a rejection
             # and carry on with the batch instead of failing the whole call.
             checked = self._reject(candidate, node_id, [
                 f"could not read the candidate: {type(exc).__name__}: {exc}"[:500]])
@@ -173,7 +172,7 @@ class Ingestor:
         except ValueError as exc:
             return self._reject(candidate, node_id, [f"the annotation is not valid JSON: {exc}"])
         problems = ann.check_annotation(annotation)
-        duration = info.frames / info.fps if info.fps else info.duration        # to the frame, not ffprobe's rounding
+        duration = info.frames / info.fps if info.fps else info.duration        # to the frame, not the probe's rounding
         if not problems and annotation["turns"][-1]["start_s"] >= duration:
             problems = [f"turn {len(annotation['turns'])} starts at {annotation['turns'][-1]['start_s']} s, "
                         f"at or after the end of the video ({duration:.2f} s)"]
