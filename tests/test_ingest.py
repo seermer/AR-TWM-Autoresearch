@@ -93,8 +93,7 @@ def test_candidate_outside_run_dir_is_rejected(tmp_path, tmp_path_factory):
 
 
 def test_candidate_inside_run_dir_but_outside_staging_is_rejected(tmp_path):
-    """The guard used to accept anything under run_dir, including a
-    blob in store/ or a hardlink in another node's view. Only staging/ is fair game."""
+    """The guard accepts only staging/, not a blob in store/ or a hardlink in another node's view."""
     ing = _ingestor(tmp_path)
     elsewhere = tmp_path / "nodes" / "n7" / "view" / "cam"
     video, annotation, pose = staged_clip(elsewhere)
@@ -402,7 +401,7 @@ def test_excluded_candidates_get_one_neutral_reason(tmp_path, annotation):
 
 
 def test_reasons_and_warnings_name_the_candidates_files_not_the_kernels_paths(tmp_path):
-    """live-10-02: every message carried the kernel's temp path (runs/<run>/tmp/probe_<hex>/captions/c.json)."""
+    """No message carries the kernel's temp path (runs/<run>/tmp/probe_<hex>/captions/c.json)."""
     ing = _ingestor(tmp_path)
     bad = _candidate(tmp_path, "bad")
     write_poses(bad.pose, n_frames=100, width=960, height=544)

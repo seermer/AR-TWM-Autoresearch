@@ -97,7 +97,7 @@ ENV4 = {"CUDA_VISIBLE_DEVICES": "0,1,2,3"}
 
 
 def test_attaching_to_a_missing_run_is_an_error_not_a_new_run(tmp_path, monkeypatch):
-    """`ar status --run-id <typo>` used to silently create a run."""
+    """`ar status --run-id <typo>` must not silently create a run."""
     import pytest
     from ar_kernel.run import RunNotFound, attach_run
     _runs(tmp_path, monkeypatch)

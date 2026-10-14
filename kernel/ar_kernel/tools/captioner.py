@@ -217,14 +217,13 @@ def register_caption_tool(mcp, kit, q) -> None:
               "whole clip. A GPU job: returns {job_id} at once; collect it with job_wait. Every job loads the "
               "model again, so send every clip of one prompt in one call. The finished "
               "job's result file (job_wait gives its path) holds `clips`: each path mapped to {caption} or "
-              "{error}. Captions are text only: for data_ingest, write {\"caption\": \"<text>\"} to a JSON file "
-              "under /workspace/staging/ with a script that reads the result file."
+              "{error}. What it can be used for: skill caption_videos."
               + (f" At most {cap} clips per job." if cap else ""))
     async def caption_videos(
             paths: Annotated[list[str] | str, Field(description="video files under /workspace (relative paths "
                                                     f"resolve against /workspace), {FROM_FILE}")],
-            prompt: Annotated[str, Field(description="the instruction sent with every clip, e.g. 'Write one factual "
-                              "caption (1-3 sentences) describing the scene and how the camera moves.'")],
+            prompt: Annotated[str, Field(description="the instruction sent with every clip, e.g. 'Describe the scene "
+                              "in one sentence.'")],
             ctx: Context) -> dict[str, Any]:
         return await kit.call(ctx, TOOL, {"paths": paths, "prompt": prompt},
                               lambda c: submit(q, c, paths, prompt))

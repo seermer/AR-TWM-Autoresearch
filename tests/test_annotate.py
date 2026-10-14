@@ -70,6 +70,19 @@ def test_pose_is_published_and_names_the_agents_clip(env):
     assert not (staging / "annotations" / job / "0.mp4").exists()     # the video is never re-published
 
 
+def test_the_result_carries_the_cut_verdict_for_the_clip_and_its_pose(env, monkeypatch):
+    q, caller, _ = env
+    seen = []
+
+    def found(cam_c2w, video):
+        seen.append((cam_c2w.shape, video.suffix))
+        return "a cut between frames 23 and 24: the picture and the measured camera both jump there"
+
+    monkeypatch.setattr(annotate, "find_cut", found)
+    _, by = run(q, caller, [{"video": "a.mp4"}])
+    assert by[0]["cut"].startswith("a cut between frames 23 and 24") and seen == [((48, 4, 4), ".mp4")]
+
+
 def test_a_pose_with_the_wrong_frame_count_is_an_item_error(env):
     q, caller, staging = env
     _, by = run(q, caller, [{"video": "a.mp4", "extra_frames": 1}, {"video": "a.mp4"}])

@@ -86,7 +86,7 @@ def main() -> int:
         except Exception as exc:          # noqa: BLE001 -- a per-item error; move on (protocol)
             status = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         # the 24 GB card has no headroom at 1280x704x121 (peak ~22.9 GiB): the previous clip
-        # (1.3 GB fp32 on the GPU) must not survive into the next item (the smoke run ran out of memory there)
+        # (1.3 GB fp32 on the GPU) must not survive into the next item
         del video
         gc.collect()
         torch.cuda.empty_cache()

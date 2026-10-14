@@ -1,5 +1,5 @@
 """Run alerts and the start-time GPU visibility check. There is deliberately no
-wait for idle GPUs (user decision 2026-09-27)."""
+wait for idle GPUs."""
 from __future__ import annotations
 
 import subprocess

@@ -48,7 +48,7 @@ def test_absolute_path_in_config_is_a_failure(tmp_path):
 
 
 def test_broken_symlink_is_a_failure(tmp_path):
-    """Exactly the MegaSAM case: a link left pointing at the old location."""
+    """A link left pointing at the old location is reported."""
     root = _tree(tmp_path)
     os.symlink(str(tmp_path / "gone" / "weights"), str(tmp_path / "WBench" / "torchhub"))
     cfg = KernelConfig.load(root / "configs" / "kernel.yaml")
@@ -126,7 +126,7 @@ def test_missing_gpu_metric_weight_is_reported(tmp_path):
 
 
 def test_broken_link_under_wbench_weights_is_reported(tmp_path):
-    """Exactly the MegaSAM incident: hub/torchhub pointing at the old checkout."""
+    """hub/torchhub pointing at the old checkout is reported."""
     from ar_kernel.doctor import WBENCH_WEIGHTS, wbench_weight_problems
     root = _tree(tmp_path)
     weights = tmp_path / "WBench" / "weights"
@@ -174,7 +174,7 @@ def test_dangling_links_in_the_package_cache_are_not_reported(tmp_path):
 
 
 def test_links_an_agent_left_in_a_run_are_not_tree_problems(tmp_path):
-    """live-10-02: 943 'broken' links, all made by agents in their workspaces and pointing at container paths."""
+    """Links made by agents in their workspaces and pointing at container paths are not reported as broken."""
     from ar_kernel.doctor import _broken_links
     for folder in ("runs/r1/nodes/n1/workspace", ".obsolete_runs/r0", "weights"):
         (tmp_path / folder).mkdir(parents=True)

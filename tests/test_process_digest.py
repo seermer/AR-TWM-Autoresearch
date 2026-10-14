@@ -13,7 +13,7 @@ def test_missing_events_is_empty_not_an_error(tmp_path):
 
 
 def test_a_torn_line_is_skipped_and_the_rest_is_still_digested(tmp_path):
-    """A killed writer leaves one unfinished line; it used to empty the whole digest."""
+    """A killed writer leaves one unfinished line; it must not empty the whole digest."""
     rec = _rec(tmp_path)
     rec.event("tool.error", node="n1", phase="improve_recipe", tool="hf_download", component="tools",
               payload={"error": "403 denied"})

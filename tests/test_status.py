@@ -35,7 +35,7 @@ def test_status_is_plain_json(tmp_path):
 
 
 def test_a_node_is_listed_under_its_own_parent():
-    """live-10-03 listed n4, a child of n2, below n3 at n3's child indent."""
+    """n4, a child of n2, is listed under n2, not below n3 at n3's child indent."""
     node = lambda i, parent, depth: {"node_id": i, "parent_id": parent, "depth": depth, "status": "scored",
                                      "score": 0.5, "P": None, "error": None}
     d = {"run_id": "r", "judge": None, "loop_pid": None, "state": None, "max_nodes": 5, "best": None, "alerts": [],

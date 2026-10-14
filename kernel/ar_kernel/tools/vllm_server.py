@@ -20,8 +20,8 @@ RELEASE_SLACK_MIB = 512          # GPU memory counts as released within this of 
 
 
 def local_client(base_url: str, timeout_s: float) -> OpenAI:
-    """The OpenAI client for a server on this machine: no proxy lookup, no retries."""
-    return OpenAI(base_url=f"{base_url}/v1", api_key="none", max_retries=0,
+    """The OpenAI client for a server on this machine: no proxy lookup."""
+    return OpenAI(base_url=f"{base_url}/v1", api_key="none",
                   http_client=httpx.Client(timeout=timeout_s, trust_env=False))
 
 

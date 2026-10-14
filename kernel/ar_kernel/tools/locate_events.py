@@ -98,34 +98,43 @@ def answer_model(times: list[float]):
     return create_model("Answer", happening_now=(bool, ...), already_happened=(bool, ...), start=(start, ...))
 
 
-def best_span(there: list[bool]) -> tuple[int, int, int] | None:
-    """(first piece, last piece, disagreeing pieces) of the run of pieces that fits `there` best: a
-    piece without the event inside the run and a piece with it outside each disagree once. The earliest
-    start wins a tie, then the longest run. None when no piece has the event."""
+def own_seconds(cut: list[tuple[float, float]]) -> list[float]:
+    """Seconds of each piece that no earlier piece covers: a moved-back last piece shares frames with
+    the piece before it, and they count once."""
+    return [end - (cut[k - 1][1] if k and cut[k - 1][1] > start else start) for k, (start, end) in enumerate(cut)]
+
+
+def best_span(there: list[bool], weights: list[float] | None = None) -> tuple[int, int, float] | None:
+    """(first piece, last piece, disagreeing seconds) of the run of pieces that fits `there` best: a
+    piece without the event inside the run and a piece with it outside each disagree for their `weights`
+    (one each by default). The earliest start wins a tie, then the longest run. None when no piece has
+    the event."""
     if not any(there):
         return None
+    weights = weights or [1.0] * len(there)
     n, best = len(there), None
     for i in range(n):
         for j in range(i, n):
-            off = sum(not x for x in there[i:j + 1]) + sum(there[:i]) + sum(there[j + 1:])
-            if best is None or (off, i, -j) < (best[2], best[0], -best[1]):
+            off = sum(w for x, w in zip(there[i:j + 1], weights[i:j + 1]) if not x)
+            off += sum(w for k, w in enumerate(weights) if there[k] and not i <= k <= j)
+            if best is None or (round(off, 6), i, -j) < (round(best[2], 6), best[0], -best[1]):
                 best = (i, j, off)
     return best
 
 
 def spans(events: list[str], cut: list[tuple[float, float]], answers: list[list[dict]]) -> list[dict]:
-    """Per event: when it starts and ends in the clip (or null), and how many pieces disagree.
-    `answers[n][k]` is the answer about event n in piece k."""
-    out = []
+    """Per event: when it starts and ends in the clip (or null), and for how many seconds of the clip the
+    answers disagree. `answers[n][k]` is the answer about event n in piece k."""
+    out, weights = [], own_seconds(cut)
     for text, per in zip(events, answers):
-        found = best_span([p["happening_now"] or p["already_happened"] for p in per])
+        found = best_span([p["happening_now"] or p["already_happened"] for p in per], weights)
         if found is None:
-            out.append({"event": text, "start_s": None, "end_s": None, "disagreeing_pieces": 0})
+            out.append({"event": text, "start_s": None, "end_s": None, "disagreeing_s": 0})
             continue
         first, last, off = found
         picked = SHEET_TIMES.get(per[first]["start"], 0.0)
         out.append({"event": text, "start_s": round(cut[first][0] + picked, 4),
-                    "end_s": round(cut[last][1], 4), "disagreeing_pieces": off})
+                    "end_s": round(cut[last][1], 4), "disagreeing_s": round(off, 4)})
     return out
 
 
@@ -280,7 +289,7 @@ def register_locate_tool(mcp, kit, q) -> None:
               "job's result file (job_wait gives its path) holds `clips`: each video mapped to {events} or "
               "{error}. Each event has `start_s` and `end_s`, the seconds of the clip between which the event is "
               "happening or its result is visible, both null when the event was not found, and "
-              "`disagreeing_pieces`: how many seconds of the clip the model's answers contradict that span. "
+              "`disagreeing_s`: how many seconds of the clip the model's answers contradict that span. "
               "The spans are for you to set the turns' starts in the annotation: skill locate_events."
               + (f" At most {cap} clips per job." if cap else ""))
     async def locate_events(items: Items, ctx: Context) -> dict[str, Any]:

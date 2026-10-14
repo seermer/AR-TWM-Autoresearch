@@ -96,7 +96,7 @@ def improve_recipe(ctx):
 
 
 def test_a_failure_inside_a_task_group_is_named_not_the_group(env):
-    """live-10-02 n1: the retry was told only 'ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)'."""
+    """The retry is told the error inside an ExceptionGroup, not only 'ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)'."""
     out = env("""
 import asyncio
 async def edit_self(ctx):

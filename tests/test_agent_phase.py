@@ -403,7 +403,7 @@ def test_runner_exception_still_revokes_token_and_cancels_jobs(env, monkeypatch)
 
 
 def test_ok_must_be_the_literal_true_not_merely_truthy(env):
-    """Cheap fix: `{"ok": 1}` (truthy but not True) must not be treated as success."""
+    """`{"ok": 1}` (truthy but not True) must not be treated as success."""
     make, conn, root, _, _ = env
     out = run_edit_self(make(FakeRunner({"ok": 1, "result": {"summary": "x"}})), conn=conn, node="n1",
                         parent_id="root", base_commit=root, runner_commit=root, attempt=1, max_attempts=3, retry=None,
@@ -412,7 +412,7 @@ def test_ok_must_be_the_literal_true_not_merely_truthy(env):
 
 
 def test_error_field_is_coerced_to_a_string_with_a_fallback(env):
-    """Cheap fix: a non-string (or missing) error field must not crash telemetry
+    """A non-string (or missing) error field must not crash telemetry
     or PhaseOutcome; a missing error gets a clear fallback message."""
     make, conn, root, _, _ = env
     out1 = run_edit_self(make(FakeRunner({"ok": False})), conn=conn, node="n1", parent_id="root",

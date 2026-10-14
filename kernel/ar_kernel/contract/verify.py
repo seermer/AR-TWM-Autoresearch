@@ -138,7 +138,7 @@ class _MockLocate:
     name = tool = LOCATE_TOOL
 
     def run(self, job, cancel, report):
-        return {"clips": {i["video"]: {"events": [{"event": e, "start_s": 0.0, "end_s": 1.0, "disagreeing_pieces": 0}
+        return {"clips": {i["video"]: {"events": [{"event": e, "start_s": 0.0, "end_s": 1.0, "disagreeing_s": 0}
                                                   for e in i["events"]]} for i in job.args["items"]},
                 "load_s": 0.0, "gpu_memory_mib": None, "gpu_memory_released": None}
 

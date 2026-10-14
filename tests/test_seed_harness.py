@@ -150,7 +150,7 @@ def test_tool_exception_is_reported_where_create_agent_raises():
 
 
 def test_a_failed_tool_call_reads_as_its_message_not_as_a_repr():
-    """The texts are from live-10-03: a schema error with pydantic's tag and link, and a lost path."""
+    """A schema error loses pydantic's tag and link; a lost path reads as its message."""
     from langchain_core.tools import ToolException
     from agent.harness import error_text
     schema = ToolException("Error executing tool data_commit: 1 validation error for data_commitArguments\ndatasets\n"

@@ -107,7 +107,7 @@ def test_launcher_host_option(tmp_path, monkeypatch):
     assert launcher.main(["--run-id", "r1"]) == 0
     assert launched[-1]["server_name"] == "127.0.0.1"
 
-# ---- final review fixes ----
+# ---- tabs, row selection and run files ----
 
 def _by_label(app, label):
     return next(b for b in app.blocks.values() if getattr(b, "label", None) == label)
@@ -170,7 +170,7 @@ def test_run_files_are_served_in_place_not_copied(run):
     assert (served if isinstance(served, dict) else served.model_dump())["path"] == video
 
 
-# ---- owner's first look (2026-09-28) ----
+# ---- trace, tables, node switching, files and commits ----
 
 def test_trace_attempt_defaults_to_any(run):
     app = ui.build_app(run.files.root)
@@ -215,7 +215,7 @@ def test_agent_commit_is_a_labelled_choice(run):
     assert _chains(app, _by_label(app, "Agent commit"), "input") == [["h_commit_tree"]]
 
 
-# ---- problems view (2026-09-28) ----
+# ---- problems view ----
 
 def test_problems_tab_and_overview_counts(tmp_path):
     from test_panel_data import _add_problems

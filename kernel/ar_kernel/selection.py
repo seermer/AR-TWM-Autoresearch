@@ -1,4 +1,4 @@
-"""Parent selection (user decision 2026-09-27): a softmax
+"""Parent selection: a softmax
 over each scored node's value -- mostly its own score, partly its subtree mean shrunk toward that
 score -- with a temperature set by the spread of values (floored at proxy noise), a penalty for
 large subtrees, and a uniform floor. Continuous in the scores."""

@@ -377,7 +377,7 @@ def test_a_ctrl_c_to_the_process_group_does_not_end_the_container(tmp_path, moun
 
 
 def test_every_phase_sees_the_same_node_files_and_only_eval_is_hidden(tmp_path):
-    """edit_self reads what improve_recipe reads (2026-10-03): only prompts and tools differ."""
+    """edit_self reads what improve_recipe reads: only prompts and tools differ."""
     from ar_kernel.sandbox.runner import Mounts, _docker_args
     node = tmp_path / "n1"
     for folder in ("eval", "attempts/improve_recipe-1/context", "contract/attempt-1"):

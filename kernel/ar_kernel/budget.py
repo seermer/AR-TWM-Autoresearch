@@ -1,4 +1,4 @@
-"""LLM spend ledger and the optional run cap (user decision 2026-09-27: dollars only, none by
+"""LLM spend ledger and the optional run cap (dollars only, none by
 default). The gateway records every real call here and refuses new ones once the cap is
 reached; the loop reads the same ledger to stop the run. Mock calls never count."""
 from __future__ import annotations

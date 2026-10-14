@@ -170,7 +170,7 @@ def test_live_ask_over_the_tool_socket(tmp_path):
 
 
 def test_a_reply_cut_off_before_the_answer_says_so_without_the_models_reasoning(make):
-    """live-10-02 n2: the failure put 2,000 characters of raw response, reasoning included, in front of the agent."""
+    """A cut-off reply must not put its raw response, reasoning included, in front of the agent."""
     cut = {"choices": [{"finish_reason": "length", "message": {"content": None, "reasoning": "SECRET THOUGHTS " * 50}}]}
     ask, caller, _, _ = make(handler=lambda request: httpx.Response(200, json=cut))
     with pytest.raises(ToolError) as failed:

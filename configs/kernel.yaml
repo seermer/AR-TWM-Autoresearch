@@ -14,7 +14,7 @@ gpus:
 retries:
   edit_self: 3
   improve_recipe: 3
-budget:                          # run-wide LLM spend cap in dollars, enforced by the gateway (user decision 2026-09-27)
+budget:                          # run-wide LLM spend cap in dollars, enforced by the gateway
   max_usd: null                  # null = no cap (the default)
   usd_per_mtok: {input: null, cached_input: null, output: null}   # needed for max_usd and for cost in `ar status`
 liveness:
@@ -25,7 +25,7 @@ alerts:
   stall_min: 30
   gateway_error_rate: 0.2
   gateway_error_window_min: 5
-selection:                       # continuous softmax parent selection (user decision 2026-09-27)
+selection:                       # continuous softmax parent selection
   decay: 0.5                     # weight per generation below a node: child 1x decay, grandchild decay^2 ...
   prior_weight: 1.0               # the node's own score as one virtual child: pulls the subtree mean toward it
   subtree_share: 0.3              # value = (1 - share) * own score + share * subtree mean
@@ -82,15 +82,14 @@ captioner:                       # caption_videos GPU job: a local vLLM server, 
   min_total_gpu_gib: 96          # the launch below was tuned on 4 x 24 GB
   model: Qwen/Qwen3.8-27B-FP8    # resolved by id through the HF cache (HF_HUB_OFFLINE=1: never downloads)
   tensor_parallel: null          # null = the largest power of two <= the number of node GPUs
-  # The owner's launch on 4 x 24 GB, checked on 57 clips (2026-09-28). vLLM test-runs the
-  # vision encoder at startup on min(max_num_batched_tokens / 12288, max_num_seqs) max-size videos, so
-  # 262144 / 32 ran out of memory at startup; at 0.95 the engine ran out of memory while serving.
+  # vLLM test-runs the vision encoder at startup on min(max_num_batched_tokens / 12288, max_num_seqs)
+  # max-size videos.
   max_model_len: 81920
   gpu_memory_utilization: 0.90
   max_num_seqs: 20               # clips are sent concurrently, up to this many at a time
   # vLLM sizes the encoder cache as max(max_num_batched_tokens, its estimate of one video's tokens); the
   # estimate (12288) is exceeded by clips with an odd sampled frame count (1080p, 13 frames: 14280 tokens),
-  # which vLLM rejects with HTTP 400 (2026-09-28).
+  # which vLLM rejects with HTTP 400.
   max_num_batched_tokens: 32768
   reasoning_parser: qwen3        # the model reasons; its reasoning is recorded per clip, not returned
   reasoning_effort: low          # sent with each request (the chat template takes low / medium / xhigh)
@@ -111,7 +110,7 @@ gateway:
   upstream_timeout_s: 600
   upstream_retries: 8            # 401-403/429/5xx, exponential backoff 1, 2, 4, ... s: about 4 minutes in all,
                                  #   so a short provider fault costs no agent attempt
-  outage_error_rate: 0.8         # stop the run (option A, no pause) when an agent attempt fails while at least
+  outage_error_rate: 0.8         # stop the run (never a pause) when an agent attempt fails while at least
   outage_window_min: 10          #   this share of the LLM calls in this window failed upstream (401-403/429/5xx/connection)
   outage_min_calls: 3            #   and at least this many calls were made in the window
 agents:                          # passed to agent containers as AR_CONTEXT_WINDOW / AR_COMPACT_AT
@@ -132,7 +131,7 @@ timeouts:                        # soft timeouts; the hard cap is 4x soft
   train_s: 172800                # 48 h soft; liveness = train.log growth
   eval_s: 43200                  # 12 h soft per render / WBench phase; liveness = output files
 annotate:                         # annotate_camera GPU job
-  enabled: true                   # ViGeo verified on the example clips
+  enabled: true
   env: alayaworld
   min_total_gpu_gib: 48
   repo: third_party/ViGeo         # relative to paths.worldmodel
@@ -154,8 +153,7 @@ generators:                       # rollout_* GPU jobs; switched on only after a
   alayaworld:
     env: alayaworld
     min_total_gpu_gib: 48         # the prompt precache spreads Gemma over two cards
-    # Rendered with the 30-step AR teacher (the DMD LoRA off). Clips carry no pose (user decision
-    # 2026-09-26: the renders follow commanded turns/orbits only weakly); agents run annotate_camera.
+    # Rendered with the 30-step AR teacher (the DMD LoRA off). Clips carry no pose; agents run annotate_camera.
     enabled: true
     max_turns: 9
     timeout_s: 43200
@@ -165,7 +163,7 @@ generators:                       # rollout_* GPU jobs; switched on only after a
     repo: third_party/Wan2.2      # relative to the AutoResearcher repo; gitignored
     commit: 1ea34ff48f87168174e12956e200b1d908b1c5ff   # pinned; the backend refuses to run off this commit
     weights: weights/wan2.2-ti2v-5b
-    enabled: false                 # smoke run passed (2 T2V + 2 I2V); switched off 2026-10-06
+    enabled: false
     # Not under the size rule of the other tools: it still crops a first frame to 1280x704 and crops its
     # render to 1248x704. Bring it under the rule (gpu_jobs.check_size, frame_keys) before switching it on.
     gpus_per_worker: 1
@@ -192,7 +190,7 @@ generators:                       # rollout_* GPU jobs; switched on only after a
     quantization: fp8-cast        # 24 GB cards: fp8-cast + CPU offload, one GPU per worker
     offload: cpu
     # host_reserve_gib also holds the ~36 GiB of shared mmapped weights, which MemAvailable counts as
-    # free: at 60, 4 workers thrashed page cache and systemd-oomd killed the loop (2026-09-30).
+    # free, so the reserve must leave room for them.
     host_reserve_gib: 100         # workers = min(GPUs, items, floor((MemAvailable - this) / peak_rss_gib)),
     workers: null                 # checked at job start; fails only below 1. Optional cap on the GPU count.
     frames: [121, 241]            # [default, max]; 8k+1
@@ -209,11 +207,9 @@ generators:                       # rollout_* GPU jobs; switched on only after a
     min_total_gpu_gib: 96           # measured on 4 x 24 GB only
     weights: weights/minimax-h3     # MiniMaxAI/MiniMax-H3, diffusers layout, fl2va/t2va partition
     revision: 42ed227ee7df40d41602854ae760620d6eb651fe
-    enabled: true                   # smoke run 2026-10-09: text-only, first-and-last and last-only items pass ingest
-    # That run, on 4 x 24 GB, 960x544, 29 steps: 243 frames in about 207 s after a 6 min load,
-    # about 11 GiB on each card, about 127 GiB of host RAM in use.
+    enabled: true
     frames: [243, 243]              # [default, max]; 17n+5, min 124. Every clip is 960x544
-    max_items: 80                   # about 4.7 h, plus the load
+    max_items: 80
     peak_rss_gib: 140               # host RAM of one job; a job starts only while
     host_reserve_gib: 60            # MemAvailable - host_reserve_gib >= peak_rss_gib
     timeout_s: 43200

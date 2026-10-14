@@ -622,7 +622,7 @@ def test_real_alayaworld_rollout(tmp_path):
             failures.append(f"{i}: ViGeo pose has {len(vigeo)} frames, the clip {c['frames']}")
         if len(commanded) != c["frames"]:
             failures.append(f"{i}: commanded camera has {len(commanded)} frames, the clip {c['frames']}")
-        # Diagnostics only (user decision 2026-09-26): how far the video strays from the commanded path.
+        # Diagnostics only: how far the video strays from the commanded path.
         est, cmd = _rel0(vigeo), _rel0(commanded)
         rot = float(np.median(_relative_rotation_errors(est, cmd)))
         path = float(np.linalg.norm(np.diff(cmd[:, :3, 3], axis=0), axis=1).sum())

@@ -495,7 +495,7 @@ def test_every_view_leaves_the_run_untouched(run_dir):
     assert _snapshot(run_dir) == before
 
 
-# ---- final review fixes ----
+# ---- reading a run's files safely ----
 
 def test_git_arguments_cannot_become_options(run, tmp_path):
     target = tmp_path / "pwned"
@@ -553,7 +553,7 @@ def test_a_blank_system_prompt_has_no_role():
     assert infer_role("  \n ", {"planner": PLANNER}) == "(no system prompt)"
 
 
-# ---- owner's first look (2026-09-28) ----
+# ---- GPU series and trace attempts ----
 
 def test_gpu_series_covers_the_runs_last_hours_not_the_clock(run_dir):
     path = run_dir / "telemetry" / "events" / "gpu.jsonl"
@@ -568,7 +568,7 @@ def test_trace_offers_attempts_and_any(run):
     assert {"0", "1"} <= set(views.trace_choices(run)["attempt"])
 
 
-# ---- problems view (2026-09-28) ----
+# ---- problems view ----
 
 from collections import Counter  # noqa: E402
 

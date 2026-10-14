@@ -1,4 +1,4 @@
-"""The loop: one node at a time. Nothing pauses (user decision 2026-09-27): a
+"""The loop: one node at a time. Nothing pauses: a
 failure the agent can act on goes back to it as the next attempt's retry report; any other
 failure ends the node with a status and an error that later agents see in the lineage."""
 from __future__ import annotations
@@ -124,7 +124,7 @@ class Loop:
         tmp.replace(self.state_path)
 
     def _children(self) -> int:
-        """Nodes counted toward max_nodes: every child except `interrupted` ones (user decision)."""
+        """Nodes counted toward max_nodes: every child except `interrupted` ones."""
         return sum(1 for n in self.nodes.all() if n["parent_id"] is not None and n["status"] != "interrupted")
 
     def _next_id(self) -> str:
@@ -142,8 +142,8 @@ class Loop:
 
     def _check_failed_attempt(self) -> None:
         """After a failed agent attempt: a spent budget (the gateway's 402) or an LLM provider outage
-        is not the agent's fault, so it stops the run instead of charging the attempt (user decision
-        2026-09-27, option A: a stop, never a pause)."""
+        is not the agent's fault, so it stops the run instead of charging the attempt:
+        a stop, never a pause."""
         self._check_budget()
         rate, calls = self.kit.budget.error_rate(60 * float(self.cfg.get("gateway.outage_window_min")))
         if calls >= int(self.cfg.get("gateway.outage_min_calls")) and \

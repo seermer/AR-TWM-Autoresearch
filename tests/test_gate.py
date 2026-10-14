@@ -20,8 +20,7 @@ def _gate_store(tmp_path_factory):
     clip_ids = []
     for i in range(8):
         # Distinct durations: byte-identical inputs collapse to ONE content-addressed
-        # clip, which is how this fixture used to hand the gate a single clip listed
-        # eight times and still pass the clips-vs-GPUs check.
+        # clip, and the gate would see a single clip listed eight times.
         seconds = 4.0 + 0.5 * i
         video, annotation, pose = staged_clip(tmp_path / "staging" / f"c{i}", seconds)
         clip_ids.append(ing.ingest([Candidate(video=video, annotation=annotation, pose=pose, derived_from=DERIVED)],
@@ -118,8 +117,8 @@ def test_fewer_clips_than_gpus_is_rejected(tmp_path):
     ("optimizer.warmup_steps", -1, "warmup_steps"),
 ])
 def test_invalid_recipe_values_fail_the_gate_instead_of_crashing(gate_env, key, value, fragment):
-    """Agent-supplied values used to raise out of the gate, which
-    crashes the node instead of giving the agent a retry."""
+    """Agent-supplied values must not raise out of the gate: that crashes the node instead of
+    giving the agent a retry."""
     gate, commit, tmp_path = gate_env
     result = gate.check({key: value}, commit, None, "n1", tmp_path / "n1", tmp_path, [0, 1, 2, 3])
     assert not result.ok

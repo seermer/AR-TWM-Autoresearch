@@ -1,4 +1,4 @@
-"""caption_videos: the vLLM caption job (Follow-up C). Unit tests run a fake vLLM server
+"""caption_videos: the vLLM caption job. Unit tests run a fake vLLM server
 (tests/fixtures/fake_vllm.py, no GPU); the `gpu` test runs the real model."""
 from conftest import job_result
 import json
@@ -97,7 +97,7 @@ def test_batch_success_captions_every_clip_then_stops_the_server(make, tmp_path)
 
 
 def test_every_bad_path_is_named_in_one_refusal_and_paths_may_come_from_a_file(make):
-    """n2 of live-10-02 resubmitted a 100-path list seven times, learning one bad path per refusal."""
+    """A 100-path list is refused once, with every bad path named, not one path per refusal."""
     q, caller, _, ws, _ = make()
     (ws / "a.mp4").write_bytes(b"x")
     with pytest.raises(ToolError) as refused:
@@ -194,8 +194,7 @@ def test_default_tensor_parallel_is_the_largest_power_of_two_within_the_gpus(tmp
 def test_the_encoder_cache_fits_every_clip_the_video_budget_allows(tmp_path):
     """vLLM's encoder cache is max(--max-num-batched-tokens, its own estimate of one video's tokens),
     and its estimate (12288 for Qwen3.8's 25165824-pixel video budget) is exceeded by clips whose
-    sampled frame count is odd: a 1080p clip of 13 frames (~6.5 s at 2 fps) takes 14280 tokens.
-    Such a clip was rejected with HTTP 400 in loopcheck_20260927 n1 (2026-09-28)."""
+    sampled frame count is odd: a 1080p clip of 13 frames (~6.5 s at 2 fps) takes 14280 tokens, which vLLM rejects with HTTP 400."""
     cmd = CaptionBackend(REAL, tmp_path, [0, 1, 2, 3], None, None).server_command(8000, tmp_path)
     assert int(cmd[cmd.index("--max-num-batched-tokens") + 1]) >= 14280
 
@@ -211,7 +210,7 @@ def test_the_server_runs_with_reasoning_and_a_data_parallel_encoder(tmp_path):
     cmd = CaptionBackend(REAL, tmp_path, [0, 1, 2, 3], None, None).server_command(8000, tmp_path)
     assert cmd[cmd.index("--reasoning-parser") + 1] == "qwen3"
     assert cmd[cmd.index("--mm-encoder-tp-mode") + 1] == "data"
-    assert "--speculative-config" not in cmd                      # off in the owner's verified launch
+    assert "--speculative-config" not in cmd                      # off by default
     assert "max_tokens" not in REAL.get("captioner")
     mtp = {"method": "mtp", "num_speculative_tokens": 3}
     cmd = CaptionBackend(fake_cfg(speculative_config=mtp), tmp_path, [0, 1, 2, 3], None, None).server_command(8000, tmp_path)

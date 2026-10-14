@@ -40,7 +40,7 @@ class CommitStore:
                 raise CommitError(f"{name}.weight must be a number, got {raw_weight!r}")
             weight = float(raw_weight)
             if not math.isfinite(weight) or weight < 0:
-                # inf/nan used to pass here and then crash steps_per_epoch in the gate.
+                # inf and nan would crash steps_per_epoch in the gate.
                 raise CommitError(f"{name}.weight must be finite and >= 0, got {raw_weight!r}")
             clip_ids = list(entry.get("clips") or [])
             bad, seen = {}, set()

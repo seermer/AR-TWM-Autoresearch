@@ -430,7 +430,7 @@ def test_a_persistent_error_body_sent_with_http_200_is_returned_as_its_code(make
 
 
 def test_an_error_inside_the_choice_sent_with_http_200_is_retried_too(make):
-    """live-10-02 n2: HTTP 200, choices[0].finish_reason 'error', choices[0].error.code 502."""
+    """HTTP 200, choices[0].finish_reason 'error', choices[0].error.code 502."""
     def handler(request):
         if len(seen) < 2:
             return httpx.Response(200, json={"choices": [{"finish_reason": "error", "message": {"content": None},
@@ -442,7 +442,7 @@ def test_an_error_inside_the_choice_sent_with_http_200_is_retried_too(make):
 
 
 def test_a_reply_with_no_content_and_no_tool_call_is_retried_too(make):
-    """live-10-03 n2: HTTP 200, finish_reason 'stop', content null, no tool call, twice in one role."""
+    """HTTP 200, finish_reason 'stop', content null, no tool call, twice in one role."""
     def handler(request):
         if len(seen) < 2:
             return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {

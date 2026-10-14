@@ -185,7 +185,7 @@ def test_a_quarantined_node_is_in_no_context_and_its_clips_leave_the_pool(world)
     assert "/workspace/staging" in ctx.folders and "separate mount" in ctx.folders["/workspace/staging"]
     nodes = NodeStore(conn)
     nodes.create("n9", "root", 1), nodes.set_status("n9", "interrupted")
-    for phase in ("edit_self", "improve_recipe"):          # live-10-02 listed the interrupted n1
+    for phase in ("edit_self", "improve_recipe"):          # an interrupted node is not listed
         assert "n9" not in [n["node_id"] for n in archive_summary(conn, phase)["nodes"]]
 
 

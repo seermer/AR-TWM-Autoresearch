@@ -61,6 +61,17 @@ def test_the_span_is_the_run_of_pieces_that_fits_best(there, span):
     assert le.best_span([bool(x) for x in there]) == span
 
 
+def test_a_moved_back_last_piece_counts_only_its_own_seconds():
+    cut = [(0.0, 1.0), (1.0, 2.0), (1.5, 2.5)]
+    assert le.own_seconds(cut) == [1.0, 1.0, 0.5]
+    assert le.best_span([True, False, True]) == (0, 2, 1)                              # one each: a tie
+    assert le.best_span([True, False, True], le.own_seconds(cut)) == (0, 0, 0.5)      # the last piece is half as heavy
+    no_event = {"happening_now": False, "already_happened": False, "start": None}
+    here = {**no_event, "happening_now": True}
+    got = le.spans(["A dog walks in."], cut, [[here, no_event, here]])
+    assert got[0]["end_s"] == 1.0 and got[0]["disagreeing_s"] == 0.5
+
+
 def test_spans_use_the_picked_start_and_end_with_the_last_piece():
     def a(now, done, start=None):
         return {"happening_now": now, "already_happened": done, "start": start}
@@ -68,8 +79,8 @@ def test_spans_use_the_picked_start_and_end_with_the_last_piece():
     none = [a(False, False)] * 4
     got = le.spans(["A dog walks in.", "Rain begins to fall."], cut,
                    [[a(False, False), a(True, False, "0.44"), a(False, True), a(False, True)], none])
-    assert got == [{"event": "A dog walks in.", "start_s": 1.4375, "end_s": 3.5, "disagreeing_pieces": 0},
-                   {"event": "Rain begins to fall.", "start_s": None, "end_s": None, "disagreeing_pieces": 0}]
+    assert got == [{"event": "A dog walks in.", "start_s": 1.4375, "end_s": 3.5, "disagreeing_s": 0},
+                   {"event": "Rain begins to fall.", "start_s": None, "end_s": None, "disagreeing_s": 0}]
     no_pick = le.spans(["A dog walks in."], cut[:2], [[a(False, False), a(False, True)]])
     assert no_pick[0]["start_s"] == 1.0 and no_pick[0]["end_s"] == 2.0       # the piece's own start
 
@@ -110,9 +121,9 @@ def test_a_job_asks_about_every_event_in_every_piece_and_returns_spans_only(env)
     clips = job_result(out)["clips"]
     assert clips == {
         "/workspace/a.mp4": {"events": [
-            {"event": "A dog walks in.", "start_s": 0.125, "end_s": 2.5, "disagreeing_pieces": 0},
-            {"event": "NEVER a cat.", "start_s": None, "end_s": None, "disagreeing_pieces": 0}]},
-        "/workspace/b.mp4": {"events": [{"event": "Rain.", "start_s": 0.125, "end_s": 1.0, "disagreeing_pieces": 0}]}}
+            {"event": "A dog walks in.", "start_s": 0.125, "end_s": 2.5, "disagreeing_s": 0},
+            {"event": "NEVER a cat.", "start_s": None, "end_s": None, "disagreeing_s": 0}]},
+        "/workspace/b.mp4": {"events": [{"event": "Rain.", "start_s": 0.125, "end_s": 1.0, "disagreeing_s": 0}]}}
     pieces = [rec.load_payload(e["payload"]) for e in rec.read_events("n1") if e["type"] == "locate.piece"]
     assert sorted((p["video"], p["event"], p["piece"]) for p in pieces) == [      # each event on its own
         ("/workspace/a.mp4", n, k) for n in (0, 1) for k in (0, 1, 2)] + [("/workspace/b.mp4", 0, 0)]

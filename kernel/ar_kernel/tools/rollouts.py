@@ -6,7 +6,7 @@ perspective). The kernel stages them in the render script's input schema, pre-en
 renders them, and publishes each whole clip with its annotation: the item's texts and the frame each
 turn starts on. Nothing the agent sees names that script, its schema or the evaluation.
 
-No pose is published (user decision 2026-09-26): the renders follow the commanded translation
+No pose is published: the renders follow the commanded translation
 but only weakly the commanded turns and orbits, so the commanded camera path is
 not a pose label. It is published as metadata (`commanded_camera`); the agent runs
 annotate_camera (ViGeo) on the clip for the pose it ingests with.
@@ -27,6 +27,7 @@ from PIL import Image
 from ..archive.db import open_db
 from ..archive.nodes import NodeStore
 from ..data.annotation import ACTIONS, FPS, PERSPECTIVES, SWITCH
+from ..data.ingest import SIZE
 from ..data.probe import aspect_ok, probe_video
 from ..subproc import file_tail, free_port, meminfo_gib
 from .gpu_jobs import (IMAGE_EXTS, GpuJob, check_item_seed, check_keyframes, check_listed_size, is_int, sizes_text,
@@ -48,7 +49,6 @@ SWITCH_CODE = {"third_person": "fp_to_tp", "first_person": "tp_to_fp"}
 # The AR teacher without the DMD LoRA, sampled as configs/infer_i2v_camera_ar.yaml does.
 AR30 = {("paths", "dmd_resume"): None, ("validation", "sampling_steps"): 30,
         ("validation", "scheduler"): "shift", ("validation", "cfg_scale"): 3.0}
-SIZE = (960, 544)           # (width, height) both turn-based rollouts render
 TURN_FRAMES = 96            # one turn of the render path, as in the evaluation
 FFMPEG_TIMEOUT_S = 600      # a wedged/oversize ffmpeg must fail its item, not hang the job
 

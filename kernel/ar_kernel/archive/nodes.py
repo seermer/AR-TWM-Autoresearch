@@ -3,7 +3,7 @@ import json, re, sqlite3, time
 from pathlib import Path
 
 # interrupted: unfinished when the loop stopped (forced stop, kernel death, spent budget); kept
-# untouched, never resumed, never a parent, not counted toward max_nodes (user decision 2026-09-27).
+# untouched, never resumed, never a parent, not counted toward max_nodes.
 # quarantined: an agent phase reached for the evaluation set; terminal, and hidden from every agent.
 STATUSES = {"running", "scored", "invalid_code", "invalid_recipe", "train_failed", "eval_failed",
             "crashed", "interrupted", "quarantined"}
@@ -51,7 +51,7 @@ class NodeStore:
             self._update(f"UPDATE nodes SET {key}=? WHERE node_id=?", (value, node_id), node_id)
 
     def _update(self, sql: str, params: tuple, node_id: str) -> None:
-        """An UPDATE matching no row used to succeed silently, losing the write."""
+        """An UPDATE matching no row would lose the write silently, so it raises."""
         if self.conn.execute(sql, params).rowcount == 0:
             raise KeyError(f"no node {node_id!r}")
 

@@ -165,7 +165,7 @@ def test_a_clips_source_is_what_it_was_derived_from():
 
 
 def test_query_writes_every_match_to_a_file(env):
-    """live-10-03: a 1,300-clip reply dropped the tool connection."""
+    """A reply of 1,300 clips must not drop the tool connection."""
     tools, caller, results, _ = env
     out = tools.query(caller, {})
     assert out["result_file"].startswith("/workspace/staging/results/data_query-") and "returned" not in out
@@ -195,7 +195,7 @@ def test_commit_validation_errors_become_tool_errors(env):
 
 
 def test_every_bad_clip_of_a_commit_is_named_in_one_refusal_with_a_file(env):
-    """n4 of live-10-03 was told a 12-character prefix of one clip id, which data_query could not find."""
+    """Every bad clip of a commit is named, so the agent is not told a shortened id that data_query cannot find."""
     tools, caller, results, _ = env
     ids = [r["clip_id"] for r in results]
     with pytest.raises(ToolError) as refused:
@@ -209,11 +209,7 @@ def test_every_bad_clip_of_a_commit_is_named_in_one_refusal_with_a_file(env):
 
 
 def test_recipe_check_reports_gate_failures_without_leaving_a_view(env, monkeypatch):
-    """An earlier version of this test was vacuous -- its recipe
-    fails the "not tunable" check before Gate.check ever reaches materialize(), so
-    the "no leftover view" assertion passed even with cleanup code deleted.
-
-    This version uses a recipe that clears every pre-materialize gate check (see
+    """The recipe clears every pre-materialize gate check (see
     tests/test_gate.py for the same arithmetic), so the gate genuinely builds a
     view under the scratch directory, and monkeypatches only the GPU-job steps
     (check_dataset / precache_dry_run / describe, all routed through
@@ -319,7 +315,7 @@ def test_a_staged_file_stays_and_ingesting_it_again_gives_the_same_clip(env):
 
 
 def test_a_path_that_is_not_text_or_not_staged_is_that_candidates_error(env):
-    """An annotation given as the object itself crashed the call; a file outside staging was named by its host path."""
+    """An annotation given as the object itself, or a file outside staging, is that candidate's error, and never names a host path."""
     tools, caller, _, _ = env
     (caller.workspace_host / "loose.mp4").write_bytes(b"x"), (caller.staging_host / "a.mp4").write_bytes(b"x")
     with pytest.raises(ToolError) as refused:

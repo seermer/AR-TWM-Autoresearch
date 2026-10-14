@@ -1,4 +1,4 @@
-"""Large caches stay inside the project (user rule 2026-09-25): every kernel subprocess gets
+"""Large caches stay inside the project: every kernel subprocess gets
 cache variables pointing at AutoResearcher/.cache unless AR_CACHE_DIR relocates it."""
 import json
 from pathlib import Path

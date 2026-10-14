@@ -109,10 +109,6 @@ def test_descendants_of_an_interrupted_node_count_nowhere():
     assert row["value"] == pytest.approx(0.8) and row["size"] == 0
 
 
-# Simulation behind these tests (2026-09-28, the shipped `candidates`, 6-node chain): with pure-noise
-# scores (SD 0.008) the newest node holds P = 0.206 against a uniform 0.167, because the size penalty
-# gives the newest leaf weight 1; a node that is truly +0.02 better receives P = 0.35. The acceptance
-# run's "always the newest" picks were luck (joint probability about 0.09).
 import random
 from collections import Counter
 

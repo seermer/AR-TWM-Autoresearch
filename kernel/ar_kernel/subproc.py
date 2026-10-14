@@ -33,7 +33,7 @@ def cache_env() -> dict[str, str]:
 
 def project_env(name: str, root: Path | None = None) -> Path | None:
     """`<repo>/.envs/<name>` when it is a conda env, else None. Every env the project runs lives
-    there (user rule, 2026-09-28: environments, data, models and code all stay in the project)."""
+    there (environments, data, models and code all stay in the project)."""
     path = (root or REPO_ROOT) / ".envs" / name
     return path if (path / "conda-meta").is_dir() else None
 

@@ -112,7 +112,7 @@ def _symlinks(cfg: KernelConfig) -> list[Finding]:
 
 
 def _envs(cfg: KernelConfig) -> list[Finding]:
-    """Every env the project runs in must live in `<repo>/.envs/<name>` (user rule, 2026-09-28).
+    """Every env the project runs in must live in `<repo>/.envs/<name>`.
     A named env of the conda installation still works but is reported, so the tree is not
     quietly depending on something outside it."""
     try:
