@@ -11,7 +11,7 @@ A candidate is a video, an annotation, a pose file and `derived_from`.
 
 - Video: .mp4, exactly 960x544, fps >= 24 (higher is subsampled), at least 2.4 s long, no display rotation
   (re-encode with rotation applied), and one continuous shot: a clip with a cut is rejected.
-- Annotation: a JSON file.
+- Annotation: a JSON file. An example with two turns:
 
   ```json
   {"scene_prompt": "A dry savanna at noon, an acacia tree on the left, low yellow grass.",
@@ -24,9 +24,8 @@ A candidate is a video, an annotation, a pose file and `derived_from`.
   - `turns`: the clip, turn by turn. `start_s` is when the turn starts, in seconds of the clip. The first is 0
     and each later one is larger than the one before. A turn ends where the next starts; the last ends with the clip.
   - `event`: one sentence, or left out. At most one per turn.
-  - `perspective`: `first_person` or `third_person`. Required on every turn when the clip has more than one turn.
+  - `perspective`: `first_person` or `third_person`. Required on every turn.
   - The first turn lasts at least 2.4 s, every later turn at least 1.4 s.
-  - A clip with nothing to say per turn has one turn: `{"start_s": 0.0}`.
   - Skill `training_text` says what text the model is trained with.
 - Poses: an npz with cam_c2w [N,4,4] with N = the mp4's frame count, camera-to-world, OpenCV convention, finite,
   bottom row [0,0,0,1], orthonormal rotation with det +1. Optional intrinsics [3,3] or [N,3,3] in pixels.

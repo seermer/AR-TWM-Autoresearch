@@ -1,6 +1,7 @@
 import pytest
 from ar_kernel.archive.db import open_db
 from ar_kernel.config import KernelConfig
+from ar_kernel.data.annotation import THIRD_PERSON_VIEW, caption_file
 from ar_kernel.data.ingest import Candidate, Ingestor
 from ar_kernel.telemetry.recorder import Recorder
 from conftest import DERIVED, make_mp4, staged_clip, write_poses
@@ -256,8 +257,18 @@ def test_the_training_text_is_made_from_the_annotation_and_both_are_stored(tmp_p
             {"time_range_s": [0.0, 2.5], "prompt": scene},
             {"time_range_s": [2.5, 5.0], "prompt": f"{scene} A camel steps out from behind the tree."},
             {"time_range_s": [5.0, 8.0], "prompt": f"{scene} The view switches from first-person to third-person, "
-                                                   "revealing the character from behind."}]}
+                                                   f"revealing the character from behind. {THIRD_PERSON_VIEW}"}]}
     assert json.loads(ing.blobs.path(clip["annotation_digest"], "annotation").read_text()) == annotation
+
+
+def test_third_person_turns_end_with_the_perspective_sentence():
+    turns = [{"start_s": 0.0, "event": "A dog walks in.", "perspective": TP}, {"start_s": 2.5, "perspective": TP},
+             {"start_s": 5.0, "perspective": FP}]
+    caption = caption_file({"scene_prompt": "A park.", "turns": turns}, 8.0)
+    assert caption["caption"] == f"A park. {THIRD_PERSON_VIEW}"
+    assert [s["prompt"] for s in caption["segments"]] == [
+        f"A park. A dog walks in. {THIRD_PERSON_VIEW}", f"A park. {THIRD_PERSON_VIEW}",
+        "A park. The view switches back to first-person, returning to the character's own eyes."]
 
 
 @pytest.mark.parametrize("annotation,message", [
@@ -267,10 +278,11 @@ def test_the_training_text_is_made_from_the_annotation_and_both_are_stored(tmp_p
     ({"scene_prompt": "A room.", "turns": [{"start_s": 1.0}]}, "turn 1 must start at 0"),
     ({"scene_prompt": "A room.", "turns": [{"start_s": 0, "perspective": FP}, {"start_s": 0, "perspective": FP}]},
      "not after turn 1"),
-    ({"scene_prompt": "A room.", "turns": [{"start_s": 0}, {"start_s": 2.5}]}, "perspective must be one of"),
-    ({"scene_prompt": "A room.", "turns": [{"start_s": 0, "event": ""}]}, "event must be one sentence"),
-    ({"scene_prompt": "A room.", "turns": [{"start_s": 0, "camera_motion": "W"}]}, "unknown field 'camera_motion'"),
-    ({"scene_prompt": "A room.", "caption": "x", "turns": [{"start_s": 0}]}, "unknown field 'caption'"),
+    ({"scene_prompt": "A room.", "turns": [{"start_s": 0}]}, "perspective is required"),
+    ({"scene_prompt": "A room.", "turns": [{"start_s": 0, "perspective": FP}, {"start_s": 2.5}]}, "perspective is required"),
+    ({"scene_prompt": "A room.", "turns": [{"start_s": 0, "event": "", "perspective": FP}]}, "event must be one sentence"),
+    ({"scene_prompt": "A room.", "turns": [{"start_s": 0, "camera_motion": "W", "perspective": FP}]}, "unknown field 'camera_motion'"),
+    ({"scene_prompt": "A room.", "caption": "x", "turns": [{"start_s": 0, "perspective": FP}]}, "unknown field 'caption'"),
     ({"scene_prompt": "A room.", "turns": [{"start_s": 0, "perspective": FP}, {"start_s": 9.0, "perspective": FP}]},
      "at or after the end of the video"),
 ])
@@ -387,9 +399,9 @@ def _rejected_events(tmp_path):
 
 
 @pytest.mark.parametrize("annotation", [
-    {"scene_prompt": f"A corridor. {COPIED}", "turns": [{"start_s": 0}]},
-    {"scene_prompt": "A corridor.", "character_prompt": COPIED, "turns": [{"start_s": 0}]},
-    {"scene_prompt": "A corridor.", "turns": [{"start_s": 0, "event": COPIED}]},
+    {"scene_prompt": f"A corridor. {COPIED}", "turns": [{"start_s": 0, "perspective": FP}]},
+    {"scene_prompt": "A corridor.", "character_prompt": COPIED, "turns": [{"start_s": 0, "perspective": FP}]},
+    {"scene_prompt": "A corridor.", "turns": [{"start_s": 0, "event": COPIED, "perspective": FP}]},
 ])
 def test_excluded_candidates_get_one_neutral_reason(tmp_path, annotation):
     ing = _ingestor(tmp_path)

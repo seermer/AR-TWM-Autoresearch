@@ -92,7 +92,7 @@ def test_case_files_load_with_the_worldmodel_loader(tmp_path):
     got = json.loads(proc.stdout.split("===AR===")[1])
 
     # the render assembles each turn's text exactly as the kernel's own assembler does
-    from ar_kernel.data.annotation import turn_texts
+    from ar_kernel.data.annotation import THIRD_PERSON_VIEW, turn_texts
     for case_id, item in (("3", first_person()), ("4", third_person())):
         assert got[case_id]["schedule"] == turn_texts(item["scene_prompt"], item.get("character_prompt"), item["turns"])
         assert got[case_id]["seed"] == item["seed"]
@@ -104,7 +104,7 @@ def test_case_files_load_with_the_worldmodel_loader(tmp_path):
 
     tp = got["4"]
     scene = "A mountain trail above a valley. A hiker in a red jacket."
-    assert tp["schedule"] == [f"{scene} The hiker raises a hand and waves.",
+    assert tp["schedule"] == [f"{scene} The hiker raises a hand and waves. {THIRD_PERSON_VIEW}",
                               f"{scene} The view switches back to first-person, returning to the character's own eyes."]
     assert tp["actions"] == ["W+left", "stop"] and tp["perspective"] == "third_person"
     assert tp["mask"] == str(data / "masks" / "case_4_mask.png")
@@ -509,7 +509,7 @@ def _ingest_as_an_agent(q, caller, ing, staging, candidate, name):
     assert ann["state"] == "done", ann.get("error")
     pose = job_result(ann)["items"][0]
     assert "error" not in pose, pose
-    (stage / "a.json").write_text(json.dumps({"scene_prompt": candidate["prompt"], "turns": [{"start_s": 0.0}]}))
+    (stage / "a.json").write_text(json.dumps({"scene_prompt": candidate["prompt"], "turns": [{"start_s": 0.0, "perspective": "first_person"}]}))
     [res] = ing.ingest([Candidate(video=stage / "v.mp4", annotation=stage / "a.json", pose=host(pose["pose"]),
                                   derived_from=candidate["derived_from"])], node_id="gpu")
     return res

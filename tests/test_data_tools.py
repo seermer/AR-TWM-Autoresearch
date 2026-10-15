@@ -182,7 +182,7 @@ def test_fetch_copies_pool_clips_into_staging(env):
     assert video.stat().st_size > 0 and video.stat().st_nlink == 1          # a copy, not a link into the archive
     caption = json.loads((caller.staging_host / "pool_clips" / "captions" / f"{wanted}.json").read_text())
     annotation = json.loads((caller.staging_host / "pool_clips" / "annotations" / f"{wanted}.json").read_text())
-    assert annotation == {"scene_prompt": caption["caption"], "turns": [{"start_s": 0.0}]}
+    assert annotation == {"scene_prompt": caption["caption"], "turns": [{"start_s": 0.0, "perspective": "first_person"}]}
     assert (caller.staging_host / "pool_clips" / "poses" / f"{wanted}.npz").is_file()
 
 

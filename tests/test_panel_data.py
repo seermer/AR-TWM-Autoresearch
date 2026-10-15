@@ -376,7 +376,7 @@ def test_training_data_and_clips(run):
     got = media.clips(run, "n1", "ds1")
     [clip] = got["rows"]
     assert clip["video"] == "store/blobs/video/vd1.mp4" and clip["caption"]["caption"] == "a hallway"
-    assert clip["annotation"]["turns"] == [{"start_s": 0.0}] and clip["derived_from"] == {"kind": "dataset", "name": "org/ds"}
+    assert clip["annotation"]["turns"] == [{"start_s": 0.0, "perspective": "first_person"}] and clip["derived_from"] == {"kind": "dataset", "name": "org/ds"}
     assert clip["leakage"] == {"matches": [], "near": [{"case_id": "7"}]}
     assert media.training_data(run, "root")["datasets"] == []
     assert media.clip_detail(run, "nope") is None

@@ -14,11 +14,16 @@ ACTIONS = ("W", "S", "A", "D", "left", "right", "up", "down", "W+A", "W+D", "S+A
 DERIVED_KINDS = ("model", "dataset", "synthetic_method")
 SWITCH = {"third_person": "The view switches from first-person to third-person, revealing the character from behind.",
           "first_person": "The view switches back to first-person, returning to the character's own eyes."}
+# The last sentence of a third-person turn (WorldModel's WBench loader ends third-person turns with it too).
+THIRD_PERSON_VIEW = ("The subject remains centered in the frame, moving and acting naturally in response to the "
+                     "camera's movement while staying in focus.")
 
 
-def turn_text(scene: str, character: str | None, event: str | None = None, switch_to: str | None = None) -> str:
-    """One turn's text: scene, subject, the turn's event, then the switch sentence."""
-    parts = (scene, character, event, SWITCH[switch_to] if switch_to else None)
+def turn_text(scene: str, character: str | None, perspective: str, event: str | None = None,
+              switch_to: str | None = None) -> str:
+    """One turn's text: scene, subject, the turn's event, the switch sentence, then the third-person sentence."""
+    parts = (scene, character, event, SWITCH[switch_to] if switch_to else None,
+             THIRD_PERSON_VIEW if perspective == "third_person" else None)
     return " ".join(p.strip() for p in parts if p and p.strip())
 
 
@@ -26,8 +31,8 @@ def turn_texts(scene: str, character: str | None, turns: list[dict]) -> list[str
     """The text of every turn. A turn whose perspective differs from the one before it switches."""
     out, previous = [], None
     for turn in turns:
-        perspective = turn.get("perspective") or previous
-        out.append(turn_text(scene, character, turn.get("event"),
+        perspective = turn["perspective"]
+        out.append(turn_text(scene, character, perspective, turn.get("event"),
                              perspective if previous and perspective != previous else None))
         previous = perspective
     return out
@@ -61,9 +66,8 @@ def check_annotation(annotation) -> list[str]:
             previous = start
         if turn.get("event") is not None and (not isinstance(turn["event"], str) or not turn["event"].strip()):
             problems.append(f"turn {n}: event must be one sentence, or absent")
-        if "perspective" in turn or len(turns) > 1:
-            if turn.get("perspective") not in PERSPECTIVES:
-                problems.append(f"turn {n}: perspective must be one of {', '.join(PERSPECTIVES)}")
+        if turn.get("perspective") not in PERSPECTIVES:
+            problems.append(f"turn {n}: perspective is required: one of {', '.join(PERSPECTIVES)}")
     return problems
 
 
@@ -88,6 +92,6 @@ def caption_file(annotation: dict, duration_s: float) -> dict:
     """WorldModel's caption file for an annotated clip: one timed prompt per turn."""
     scene, character, turns = annotation["scene_prompt"], annotation.get("character_prompt"), annotation["turns"]
     starts = [float(t["start_s"]) for t in turns]
-    return {"caption": turn_text(scene, character),
+    return {"caption": turn_text(scene, character, turns[0]["perspective"]),
             "segments": [{"time_range_s": [lo, hi], "prompt": text}
                          for lo, hi, text in zip(starts, [*starts[1:], duration_s], turn_texts(scene, character, turns))]}

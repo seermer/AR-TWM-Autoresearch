@@ -122,7 +122,7 @@ def make_run(base: Path, name: str = "r1") -> Path:
     _write(run / "store" / "blobs" / "caption" / "cd1.json",
            {"caption": "a hallway", "segments": [{"time_range_s": [0, 1], "prompt": "a hallway"}]})
     _write(run / "store" / "blobs" / "annotation" / "ad1.json",
-           {"scene_prompt": "a hallway", "turns": [{"start_s": 0.0}]})
+           {"scene_prompt": "a hallway", "turns": [{"start_s": 0.0, "perspective": "first_person"}]})
     c2w = np.tile(np.eye(4), (5, 1, 1))
     c2w[:, 0, 3] = np.arange(5)
     c2w[:, 2, 3] = np.arange(5) * 2

@@ -31,7 +31,7 @@ def write_poses(path, n_frames, width=736, height=414, moving=True, intrinsics=T
 
 def write_annotation(path, turns=None, scene="A camera moves slowly through a bright room.", character=None):
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"scene_prompt": scene, "turns": turns if turns is not None else [{"start_s": 0.0}]}
+    payload = {"scene_prompt": scene, "turns": turns if turns is not None else [{"start_s": 0.0, "perspective": "first_person"}]}
     if character is not None:
         payload["character_prompt"] = character
     path.write_text(json.dumps(payload), encoding="utf-8")
