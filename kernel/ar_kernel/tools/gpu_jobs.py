@@ -438,6 +438,8 @@ class GpuJob:
             raise RuntimeError(f"{message}:\n{file_tail(log, 2000)}")
         world = len(groups)
         missing: dict[int, str] = {}
+        if cancel.is_set() and not timed_out.is_set():
+            return codes, missing           # the cancel killed the workers: _collect's "cancelled or not reached"
         for index in indices:
             code = codes[index % world]
             if code not in (0, None) and not (out / f"{index}.json").exists():

@@ -61,8 +61,9 @@ def recorded(run: Run) -> list[dict]:
             body = load(e.get("payload")) or {}
             if body.get("error"):
                 add("job_failed", f"job {e.get('job_id')}: {body['error']}")
-            for item_name, error in _item_errors(body.get("result")):
-                add("job_item", f"job {e.get('job_id')}: {item_name}: {error}")
+            if e.get("state") != "cancelled":            # whoever cancelled it did not want those items
+                for item_name, error in _item_errors(body.get("result")):
+                    add("job_item", f"job {e.get('job_id')}: {item_name}: {error}")
         elif kind == "gate.failed":
             add("gate_failed", "; ".join(map(str, (load(e.get("payload")) or {}).get("failures") or [])))
         elif kind == "ingest.rejected":

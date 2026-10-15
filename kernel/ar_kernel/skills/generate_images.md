@@ -1,11 +1,14 @@
 ---
 name: generate_images
 tool: generate_images
-description: Use when a rollout needs a first frame that does not exist yet: what generate_images takes and gives.
+description: Use when writing generate_images prompts: what to put in a prompt.
 ---
 
-# Using an image as a frame
+# Writing the prompt
 
-- An image is not training data by itself: it becomes the first frame of a rollout_alayaworld or rollout_h3 item, or a keyframe of rollout_ltx25.
-- A rollout uses the image as it is, with no crop and no resize, and refuses one of another size. Give generate_images the width and height that rollout will render: each rollout tool's description gives its size.
-- The clip starts from this frame, so write the image prompt to show what the scene text of its item describes.
+- A prompt describes one still picture: what is in it at one instant, not what happens over time.
+- Say what kind of picture it is: a live-action photograph, a 3D render, a painting, and so on.
+- Describe the setting: the place, its main things and where they are, the light and the time of day.
+- Describe every subject that should be visible: how it looks, where it is in the picture and how large, and what it is doing at that instant.
+- Say where the picture is seen from: where the camera stands and where it looks, for example at eye level, from behind a person, from a low angle, or through someone's own eyes.
+- One prompt gives one picture; another seed gives another picture of the same content.

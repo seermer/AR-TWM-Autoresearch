@@ -19,7 +19,7 @@ from .agent_phase import PhaseEnv, run_edit_self, run_improve_recipe, smoke_cont
 from .archive.blobs import BlobStore
 from .archive.clips import ClipStore
 from .archive.commits import CommitStore
-from .archive.nodes import NodeStore, run_rel
+from .archive.nodes import NOT_SHOWN, NodeStore, run_rel
 from .contract.verify import verify_contract
 from .guards import alert
 from .isolation import audit, host_roots, scrub_train_files
@@ -275,6 +275,11 @@ class Loop:
 
     # -- steps 3-4 ---------------------------------------------------------------------------
     def _edit(self, child: str, parent: dict) -> tuple[str | None, str | None]:
+        if not any(n["node_id"] != "root" and n["status"] not in NOT_SHOWN for n in self.nodes.all()):
+            # Root runs no roles, so before any other node is shown there is no evidence to edit from.
+            self.repo.set_ref(self.repo.branch_ref(child), parent["agent_commit"])
+            self.nodes.set_fields(child, agent_commit=parent["agent_commit"])
+            return parent["agent_commit"], None
         n = int(self.cfg.get("retries.edit_self"))
         base, retry, prev_ws = parent["agent_commit"], None, None
         for k in range(1, n + 1):

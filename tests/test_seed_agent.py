@@ -294,10 +294,9 @@ def test_a_role_that_never_submits_is_reminded_three_times(tmp_path, monkeypatch
     assert sent == ["the task", *[orch.REMIND.format(tools="submit_plan")] * 3]
 
 
-def test_a_review_that_never_answers_keeps_the_submitted_result(tmp_path, monkeypatch):
+def test_a_review_that_never_answers_keeps_the_submitted_result():
     from types import SimpleNamespace as NS
     from agent import orchestration as orch
-    monkeypatch.setattr(orch, "RECORD", tmp_path / "plans.json")
     plan, accept, done, replan = (NS(value=None, name=n) for n in ("plan", "accept", "done", "replan"))
     calls = []
 
@@ -322,6 +321,36 @@ def test_a_review_that_never_answers_keeps_the_submitted_result(tmp_path, monkey
     calls.clear(), calls.append("first")
     with pytest.raises(orch.NoSubmission, match="finished without"):
         asyncio.run(orch.plan_and_engineer(team, task="t", show=lambda p: "work", engineer_context="ctx"))
+
+
+def test_the_record_holds_the_real_rounds_when_the_phase_ends(tmp_path):
+    """A role's test that ran the loop overwrote the live record; a Team without a record writes nothing."""
+    from types import SimpleNamespace as NS
+    from agent import orchestration as orch
+    record = tmp_path / "plans.json"
+    plan, accept, done, replan = (NS(value=None, name=n) for n in ("plan", "accept", "done", "replan"))
+
+    class Planner:
+        async def run(self, task):
+            if done.value is not None:
+                record.write_text('[{"plan": {"hypothesis": "fake"}}]')    # what a role's test left behind
+                return accept
+            plan.value = NS(model_dump=lambda: {"hypothesis": "h"})
+            return plan
+
+    class Engineer:
+        messages = []
+
+        async def run(self, work):
+            done.value = NS(model_dump=lambda: {"data_commit": "c"}, model_dump_json=lambda indent: "{}")
+            return done
+    team = orch.Team(Planner(), plan, accept, Engineer(), done, replan, [], record)
+    asyncio.run(orch.plan_and_engineer(team, task="t", show=lambda p: "work", engineer_context="ctx"))
+    assert json.loads(record.read_text()) == [{"plan": {"hypothesis": "h"}, "result": {"data_commit": "c"}}]
+    done.value, plan.value = None, None
+    asyncio.run(orch.plan_and_engineer(orch.Team(Planner(), plan, accept, Engineer(), done, replan, []),
+                                       task="t", show=lambda p: "work", engineer_context="ctx"))
+    assert json.loads(record.read_text())[0]["plan"] == {"hypothesis": "fake"}   # left untouched
 
 
 def test_submit_tool_validates_then_captures():

@@ -108,7 +108,7 @@ def siblings(conn, run_dir: Path, repo, parent_id: str, phase: str) -> list[dict
 
 
 def archive_summary(conn, phase: str) -> dict:
-    nodes = [n for n in NodeStore(conn).all() if n["status"] not in ("quarantined", "interrupted")]
+    nodes = [n for n in NodeStore(conn).all() if n["status"] not in NOT_SHOWN]
     rows = [{"node_id": n["node_id"], "parent_id": n["parent_id"], "status": n["status"], "depth": n["depth"]}
             for n in nodes]
     if phase == "edit_self":

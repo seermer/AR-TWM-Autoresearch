@@ -13,6 +13,7 @@ import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Annotated, Any, Literal, Optional
 
 from mcp.server.mcpserver import Context
@@ -177,53 +178,58 @@ class LocateEventsBackend:
         results: dict[str, dict] = {}
         calls = []                                  # (video, event number, piece number, the sheet as a data URL, its times)
         cuts: dict[str, list] = {}
-        for i, item in enumerate(job.args["items"]):
-            video = item["video"]
-            dst = media / f"{i}{Path(video).suffix}"
-            try:
-                stage_clip(caller, video, dst)
-                info = probe_video(dst)
-                frames = decode(dst, int(self.block["frame_width"]))
-                cuts[video] = pieces(len(frames), info.fps)
-                for k, (start, end) in enumerate(cuts[video]):
-                    times = sheet_times(start, end)
-                    url = data_url(sheet(frames, info.fps, start, times))
-                    calls += [(video, n, k, url, times) for n in range(len(item["events"]))]
-            except (PathError, OSError, subprocess.SubprocessError, ValueError) as exc:
-                results[video] = {"error": f"{type(exc).__name__}: {exc}"[:500]}
-        if not calls:
-            return {"clips": results, "load_s": None, "gpu_memory_mib": None, "gpu_memory_released": None}
         port, before = free_port(), self.gpu_memory(self.gpus)
         server = VllmServer(c["env"], self.server_command(port), self.gpus, port, cwd=work,
                             log_path=work / "vllm.log", recorder=self.recorder, node=job.node,
                             phase=TOOL, poll_s=self.poll_s, label="locate server")
         events = {item["video"]: item["events"] for item in job.args["items"]}
         load_s, answers, failed, lock, done = None, {}, {}, threading.Lock(), [0]
+        abandon = threading.Event()                 # ends a start still waiting when there is nothing to ask
+        loader = ThreadPoolExecutor(max_workers=1)  # the model loads while the sheets are drawn
+        starting = loader.submit(server.start, float(c["startup_timeout_s"]),
+                                 SimpleNamespace(is_set=lambda: cancel.is_set() or abandon.is_set()))
         try:
-            load_s = server.start(float(c["startup_timeout_s"]), cancel)
-            with local_client(server.base_url, float(self.block["request_timeout_s"])) as client:
-                def one(video, n, k, url, times) -> None:
-                    if cancel.is_set() or load_s is None:
-                        return
-                    try:
-                        answer, reasoning = self.ask(client, url, events[video][n], times)
-                    except Exception as exc:        # noqa: BLE001 -- one piece's failure is its clip's error
-                        answer, reasoning = None, f"{type(exc).__name__}: {exc}"[:2000]
-                    with lock:
-                        if answer is None:
-                            failed[video] = reasoning
-                        else:
-                            answers.setdefault(video, {})[n, k] = answer
-                        done[0] += 1
-                        self.recorder.event("locate.piece", node=job.node, component="tools", job_id=job.id,
-                                            ok=answer is not None,
-                                            payload={"video": video, "event": n, "piece": k, "answer": answer, "reasoning": reasoning})
-                        report({"asked": done[0], "total": len(calls)})
+            for i, item in enumerate(job.args["items"]):
+                video = item["video"]
+                dst = media / f"{i}{Path(video).suffix}"
+                try:
+                    stage_clip(caller, video, dst)
+                    info = probe_video(dst)
+                    frames = decode(dst, int(self.block["frame_width"]))
+                    cuts[video] = pieces(len(frames), info.fps)
+                    for k, (start, end) in enumerate(cuts[video]):
+                        times = sheet_times(start, end)
+                        url = data_url(sheet(frames, info.fps, start, times))
+                        calls += [(video, n, k, url, times) for n in range(len(item["events"]))]
+                except (PathError, OSError, subprocess.SubprocessError, ValueError) as exc:
+                    results[video] = {"error": f"{type(exc).__name__}: {exc}"[:500]}
+            if calls:
+                load_s = starting.result()
+                with local_client(server.base_url, float(self.block["request_timeout_s"])) as client:
+                    def one(video, n, k, url, times) -> None:
+                        if cancel.is_set() or load_s is None:
+                            return
+                        try:
+                            answer, reasoning = self.ask(client, url, events[video][n], times)
+                        except Exception as exc:        # noqa: BLE001 -- one piece's failure is its clip's error
+                            answer, reasoning = None, f"{type(exc).__name__}: {exc}"[:2000]
+                        with lock:
+                            if answer is None:
+                                failed[video] = reasoning
+                            else:
+                                answers.setdefault(video, {})[n, k] = answer
+                            done[0] += 1
+                            self.recorder.event("locate.piece", node=job.node, component="tools", job_id=job.id,
+                                                ok=answer is not None,
+                                                payload={"video": video, "event": n, "piece": k, "answer": answer, "reasoning": reasoning})
+                            report({"asked": done[0], "total": len(calls)})
 
-                with ThreadPoolExecutor(max_workers=max(1, min(int(c["max_num_seqs"]), len(calls)))) as pool:
-                    for f in [pool.submit(one, *call) for call in calls]:
-                        f.result()
+                    with ThreadPoolExecutor(max_workers=max(1, min(int(c["max_num_seqs"]), len(calls)))) as pool:
+                        for f in [pool.submit(one, *call) for call in calls]:
+                            f.result()
         finally:
+            abandon.set()
+            loader.shutdown()                       # start has returned, so stop finds its process
             exit_code = server.stop()
             shutil.rmtree(media, ignore_errors=True)
             self.recorder.event("locate.server_stopped", node=job.node, component="tools", job_id=job.id,

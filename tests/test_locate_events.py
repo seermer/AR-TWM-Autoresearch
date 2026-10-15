@@ -1,7 +1,9 @@
 """locate_events: the pieces and sheets, the answer shape, the span rule, and the job against a fake
 model server (tests/fixtures/fake_vllm.py, no GPU)."""
 import json
+import os
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -85,8 +87,9 @@ def test_spans_use_the_picked_start_and_end_with_the_last_piece():
     assert no_pick[0]["start_s"] == 1.0 and no_pick[0]["end_s"] == 2.0       # the piece's own start
 
 
-def fake_cfg(**over) -> KernelConfig:
-    c = {**REAL.get("captioner"), "env": "autoresearcher", "startup_timeout_s": 60, "memory_release_timeout_s": 2}
+def fake_cfg(captioner=None, **over) -> KernelConfig:
+    c = {**REAL.get("captioner"), "env": "autoresearcher", "startup_timeout_s": 60, "memory_release_timeout_s": 2,
+         **(captioner or {})}
     return KernelConfig(raw={"captioner": c, "locate_events": {**REAL.get("locate_events"), **over}},
                         repo_root=REAL.repo_root)
 
@@ -102,7 +105,7 @@ def env(tmp_path):
     rec = Recorder(tmp_path / "run")
     reg = TokenRegistry(rec)
     q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
-    q.register(FakeServer(fake_cfg(), tmp_path / "run", [0, 1, 4, 5], reg, rec,
+    q.register(FakeServer(fake_cfg(), tmp_path / "run", [0, 1, 2, 3], reg, rec,
                           gpu_memory=lambda gpus: {g: 100 for g in gpus}, poll_s=0.2))
     ws, staging = tmp_path / "ws", tmp_path / "staging"
     ws.mkdir(); staging.mkdir()
@@ -153,3 +156,72 @@ def test_bad_items_are_refused_before_a_job_is_queued(env, items, message):
     q, caller, _, _ = env
     with pytest.raises(ToolError, match=message):
         le.submit(q, caller, items)
+
+
+def _server_gone(run, job_id):
+    pid = int((run / "jobs" / job_id / "fake_vllm.pid").read_text())
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
+def test_the_server_loads_while_the_sheets_are_drawn(env, monkeypatch):
+    q, caller, _, run = env
+    real_decode, seen = le.decode, []
+
+    def decode(path, width):                             # the server process starts before any sheet is drawn
+        argv = path.parent.parent / "fake_vllm.argv.json"
+        deadline = time.monotonic() + 30
+        while not argv.exists() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        seen.append(argv.exists())
+        return real_decode(path, width)
+    monkeypatch.setattr(le, "decode", decode)
+    out = q.wait(caller, le.submit(q, caller, [{"video": "a.mp4", "events": ["Rain."]}])["job_id"], 120)
+    assert out["state"] == "done" and seen == [True]
+
+
+def test_a_job_whose_clips_all_fail_prep_still_stops_the_server(env, tmp_path):
+    q, caller, rec, run = env
+    (tmp_path / "ws" / "c.mp4").write_text("not a video")
+    out = q.wait(caller, le.submit(q, caller, [{"video": "c.mp4", "events": ["Rain."]}])["job_id"], 120)
+    assert out["state"] == "done" and "error" in job_result(out)["clips"]["/workspace/c.mp4"]
+    assert [e for e in rec.read_events("n1") if e["type"] == "locate.server_stopped"]
+    assert not [e for e in rec.read_events("n1") if e["type"] == "locate.piece"]
+    assert _server_gone(run, out["id"])
+
+
+def test_a_cancel_while_the_sheets_are_drawn_asks_nothing(env, monkeypatch):
+    q, caller, rec, run = env
+    real_decode, drawing = le.decode, threading.Event()
+
+    def decode(path, width):
+        drawing.set()
+        time.sleep(3)
+        return real_decode(path, width)
+    monkeypatch.setattr(le, "decode", decode)
+    job_id = le.submit(q, caller, [{"video": "a.mp4", "events": ["Rain."]}])["job_id"]
+    assert drawing.wait(60)
+    q.cancel(caller, job_id)
+    out = q.wait(caller, job_id, 120)
+    assert out["state"] == "cancelled"
+    assert not [e for e in rec.read_events("n1") if e["type"] == "locate.piece"]
+    assert _server_gone(run, job_id)
+
+
+def test_a_server_that_dies_while_loading_fails_the_job(tmp_path):
+    rec = Recorder(tmp_path / "run")
+    reg = TokenRegistry(rec)
+    q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
+    q.register(FakeServer(fake_cfg(captioner={"extra_args": ["--fake-mode", "exit"]}), tmp_path / "run", [0, 1, 2, 3],
+                          reg, rec, gpu_memory=lambda gpus: {g: 100 for g in gpus}, poll_s=0.2))
+    ws = tmp_path / "ws"
+    make_mp4(ws / "a.mp4", seconds=1.0, fps=24, width=320, height=180)
+    caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=tmp_path / "st")
+    try:
+        out = q.wait(caller, le.submit(q, caller, [{"video": "a.mp4", "events": ["Rain."]}])["job_id"], 120)
+    finally:
+        q.shutdown()
+    assert out["state"] == "failed" and "exited during startup" in out["error"]

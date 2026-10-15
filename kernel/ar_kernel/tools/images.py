@@ -28,11 +28,10 @@ class ImageBackend(GpuJob):
         super().__init__(*args, **kwargs)
         self.height, self.width = self.block["default_size"]
         self.description = (
-            "Generate images from text prompts (Z-Image-Turbo), for use as the first or last frame of "
-            "a rollout. A GPU job: returns {job_id} at "
+            "Generate images from text prompts (Z-Image-Turbo). A GPU job: returns {job_id} at "
             "once; collect with job_wait. `width`/`height`: within 2% of 16:9, and multiples of 16 "
-            f"in 256..1920 (default {self.width}x{self.height}). A rollout uses a frame image as it is, so make it "
-            "at exactly the size that rollout renders. Items: {'prompt': str, 'seed': int}. Each result "
+            f"in 256..1920 (default {self.width}x{self.height}). "
+            "Items: {'prompt': str, 'seed': int}. Each result "
             "item gives `image`: a png in /workspace/staging/images/<job_id>/.")
 
     def check_args(self, args):

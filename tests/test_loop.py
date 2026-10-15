@@ -46,7 +46,6 @@ def test_root_then_one_scored_child(make_loop):
     nodes = {n["node_id"]: n for n in NodeStore(loop.ctx.conn).all()}
     assert nodes["root"]["status"] == "scored" and nodes["n1"]["status"] == "scored"
     assert nodes["n1"]["checkpoint_path"].startswith("nodes/n1/")
-    assert json.loads((run / "nodes" / "n1" / "edit.json").read_text())["summary"] == "s"
     assert (run / "nodes" / "n1" / "recipe.yaml").exists() and (run / "nodes" / "n1" / "rationale.md").exists()
     assert json.loads((run / "nodes" / "n1" / "eval" / "aggregates.json").read_text())["metrics"]["m"] == 0.9
     assert nodes["root"]["subtree_value"] == pytest.approx(0.7 * 0.7 + 0.3 * (0.7 + 0.5 * 0.9) / 1.5)
@@ -54,10 +53,25 @@ def test_root_then_one_scored_child(make_loop):
     assert passed["checkpoint"].startswith("nodes/n1/")          # run-relative, never absolute
 
 
+def test_the_first_child_runs_its_parents_code_without_edit_self(make_loop):
+    """Root runs no roles: before another node is shown, an edit has no evidence to start from."""
+    run, make = make_loop
+    script = Script(run)
+    loop = make(script, max_nodes=2)                            # n1 skips edit_self, n2 edits
+    loop.run()
+    nodes = NodeStore(loop.ctx.conn)
+    root, n1 = nodes.get("root")["agent_commit"], nodes.get("n1")
+    assert n1["status"] == "scored" and n1["agent_commit"] == root
+    assert loop.repo.resolve(loop.repo.branch_ref("n1")) == root
+    assert not (run / "nodes" / "n1" / "edit.json").exists() and nodes.attempts("n1", "edit_self") == []
+    assert [r[:3] for r in script.retries if r[0] == "edit_self"] == [("edit_self", "n2", 1)]
+    assert json.loads((run / "nodes" / "n2" / "edit.json").read_text())["summary"] == "s"
+
+
 def test_contract_failure_retries_with_the_report(make_loop):
     run, make = make_loop
     script = Script(run, contract=[False, True])
-    make(script).run()
+    make(script, max_nodes=2).run()
     edits = [r for r in script.retries if r[0] == "edit_self"]
     assert [a for _, _, a, _ in edits] == [1, 2] and edits[1][3]["kind"] == "contract"
 
@@ -65,17 +79,18 @@ def test_contract_failure_retries_with_the_report(make_loop):
 def test_every_edit_attempt_runs_on_the_parents_code(make_loop):
     run, make = make_loop
     script = Script(run, contract=[False, True])
-    loop = make(script)
+    loop = make(script, max_nodes=2)
     loop.run()
-    assert script.runners == [NodeStore(loop.ctx.conn).get("root")["agent_commit"]] * 2
+    nodes = NodeStore(loop.ctx.conn)
+    assert script.runners == [nodes.get(nodes.get("n2")["parent_id"])["agent_commit"]] * 2
 
 
 def test_edit_exhaustion_is_invalid_code(make_loop):
     run, make = make_loop
-    loop = make(Script(run, edit=[False, False, False]))
+    loop = make(Script(run, edit=[False, False, False]), max_nodes=2)
     loop.run()
-    n1 = NodeStore(loop.ctx.conn).get("n1")
-    assert n1["status"] == "invalid_code" and "agent failed" in n1["error"]
+    n2 = NodeStore(loop.ctx.conn).get("n2")
+    assert n2["status"] == "invalid_code" and "agent failed" in n2["error"]
 
 
 def test_training_failure_goes_back_to_the_agent_then_train_failed(make_loop):
@@ -193,8 +208,8 @@ def test_provider_outage_stops_the_run_instead_of_failing_the_node(make_loop):
     loop = make(script, max_nodes=3, budget=budget)
     loop.phases.edit_self = outage
     assert "outage" in loop.run()
-    assert NodeStore(loop.ctx.conn).get("n1")["status"] == "running"      # -> interrupted on resume
-    assert NodeStore(loop.ctx.conn).attempts("n1", "edit_self") == []     # the attempt was not charged
+    assert NodeStore(loop.ctx.conn).get("n2")["status"] == "running"      # -> interrupted on resume
+    assert NodeStore(loop.ctx.conn).attempts("n2", "edit_self") == []     # the attempt was not charged
 
 
 def test_agent_side_400s_are_not_an_outage(make_loop):
@@ -207,7 +222,7 @@ def test_agent_side_400s_are_not_an_outage(make_loop):
         for _ in range(3):
             budget.record(400, None)
         return real_edit(env, **kw)
-    loop = make(script, max_nodes=1, budget=budget)
+    loop = make(script, max_nodes=2, budget=budget)
     loop.phases.edit_self = bad_requests
     assert loop.run() == "max_nodes reached"
 
@@ -225,7 +240,7 @@ def test_budget_spent_during_the_last_attempt_is_a_stop_not_invalid_code(make_lo
     loop = make(script, max_nodes=3, budget=budget)
     loop.phases.edit_self = spend_on_third
     assert "budget" in loop.run()
-    assert NodeStore(loop.ctx.conn).get("n1")["status"] == "running"
+    assert NodeStore(loop.ctx.conn).get("n2")["status"] == "running"
 
 
 def test_budget_exhaustion_stops_the_run_and_leaves_the_node_running(make_loop):
@@ -240,7 +255,7 @@ def test_budget_exhaustion_stops_the_run_and_leaves_the_node_running(make_loop):
     script.edit_self = spend
     loop = make(script, max_nodes=3, budget=budget)
     assert "budget" in loop.run()
-    assert NodeStore(loop.ctx.conn).get("n1")["status"] == "running"
+    assert NodeStore(loop.ctx.conn).get("n2")["status"] == "running"
 
 
 def test_graceful_flag_finishes_the_current_node(make_loop):
@@ -269,7 +284,7 @@ def test_interrupted_nodes_do_not_count_and_ids_are_never_reused(make_loop):
     nodes = {n["node_id"]: n for n in NodeStore(loop2.ctx.conn).all()}
     assert {k: v["status"] for k, v in nodes.items()} == {"root": "scored", "n1": "interrupted", "n2": "scored"}
     assert nodes["n2"]["parent_id"] == "root"                  # an interrupted node is never a parent
-    assert (run / "nodes" / "n1" / "edit.json").exists()       # and keeps its files
+    assert (run / "nodes" / "n1" / "recipe.yaml").exists()     # and keeps its files
 
 
 def test_root_score_failure_ends_the_run_with_the_root_eval_failed(make_loop):
@@ -328,7 +343,7 @@ def test_a_scored_root_is_reused_by_the_next_run(tmp_path):
 def test_a_phase_that_reaches_for_the_evaluation_set_quarantines_the_node(make_loop):
     run, make = make_loop
     script = Script(run, score=[0.7, 0.9])
-    loop = make(script)
+    loop = make(script, max_nodes=2)
     real_edit = script.edit_self
 
     def reaching_edit(env, *, node, attempt, **kw):
@@ -339,16 +354,16 @@ def test_a_phase_that_reaches_for_the_evaluation_set_quarantines_the_node(make_l
         return real_edit(env, node=node, attempt=attempt, **kw)
     loop.phases.edit_self = reaching_edit
     loop.run()
-    n1 = NodeStore(loop.ctx.conn).get("n1")
-    assert n1["status"] == "quarantined" and n1["error"] == "quarantined: the model wrote wbench"
-    assert [r[0] for r in script.retries] == ["edit_self"]              # one attempt, no retry, no data phase
-    assert any(e["type"] == "isolation.audit" for e in loop.ctx.recorder.read_events("n1"))
+    n2 = NodeStore(loop.ctx.conn).get("n2")
+    assert n2["status"] == "quarantined" and n2["error"] == "quarantined: the model wrote wbench"
+    assert [r[0] for r in script.retries if r[1] == "n2"] == ["edit_self"]   # one attempt, no retry, no data phase
+    assert any(e["type"] == "isolation.audit" for e in loop.ctx.recorder.read_events("n2"))
 
 
 def test_a_phase_that_crashes_after_reaching_for_the_evaluation_set_is_still_quarantined(make_loop):
     run, make = make_loop
     script = Script(run, score=[0.7, 0.9])
-    loop = make(script)
+    loop = make(script, max_nodes=2)
 
     def crashing_edit(env, *, node, attempt, **kw):
         message = {"role": "assistant", "content": "I will fetch WBench."}
@@ -357,7 +372,7 @@ def test_a_phase_that_crashes_after_reaching_for_the_evaluation_set_is_still_qua
         raise RuntimeError("docker died")
     loop.phases.edit_self = crashing_edit
     loop.run()
-    assert NodeStore(loop.ctx.conn).get("n1")["status"] == "quarantined"
+    assert NodeStore(loop.ctx.conn).get("n2")["status"] == "quarantined"
 
 
 def test_saving_a_root_another_run_already_saved_keeps_the_first(tmp_path):

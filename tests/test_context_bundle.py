@@ -128,17 +128,23 @@ def test_a_data_entry_carries_scores_under_agent_names_and_no_code_or_process(wo
 
 
 def test_an_edit_entry_carries_code_and_process_and_no_score(world):
-    conn, repo, run = world
-    NodeStore(conn).add_attempt("root", "edit_self", 1, "contract_failed", {})
-    [entry] = lineage(conn, run, repo, "root", "edit_self")
+    conn, repo, run = world                                     # n1 finished; n2 is the node being built
+    nodes = NodeStore(conn)
+    nodes.set_fields("n1", agent_commit=nodes.get("root")["agent_commit"])
+    nodes.record_score("n1", 0.81, METRIC_SET, {"aesthetic_quality": 0.81})
+    nodes.add_attempt("n1", "edit_self", 1, "contract_failed", {})
+    (run / "nodes" / "n1").mkdir()
+    (run / "nodes" / "n1" / "edit.json").write_text(json.dumps({"summary": "s"}))
+    nodes.create("n2", "n1", 2)
+    entry = lineage(conn, run, repo, "n1", "edit_self")[-1]
     assert sorted(entry) == ["code_diff_stats", "edit", "error", "node_id", "process", "status"]
     assert entry["edit"] == {"summary": "s"}
     assert entry["process"] == {"attempts": [{"phase": "edit_self", "attempt": 1, "outcome": "contract_failed"}]}
-    ctx = build_edit_context(conn=conn, run_dir=run, repo=repo, parent_id="root", attempt=1, max_attempts=3,
+    ctx = build_edit_context(conn=conn, run_dir=run, repo=repo, parent_id="n1", attempt=1, max_attempts=3,
                              retry=None, nodes_remaining=9)
-    assert "0.78" not in ctx.model_dump_json()                  # no score anywhere in an edit context
+    assert "0.78" not in ctx.model_dump_json() and "0.81" not in ctx.model_dump_json()   # no score in an edit context
     assert ctx.archive == {"nodes": [{"node_id": "root", "parent_id": None, "status": "scored", "depth": 0},
-                                     {"node_id": "n1", "parent_id": "root", "status": "running", "depth": 1}]}
+                                     {"node_id": "n1", "parent_id": "root", "status": "scored", "depth": 1}]}
 
 
 def test_archive_summary_names_the_best_node(world):

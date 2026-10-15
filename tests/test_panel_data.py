@@ -601,9 +601,11 @@ def _add_problems(run_dir):
               conversation_id="c9", turn_index=0, model="m", component="gateway", **base)
     rec.event("llm.response", payload={"body": {"error": {"message": "rate limited"}}}, call_id="r1",
               conversation_id="c9", status=429, usage={}, cost_usd=None, latency_s=0.1, component="gateway", **base)
-    rec.event("job.finished", node="n2", job_id="j1", component="tools", payload={"error": None, "result": {
+    rec.event("job.finished", node="n2", job_id="j1", component="tools", state="done", payload={"error": None, "result": {
         "clips": {"/workspace/a.mp4": {"error": "HTTP 400: too many tokens"}, "/workspace/b.mp4": {"caption": "ok"}}}})
     rec.event("job.finished", node="n2", job_id="j2", component="tools", payload={"error": "worker died", "result": None})
+    rec.event("job.finished", node="n2", job_id="j3", component="tools", state="cancelled", payload={"error": None,
+              "result": {"clips": {"/workspace/c.mp4": {"error": "not asked (cancelled)"}}}})
     rec.event("subproc.end", node="n2", phase="render", returncode=1, payload={"stdout": "", "stderr": "Traceback: x"})
     rec.event("subproc.end", node="n2", phase="render", returncode=0, payload={"stdout": "", "stderr": ""})
     rec.event("subproc.cancelled", node="n2", phase="caption_videos", returncode=-15, payload={})

@@ -142,8 +142,9 @@ class Replan(BaseModel):
     report: str = Field(min_length=1, description="what you did and found, and why the plan should change")
 
 
-def save(rounds: list) -> None:
-    RECORD.write_text(json.dumps(rounds, indent=1))
+def save(team: Team) -> None:
+    if team.record is not None:
+        team.record.write_text(json.dumps(team.rounds, indent=1))
 
 
 def replan_tool(rounds: list) -> tuple:
@@ -176,35 +177,39 @@ class Team:
     done: object
     replan: object
     rounds: list                  # every plan, with the engineer's report or result
+    record: Path | None = None    # where rounds are saved; None saves nothing
 
 
 async def plan_and_engineer(team: Team, *, task: str, show, engineer_context: str) -> None:
     """Plan and carry out. The planner plans again when the engineer asks, or when it is shown the engineer's
     result and wants it changed; the phase ends when the planner accepts a result or the plans are used up.
-    Every round is appended to team.rounds and saved."""
-    while True:
-        try:
-            box = await team.planner.run(task)
-        except NoSubmission:
-            if team.done.value is None:
-                raise
-            return                                   # a review that never answered: the submitted result stands
-        if box is team.accept:
-            return
-        team.rounds.append({"plan": team.plan.value.model_dump()})
-        save(team.rounds)
-        work = show(team.plan.value)
-        work = f"The planner revised the plan.\n\n{work}" if team.engineer.messages else f"{work}\n\n{engineer_context}"
-        if await team.engineer.run(work) is team.done:
-            team.rounds[-1]["result"] = team.done.value.model_dump()
-            save(team.rounds)
-            if len(team.rounds) >= MAX_ROUNDS:
+    Every round is appended to team.rounds and saved, and saved once more when the phase ends."""
+    try:
+        while True:
+            try:
+                box = await team.planner.run(task)
+            except NoSubmission:
+                if team.done.value is None:
+                    raise
+                return                                   # a review that never answered: the submitted result stands
+            if box is team.accept:
                 return
-            task = f"{block('engineer_result', team.done.value.model_dump_json(indent=2))}\n\n{REVIEW}"
-        else:
-            team.rounds[-1]["report"] = team.replan.value.report
-            save(team.rounds)
-            task = f"{block('engineer_report', team.replan.value.report)}\n\n{REPLAN}"
+            team.rounds.append({"plan": team.plan.value.model_dump()})
+            save(team)
+            work = show(team.plan.value)
+            work = f"The planner revised the plan.\n\n{work}" if team.engineer.messages else f"{work}\n\n{engineer_context}"
+            if await team.engineer.run(work) is team.done:
+                team.rounds[-1]["result"] = team.done.value.model_dump()
+                save(team)
+                if len(team.rounds) >= MAX_ROUNDS:
+                    return
+                task = f"{block('engineer_result', team.done.value.model_dump_json(indent=2))}\n\n{REVIEW}"
+            else:
+                team.rounds[-1]["report"] = team.replan.value.report
+                save(team)
+                task = f"{block('engineer_report', team.replan.value.report)}\n\n{REPLAN}"
+    finally:
+        save(team)
 
 
 def check_roles() -> None:
@@ -264,7 +269,7 @@ def recipe_team(ctx: RecipeContext | None, session, ktools: list) -> Team:
     replan_t, replan = replan_tool(rounds)
     engineer = Role("data_engineer", [*ktools, *local_tools(WORKSPACE, papers=True), done_tool, replan_t],
                     [done, replan], skill)
-    return Team(planner, plan, accept, engineer, done, replan, rounds)
+    return Team(planner, plan, accept, engineer, done, replan, rounds, RECORD)
 
 
 async def run_task(ctx: RecipeContext) -> RecipeResult:
@@ -339,7 +344,7 @@ def edit_team(ktools: list) -> Team:
                    [plan, accept])
     replan_t, replan = replan_tool(rounds)
     engineer = Role("coder", [*kernel, *local_tools(AGENT_ROOT, papers=False), done_tool, replan_t], [done, replan])
-    return Team(planner, plan, accept, engineer, done, replan, rounds)
+    return Team(planner, plan, accept, engineer, done, replan, rounds, RECORD)
 
 
 async def run_meta(ctx: EditContext) -> EditResult:
