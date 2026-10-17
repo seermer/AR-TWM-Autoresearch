@@ -235,12 +235,13 @@ class Ingestor:
         digests = {key: self.blobs.put(held[key], key) for key in ("video", "caption", "annotation", "pose")}
         clip_id = hashlib.sha256(json.dumps(
             {key: digests[key] for key in ("video", "caption", "pose")}, sort_keys=True).encode()).hexdigest()
-        self.clips.add({
+        moved_from = self.clips.add({
             "clip_id": clip_id, **{f"{key}_digest": digest for key, digest in digests.items()}, **facts,
             "derived_from": {"kind": candidate.derived_from["kind"], "name": candidate.derived_from["name"]},
             "ingested_by": node_id,
         })
-        self._event(candidate, "ingest.accepted", node_id, {"clip_id": clip_id, "warnings": facts["warnings"]})
+        self._event(candidate, "ingest.accepted", node_id,
+                    {"clip_id": clip_id, "warnings": facts["warnings"], "moved_from": moved_from})
         return IngestResult(accepted=True, clip_id=clip_id, warnings=facts["warnings"])
 
 

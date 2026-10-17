@@ -1,0 +1,26 @@
+"""The metrics as agents see them: name -> (dimension, what it measures)."""
+
+METRICS = {
+    "frame_aesthetics": ("quality", "how good single frames look: composition, color, light"),
+    "frame_clarity": ("quality", "frames free of blur, noise and compression artifacts"),
+    "flicker_free": ("quality", "no flicker between neighboring frames"),
+    "motion_amount": ("quality", "how much the video moves; a near-static video scores low"),
+    "smooth_motion": ("quality", "motion that is smooth from frame to frame"),
+    "human_preference": ("quality", "how a human-preference model rates the frames"),
+    "background_stability": ("consistency", "the background keeps its look over time"),
+    "no_hard_cuts": ("consistency", "the video has no abrupt cut"),
+    "subject_framing_stability": ("consistency", "the followed subject stays at a steady place in the frame"),
+    "subject_stability": ("consistency", "the subject keeps its look over time"),
+    "geometry_stability": ("consistency", "the scene's 3D shape agrees between frames"),
+    "appearance_stability": ("consistency", "the same surface keeps its color and light between frames"),
+    "revisit_match": ("consistency", "a place looks the same when the camera comes back to it"),
+    "revisit_match_strict": ("consistency", "the same, counted less when the view barely changed on the way"),
+    "camera_path_accuracy": ("control", "the camera follows the commanded moves"),
+    "follows_event_instruction": ("control", "an instructed event happens in the scene, fully and with the right details"),
+    "follows_subject_action": ("control", "the subject does an instructed action, fully and naturally"),
+    "follows_viewpoint_change": ("control", "an instructed change of viewpoint happens and ends in a valid view"),
+    "scene_matches_description": ("description", "the scene matches its text"),
+    "subject_matches_description": ("description", "the subject matches its text"),
+    "looks_plausible": ("physics", "the video looks physically plausible"),
+    "cause_and_effect": ("physics", "objects and characters obey physics and cause and effect"),
+}

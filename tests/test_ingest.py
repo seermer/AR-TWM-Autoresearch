@@ -330,6 +330,19 @@ def test_every_ingest_event_names_its_candidate(tmp_path):
     assert accepted == {"video": str(good.video), "annotation": str(good.annotation), "pose": str(good.pose)}
 
 
+def test_a_reingest_records_where_a_hidden_clip_moved_from(tmp_path):
+    ing = _ingestor(tmp_path)
+    cand = _candidate(tmp_path)
+    [first] = ing.ingest([cand], node_id="n1")
+    ing.clips.hide("n1", "fail1")
+    ing.ingest([cand], node_id="n2")
+    ing.ingest([cand], node_id="n3")                                   # visible now: n2 keeps it
+    for node, moved_from in (("n2", "n1fail1"), ("n3", None)):
+        [event] = [e for e in ing.recorder.read_events(node) if e["type"] == "ingest.accepted"]
+        assert ing.recorder.load_payload(event["payload"])["moved_from"] == moved_from
+    assert ing.clips.get(first.clip_id)["ingested_by"] == "n2"
+
+
 def _path(n=120, step=0.02):
     import numpy as np
     c2w = np.tile(np.eye(4), (n, 1, 1))

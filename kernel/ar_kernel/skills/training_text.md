@@ -6,7 +6,7 @@ description: Use when writing a clip's annotation: what text the model is traine
 # What text the model is trained with
 
 - A clip is trained turn by turn. A turn is one stretch of the clip with one text.
-- The kernel writes each turn's text from the clip's annotation: the scene (`scene_prompt`), then the subject (`character_prompt`, when the clip has one), then the turn's `event`, when it has one. On a turn whose perspective differs from the turn before, the kernel adds a sentence that the view switches; on every third-person turn it adds a sentence that the subject stays centred and moves naturally with the camera. Do not write either sentence yourself.
+- The kernel writes each turn's text from the clip's annotation: the scene (`scene_prompt`), then the subject (`character_prompt`, when the clip has one), then the turn's `event`, when it has one. On a turn whose perspective differs from the turn before, the kernel adds a sentence that the view switches; on every third-person turn it adds a sentence that the subject stays centered and moves naturally with the camera. Do not write either sentence yourself.
 - Nothing is carried over from earlier turns: a turn's text describes that turn only.
 - The text describes what is on screen during the frames of the turn; it is not an instruction relative to earlier text.
 - Write the scene and the subject as prose: what is there. Write an event as one sentence: what happens during that turn.

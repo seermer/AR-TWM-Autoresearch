@@ -34,6 +34,7 @@ class Call:
     usage: dict = field(default_factory=dict)
     cost_usd: float | None = None
     latency_s: float | None = None
+    role: str | None = None
 
 
 @dataclass
@@ -117,7 +118,8 @@ def segments(events: list[dict], node: str, phase: str, attempt: int) -> list[Se
             continue                              # a kernel tool's own model call (ask) is no conversation
         if e.get("type") == "llm.request" and e.get("call_id"):
             calls[e["call_id"]] = Call(e["call_id"], e.get("conversation_id") or e["call_id"],
-                                       e.get("turn_index") or 0, e.get("ts_wall", 0.0), e.get("payload"))
+                                       e.get("turn_index") or 0, e.get("ts_wall", 0.0), e.get("payload"),
+                                       role=e.get("role"))
         elif e.get("type") == "llm.response" and e.get("call_id") in calls:
             c = calls[e["call_id"]]
             c.response, c.status, c.usage = e.get("payload"), e.get("status"), e.get("usage") or {}
@@ -267,21 +269,3 @@ def chat_items(chain: list[Segment], load: Load, awaiting: bool) -> list[dict]:
             title = f"Compaction #{k + 1} summary" + (", retry without tools" if r else "")
             items.append(item("compaction_summary", title, text))
     return items
-
-
-def _fixed_start(text: str) -> str:
-    """A prompt file up to its first line with a {skill_...} slot: the agent fills such a line in or leaves it out."""
-    head = text.split("{skill_")[0]
-    return head if head == text else head[:head.rfind("\n") + 1]
-
-
-def infer_role(system_text: str | None, prompt_files: dict[str, str]) -> str:
-    """The prompt file (in the agent code that ran) the system prompt starts with; else the
-    system prompt's first line. Only a label: roles are the agent's own convention."""
-    if not (system_text or "").strip():
-        return "(no system prompt)"
-    starts = {name: _fixed_start(text) for name, text in prompt_files.items()}
-    matches = [name for name, start in starts.items() if start and system_text.startswith(start)]
-    if matches:
-        return max(matches, key=lambda n: len(starts[n]))
-    return system_text.strip().splitlines()[0][:80]

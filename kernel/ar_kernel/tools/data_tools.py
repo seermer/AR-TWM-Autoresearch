@@ -14,7 +14,7 @@ from mcp.server.mcpserver import Context
 from pydantic import Field
 
 from ..archive.blobs import KINDS, BlobStore
-from ..archive.clips import ClipStore
+from ..archive.clips import ClipStore, hidden
 from ..archive.commits import BadClips, CommitError, CommitStore
 from ..archive.db import open_db
 from ..archive.nodes import NodeStore
@@ -189,6 +189,16 @@ class DataTools:
             conn.close()
         return {"commit_id": commit_id, "datasets": stats}
 
+    def commit_exists(self, commit_id: str) -> bool:
+        conn = open_db(self.run_dir)
+        try:
+            CommitStore(conn, BlobStore(self.run_dir, conn), ClipStore(conn)).get(commit_id)
+        except KeyError:
+            return False
+        finally:
+            conn.close()
+        return True
+
     def recipe_check(self, caller, recipe: dict, data_commit: str) -> dict:
         scratch = caller.workspace_host.parent / "recipe_check" / uuid.uuid4().hex
         conn = open_db(self.run_dir)
@@ -256,9 +266,8 @@ def _parent_commit(conn, node_id: str) -> str | None:
 
 
 def pool_clips(conn) -> list[dict]:
-    """The clips agents may use: all of them except those a quarantined node ingested."""
-    hidden = {n["node_id"] for n in NodeStore(conn).all() if n["status"] == "quarantined"}
-    return [c for c in ClipStore(conn).all() if c.get("ingested_by") not in hidden]
+    """The clips agents may use: every clip not marked hidden."""
+    return [c for c in ClipStore(conn).all() if not hidden(c["ingested_by"])]
 
 
 def clip_source(clip: dict) -> str:
@@ -375,8 +384,8 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
                               {"parent": parent, "datasets": datasets, "message": message, "include": include or []},
                               lambda c: tools.commit(c, parent, datasets, message, include or []))
 
-    @mcp.tool(name="recipe_check", description="Run every pre-training check on a recipe and a data commit "
-              "without using up an attempt. It uses the GPUs, so it is refused while a GPU job "
+    @mcp.tool(name="recipe_check", description="Run every pre-training check on a recipe and a data commit. "
+              "It uses the GPUs, so it is refused while a GPU job "
               "runs. Returns ok and the failures. Among the checks: the commit must have "
               "enough clips for the step count. One pass over the data draws, for the dataset that needs the "
               "most, ceil(clips / (weight / total_weight)) clips; that many, divided by the GPU count and then "

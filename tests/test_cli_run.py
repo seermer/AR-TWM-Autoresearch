@@ -161,6 +161,24 @@ def test_a_new_run_with_an_unreachable_git_remote_creates_nothing(tmp_path, monk
     assert "cannot reach --git-remote" in capsys.readouterr().err and not (tmp_path / "r2").exists()
 
 
+def test_a_new_run_named_like_a_run_on_its_git_remote_creates_nothing(tmp_path, monkeypatch, capsys):
+    import subprocess
+    monkeypatch.setattr(cli.KernelConfig, "runs_dir", property(lambda self: tmp_path))
+    monkeypatch.setattr(cli, "load_dotenv", lambda path, env: [])
+    monkeypatch.setattr(cli, "check_visible", lambda gpus: None)
+    monkeypatch.setattr(cli, "check_tools_fit", lambda cfg, gpus: None)
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("OPENAI_MODEL", "m")
+    remote, work = tmp_path / "remote.git", tmp_path / "work"
+    subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+    subprocess.run(["git", "init", "-q", str(work)], check=True)
+    subprocess.run(["git", "-C", str(work), "-c", "user.name=x", "-c", "user.email=x", "commit", "-q", "--allow-empty",
+                    "-m", "x"], check=True)
+    subprocess.run(["git", "-C", str(work), "push", "-q", str(remote), "HEAD:refs/heads/r2/node/root"], check=True)
+    assert cli.main(["run", "--run-id", "r2", "--max-nodes", "1", "--git-remote", str(remote)]) == 2
+    assert "already has a run named 'r2'" in capsys.readouterr().err and not (tmp_path / "r2").exists()
+
+
 def test_resume_pushes_to_the_git_remote_the_run_was_started_with(tmp_path, monkeypatch):
     run = _existing_run(tmp_path, monkeypatch)
     Control(run).save_args(git_remote="git@example.com:me/runs.git")

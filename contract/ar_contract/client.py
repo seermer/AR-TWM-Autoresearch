@@ -73,13 +73,8 @@ class ReasoningChatOpenAI(ChatOpenAI):
         return payload
 
 
-def chat_model(model: str | None = None, **kwargs) -> ReasoningChatOpenAI:
-    """A LangChain chat model bound to the gateway (Chat Completions, non-streaming).
-
-    Both clients go over the socket: without an explicit sync client, a sync invoke()
-    would try TCP localhost:80 and fail inside the container. Reasoning effort
-    is not set here: the gateway enforces OPENAI_EFFORT. No timeout here either: the gateway
-    has its own per try and retries, and answers with an error when it gives up."""
+def chat_model(model: str | None = None, role: str | None = None, **kwargs) -> ReasoningChatOpenAI:
+    """A chat model bound to the gateway over the socket; `role` labels its conversations."""
     sock = os.path.join(socket_dir(), "gateway.sock")
     return ReasoningChatOpenAI(model=model or default_model(), base_url="http://localhost/v1",
                                api_key=token(), use_responses_api=False, max_retries=0,
@@ -87,7 +82,7 @@ def chat_model(model: str | None = None, **kwargs) -> ReasoningChatOpenAI:
                                                         timeout=None),
                                http_async_client=httpx.AsyncClient(
                                    transport=httpx.AsyncHTTPTransport(uds=sock), timeout=None),
-                               **kwargs)
+                               **({"default_headers": {"X-AR-Role": role}} if role else {}), **kwargs)
 
 
 @asynccontextmanager

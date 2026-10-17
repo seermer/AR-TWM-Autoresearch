@@ -7,11 +7,11 @@ import pytest
 
 from ar_contract import models
 from ar_contract.run import main
+from ar_contract.static import static_check
 
 
 def _edit_ctx(**over):
-    base = {"nodes_remaining": 5, "attempt": 1, "max_attempts": 3}
-    return {**base, **over}
+    return dict(over)
 
 
 def _layout(tmp_path, entry_src, ctx):
@@ -49,16 +49,16 @@ def env(tmp_path, monkeypatch):
 GOOD = """
 from ar_contract.models import EditResult, RecipeResult
 def edit_self(ctx):
-    return EditResult(summary=f"attempt {ctx.attempt}")
+    return EditResult(snapshot_id="s1", summary=f"{len(ctx.lineage)} ancestors")
 def improve_recipe(ctx):
-    return RecipeResult(data_commit="c1", recipe={"optimizer.lr": 1e-5}, rationale="why")
+    return RecipeResult(snapshot_id="s2", summary="why")
 """
 
 
 def test_good_edit_self_writes_ok_result(env):
     out = env(GOOD, _edit_ctx())
     assert main(["edit_self"]) == 0
-    assert json.loads(out.read_text()) == {"ok": True, "result": {"summary": "attempt 1"}}
+    assert json.loads(out.read_text()) == {"ok": True, "result": {"snapshot_id": "s1", "summary": "0 ancestors"}}
 
 
 def test_the_running_code_comes_from_the_code_dir_when_one_is_set(env, tmp_path, monkeypatch):
@@ -75,7 +75,7 @@ def test_async_entry_points_are_supported(env):
     out = env("""
 from ar_contract.models import EditResult
 async def edit_self(ctx):
-    return EditResult(summary="async ok")
+    return EditResult(snapshot_id="s", summary="async ok")
 def improve_recipe(ctx):
     raise NotImplementedError
 """, _edit_ctx())
@@ -117,7 +117,7 @@ def improve_recipe(ctx):
 def test_invalid_result_is_a_schema_failure(env):
     out = env("""
 def edit_self(ctx):
-    return {"summary": ""}          # empty summary violates min_length=1
+    return {"snapshot_id": "s", "summary": ""}          # empty summary violates min_length=1
 def improve_recipe(ctx):
     pass
 """, _edit_ctx())
@@ -128,7 +128,7 @@ def improve_recipe(ctx):
 def test_dict_results_are_validated_and_accepted(env):
     out = env("""
 def edit_self(ctx):
-    return {"summary": "plain dict is fine"}
+    return {"snapshot_id": "s", "summary": "plain dict is fine"}
 def improve_recipe(ctx):
     pass
 """, _edit_ctx())
@@ -141,11 +141,14 @@ def test_unknown_kind_is_rejected(env):
     assert main(["drop_tables"]) == 2
 
 
-def test_recipe_result_requires_commit_recipe_and_rationale():
-    with pytest.raises(Exception):
-        models.RecipeResult(data_commit="", recipe={}, rationale="x")
-    ok = models.RecipeResult(data_commit="c", recipe={"optimizer.lr": 1e-5}, rationale="r")
-    assert ok.recipe["optimizer.lr"] == 1e-5
+@pytest.mark.parametrize("fields", [{"snapshot_id": "", "summary": "x"}, {"snapshot_id": "s", "summary": ""},
+                                    {"snapshot_id": "s", "summary": "x" * (models.SUMMARY_CHARS + 1)},
+                                    {"summary": "x"}])
+def test_a_result_needs_a_snapshot_id_and_a_capped_summary(fields):
+    for model in models.RESULT_MODELS.values():
+        with pytest.raises(Exception):
+            model(**fields)
+        assert model(snapshot_id="s", summary="x").model_dump() == {"snapshot_id": "s", "summary": "x"}
 
 
 
@@ -235,3 +238,30 @@ def test_reasoning_is_never_invented():
     assert "reasoning" not in first.additional_kwargs and "reasoning_content" not in first.additional_kwargs
     model.invoke([HumanMessage("go"), first, HumanMessage("more")])
     assert seen[1]["messages"][1] == {"role": "assistant", "content": "hi"}
+
+
+# a RecursionError, not a SyntaxError
+_DEEPLY_NESTED_SRC = ("def edit_self(ctx):\n    return " + "1+" * 20000 + "1\n"
+                     "def improve_recipe(ctx): ...\n")
+
+
+@pytest.mark.parametrize("src,ok,fragment", [
+    ("def edit_self(ctx): ...\ndef improve_recipe(ctx): ...\n", True, ""),
+    ("async def edit_self(ctx): ...\nasync def improve_recipe(ctx): ...\n", True, ""),
+    ("def edit_self(ctx): ...\n", False, "improve_recipe"),
+    ("def edit_self(ctx, extra): ...\ndef improve_recipe(ctx): ...\n", False, "exactly one"),
+    ("def edit_self(*args): ...\ndef improve_recipe(ctx): ...\n", False, "exactly one"),
+    ("def outer():\n    def edit_self(ctx): ...\ndef improve_recipe(ctx): ...\n", False, "edit_self"),
+    ("def edit_self(ctx):\n  return (\n", False, "syntax"),
+    pytest.param(_DEEPLY_NESTED_SRC, False, "cannot parse", id="deeply_nested_recursion_error"),
+])
+def test_static_check(src, ok, fragment):
+    problem = static_check(src)
+    assert (problem is None) is ok and fragment in (problem or "")
+
+
+def test_chat_model_sends_its_role_label_as_a_header(monkeypatch):
+    from ar_contract.client import chat_model
+    monkeypatch.setenv("AR_TOKEN", "t")
+    assert chat_model("m", role="coder").default_headers == {"X-AR-Role": "coder"}
+    assert "X-AR-Role" not in (chat_model("m").default_headers or {})

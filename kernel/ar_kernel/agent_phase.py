@@ -20,6 +20,7 @@ from .isolation import host_roots, scrub
 from .liveness import Liveness, tree_mark
 from .sandbox.image import ImageBuildError, ensure_image
 from .sandbox.runner import Mounts, RunResult, container_name, diff, run_container, snapshot
+from .tools import snapshot as snapshots
 from .vcs.agents_repo import CheckoutError
 
 
@@ -73,44 +74,27 @@ def _failed_before_start(dirs: dict, started: float, error: str) -> tuple:
 
 
 def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str, ctx,
-         mock_script: str | None, agent_readonly: bool, previous_workspace: Path | None,
-         nodes: dict[str, Path], runner_commit: str | None = None) -> tuple:
-    """`code_commit` is checked out at /agent. `runner_commit`, when given, is the code that runs
-    instead, checked out at /code."""
+         mock_script: str | None, agent_readonly: bool, nodes: dict[str, Path]) -> tuple:
+    """`code_commit` is checked out at /agent; when /agent is writable, the code runs from a second
+    checkout at /code, so an edit that breaks the agent mid-phase does not stop the roles."""
     dirs = attempt_dirs(env.run_dir, node, phase, attempt)
     started = time.monotonic()
     if dirs["attempt"].exists():
         shutil.rmtree(dirs["attempt"])
     if dirs["staging"].exists():            # outside the attempt dir: a rerun must clear it too
         shutil.rmtree(dirs["staging"])
+    snapshots.clear(env.run_dir, env.repo, node, phase, attempt)
     try:
         env.repo.checkout(code_commit, dirs["agent"])
     except CheckoutError as exc:            # e.g. a committed symlink out of the tree
         shutil.rmtree(dirs["agent"])        # no tree: edit_self commits nothing
         return _failed_before_start(dirs, started, f"cannot check out the agent code: {exc}")
     running = dirs["agent"]
-    if runner_commit is not None:
+    if not agent_readonly:
         running = dirs["code"]
-        env.repo.checkout(runner_commit, running)       # a commit that already passed the contract check
-    if previous_workspace is not None and Path(previous_workspace).exists():
-        prev_ws = Path(previous_workspace)
-        try:
-            shutil.copytree(prev_ws, dirs["workspace"], symlinks=True)
-        except (shutil.Error, OSError) as exc:     # FIFOs or files the agent made unreadable
-            return _failed_before_start(dirs, started, f"cannot copy the previous workspace: {exc}")
-        # Move (never copy) the previous attempt's staging: a partial hf_download can be tens of GiB.
-        prev_staging = Path(env.run_dir) / "staging" / node / prev_ws.parent.name
-        if prev_staging.exists():
-            shutil.move(str(prev_staging), str(dirs["staging"]))
+        env.repo.checkout(code_commit, running)
     for key in ("workspace", "context", "staging"):
         dirs[key].mkdir(parents=True, exist_ok=True)
-    # A retry's workspace is copied from the previous attempt, whose result.json must never
-    # pass for this one's. A symlink is unlinked, never followed.
-    result_file = dirs["workspace"] / "result.json"
-    if result_file.is_symlink() or result_file.is_file():
-        result_file.unlink()
-    elif result_file.is_dir():
-        shutil.rmtree(result_file)
     (Path(env.run_dir) / "store").mkdir(exist_ok=True)
     write_bundle(ctx, dirs["context"], env.cfg.get("isolation.blocked_names") or [], host_roots(env.cfg))
     reqs = running / "agent" / "requirements.txt"
@@ -124,7 +108,9 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
         return _failed_before_start(dirs, started, f"agent image failed to build: {exc}")
 
     caller = env.registry.issue(node=node, phase=phase, attempt=attempt, workspace_host=dirs["workspace"],
-                                staging_host=dirs["staging"], mock_script=mock_script)
+                                staging_host=dirs["staging"], mock_script=mock_script,
+                                agent_host=None if agent_readonly else dirs["agent"],
+                                base_commit=None if agent_readonly else code_commit)
     # From here on, any raise must still revoke the token and cancel its jobs, or an ended
     # phase could keep the GPUs.
     try:
@@ -146,7 +132,7 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
                           context=dirs["context"],
                           contract=env.cfg.repo_root / "contract", sockets=env.socket_dir,
                           agent_readonly=agent_readonly, nodes=nodes,
-                          code=running if runner_commit is not None else None),
+                          code=None if agent_readonly else running),
             command=["python", "-m", "ar_contract.run", phase],
             env={"AR_TOKEN": caller.token, "AR_DEFAULT_MODEL": env.default_model, "AR_NODE": node,
                  "AR_PHASE": phase, "AR_ATTEMPT": str(attempt),
@@ -197,50 +183,54 @@ def _validate_result(phase: str, body: dict) -> tuple[bool, dict | None, str | N
     return True, model.model_dump(), None
 
 
-def _outcome(env, phase, node, attempt, dirs, result, body, diffs, duration, commit, extra_check=None):
+def _judge(phase, result, body, resolve) -> tuple[bool, dict | None, str | None]:
+    """(ok, result, error); `resolve` maps the validated result to (result, None) or (None, error)."""
     if result.timed_out:
-        ok, res, error = False, None, "the agent call timed out and was killed"
-    elif body is None:
-        ok, res, error = False, None, f"no result.json (exit code {result.exit_code}): {result.stderr[-6000:]}"
-    else:
-        ok, res, error = _validate_result(phase, body)
-        if ok and extra_check is not None:
-            problem = extra_check(res)
-            if problem:
-                ok, res, error = False, None, problem
+        return False, None, "the agent call timed out and was killed"
+    if body is None:
+        return False, None, f"no result.json (exit code {result.exit_code}): {result.stderr[-6000:]}"
+    ok, res, error = _validate_result(phase, body)
+    if not ok:
+        return False, None, error
+    res, error = resolve(res)
+    return error is None, res, error
+
+
+def _outcome(env, phase, node, attempt, dirs, result, verdict, diffs, duration, commit):
+    ok, res, error = verdict
     outcome = PhaseOutcome(ok, res, error, result.exit_code, result.timed_out, commit, dirs["attempt"], duration)
     env.recorder.event("phase.end", node=node, phase=phase, attempt=attempt, component="kernel",
                        ok=ok, timed_out=result.timed_out, exit_code=result.exit_code,
-                       payload={"result": outcome.result, "error": error, "diffs": diffs, "commit": commit})
+                       payload={"result": res, "error": error, "diffs": diffs, "commit": commit})
     return outcome
 
 
-def run_edit_self(env: PhaseEnv, *, conn, node: str, parent_id: str, base_commit: str, runner_commit: str,
-                  attempt: int, max_attempts: int, retry: dict | None, nodes_remaining: int,
-                  previous_workspace: Path | None = None, mock_script: str | None = None,
-                  dry_run: bool = False) -> PhaseOutcome:
-    """`base_commit`: the tree to edit (the parent's, or a failed attempt's on a retry).
-    `runner_commit`: the parent's code, which runs the phase, so an edit that broke the agent can
-    still be repaired on a retry."""
-    ctx = build_edit_context(conn=conn, run_dir=env.run_dir, repo=env.repo, parent_id=parent_id,
-                             attempt=attempt, max_attempts=max_attempts, retry=retry,
-                             nodes_remaining=nodes_remaining, dry_run=dry_run)
+def _unknown(snapshot_id: str, node: str, phase: str, attempt: int) -> str:
+    return (f"result names snapshot {snapshot_id!r}, which is not a snapshot of {node} {phase} attempt {attempt}: "
+            "snapshot_id must be an id the snapshot tool returned in this attempt")
+
+
+def run_edit_self(env: PhaseEnv, *, conn, node: str, parent_id: str, agent_commit: str, attempt: int,
+                  mock_script: str | None = None, dry_run: bool = False) -> PhaseOutcome:
+    ctx = build_edit_context(conn=conn, run_dir=env.run_dir, repo=env.repo, parent_id=parent_id, dry_run=dry_run)
     dirs, result, body, diffs, duration = _run(env, phase="edit_self", node=node, attempt=attempt,
-                                               code_commit=base_commit, ctx=ctx, mock_script=mock_script,
-                                               agent_readonly=False, previous_workspace=previous_workspace,
-                                               nodes=finished_node_dirs(conn, env.run_dir),
-                                               runner_commit=runner_commit)
-    # The edited code is committed to an attempt ref whether or not the attempt succeeded.
-    # No tree, or an uncommittable one, means no commit and a failed attempt.
-    commit = None
-    if dirs["agent"].exists():
+                                               code_commit=agent_commit, ctx=ctx, mock_script=mock_script,
+                                               agent_readonly=False, nodes=finished_node_dirs(conn, env.run_dir))
+    def resolve(res: dict) -> tuple:
+        if snapshots.edit_snapshot(env.repo, node, "edit_self", attempt, res["snapshot_id"]) is None:
+            return None, _unknown(res["snapshot_id"], node, "edit_self", attempt)
+        return res, None
+
+    ok, res, error = _judge("edit_self", result, body, resolve)
+    commit = res["snapshot_id"] if ok else None
+    if not ok and dirs["agent"].exists():
         try:
-            commit = env.repo.commit_tree(dirs["agent"], base_commit, f"{node} edit_self attempt {attempt}")
+            commit = env.repo.commit_tree(dirs["agent"], agent_commit, f"{node} edit_self attempt {attempt}")
         except subprocess.CalledProcessError as exc:
-            body = {"ok": False, "error": f"cannot commit the agent tree: {exc.stderr.decode(errors='replace')}"}
-        else:
-            env.repo.set_ref(env.repo.attempt_ref(node, "edit_self", attempt), commit)
-    return _outcome(env, "edit_self", node, attempt, dirs, result, body, diffs, duration, commit)
+            error = f"{error}\nThe agent tree could not be committed either: {exc.stderr.decode(errors='replace')}"
+    if commit is not None:
+        env.repo.set_ref(env.repo.attempt_ref(node, "edit_self", attempt), commit)
+    return _outcome(env, "edit_self", node, attempt, dirs, result, (ok, res, error), diffs, duration, commit)
 
 
 def _recipe_tools(env: PhaseEnv) -> list[str]:
@@ -249,11 +239,10 @@ def _recipe_tools(env: PhaseEnv) -> list[str]:
             *sorted(b.tool for b in env.queue.backends.values())]
 
 
-def smoke_contexts(env: PhaseEnv, *, conn, node: str, parent_id: str, nodes_remaining: int) -> dict[str, dict]:
+def smoke_contexts(env: PhaseEnv, *, conn, node: str, parent_id: str) -> dict[str, dict]:
     """The contexts this node's two phases get, marked dry_run: what the contract check feeds the
     edited code, so code that cannot digest the node's real context fails there."""
-    common = dict(conn=conn, run_dir=env.run_dir, repo=env.repo, parent_id=parent_id, attempt=1,
-                  max_attempts=1, retry=None, nodes_remaining=nodes_remaining, dry_run=True)
+    common = dict(conn=conn, run_dir=env.run_dir, repo=env.repo, parent_id=parent_id, dry_run=True)
     recipe = build_recipe_context(cfg=env.cfg, node_id=node, n_gpus=len(env.gpus), tools=_recipe_tools(env),
                                   **common)
     return scrub({"edit_self": build_edit_context(**common).model_dump(mode="json"),
@@ -262,25 +251,29 @@ def smoke_contexts(env: PhaseEnv, *, conn, node: str, parent_id: str, nodes_rema
 
 
 def run_improve_recipe(env: PhaseEnv, *, conn, node: str, parent_id: str, agent_commit: str, attempt: int,
-                       max_attempts: int, retry: dict | None, nodes_remaining: int,
-                       previous_workspace: Path | None = None, mock_script: str | None = None,
+                       mock_script: str | None = None,
                        dry_run: bool = False) -> PhaseOutcome:
     ctx = build_recipe_context(cfg=env.cfg, conn=conn, run_dir=env.run_dir, repo=env.repo, node_id=node,
-                               parent_id=parent_id, attempt=attempt, max_attempts=max_attempts,
-                               retry=retry, nodes_remaining=nodes_remaining, n_gpus=len(env.gpus),
+                               parent_id=parent_id, n_gpus=len(env.gpus),
                                tools=_recipe_tools(env), dry_run=dry_run)
     # improve_recipe mounts /agent read-only: only edit_self changes code.
     dirs, result, body, diffs, duration = _run(env, phase="improve_recipe", node=node, attempt=attempt,
                                                code_commit=agent_commit, ctx=ctx, mock_script=mock_script,
-                                               agent_readonly=True, previous_workspace=previous_workspace,
-                                               nodes=finished_node_dirs(conn, env.run_dir))
+                                               agent_readonly=True, nodes=finished_node_dirs(conn, env.run_dir))
 
-    def check_data_commit(res: dict) -> str | None:           # `res` is already validated
+    def resolve(res: dict) -> tuple:
+        stored = snapshots.recipe_snapshot(env.run_dir, node, "improve_recipe", attempt, res["snapshot_id"])
+        if stored is None:
+            return None, _unknown(res["snapshot_id"], node, "improve_recipe", attempt)
+        if not stored["has_result"]:
+            return None, (f"result names snapshot {res['snapshot_id']!r}, which holds no data commit and recipe: "
+                          "the phase's result must be a snapshot taken with data_commit, recipe and rationale")
         try:
-            CommitStore(conn, BlobStore(env.run_dir, conn), ClipStore(conn)).get(res["data_commit"])
+            CommitStore(conn, BlobStore(env.run_dir, conn), ClipStore(conn)).get(stored["data_commit"])
         except KeyError:
-            return f"result names data commit {res['data_commit']!r}, which does not exist"
-        return None
+            return None, f"snapshot {res['snapshot_id']!r} names data commit {stored['data_commit']!r}, which does not exist"
+        return {"snapshot_id": res["snapshot_id"], "data_commit": stored["data_commit"], "recipe": stored["recipe"],
+                "rationale": stored["rationale"], "summary": res["summary"]}, None
 
-    return _outcome(env, "improve_recipe", node, attempt, dirs, result, body, diffs, duration, None,
-                    extra_check=check_data_commit)
+    return _outcome(env, "improve_recipe", node, attempt, dirs, result,
+                    _judge("improve_recipe", result, body, resolve), diffs, duration, None)

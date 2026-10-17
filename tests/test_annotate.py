@@ -181,7 +181,7 @@ def test_real_vigeo_matches_the_example_poses(tmp_path):
     try:
         job = q.backends["annotate_camera"].submit(q, caller, {"items": [{"video": f"{c}.mp4"} for c in clips]})
         out = q.wait(caller, job["job_id"], 600)
-        while out["state"] not in ("done", "failed", "cancelled"):
+        while out["state"] not in ("done", "failed", "canceled"):
             out = q.wait(caller, job["job_id"], 600)
     finally:
         q.shutdown()

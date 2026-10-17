@@ -1,20 +1,13 @@
-"""What a role is told first: the kernel's context as a Markdown digest. The exact data is in
-/context/context.json and each finished node's files are under /nodes/<node>/; the digest points there
-instead of repeating them. The two phases are told different things: the data roles see how earlier
-nodes scored, on what data and with which data idea; the edit roles see how the agent code changed and
-how each run went, and no score. Small sections come first and the lineage last, and only the most
-recent LINEAGE_SHOWN ancestors are described, so the digest stays about the same size at any depth."""
+"""Each role's context as Markdown."""
 from __future__ import annotations
 
-import json
-import re
 from collections import Counter
 
-LINEAGE_SHOWN = 10          # most recent ancestors described; the root stays in the score tables as the baseline
-SIBLINGS_SHOWN = 10         # most recent finished children of the parent described
-TEXT_CHARS = 4000           # safety cap on a free text quoted per node
-TOP_NODES = 5               # best nodes listed from the whole archive
-GROUP_AXES = ("viewpoint",)     # groups in the group table; scene categories are in context.json
+LINEAGE_SHOWN = 10          # ancestors shown
+SIBLINGS_SHOWN = 10         # siblings shown
+TEXT_CHARS = 4000           # chars per quoted text
+TOP_NODES = 5               # best nodes listed
+GROUP_AXES = ("viewpoint",)     # groups in the group table
 POINTER = "Exact data: /context/context.json. What each finished node left behind: /nodes/<node>/."
 
 
@@ -36,37 +29,26 @@ def clip(text: str, limit: int = TEXT_CHARS) -> str:
     return text if len(text) <= limit else text[:limit] + " ..."
 
 
-def _fields(value: dict) -> str:
-    """A small dict as Markdown bullets: multi-line text in a code block, the rest inline."""
-    out = []
-    for key, item in value.items():
-        if isinstance(item, str) and "\n" in item:
-            out.append(f"- {key}:\n```\n{item.strip()}\n```")
-        else:
-            out.append(f"- {key}: {item if isinstance(item, str) else json.dumps(item)}")
-    return "\n".join(out)
+TOOL_OUTPUT = ("every tool call's full output, one file per call named <role>-<tool>-<time>-<n>.txt; an attempt "
+               "workspace under /nodes/<node>/attempts/ keeps its own tool_output folder")
 
 
-def retry_section(retry: dict | None, previous_plans: list | None) -> str:
-    if not retry:
-        return ""
-    parts = ["## Retry", "The previous attempt of this phase failed:", _fields(retry)]
-    for i, rnd in enumerate(previous_plans or [], 1):
-        parts.append(f"Its plan {i}:\n```json\n{json.dumps(rnd, indent=1)}\n```")
-    return "\n\n".join(parts)
-
-
-SCRATCH_NOTE = "throwaway files of the role that is working; emptied when its turn ends"      # orchestration.Role
-
-
-def folders_section(folders: dict) -> str:
-    """What each folder is for: the kernel's map, plus this agent's own scratch folder."""
-    folders = {**folders, "/workspace/scratch": SCRATCH_NOTE}
+def folders_section(folders: dict, scratch: str) -> str:
+    """What each folder is for."""
+    folders = {**folders, "/workspace/tool_output": TOOL_OUTPUT,
+               scratch: "your scratch folder, for throwaway files; removed when your conversation ends"}
     return "## Folders\n\n" + "\n".join(f"- `{path}`: {what}" for path, what in folders.items())
 
 
+def skill_section(skill: dict) -> str:
+    if not skill:
+        return ""
+    return "## Target skill\n\nThe skill this run aims to improve.\n\n" + "\n".join(
+        f"- {key}: {skill[key]}" for key in ("name", "sentence", "description") if skill.get(key))
+
+
 def _pool(ctx) -> str:
-    """The clip pool in one line: how many clips, and from which nodes and sources."""
+    """The clip pool in one line."""
     parts = [f"{name}: " + ", ".join(f"{key} {n}" for key, n in (ctx.clip_pool_stats.get(by) or {}).items())
              for name, by in (("ingested by", "by_node"), ("sources", "by_source")) if ctx.clip_pool_stats.get(by)]
     return f"- Clip pool: {ctx.clip_pool_size} clips in the archive" + (f" ({'; '.join(parts)})" if parts else "")
@@ -95,8 +77,8 @@ def best_section(archive: dict) -> str:
     return "\n\n".join([
         "## Archive",
         f"{len(nodes)} nodes, {archive.get('n_scored', len(best))} scored. The best {len(best)}:",
-        table(["node", "parent", "depth", "score", "status", "data commit"],
-              [[n["node_id"], n.get("parent_id"), n.get("depth"), n.get("score"), n.get("status"), n.get("data_commit")]
+        table(["node", "parent", "score", "status", "data commit"],
+              [[n["node_id"], n.get("parent_id"), n.get("score"), n.get("status"), n.get("data_commit")]
                for n in best])])
 
 
@@ -108,7 +90,7 @@ def _score_rows(nodes: list[dict], pick) -> list[list]:
 
 
 def _groups(aggregates: dict) -> dict:
-    """One row per group and dimension: the dimension's score over that group of evaluation items alone."""
+    """One row per group and dimension."""
     return {f"{axis}: {name} / {dimension}": value
             for axis, groups in (aggregates.get("groups") or {}).items() if axis in GROUP_AXES
             for name, dimensions in groups.items() for dimension, value in dimensions.items()}
@@ -121,31 +103,22 @@ def _data(n: dict) -> str:
         for name, d in n["data"].items())
 
 
-def _hypothesis(rationale: str | None) -> str | None:
-    """The data idea a node tested: run_task records its final plan in the rationale as a `Plan: {json}` line."""
-    plans = re.findall(r"^Plan: (\{.*\})$", rationale or "", re.MULTILINE)
-    try:
-        return json.loads(plans[-1]).get("hypothesis") if plans else None      # the last one: run_task appends it
-    except ValueError:                                      # a line of the rationale that only looks like one
-        return None
-
-
 def data_node(n: dict) -> str:
-    """An earlier node as the data planner needs it: what data idea it tested, on what data, with which recipe."""
+    """An earlier node for the data roles."""
     lines = [f"### {n['node_id']}: {n.get('status')}, score {_cell(n.get('score'))}"]
     if n["node_id"] == "root":
         lines.append("- The root is the baseline: the model with no further fine-tuning.")
     if n.get("error"):
         lines.append(f"- Error: {clip(n['error'])}")
-    if _hypothesis(n.get("rationale")):
-        lines.append(f"- Hypothesis: {clip(_hypothesis(n['rationale']))}")
+    if n.get("summary"):
+        lines.append(f"- Summary: {clip(n['summary'])}")
     if n.get("data"):
         lines.append(_data(n))
         lines.append(f"- Data commit: {n.get('data_commit')}")
     if n.get("recipe"):
         lines.append("- Recipe: " + ", ".join(f"{k} {v}" for k, v in n["recipe"].items()))
     elif n.get("data"):
-        lines.append("- Recipe: all values kept default")
+        lines.append("- Recipe: all values kept at their base values")
     return "\n".join(lines)
 
 
@@ -159,15 +132,20 @@ def status_section(archive: dict) -> str:
     return f"## Archive\n\n{len(nodes)} nodes: " + ", ".join(f"{status} {n}" for status, n in counts.most_common())
 
 
-def _process(p: dict) -> list[str]:
-    """How a node's run went, one line per kind of fact. The tool error messages are in context.json."""
-    lines = [f"- {r['phase']} / {r['role']}: {r['turns']} model turns, {r['compactions']} compactions"
-             for r in p.get("roles") or []]
+def phase_line(p: dict, node: str) -> str:
+    """One phase attempt."""
+    convs = ", ".join(f"{c['role']} {c['turns']} turns (/nodes/{node}/{c['transcript']})"
+                      for c in p.get("conversations") or []) or "no conversation"
+    return (f"- {p['phase']} attempt {p['attempt']}: {convs}; snapshots: {', '.join(p.get('snapshots') or []) or 'none'}; "
+            f"result: {p.get('accepted') or 'none'}")
+
+
+def _process(p: dict, node: str) -> list[str]:
+    """How a node's run went."""
+    lines = [phase_line(row, node) for row in p.get("phases") or []]
     if p.get("tools"):
         lines.append("- Kernel tool calls (errors): "
                      + ", ".join(f"{tool} {v['calls']} ({v['errors']})" for tool, v in p["tools"].items()))
-    if p.get("local_errors"):
-        lines.append("- Local tool failures: " + ", ".join(f"{k} {v}" for k, v in p["local_errors"].items()))
     jobs = p.get("gpu_jobs") or {}
     if jobs.get("run"):
         lines.append(f"- GPU jobs: {jobs['run']} run, {jobs['failed']} failed")
@@ -175,8 +153,6 @@ def _process(p: dict) -> list[str]:
     if ingest.get("accepted") or ingest.get("rejected"):
         reasons = "".join(f"; {r['count']}x {clip(r['reason'], 200)}" for r in ingest.get("reasons") or [])
         lines.append(f"- Ingest: {ingest['accepted']} accepted, {ingest['rejected']} rejected{reasons}")
-    lines += [f"- {phase} rounds: {r['plans']} plans, {r['reports']} reports back"
-              for phase, r in (p.get("rounds") or {}).items()]
     failed = [a for a in p.get("attempts") or [] if a["outcome"] != "passed"]
     if failed:
         lines.append("- Failed attempts: " + ", ".join(f"{a['phase']} {a['attempt']} {a['outcome']}" for a in failed))
@@ -186,16 +162,16 @@ def _process(p: dict) -> list[str]:
 
 
 def edit_node(n: dict) -> str:
-    """An earlier node as the edit planner needs it: how the agent code changed and how the run went."""
+    """An earlier node for the edit roles."""
     lines = [f"### {n['node_id']}: {n.get('status')}"]
     if n.get("error"):
         lines.append(f"- Error: {clip(n['error'])}")
     if n.get("edit"):
-        lines.append(f"- Edit: {clip(n['edit'].get('summary', ''))}")
+        lines.append(f"- Summary: {clip(n['edit'].get('summary', ''))}")
     if n.get("code_diff_stats"):
         lines.append("- Code changed: " + ", ".join(f"{d['path']} (+{d['added']}/-{d['removed']})"
                                                     for d in n["code_diff_stats"]))
-    return "\n".join(lines + _process(n.get("process") or {}))
+    return "\n".join(lines + _process(n.get("process") or {}, n["node_id"]))
 
 
 # ---- sections shared by both phases ----
@@ -208,7 +184,7 @@ def lineage_section(lineage: list[dict], describe, scores: bool) -> str:
         f" Only the last {len(shown)} are described here; all of them are in /context/context.json and /nodes/.")
     parts = ["## Lineage", f"From the root to the parent: {len(lineage)} nodes, oldest first.{older}"]
     if scores:
-        columns = shown if shown[0] is lineage[0] else [lineage[0], *shown]       # the root: the baseline
+        columns = shown if shown[0] is lineage[0] else [lineage[0], *shown]
         ids = [n["node_id"] for n in columns]
         parts += [
             "### Scores\n\n" + table(["", *ids], [["score", *[n.get("score") for n in columns]],
@@ -232,8 +208,8 @@ def siblings_section(siblings: list[dict], describe, scores: bool) -> str:
         *[describe(n) for n in shown]])
 
 
-def _node_and_recipe(ctx, previous_plans: list | None) -> list[str]:
-    """What the data phase needs to act: this node's facts, the retry report, the recipe keys and the metrics."""
+def _node_and_recipe(ctx, scratch: str) -> list[str]:
+    """This node's facts for the data roles."""
     guide = ctx.recipe_guide or {}
     keys = [[k, r.get("type"), r.get("min"), r.get("max"), (guide.get(k) or {}).get("base"),
              ctx.parent_recipe.get(k), (guide.get(k) or {}).get("meaning")]
@@ -245,10 +221,9 @@ def _node_and_recipe(ctx, previous_plans: list | None) -> list[str]:
             f"- Node id: {ctx.node_id}",
             f"- Training GPUs: {ctx.n_gpus}",
             f"- Parent data commit: {ctx.parent_data_commit or 'none (the parent is the root)'}",
-            _pool(ctx),
-            f"- Kernel tools: {', '.join(ctx.tools)}"]),
-        folders_section(ctx.folders),
-        retry_section(ctx.retry, previous_plans),
+            _pool(ctx)]),
+        skill_section(ctx.target_skill),
+        folders_section(ctx.folders, scratch),
         "## Recipe\n\nTunable keys, with the base recipe's and the parent's values:\n\n"
         + table(["key", "type", "min", "max", "base", "parent", "meaning"], keys)
         + f"\n\nLoRA (rank/alpha): {pairs(ctx.lora_allowlist, '/')}. The full base recipe is `base_recipe` "
@@ -256,33 +231,37 @@ def _node_and_recipe(ctx, previous_plans: list | None) -> list[str]:
         metric_section(ctx.metric_guide)]
 
 
-def recipe_context(ctx, previous_plans: list | None) -> str:
-    """The data planner's first message."""
-    return "\n\n".join(s for s in [
-        *_node_and_recipe(ctx, previous_plans),
-        best_section(ctx.archive),
-        siblings_section(ctx.siblings, data_node, scores=True),
-        lineage_section(ctx.lineage, data_node, scores=True)] if s)
+def _join(sections) -> str:
+    return "\n\n".join(s for s in sections if s)
 
 
-def engineer_context(ctx, previous_plans: list | None) -> str:
-    """What the data engineer gets with the plan: the plan already carries what the planner drew from history."""
-    return "\n\n".join(s for s in _node_and_recipe(ctx, previous_plans) if s)
+def recipe_planner_context(ctx, scratch: str) -> str:
+    return _join([*_node_and_recipe(ctx, scratch), best_section(ctx.archive),
+                  siblings_section(ctx.siblings, data_node, scores=True),
+                  lineage_section(ctx.lineage, data_node, scores=True)])
 
 
-def edit_context(ctx, components: dict, previous_plans: list | None) -> str:
-    """The edit planner's first message."""
-    return "\n\n".join(s for s in [
-        POINTER,
-        f"## This node\n\n- Nodes left in the run after this one: {ctx.nodes_remaining}\n" + components_section(components),
-        folders_section(ctx.folders),
-        retry_section(ctx.retry, previous_plans),
-        status_section(ctx.archive),
-        siblings_section(ctx.siblings, edit_node, scores=False),
-        lineage_section(ctx.lineage, edit_node, scores=False)] if s)
+def data_engineer_context(ctx, scratch: str) -> str:
+    return _join(_node_and_recipe(ctx, scratch))
 
 
-def coder_context(ctx, components: dict) -> str:
-    """What the coder gets with the plan."""
-    return "\n\n".join(s for s in [POINTER, f"## This agent\n\n{components_section(components)}",
-                                    folders_section(ctx.folders), retry_section(ctx.retry, None)] if s)
+def recipe_reviewer_context(ctx, scratch: str) -> str:
+    return _join(_node_and_recipe(ctx, scratch))
+
+
+def _this_agent(ctx, components: dict, scratch: str) -> list[str]:
+    return [POINTER, f"## This agent\n\n{components_section(components)}", folders_section(ctx.folders, scratch)]
+
+
+def edit_planner_context(ctx, components: dict, scratch: str) -> str:
+    return _join([*_this_agent(ctx, components, scratch), status_section(ctx.archive),
+                  siblings_section(ctx.siblings, edit_node, scores=False),
+                  lineage_section(ctx.lineage, edit_node, scores=False)])
+
+
+def coder_context(ctx, components: dict, scratch: str) -> str:
+    return _join(_this_agent(ctx, components, scratch))
+
+
+def edit_reviewer_context(ctx, components: dict, scratch: str) -> str:
+    return _join(_this_agent(ctx, components, scratch))

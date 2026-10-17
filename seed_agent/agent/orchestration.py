@@ -1,235 +1,179 @@
-"""Which roles run, in what order, with which tools and what they are told first.
-
-A role = a system prompt and a tool list, run on the harness. It returns its result by calling a
-submit tool; one that stops without submitting is reminded, REMINDERS times.
-Both phases are a planner and an engineer. The planner submits a plan that states intent; the engineer
-carries it out, then either submits its result or reports back with request_replan for a new plan. The
-planner is shown a submitted result and accepts it or revises the plan, up to MAX_ROUNDS plans per phase.
-Each role keeps its conversation throughout. Every plan, report and result is recorded in plans.json. A planner has the engineer's file and shell tools and is
-told to change nothing outside /workspace/scratch, which is emptied after every role's turn; its kernel tools only read.
-- improve_recipe: planner -> data engineer, who builds the data commit and writes the recipe
-  (recipe_check must pass before the submission is accepted).
-- edit_self: edit planner -> coder (the self-test must pass before the submission is accepted).
-"""
+"""The roles, their tools and the phases."""
 from __future__ import annotations
 
-import ast
+import asyncio
+import itertools
 import json
-import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+import tempfile
 from pathlib import Path
+from typing import Literal
 
 from ar_contract.client import chat_model, mcp_session
 from ar_contract.models import EditContext, EditResult, RecipeContext, RecipeResult
+from ar_contract.static import mentions, static_check
 from langchain_core.messages import HumanMessage
-from langchain_core.tools import ToolException
+from langchain_core.tools import StructuredTool, ToolException
 from pydantic import BaseModel, Field
 
+from .briefing import (coder_context, data_engineer_context, edit_planner_context, edit_reviewer_context,
+                       recipe_planner_context, recipe_reviewer_context)
 from .entry import AGENT_ROOT, BRIEF_CHARS, COMPACT_AT, CONTEXT_WINDOW, MAX_ROUNDS, MODEL, WORKSPACE
-from .briefing import coder_context, edit_context, engineer_context, recipe_context
-from .harness import build_react_agent
-from .tools import kernel_tools, local_tools, result_text, submit_tool
+from .harness import Guard, remove_tree, run_loop
+from .tools import kernel_tools, local_tools, result_text
 
 AGENT_PKG = Path(__file__).resolve().parent
-SCRATCH = Path(WORKSPACE) / "scratch"         # every role's throwaway files; emptied when its turn ends
-RECORD = Path(WORKSPACE) / "plans.json"       # every plan and report; carried to a retry with the workspace
-PLAN_FIELD_CHARS = 4000                       # a safety cap: plans that state intent stay well under it, ones that
-                                              # dictate file contents (5,800 characters and up) do not fit
+SCRATCH = Path(WORKSPACE) / "scratch"
+GUARD_DIR = str(Path(WORKSPACE) / "staging" / ".guard")
+PLAN_FIELD_CHARS = 4000                       # chars per plan field
 REMIND = ("Your last message made no tool call, which ends your turn. Keep working with the tools; when the "
-          "work is done, call {tools}. Nothing is recorded unless you call {tools}.")
-REMINDERS = 3
-REPLAN = "Revise the plan. The engineer carries out the plan you submit next."
-REVIEW = ("The engineer finished. Check the result against your plan by looking at what was built, not only at "
-          "this summary. If it tests the plan, call accept_result. If it falls short in a way the engineer can "
-          "fix, submit a revised plan that says what to change: the work so far stays.")
-# read-only, but for data_fetch, which copies into staging
-PLANNING_KERNEL_TOOLS = {"hf_search", "hf_list_files", "data_query", "data_fetch", "ask", "read_skill"}
+          "work is done, call {tool}. Nothing is recorded unless you call {tool}.")
+REMINDERS = 4
+READ_ONLY_KERNEL_TOOLS = {"hf_search", "hf_list_files", "data_query", "data_fetch", "ask", "read_skill"}
 EDIT_KERNEL_TOOLS = {"ask", "read_skill"}
-SKILL_ROLES = ("planner", "data_engineer")    # the roles whose prompts name the run's target skill
 
-# Where each component lives in this agent, in the order an edit should consider them.
 COMPONENTS = {
-    "tools": "agent/tools.py -- the agent's own tools and the adapter for kernel tools (the kernel's tools and "
-             "skills themselves are fixed)",
-    "orchestration": "agent/orchestration.py -- the roles, their tools, the plan and replan loop, the plan "
-                     "and result schemas",
-    "briefing": "agent/briefing.py -- what each role is told first, built from the kernel's context",
-    "harness": "agent/harness.py -- the single-agent inner loop: ReAct graph, tool execution, auto-compaction",
-    "prompts": "agent/prompts/*.md -- each role's mission and general behaviour; a line with a {skill_...} slot "
-               "is filled in with the skill the run aims to improve",
-    "settings": "agent/entry.py -- limits: plans per phase, the context digest cap",
+    "tools": "agent/tools.py -- the agent's own tools and the adapter for kernel tools",
+    "orchestration": "agent/orchestration.py -- the roles and how work passes between them",
+    "briefing": "agent/briefing.py -- each role's context",
+    "harness": "agent/harness.py -- the single-agent loop logic",
+    "prompts": "agent/prompts/*.md -- the role prompts and the compaction prompt",
+    "entry": "agent/entry.py -- the two entry points, and the settings",
+    "requirements": "agent/requirements.txt -- the packages added to the agent image",
 }
 
 
-# ---- roles ----
-
-def block(tag: str, text: str, **attrs) -> str:
-    attributes = "".join(f' {key}="{value}"' for key, value in attrs.items())
-    return f"<{tag}{attributes}>\n{text.strip()}\n</{tag}>"
-
-
-def system_prompt(name: str, skill: dict | None = None) -> str:
-    """A role's prompt file. A line with a {skill_...} slot is filled from the run's target skill
-    (name, sentence, description), and left out when the run has none."""
-    text = (AGENT_PKG / "prompts" / f"{name}.md").read_text()
-    if name in SKILL_ROLES and "{skill_name}" not in text:
-        raise ValueError(f"agent/prompts/{name}.md must keep a line with {{skill_name}}: it is where the role "
-                         f"is told the skill the run aims to improve")
-    lines = []
-    for line in text.splitlines(keepends=True):
-        if "{skill_" in line:
-            if not skill:
-                continue
-            for key, value in skill.items():
-                line = line.replace(f"{{skill_{key}}}", value)
-        lines.append(line)
-    return "".join(lines)
+class NoSubmission(RuntimeError):
+    """A role ended its turn without submitting."""
 
 
 def brief(text: str) -> str:
-    """The context digest (briefing.py) in a <context> block. BRIEF_CHARS is only a safety cap: the digest
-    ends with the lineage, so a cut would only shorten that."""
     if len(text) > BRIEF_CHARS:
         text = text[:BRIEF_CHARS] + " ...[truncated: the full context is in /context/context.json]"
-    return block("context", text)
+    return f"<context>\n{text.strip()}\n</context>"
 
 
 class Role:
-    """One role on the harness. Its conversation continues across calls to run()."""
+    """One role: prompt, context, tools, a submit tool, its conversation and scratch folder."""
+    _ids = itertools.count(1)
 
-    def __init__(self, name: str, tools: list, submissions: list, skill: dict | None = None) -> None:
-        self.submissions = submissions            # the boxes of its submit tools
+    def __init__(self, name: str, context, tools: list, submit: str, schema: type[BaseModel], check=None, *,
+                 owns: str | None = None, papers: bool = False, guard: Guard | None = None) -> None:
+        self.name, self.context_fn, self.submit, self.guard = name, context, submit, guard
+        self.scratch = SCRATCH / f"{name}-{next(Role._ids)}"
+        self.system = (AGENT_PKG / "prompts" / f"{name}.md").read_text()
         self.messages: list = []
-        model = chat_model(MODEL)
-        model.bind_tools(tools)                   # a broken tool schema fails here, not at the first call
-        self.agent = build_react_agent(model, tools, system_prompt(name, skill),
-                                       context_window=CONTEXT_WINDOW, compact_at=COMPACT_AT)
+        self.context: str | None = None
+        self.value: dict | None = None
 
-    def _submitted(self):
-        return next((box for box in self.submissions if box.value is not None), None)
+        async def accept(**kwargs) -> str:
+            value = schema.model_validate(kwargs).model_dump()
+            value.update((await check(value) if check is not None else None) or {})
+            self.value = value
+            return json.dumps({"submitted": value}, ensure_ascii=False)
 
-    async def run(self, task: str):
-        """Work on `task` until a submit tool is called; returns that tool's box. Reminded when it stops early."""
-        for box in self.submissions:
-            box.value = None
-        names = " or ".join(box.name for box in self.submissions)
-        SCRATCH.mkdir(parents=True, exist_ok=True)
-        try:
-            for message in (task, *[REMIND.format(tools=names)] * REMINDERS):
-                state = await self.agent.ainvoke({"messages": [*self.messages, HumanMessage(content=message)]})
-                self.messages = state["messages"]
-                if self._submitted() is not None:
-                    return self._submitted()
-        finally:
-            shutil.rmtree(SCRATCH, ignore_errors=True)
-        raise NoSubmission(f"the role finished without calling {names}")
+        self.tools = [*tools, *local_tools(owns or str(self.scratch), papers),
+                      StructuredTool(name=submit, description=schema.__doc__ or submit, args_schema=schema,
+                                     coroutine=accept, return_direct=True)]
+        self.model = chat_model(MODEL, role=name)
+        self.model.bind_tools(self.tools)          # validates the tool schemas
 
+    async def run(self, briefing: str) -> dict:
+        """Works on `briefing` until the submit is accepted; returns the submission."""
+        self.scratch.mkdir(parents=True, exist_ok=True)
+        if self.context is None:
+            self.context = brief(self.context_fn(str(self.scratch)))
+        pinned = f"{self.context}\n\n{briefing}"
+        self.value = None
+        self.messages.append(HumanMessage(content=briefing if len(self.messages) else pinned))
+        for k in range(REMINDERS + 1):
+            if k:
+                self.messages.append(HumanMessage(content=REMIND.format(tool=self.submit)))
+            self.messages = await run_loop(self.model, self.tools, self.system, self.messages, role=self.name,
+                                           pinned=pinned, compact_at=COMPACT_AT, context_window=CONTEXT_WINDOW,
+                                           guard=self.guard)
+            if self.value is not None:
+                return self.value
+        raise NoSubmission(f"{self.name} ended its turn without calling {self.submit}, after {REMINDERS} reminders")
 
-class NoSubmission(RuntimeError):
-    """A role's turn ended without a submit tool call, reminders included."""
+    def close(self) -> None:
+        remove_tree(self.scratch)
 
 
 async def ping() -> str:
-    """Contract smoke run: after building every role, one model call proves the wiring."""
-    agent = build_react_agent(chat_model(MODEL), [], "Reply with the single word ok.",
-                              context_window=CONTEXT_WINDOW, compact_at=COMPACT_AT)
-    return (await agent.ainvoke({"messages": [HumanMessage(content="ping")]}))["messages"][-1].text
-
-
-class Replan(BaseModel):
-    report: str = Field(min_length=1, description="what you did and found, and why the plan should change")
-
-
-def save(team: Team) -> None:
-    if team.record is not None:
-        team.record.write_text(json.dumps(team.rounds, indent=1))
-
-
-def replan_tool(rounds: list) -> tuple:
-    """The engineer's way back to the planner."""
-    async def check(_) -> None:
-        if len(rounds) >= MAX_ROUNDS:
-            raise ToolException(f"No replans left: all {MAX_ROUNDS} plans are used. Finish with the current plan.")
-    return submit_tool("request_replan", "Stop and send a report back to the planner, who then revises the plan. "
-                       "The normal step when what you found changes what should be done.", Replan, check)
-
-
-class Accept(BaseModel):
-    reason: str = Field(min_length=1, description="in a sentence, what in the result shows that it tests the plan")
-
-
-def accept_tool(done) -> tuple:
-    """The planner's way to end the phase, once the engineer has submitted a result."""
-    async def check(_) -> None:
-        if done.value is None:
-            raise ToolException("There is no result to accept yet. Submit a plan.")
-    return submit_tool("accept_result", "Accept the engineer's result as the outcome of this phase.", Accept, check)
-
-
-@dataclass
-class Team:
-    planner: Role
-    plan: object                  # the submit boxes
-    accept: object
-    engineer: Role
-    done: object
-    replan: object
-    rounds: list                  # every plan, with the engineer's report or result
-    record: Path | None = None    # where rounds are saved; None saves nothing
-
-
-async def plan_and_engineer(team: Team, *, task: str, show, engineer_context: str) -> None:
-    """Plan and carry out. The planner plans again when the engineer asks, or when it is shown the engineer's
-    result and wants it changed; the phase ends when the planner accepts a result or the plans are used up.
-    Every round is appended to team.rounds and saved, and saved once more when the phase ends."""
-    try:
-        while True:
-            try:
-                box = await team.planner.run(task)
-            except NoSubmission:
-                if team.done.value is None:
-                    raise
-                return                                   # a review that never answered: the submitted result stands
-            if box is team.accept:
-                return
-            team.rounds.append({"plan": team.plan.value.model_dump()})
-            save(team)
-            work = show(team.plan.value)
-            work = f"The planner revised the plan.\n\n{work}" if team.engineer.messages else f"{work}\n\n{engineer_context}"
-            if await team.engineer.run(work) is team.done:
-                team.rounds[-1]["result"] = team.done.value.model_dump()
-                save(team)
-                if len(team.rounds) >= MAX_ROUNDS:
-                    return
-                task = f"{block('engineer_result', team.done.value.model_dump_json(indent=2))}\n\n{REVIEW}"
-            else:
-                team.rounds[-1]["report"] = team.replan.value.report
-                save(team)
-                task = f"{block('engineer_report', team.replan.value.report)}\n\n{REPLAN}"
-    finally:
-        save(team)
-
-
-def check_roles() -> None:
-    """Build every role of both phases (prompts, tool schemas) without calling a model."""
-    recipe_team(None, None, [])
-    edit_team([])
-
-
-def previous_plans(ctx) -> list | None:
-    """The failed attempt's plans, on a retry: read before this attempt overwrites the record."""
-    return json.loads(RECORD.read_text()) if ctx.retry and RECORD.exists() else None
+    """One model call, for the dry run."""
+    messages = await run_loop(chat_model(MODEL, role="ping"), [], "Reply with the single word ok.",
+                              [HumanMessage(content="ping")], role="ping", pinned="ping", compact_at=COMPACT_AT,
+                              context_window=CONTEXT_WINDOW)
+    return messages[-1].text
 
 
 def plan_text(length: str, description: str, **kwargs):
     return Field(max_length=PLAN_FIELD_CHARS, description=f"{description} ({length})", **kwargs)
 
 
+class Review(BaseModel):
+    """Submit your review of the build."""
+    verdict: Literal["carries_out_plan", "falls_short"]
+    findings: str = Field(min_length=1, description="each problem with where it shows, most important first; "
+                                                    "which ones decide the verdict; what you checked")
+
+
+def delegate(builder: Role, reviewer, schema: type[BaseModel], handbacks: list, describe) -> StructuredTool:
+    """The planner's tool for `builder`: build, review, hand back."""
+    calls = 0
+
+    async def call(**kwargs) -> str:
+        nonlocal calls
+        if calls >= MAX_ROUNDS:
+            raise ToolException(f"No calls left: {builder.name} was called {MAX_ROUNDS} times in this phase. "
+                                "Finish with submit_result.")
+        calls += 1
+        plan = schema.model_validate(kwargs)
+        briefing = f"<plan>\n{plan.model_dump_json(indent=1)}\n</plan>"
+        built = await builder.run(briefing if calls == 1 else f"The planner revised the plan.\n\n{briefing}")
+        review_role = reviewer()
+        try:
+            review = await review_role.run(describe(briefing, built))
+        finally:
+            review_role.close()
+        handback = {"snapshot_id": built["snapshot_id"], "report": built["report"], "review": review}
+        handbacks.append({**handback, "submission": built})
+        return json.dumps(handback, indent=1, ensure_ascii=False)
+
+    tools = ", ".join(t.name for t in builder.tools if t.name != builder.submit)
+    return StructuredTool(name=builder.name, description=f"{schema.__doc__} Its tools: {tools}", args_schema=schema,
+                          coroutine=call, metadata={"ends_batch": True})
+
+
+def result_check(handbacks: list, needs_result: bool):
+    async def check(value: dict) -> None:
+        valid = [h for h in handbacks if not needs_result or h["submission"].get("data_commit")]
+        if not any(h["snapshot_id"] == value["snapshot_id"] for h in valid):
+            ids = "; ".join(f"{h['snapshot_id']} ({h['review']['verdict']})" for h in valid) or "none yet"
+            raise ToolException(f"{value['snapshot_id']} is not a snapshot handed back in this phase"
+                                f"{' with a data commit and a recipe' if needs_result else ''}. The ones you can "
+                                f"accept: {ids}.")
+    return check
+
+
+class EditSubmit(EditResult):
+    """End the phase with the snapshot you accept and the node's summary."""
+
+
+class RecipeSubmit(RecipeResult):
+    """End the phase with the snapshot you accept, one with a data commit and a recipe, and the node's summary."""
+
+
+async def snapshot(session, args: dict) -> str:
+    return json.loads(result_text(await session.call_tool("snapshot", args)))["snapshot_id"]
+
+
 # ---- improve_recipe ----
 
 class DataPlan(BaseModel):
+    """Brief the data engineer."""
     hypothesis: str = plan_text("one or two sentences", "the one data idea this node tests, and what in "
                                 "earlier nodes suggests it", min_length=1)
     expected_change: str = plan_text("a sentence", "which metrics or groups should move, and in which direction",
@@ -239,11 +183,13 @@ class DataPlan(BaseModel):
     constraints: str = plan_text("optional", "what the engineer must keep or must not do, if anything", default="")
 
 
-class DataAndRecipe(BaseModel):
-    data_commit: str = Field(min_length=1, description="the data_commit id to train on")
-    notes: str = Field(description="what the commit contains, and where it departs from the plan")
-    recipe: dict[str, float] = Field(description="tunable key -> value")
-    rationale: str = Field(min_length=1, description="why each changed key has its value")
+class DataHandback(BaseModel):
+    """Hand back to the planner: your report, and the data commit and recipe when the data is ready."""
+    report: str = Field(min_length=1, description="what you built, how you checked it and what the checks showed, "
+                                                  "where it departs from the plan, what the planner should know")
+    data_commit: str | None = Field(None, min_length=1, description="the data_commit id to train on")
+    recipe: dict[str, float] | None = Field(None, description="tunable key -> value")
+    rationale: str | None = Field(None, min_length=1, description="the reason for each changed key's value")
 
 
 def typed(recipe: dict, rules: dict) -> dict:
@@ -251,48 +197,62 @@ def typed(recipe: dict, rules: dict) -> dict:
             for key, value in recipe.items()}
 
 
-def recipe_team(ctx: RecipeContext | None, session, ktools: list) -> Team:
-    async def recipe_passes(result: DataAndRecipe) -> None:
-        check = json.loads(result_text(await session.call_tool("recipe_check", {
-            "recipe": typed(result.recipe, ctx.tunable_rules), "data_commit": result.data_commit})))
+def recipe_roles(ctx: RecipeContext | None, session, ktools: list) -> tuple:
+    """(planner, engineer, reviewer factory)."""
+    async def built(value: dict) -> dict:
+        given = [value[k] is not None for k in ("data_commit", "recipe", "rationale")]
+        if any(given) and not all(given):
+            raise ToolException("Give data_commit, recipe and rationale together, or none of them.")
+        if not any(given):
+            return {"snapshot_id": await snapshot(session, {})}
+        recipe = typed(value["recipe"], ctx.tunable_rules)
+        check = json.loads(result_text(await session.call_tool(
+            "recipe_check", {"recipe": recipe, "data_commit": value["data_commit"]})))
         if not check.get("ok"):
             raise ToolException(f"recipe_check failed: {check.get('failures')}")
+        return {"recipe": recipe, "snapshot_id": await snapshot(session, {
+            "data_commit": value["data_commit"], "recipe": recipe, "rationale": value["rationale"]})}
 
-    rounds: list[dict] = []
-    skill = ctx.target_skill if ctx else None
-    plan_tool, plan = submit_tool("submit_plan", "Submit the data plan for this node.", DataPlan)
-    done_tool, done = submit_tool("submit_data_and_recipe", "Submit the data commit and the recipe to train on. "
-                                  "It is accepted only if recipe_check passes.", DataAndRecipe, recipe_passes)
-    accept_t, accept = accept_tool(done)
-    planner = Role("planner", [plan_tool, accept_t, *[t for t in ktools if t.name in PLANNING_KERNEL_TOOLS],
-                               *local_tools(WORKSPACE, papers=True)], [plan, accept], skill)
-    replan_t, replan = replan_tool(rounds)
-    engineer = Role("data_engineer", [*ktools, *local_tools(WORKSPACE, papers=True), done_tool, replan_t],
-                    [done, replan], skill)
-    return Team(planner, plan, accept, engineer, done, replan, rounds, RECORD)
+    def describe(briefing: str, b: dict) -> str:
+        shown = {k: b[k] for k in ("snapshot_id", "data_commit", "recipe", "rationale")}
+        return (f"{briefing}\n\n<report>\n{b['report']}\n</report>\n\n"
+                f"<snapshot>\n{json.dumps(shown, indent=1, ensure_ascii=False)}\n</snapshot>")
+
+    read_only = [t for t in ktools if t.name in READ_ONLY_KERNEL_TOOLS]
+    handbacks: list = []
+    engineer = Role("data_engineer", lambda s: data_engineer_context(ctx, s), ktools, "submit_data_engineer",
+                    DataHandback, built, owns=WORKSPACE, papers=True)
+    reviewer = lambda: Role("recipe_reviewer", lambda s: recipe_reviewer_context(ctx, s), read_only, "submit_review",
+                            Review)
+    planner = Role("recipe_planner", lambda s: recipe_planner_context(ctx, s),
+                   [delegate(engineer, reviewer, DataPlan, handbacks, describe), *read_only], "submit_result",
+                   RecipeSubmit, result_check(handbacks, needs_result=True), papers=True)
+    return planner, engineer, reviewer
 
 
 async def run_task(ctx: RecipeContext) -> RecipeResult:
     async with mcp_session() as session:
         ktools = await kernel_tools(session)
-        team = recipe_team(ctx, session, ktools)
-        previous = previous_plans(ctx)
-        # Both built in a dry run too: it gets the real context.
-        context, for_engineer = brief(recipe_context(ctx, previous)), brief(engineer_context(ctx, previous))
-        if ctx.dry_run:
-            return RecipeResult(data_commit=ctx.parent_data_commit or "dry-run", recipe={},
-                                rationale=f"dry run: roles and the first message built, {len(ktools)} kernel "
-                                          f"tools, model said {await ping()!r}")
-        await plan_and_engineer(team, task=context, show=lambda p: block("plan", p.model_dump_json(indent=2)),
-                                engineer_context=for_engineer)
-    r = team.done.value
-    return RecipeResult(data_commit=r.data_commit, recipe=typed(r.recipe, ctx.tunable_rules),
-                        rationale=f"{r.rationale}\n\nPlan: {json.dumps(team.rounds[-1]['plan'])}\nData: {r.notes}")
+        planner, engineer, reviewer = recipe_roles(ctx, session, ktools)
+        try:
+            if ctx.dry_run:
+                for role in (planner, engineer, reviewer()):
+                    role.context_fn(str(role.scratch))
+                commit = json.loads(result_text(await session.call_tool(
+                    "data_commit", {"parent": None, "datasets": {}, "message": "dry run"})))["commit_id"]
+                sid = await snapshot(session, {"data_commit": commit, "recipe": {}, "rationale": "dry run"})
+                return RecipeResult(snapshot_id=sid, summary=f"dry run: roles and contexts built, {len(ktools)} "
+                                                             f"kernel tools, model said {await ping()!r}")
+            return RecipeResult(**await planner.run("Plan this node's data, have it built, and submit the result."))
+        finally:
+            planner.close()
+            engineer.close()
 
 
 # ---- edit_self ----
 
 class EditPlan(BaseModel):
+    """Brief the coder."""
     problem: str = plan_text("one or two sentences", "where the agent system made its roles waste effort, lack a "
                              "capability or lose information", min_length=1)
     evidence: str = plan_text("a short paragraph", "where it shows: nodes, transcript files, process lines",
@@ -301,26 +261,36 @@ class EditPlan(BaseModel):
                                "component, as intent; not the code or the text to write", min_length=1)
     check: str = plan_text("a sentence", "what a later reader of the process lines and transcripts would see if "
                            "it worked", min_length=1)
+    constraints: str = plan_text("optional", "what the coder must keep or must not do, if anything", default="")
 
 
-class EditSummary(BaseModel):
-    summary: str = Field(min_length=1, description="one paragraph: what you changed and how you checked it")
+class CodeHandback(BaseModel):
+    """Hand back to the planner. Accepted only if the self-test passes on /agent."""
+    report: str = Field(min_length=1, description="what you changed and in which files, how you checked it, where "
+                                                  "you departed from the plan and why, what is still open")
+
+
+def committed_files(root: str) -> list[str]:
+    """The files the kernel commits from `root`: every file its ignore rules keep."""
+    with tempfile.TemporaryDirectory() as tmp:
+        git = ["git", "--git-dir", f"{tmp}/.git", "--work-tree", root]
+        subprocess.run(["git", "init", "-q", tmp], check=True, capture_output=True, text=True, timeout=60)
+        out = subprocess.run([*git, "ls-files", "-z", "--others", "--exclude-standard"], check=True,
+                             capture_output=True, text=True, timeout=60).stdout
+    return sorted(f for f in out.split("\0") if f)
 
 
 def selftest(root: str) -> list[str]:
-    """The contract's static and import checks, plus building every role, run locally so the agent can fix
-    itself. agent.orchestration is imported too: agent.entry imports it only when an entry point runs."""
-    errors = []
+    """The contract's checks plus building every role; returns the errors."""
     try:
-        tree = ast.parse((Path(root) / "agent" / "entry.py").read_text())
-        top = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-        for name in ("edit_self", "improve_recipe"):
-            fn = top.get(name)
-            if (fn is None or len(fn.args.posonlyargs + fn.args.args) != 1 or fn.args.vararg
-                    or fn.args.kwarg or fn.args.kwonlyargs):
-                errors.append(f"agent/entry.py needs top-level {name}(ctx) with exactly one parameter")
-    except (OSError, SyntaxError, ValueError, RecursionError) as exc:
-        errors.append(f"agent/entry.py: {exc}")
+        problem = static_check((Path(root) / "agent" / "entry.py").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as exc:
+        problem = f"cannot read agent/entry.py: {exc}"
+    errors = [problem] if problem else []
+    try:
+        errors += mentions(root, committed_files(root))
+    except (OSError, subprocess.SubprocessError) as exc:
+        errors.append(f"cannot list the files of {root}: {getattr(exc, 'stderr', '') or exc}")
     r = subprocess.run([sys.executable, "-c", "import agent.entry, agent.orchestration as o; o.check_roles()"],
                        cwd=root, capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
@@ -328,31 +298,59 @@ def selftest(root: str) -> list[str]:
     return errors
 
 
-def edit_team(ktools: list) -> Team:
-    async def selftest_passes(_) -> None:
-        errors = selftest(AGENT_ROOT)
+async def _self_test() -> str:
+    errors = await asyncio.to_thread(selftest, AGENT_ROOT)
+    return "self-test failed:\n" + "\n".join(errors) if errors else "self-test passed"
+
+
+SELF_TEST = StructuredTool.from_function(coroutine=_self_test, name="self_test",
+                                         description="Run the self-test on /agent: the kernel's entry-point "
+                                                     "check, the refusal of code that mentions a specific node or "
+                                                     "a metric, the import, and building every role.")
+
+
+def edit_roles(ctx: EditContext | None, session, ktools: list, guard: Guard | None) -> tuple:
+    """(planner, coder, reviewer factory)."""
+    async def built(value: dict) -> dict:
+        errors = await asyncio.to_thread(selftest, AGENT_ROOT)
         if errors:
             raise ToolException("The self-test failed. Fix these first:\n" + "\n".join(errors))
+        return {"snapshot_id": await snapshot(session, {})}
 
-    rounds: list[dict] = []
+    def describe(briefing: str, b: dict) -> str:
+        return (f"{briefing}\n\n<report>\n{b['report']}\n</report>\n\n"
+                f"<snapshot>\n{b['snapshot_id']}: /agent as the coder handed it back\n</snapshot>")
+
     kernel = [t for t in ktools if t.name in EDIT_KERNEL_TOOLS]
-    plan_tool, plan = submit_tool("submit_edit_plan", "Submit the edit plan.", EditPlan)
-    done_tool, done = submit_tool("submit_edit", "Submit the summary of the change you made. It is accepted "
-                                  "only if the self-test passes.", EditSummary, selftest_passes)
-    accept_t, accept = accept_tool(done)
-    planner = Role("edit_planner", [plan_tool, accept_t, *kernel, *local_tools(AGENT_ROOT, papers=False)],
-                   [plan, accept])
-    replan_t, replan = replan_tool(rounds)
-    engineer = Role("coder", [*kernel, *local_tools(AGENT_ROOT, papers=False), done_tool, replan_t], [done, replan])
-    return Team(planner, plan, accept, engineer, done, replan, rounds, RECORD)
+    handbacks: list = []
+    coder = Role("coder", lambda s: coder_context(ctx, COMPONENTS, s), [*kernel, SELF_TEST], "submit_coder",
+                 CodeHandback, built, owns=AGENT_ROOT, guard=guard)
+    reviewer = lambda: Role("edit_reviewer", lambda s: edit_reviewer_context(ctx, COMPONENTS, s),
+                            [*kernel, SELF_TEST], "submit_review", Review, guard=guard)
+    planner = Role("edit_planner", lambda s: edit_planner_context(ctx, COMPONENTS, s),
+                   [delegate(coder, reviewer, EditPlan, handbacks, describe), *kernel], "submit_result",
+                   EditSubmit, result_check(handbacks, needs_result=False), papers=True, guard=guard)
+    return planner, coder, reviewer
 
 
 async def run_meta(ctx: EditContext) -> EditResult:
     async with mcp_session() as session:
-        team = edit_team(await kernel_tools(session))
-        task = brief(edit_context(ctx, COMPONENTS, previous_plans(ctx)))    # built in a dry run too: it gets the real context
-        if ctx.dry_run:
-            return EditResult(summary=f"dry run: roles and the first message built, model said {await ping()!r}")
-        await plan_and_engineer(team, task=task, show=lambda p: block("edit_plan", p.model_dump_json(indent=2)),
-                                engineer_context=brief(coder_context(ctx, COMPONENTS)))
-    return EditResult(summary=team.done.value.summary)
+        guard = Guard(AGENT_ROOT, "coder", GUARD_DIR)
+        planner, coder, reviewer = edit_roles(ctx, session, await kernel_tools(session), guard)
+        try:
+            if ctx.dry_run:
+                for role in (planner, coder, reviewer()):
+                    role.context_fn(str(role.scratch))
+                return EditResult(snapshot_id=await snapshot(session, {}),
+                                  summary=f"dry run: roles and contexts built, model said {await ping()!r}")
+            return EditResult(**await planner.run("Find the problem, have the coder fix it, and submit the result."))
+        finally:
+            planner.close()
+            coder.close()
+            guard.remove()
+
+
+def check_roles() -> None:
+    """Builds every role without a model call."""
+    for _, _, reviewer in (recipe_roles(None, None, []), edit_roles(None, None, [], None)):
+        reviewer()

@@ -60,14 +60,14 @@ def test_multi_node_run_telemetry_is_complete(tmp_path, spawn):
     events = Recorder(run).read_events()
     created = [e["child"] for e in events if e["type"] == "node.created"]
     ended = [e["child"] for e in events if e["type"] == "node.end"]
-    assert created == ["n1", "n2", "n3", "n4"] and ended == ["n1", "n2", "n3"]
+    assert created == ["node0001", "node0002", "node0003", "node0004"] and ended == ["node0001", "node0002", "node0003"]
     assert [e for e in events if e["type"] == "run.stopped"]
     assert len({e["child"] for e in events if e["type"] == "select"}) == 4
     statuses = {n["node_id"]: n["status"] for n in NodeStore(open_db(run)).all()}
-    assert statuses == {"root": "scored", "n1": "scored", "n2": "invalid_code", "n3": "train_failed",
-                        "n4": "running"}                  # its eval failed twice: the run stopped
+    assert statuses == {"root": "scored", "node0001": "scored", "node0002": "invalid_code", "node0003": "train_failed",
+                        "node0004": "running"}                  # its eval failed twice: the run stopped
     failed = sorted(e["message"].split()[0] for e in events if e["type"] == "alert" and e["kind"] == "node_failed")
-    assert failed == ["n2", "n3"]
+    assert failed == ["node0002", "node0003"]
 
 
 def test_sigterm_mid_phase_stops_within_seconds_and_resume_marks_interrupted(tmp_path, spawn):
@@ -80,8 +80,8 @@ def test_sigterm_mid_phase_stops_within_seconds_and_resume_marks_interrupted(tmp
     stopped = [e for e in Recorder(run).read_events() if e["type"] == "run.stopped"]
     assert "force stop" in Recorder(run).load_payload(stopped[-1]["payload"])["reason"]
     ctx = resume_mark(run)
-    assert {n["node_id"]: n["status"] for n in NodeStore(ctx.conn).all()} == {"root": "scored", "n1": "interrupted"}
-    assert (run / "nodes" / "n1" / "attempts" / "improve_recipe-1" / "workspace").exists()   # files kept
+    assert {n["node_id"]: n["status"] for n in NodeStore(ctx.conn).all()} == {"root": "scored", "node0001": "interrupted"}
+    assert (run / "nodes" / "node0001" / "attempts" / "improve_recipe-1" / "workspace").exists()   # files kept
 
 
 def test_kill_9_then_resume_starts_a_fresh_cycle_with_a_new_id(tmp_path, spawn):
@@ -94,14 +94,14 @@ def test_kill_9_then_resume_starts_a_fresh_cycle_with_a_new_id(tmp_path, spawn):
     proc = spawn(run, 1, "none")                           # max_nodes 1: exactly one more node
     assert proc.wait(timeout=120) == 0
     ids = {n["node_id"]: n["status"] for n in NodeStore(open_db(run)).all()}
-    assert ids == {"root": "scored", "n1": "interrupted", "n2": "scored"}   # n1 kept; ids not reused
+    assert ids == {"root": "scored", "node0001": "interrupted", "node0002": "scored"}   # node0001 kept; ids not reused
 
 
 def test_graceful_stop_file_finishes_the_current_node(tmp_path, spawn):
     run = tmp_path / "run"
-    proc = spawn(run, 5, "pace")                       # ~7 s per node, so the request lands in n1
-    wait_phase(run, "n1", key="node")                  # as soon as n1 starts
+    proc = spawn(run, 5, "pace")                       # ~7 s per node, so the request lands in node0001
+    wait_phase(run, "node0001", key="node")                  # as soon as node0001 starts
     (run / "control" / "stop").touch()
     assert proc.wait(timeout=120) == 0
     statuses = {n["node_id"]: n["status"] for n in NodeStore(open_db(run)).all()}
-    assert statuses == {"root": "scored", "n1": "scored"}
+    assert statuses == {"root": "scored", "node0001": "scored"}

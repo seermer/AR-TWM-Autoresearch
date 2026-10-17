@@ -1,10 +1,4 @@
-"""Every failure in a run, in one list (newest first).
-
-"recorded": failures the kernel wrote down as such -- failed LLM calls, kernel tool errors,
-per-item errors inside GPU job results, gate/ingest/contract failures, failed subprocesses and
-containers, error spans, warnings and alerts. "inferred": the agent's own in-container tools
-(run_command, read_file, ...), whose failures exist only as tool outputs inside the model
-conversation, recognised by the seed harness's error text (see chat.is_tool_error)."""
+"""Every failure in a run, newest first: "recorded" by the kernel, or "inferred" from the seed's tool error text."""
 from __future__ import annotations
 
 from .chat import chains, is_tool_error, request_messages, segments, text_of
@@ -61,7 +55,7 @@ def recorded(run: Run) -> list[dict]:
             body = load(e.get("payload")) or {}
             if body.get("error"):
                 add("job_failed", f"job {e.get('job_id')}: {body['error']}")
-            if e.get("state") != "cancelled":            # whoever cancelled it did not want those items
+            if e.get("state") != "canceled":            # whoever cancelled it did not want those items
                 for item_name, error in _item_errors(body.get("result")):
                     add("job_item", f"job {e.get('job_id')}: {item_name}: {error}")
         elif kind == "gate.failed":

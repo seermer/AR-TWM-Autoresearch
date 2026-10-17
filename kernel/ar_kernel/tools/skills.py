@@ -50,7 +50,7 @@ def register_skill_tool(mcp, kit) -> None:
     skills = load_skills({t.name: t for t in asyncio.run(mcp.list_tools())})
     index = "\n".join(f"- {name}: {skill['description']}" for name, skill in skills.items())
 
-    @mcp.tool(name="read_skill", description="Read one of the kernel's reference notes. Read a skill at the "
+    @mcp.tool(name="read_skill", description="Read one of the kernel's skills. Read a skill at the "
               "moment you are about to do what it covers, not up front. The skills:\n" + index)
     async def read_skill(name: Annotated[str, Field(description="a skill's name, from the list above")],
                          ctx: Context) -> str:

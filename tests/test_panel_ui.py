@@ -26,7 +26,8 @@ def test_every_handler_runs_on_the_fake_run(run, tmp_path):
     _ok(ui.h_overview(run))
     rows = _ok(ui.h_trace(run, "n1", "", None, ["llm.request"], "", "", False, 1))[0]
     _ok(ui.h_trace_detail(run, int(rows.iloc[0]["seq"])))
-    _ok(ui.h_node(run, "n1")), _ok(ui.h_node(run, "root"))
+    assert "**Summary (summary.md):** Tested pool clips." in _ok(ui.h_node(run, "n1"))[0]
+    _ok(ui.h_node(run, "root"))
     attempts = _ok(ui.h_attempts(run, "n1"))[0]["choices"]
     key = next(c for c in (c[0] if isinstance(c, tuple) else c for c in attempts) if c.startswith("improve_recipe"))
     convs = _ok(ui.h_conversations(run, "n1", key))[0]["choices"]
@@ -139,8 +140,8 @@ def test_node_level_tabs_follow_the_node_even_when_a_default_repeats(run):
     assert _chains(app, button("Load eval"), "click") == [["h_eval", "h_eval_case"]]
     assert _chains(app, button("Load training data"), "click") == [["h_training_data", "h_clips"]]
     assert _chains(app, _by_label(app, "Compare with"), "input") == [["h_eval_case"]]
-    for label in ("Phase-attempt", "Conversation (role labels are inferred)", "improve_recipe attempt",
-                  "edit_self attempt", "Case", "Dataset", "Full run_command outputs (tool_output/)", "File",
+    for label in ("Phase-attempt", "Conversation (role = the agent's own label)", "improve_recipe attempt",
+                  "edit_self attempt", "Case", "Dataset", "Full tool outputs (tool_output/)", "File",
                   "Compare with"):
         assert _chains(app, _by_label(app, label), "change") == [], label        # user changes use .input
         assert _chains(app, _by_label(app, label), "input"), label

@@ -53,7 +53,7 @@ class Job:
     finished: float | None = None
 
 
-_TERMINAL = {"done", "failed", "cancelled"}
+_TERMINAL = {"done", "failed", "canceled"}
 
 
 def summarise(result: dict) -> dict:
@@ -164,7 +164,7 @@ class JobQueue:
     def _cancel_locked(self, job: Job) -> None:
         self._cancel[job.id].set()
         if job.state == "queued":
-            job.state, job.finished = "cancelled", time.time()
+            job.state, job.finished = "canceled", time.time()
             self._cond.notify_all()
 
     def shutdown(self) -> None:
@@ -206,7 +206,7 @@ class JobQueue:
                 try:
                     self.require_free()
                     result = self._backends[job.backend].run(job, cancel, report)
-                    final = "cancelled" if cancel.is_set() else "done"
+                    final = "canceled" if cancel.is_set() else "done"
                 except Exception as exc:                  # noqa: BLE001 -- a job failure, not a crash
                     final, error, tb = "failed", f"{type(exc).__name__}: {exc}", traceback.format_exc()
             result_file = summary = None

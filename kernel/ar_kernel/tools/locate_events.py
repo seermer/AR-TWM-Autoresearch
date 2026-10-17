@@ -242,7 +242,7 @@ class LocateEventsBackend:
                 results[video] = {"events": spans(item["events"], cuts[video], [
                     [answers[video][n, k] for k in range(len(cuts[video]))] for n in range(len(item["events"]))])}
             else:
-                results.setdefault(video, {"error": "not asked (cancelled)"})
+                results.setdefault(video, {"error": "not asked (canceled)"})
         timeout = float(c["memory_release_timeout_s"])
         after, released = wait_gpu_release(self.gpu_memory, self.gpus, before,
                                            min(timeout, 5.0) if cancel.is_set() else timeout)

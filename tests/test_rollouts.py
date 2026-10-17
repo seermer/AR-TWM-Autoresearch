@@ -489,7 +489,7 @@ def _hiker_mask(path):
 
 def _wait(q, caller, job_id):
     out = q.wait(caller, job_id, 3600)
-    while out["state"] not in ("done", "failed", "cancelled"):
+    while out["state"] not in ("done", "failed", "canceled"):
         out = q.wait(caller, job_id, 3600)
     return out
 

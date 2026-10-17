@@ -121,8 +121,7 @@ sandbox:
   cpus: 16
   memory_gb: 64
   network: bridge                # default: docker's bridge, outbound internet for pip, curl, wget in the
-                                 # edit_self and improve_recipe containers; `none` = offline. Contract
-                                 # verification containers are always offline.
+                                 # edit_self, improve_recipe and contract containers; `none` = offline.
 timeouts:                        # soft timeouts; the hard cap is 4x soft
   edit_self_s: 7200
   improve_recipe_s: 86400

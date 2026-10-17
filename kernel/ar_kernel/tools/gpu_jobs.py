@@ -340,7 +340,7 @@ class GpuJob:
         index = item["index"]
         status_path = out / f"{index}.json"
         if not status_path.exists():
-            return {"index": index, "error": missing.get(index, "no output (cancelled or not reached)")}
+            return {"index": index, "error": missing.get(index, "no output (canceled or not reached)")}
         try:
             status = json.loads(status_path.read_text(encoding="utf-8"))
             if not isinstance(status, dict):
@@ -439,7 +439,7 @@ class GpuJob:
         world = len(groups)
         missing: dict[int, str] = {}
         if cancel.is_set() and not timed_out.is_set():
-            return codes, missing           # the cancel killed the workers: _collect's "cancelled or not reached"
+            return codes, missing           # the cancel killed the workers: _collect's "canceled or not reached"
         for index in indices:
             code = codes[index % world]
             if code not in (0, None) and not (out / f"{index}.json").exists():

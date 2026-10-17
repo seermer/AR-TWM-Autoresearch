@@ -5,11 +5,10 @@ import difflib
 import math
 import re
 import shutil
-import threading
 import time
 from pathlib import Path
 
-from .chat import (chains, chat_items, infer_role, message_items, request_messages, request_tools, tool_lines,
+from .chat import (chains, chat_items, is_tool_error, message_items, request_messages, request_tools, tool_lines,
                    response_message, segments, text_of)
 from .events import EventLog, event_row, filter_events
 from .runfiles import RunFiles, fmt_ts, loads
@@ -21,9 +20,7 @@ class Run:
     def __init__(self, run_dir: Path | str) -> None:
         self.files = RunFiles(run_dir)
         self.log = EventLog(self.files)
-        self._prompts: dict[str, dict[str, str]] = {}
         self.cache: dict = {}                  # derived results keyed by what they were derived from
-        self._lock = threading.Lock()
 
     @property
     def name(self) -> str:
@@ -37,20 +34,6 @@ class Run:
             return None
         rows = self.files.query("SELECT * FROM nodes WHERE node_id = ?", (node_id,))
         return rows[0] if rows else None
-
-    def prompt_files(self, commit: str | None) -> dict[str, str]:
-        """agent/prompts/*.md of an agent commit, cached (a commit never changes)."""
-        if not commit:
-            return {}
-        with self._lock:
-            if commit in self._prompts:
-                return self._prompts[commit]
-        names = (self.files.git("ls-tree", "--name-only", f"{commit}:agent/prompts") or "").split()
-        found = {n[:-3]: self.files.git("show", f"{commit}:agent/prompts/{n}") or ""
-                 for n in names if n.endswith(".md")}
-        with self._lock:
-            self._prompts[commit] = found
-        return found
 
 
 def unified(a: str, b: str, name_a: str, name_b: str) -> str:
@@ -187,6 +170,7 @@ def node_detail(run: Run, node_id: str) -> dict | None:
     return {
         "node": n, "baseline": n["parent_id"] is None, "lineage": " → ".join(reversed(lineage)),
         "edit": run.files.read_json(f"{base}/edit.json"), "rationale": run.files.read_text(f"{base}/rationale.md"),
+        "summary": run.files.read_text(f"{base}/summary.md"),
         "recipe": recipe,
         "recipe_diff": unified(parent_recipe or "", recipe, f"{parent['node_id'] if parent else 'none'}/recipe.yaml",
                                f"{node_id}/recipe.yaml") if recipe else None,
@@ -210,24 +194,18 @@ def agent_attempts(run: Run, node_id: str) -> list[tuple[str, int]]:
     return sorted(p for p in pairs if p[0] and p[1] is not None)
 
 
-def _phase_start(events: list[dict], phase: str, attempt: int) -> dict | None:
-    return next((e for e in events if e.get("type") == "phase.start" and e.get("phase") == phase
-                 and e.get("attempt") == attempt), None)
-
-
 def conversations(run: Run, node_id: str, phase: str, attempt: int) -> list[dict]:
+    """Compactions and tool errors are inferred (chat.chains, chat.is_tool_error)."""
     events = run.log.events(files=[node_id])
     load = run.log.payload
-    start = _phase_start(events, phase, attempt)
-    prompts = run.prompt_files((load(start.get("payload")) or {}).get("code_commit") if start else None)
     out = []
     for i, chain in enumerate(chains(segments(events, node_id, phase, attempt), load)):
-        system = next((text_of(m.get("content")) for m in request_messages(load(chain[0].calls[0].request))
-                       if m.get("role") == "system"), None)
         calls = [c for s in chain for c in s.calls]
         costs = [c.cost_usd for c in calls if c.cost_usd is not None]
-        out.append({"index": i, "role": infer_role(system, prompts), "started": fmt_ts(chain[0].first_ts),
-                    "calls": len(calls), "compactions": len(chain) - 1,
+        errors = sum(is_tool_error(text_of(m.get("content"))) for s in chain
+                     for m in request_messages(load(s.calls[-1].request)) if m.get("role") == "tool")
+        out.append({"index": i, "role": chain[0].calls[0].role or "unlabeled", "started": fmt_ts(chain[0].first_ts),
+                    "calls": len(calls), "compactions": len(chain) - 1, "tool_errors": errors,
                     "tokens": sum(c.usage.get("total_tokens") or 0 for c in calls),
                     "usd": round(sum(costs), 4) if costs else None, "chain": chain})
     return out
@@ -248,7 +226,7 @@ def tool_logs(run: Run, node_id: str, phase: str, attempt: int) -> list[str]:
     folder = run.files.path(f"nodes/{node_id}/attempts/{phase}-{attempt}/workspace/tool_output")
     if not folder.is_dir():
         return []
-    return [str(p.relative_to(run.files.root)) for p in sorted(folder.glob("*.log"))]
+    return [str(p.relative_to(run.files.root)) for p in sorted(folder.iterdir()) if p.is_file()]
 
 
 # ---- Code edits ----
@@ -379,7 +357,7 @@ def cost(run: Run) -> dict:
     for n in run.nodes():
         for phase, attempt in agent_attempts(run, n["node_id"]):
             for c in conversations(run, n["node_id"], phase, attempt):
-                r = roles.setdefault(c["role"], {"role (inferred)": c["role"], "conversations": 0, "calls": 0,
+                r = roles.setdefault(c["role"], {"role": c["role"], "conversations": 0, "calls": 0,
                                                  "tokens": 0, "usd": 0.0})
                 r["conversations"] += 1
                 r["calls"] += c["calls"]

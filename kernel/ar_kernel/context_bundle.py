@@ -30,11 +30,10 @@ _SHARED = {
     "/context/context.json": "the exact data this message was built from",
     "/nodes/<node>/": "read-only: what each finished node left behind (layout: skill node_files). Kernel tools "
                       "cannot read it; copy a file into /workspace to pass it to one",
-    "/tmp": "4 GB of scratch in memory, gone when the phase ends"}
+    "/tmp": "scratch in memory, gone when the phase ends"}
 FOLDERS = {
     "improve_recipe": {
-        "/workspace": "your working directory, writable. It is kept for a retry and later nodes see it under "
-                      "/nodes/<this node>/attempts/",
+        "/workspace": "writable; later nodes see it under /nodes/<this node>/attempts/",
         "/workspace/staging": "what goes to and comes from kernel tools: downloads (hf/), GPU job outputs "
                               "(annotations/, rollouts/, images/), result files (results/), clips copied from the pool "
                               "(pool_clips/) and the candidates "
@@ -46,7 +45,7 @@ FOLDERS = {
         "kernel tool paths": "regular files under /workspace only; a symbolic link is refused, so copy the "
                              "file instead"},
     "edit_self": {
-        "/agent": "the agent code you change, writable",
+        "/agent": "the agent's code, writable in this phase",
         "/code": "read-only: the parent's code, which is the code running you",
         "/workspace": "scratch for this phase, writable",
         **_SHARED}}
@@ -75,11 +74,13 @@ def _entry(conn, run_dir: Path, repo, node: dict, parent_commit: str | None, pha
              "error": KERNEL_FAILURES.get(node["status"], node["error"])}
     if phase == "improve_recipe":
         recipe_path, rationale = _node_file(run_dir, nid, "recipe.yaml"), _node_file(run_dir, nid, "rationale.md")
+        summary = _node_file(run_dir, nid, "summary.md")
         return {**entry, "score": node["score"], "metrics": agent_metrics(node["metrics"]),
                 "aggregates": agent_aggregates(_read_json(_node_file(run_dir, nid, "eval/aggregates.json"))),
                 "data_commit": node["data_commit"], "data": _data_stats(conn, node["data_commit"]),
                 "recipe": yaml.safe_load(recipe_path.read_text()) if recipe_path.exists() else None,
-                "rationale": rationale.read_text() if rationale.exists() else None}
+                "rationale": rationale.read_text() if rationale.exists() else None,
+                "summary": summary.read_text() if summary.exists() else None}
     attempts = [{"phase": p, "attempt": a["idx"], "outcome": a["outcome"]}
                 for p in ("edit_self", "improve_recipe") for a in NodeStore(conn).attempts(nid, p)]
     return {**entry, "edit": _read_json(_node_file(run_dir, nid, "edit.json")),
@@ -109,13 +110,12 @@ def siblings(conn, run_dir: Path, repo, parent_id: str, phase: str) -> list[dict
 
 def archive_summary(conn, phase: str) -> dict:
     nodes = [n for n in NodeStore(conn).all() if n["status"] not in NOT_SHOWN]
-    rows = [{"node_id": n["node_id"], "parent_id": n["parent_id"], "status": n["status"], "depth": n["depth"]}
-            for n in nodes]
+    rows = [{"node_id": n["node_id"], "parent_id": n["parent_id"], "status": n["status"]} for n in nodes]
     if phase == "edit_self":
         return {"nodes": rows}
     scored = [n for n in nodes if n["status"] == "scored" and n["score"] is not None]
     best = max(scored, key=lambda n: n["score"], default=None)
-    return {"nodes": [{**row, "score": n["score"], "subtree_value": n["subtree_value"], "data_commit": n["data_commit"]}
+    return {"nodes": [{**row, "score": n["score"], "data_commit": n["data_commit"]}
                       for row, n in zip(rows, nodes)],
             "n_scored": len(scored),
             "best": {"node_id": best["node_id"], "score": best["score"]} if best else None}
@@ -129,17 +129,14 @@ def clip_pool_stats(clips: list[dict]) -> dict:
     return {key: dict(count.most_common()) for key, count in counts.items()}
 
 
-def build_edit_context(*, conn, run_dir: Path, repo, parent_id: str, attempt: int, max_attempts: int,
-                       retry: dict | None, nodes_remaining: int, dry_run: bool = False) -> EditContext:
+def build_edit_context(*, conn, run_dir: Path, repo, parent_id: str, dry_run: bool = False) -> EditContext:
     return EditContext(lineage=lineage(conn, run_dir, repo, parent_id, "edit_self"),
                        siblings=siblings(conn, run_dir, repo, parent_id, "edit_self"),
                        archive=archive_summary(conn, "edit_self"),
-                       nodes_remaining=nodes_remaining, attempt=attempt, max_attempts=max_attempts,
-                       retry=retry, dry_run=dry_run, folders=FOLDERS["edit_self"])
+                       dry_run=dry_run, folders=FOLDERS["edit_self"])
 
 
-def build_recipe_context(*, cfg, conn, run_dir: Path, repo, node_id: str, parent_id: str, attempt: int,
-                         max_attempts: int, retry: dict | None, nodes_remaining: int, n_gpus: int,
+def build_recipe_context(*, cfg, conn, run_dir: Path, repo, node_id: str, parent_id: str, n_gpus: int,
                          tools: list[str], dry_run: bool = False) -> RecipeContext:
     parent = NodeStore(conn).get(parent_id)
     pool = pool_clips(conn)
@@ -149,7 +146,6 @@ def build_recipe_context(*, cfg, conn, run_dir: Path, repo, node_id: str, parent
         lineage=lineage(conn, run_dir, repo, parent_id, "improve_recipe"),
         siblings=siblings(conn, run_dir, repo, parent_id, "improve_recipe"),
         archive=archive_summary(conn, "improve_recipe"),
-        nodes_remaining=nodes_remaining, attempt=attempt, max_attempts=max_attempts, retry=retry,
         dry_run=dry_run, folders=FOLDERS["improve_recipe"], node_id=node_id,
         clip_pool_size=len(pool), clip_pool_stats=clip_pool_stats(pool),
         parent_data_commit=parent["data_commit"],
@@ -165,13 +161,11 @@ def build_recipe_context(*, cfg, conn, run_dir: Path, repo, node_id: str, parent
 
 
 def write_bundle(ctx, dest: Path, censor: list[str] = (), roots=()) -> Path:
-    """`censor`: names replaced in everything written, as are the host folders `roots`. The context carries raw log tails and tool error
+    """`censor`: names replaced in everything written, as are the host folders `roots`. The context carries node and tool error
     texts, and it reaches the model as a user message, which the gateway does not censor."""
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
     data = scrub(ctx.model_dump(mode="json"), list(censor), roots)
     path = dest / "context.json"
     path.write_text(json.dumps(data, indent=1))
-    if data.get("retry"):
-        (dest / "retry.json").write_text(json.dumps(data["retry"], indent=1))
     return path

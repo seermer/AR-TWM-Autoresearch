@@ -31,6 +31,8 @@ class Caller:
     mock_script: str | None = None
     scrub_names: tuple[str, ...] = ()      # replaced in everything a kernel tool gives this caller
     host_roots: tuple = ()                 # isolation.host_roots: replaced likewise
+    agent_host: Path | None = None         # None in improve_recipe
+    base_commit: str | None = None         # that tree's parent commit
 
 
 class TokenRegistry:
@@ -41,11 +43,13 @@ class TokenRegistry:
         self._on_revoke: list[Callable[[str], None]] = []
 
     def issue(self, *, node: str, phase: str, attempt: int, workspace_host: Path,
-              staging_host: Path, mock_script: str | None = None) -> Caller:
+              staging_host: Path, mock_script: str | None = None, agent_host: Path | None = None,
+              base_commit: str | None = None) -> Caller:
         token = "ar-" + secrets.token_urlsafe(32)
         self._recorder.add_redaction(token)
         caller = Caller(token, node, phase, attempt, Path(workspace_host), Path(staging_host),
-                        mock_script, self._scrub_names, self._host_roots)
+                        mock_script, self._scrub_names, self._host_roots,
+                        Path(agent_host) if agent_host is not None else None, base_commit)
         with self._lock:
             self._by_token[token] = caller
         return caller

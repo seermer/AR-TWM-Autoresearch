@@ -2,6 +2,8 @@ from __future__ import annotations
 import json, math, shutil
 from pathlib import Path
 
+from ar_contract.metrics import METRICS
+
 from ..config import KernelConfig
 
 DIMENSION_METRICS = [
@@ -16,38 +18,33 @@ DIMENSION_METRICS = [
     "visual_plausibility", "causal_fidelity",
 ]
 # What agents are shown instead of the benchmark's own names. Real name -> (alias, dimension alias,
-# what it measures). Applied in memory when a context is built; nothing on disk uses an alias.
-AGENT_METRICS = {
-    "aesthetic_quality": ("frame_aesthetics", "quality", "how good single frames look: composition, colour, light"),
-    "imaging_quality": ("frame_clarity", "quality", "frames free of blur, noise and compression artefacts"),
-    "temporal_flickering": ("flicker_free", "quality", "no flicker between neighbouring frames"),
-    "dynamic_degree": ("motion_amount", "quality", "how much the video moves; a near-static video scores low"),
-    "motion_smoothness": ("smooth_motion", "quality", "motion that is smooth from frame to frame"),
-    "hpsv3_quality": ("human_preference", "quality", "how a human-preference model rates the frames"),
-    "background_consistency": ("background_stability", "consistency", "the background keeps its look over time"),
-    "segment_continuity": ("no_hard_cuts", "consistency", "the video has no abrupt cut"),
-    "perspective_consistency": ("subject_framing_stability", "consistency",
-                                "the followed subject stays at a steady place in the frame"),
-    "subject_consistency": ("subject_stability", "consistency", "the subject keeps its look over time"),
-    "geometric_consistency": ("geometry_stability", "consistency", "the scene's 3D shape agrees between frames"),
-    "photometric_consistency": ("appearance_stability", "consistency",
-                                "the same surface keeps its colour and light between frames"),
-    "spatial_consistency": ("revisit_match", "consistency",
-                            "a place looks the same when the camera comes back to it"),
-    "gated_spatial_consistency": ("revisit_match_strict", "consistency",
-                                  "the same, counted less when the view barely changed on the way"),
-    "navigation_trajectory": ("camera_path_accuracy", "control", "the camera follows the commanded moves"),
-    "event_edit_adherence": ("follows_event_instruction", "control",
-                             "an instructed event happens in the scene, fully and with the right details"),
-    "subject_action_adherence": ("follows_subject_action", "control",
-                                 "the subject does an instructed action, fully and naturally"),
-    "perspective_switch_adherence": ("follows_viewpoint_change", "control",
-                                     "an instructed change of viewpoint happens and ends in a valid view"),
-    "scene_adherence": ("scene_matches_description", "description", "the scene matches its text"),
-    "subject_adherence": ("subject_matches_description", "description", "the subject matches its text"),
-    "visual_plausibility": ("looks_plausible", "physics", "the video looks physically plausible"),
-    "causal_fidelity": ("cause_and_effect", "physics", "objects and characters obey physics and cause and effect"),
+# what it measures); the alias's dimension and meaning are in ar_contract. Applied in memory when a
+# context is built; nothing on disk uses an alias.
+_ALIASES = {
+    "aesthetic_quality": "frame_aesthetics",
+    "imaging_quality": "frame_clarity",
+    "temporal_flickering": "flicker_free",
+    "dynamic_degree": "motion_amount",
+    "motion_smoothness": "smooth_motion",
+    "hpsv3_quality": "human_preference",
+    "background_consistency": "background_stability",
+    "segment_continuity": "no_hard_cuts",
+    "perspective_consistency": "subject_framing_stability",
+    "subject_consistency": "subject_stability",
+    "geometric_consistency": "geometry_stability",
+    "photometric_consistency": "appearance_stability",
+    "spatial_consistency": "revisit_match",
+    "gated_spatial_consistency": "revisit_match_strict",
+    "navigation_trajectory": "camera_path_accuracy",
+    "event_edit_adherence": "follows_event_instruction",
+    "subject_action_adherence": "follows_subject_action",
+    "perspective_switch_adherence": "follows_viewpoint_change",
+    "scene_adherence": "scene_matches_description",
+    "subject_adherence": "subject_matches_description",
+    "visual_plausibility": "looks_plausible",
+    "causal_fidelity": "cause_and_effect",
 }
+AGENT_METRICS = {name: (alias, *METRICS[alias]) for name, alias in _ALIASES.items()}
 AGENT_DIMENSIONS = {"interaction": "control", "setting": "description", "physical": "physics"}
 AGENT_AXES = {"perspective": "viewpoint"}
 

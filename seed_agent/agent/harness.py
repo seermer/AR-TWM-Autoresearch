@@ -1,68 +1,28 @@
-"""Single-agent inner loop: an explicit ReAct graph, plus Claude-Code-style auto-compaction.
-
-Reproduces langchain.agents.create_agent (langchain 1.4.2, factory.py @ 4af7ab8)
-with no middleware, no response_format and async tools:
-  START -> model; model -> END if the last AI message has no tool calls,
-  else one Send("tools", [call]) per tool call (parallel); tools -> model.
-Tool execution follows langgraph.prebuilt.ToolNode's default messages.
-
-Four deliberate differences from create_agent's default:
-  1. A tool that raises is reported to the model as an error ToolMessage
-     (create_agent re-raises and ends the run).
-  2. Auto-compact: call_model estimates the context size before every model call
-     (the last reply's reported usage plus ~4 chars/token for what came after, with
-     each image counted as a fixed IMAGE_TOKENS), on the merged state -- there is no
-     per-Send routing decision, so parallel tool results are never seen in isolation.
-     Below compact_at * context_window nothing happens and messages append linearly.
-     At or above it, a dedicated summarizer call branches off the SAME bound model as the
-     normal call (system prompt, tools, tool_choice=None) with one instruction message
-     (prompts/compact.md) appended -- byte-identical to the agent's normal request up to
-     that append, maximizing prompt-cache hits. If the model calls a tool instead of
-     writing the summary, the call is retried once with tool_choice="none" to force text.
-     The history is then replaced by one user message -- a continuation preamble plus the
-     summary -- before the real model call runs on it. An empty summary raises.
-  3. A text result longer than TOOL_RESULT_LIMIT is saved to /workspace/tool_output and the model gets
-     its head and tail with the file's path.
-  4. A `return_direct` tool ends the run only when it succeeds: after all parallel tool results are in
-     (node "tools_done"), the run ends if one of them is a successful return_direct result, and goes back
-     to the model otherwise. So a rejected submission returns to the model to be corrected, and an
-     accepted one is not followed by another model call.
-"""
+"""The agent loop, compaction, tool output files and the write guard."""
 from __future__ import annotations
 
+import asyncio
 import itertools
 import json
 import os
 import re
+import shutil
+import subprocess
+import sys
 import time
 from pathlib import Path
-from typing import Annotated, Any, TypedDict
+from typing import Any
 
-from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import (AIMessage, AnyMessage, HumanMessage, RemoveMessage,
-                                     SystemMessage, ToolMessage)
-from langchain_core.messages.tool import ToolCall
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool, ToolException
-from langgraph.graph import END, START, StateGraph
-from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
-from langgraph.types import Send
 from pydantic import ValidationError
 
-RECURSION_LIMIT = 9_999
 COMPACT_PROMPT = Path(__file__).resolve().parent / "prompts" / "compact.md"
-INVALID_TOOL = "Error: {name} is not a valid tool, try one of [{names}]."
-INVALID_ARGS = ("Error invoking tool '{name}' with kwargs {args} with error:\n"
-                " {error}\n Please fix the error and try again.")
-TOOL_ERROR = "Error: {error}\n Please fix your mistakes."   # ToolNode's handle_tool_errors=True text
 TOOL_BLOCK_TYPES = {"text", "image_url", "image", "json", "search_result", "custom_tool_call_output",
                     "document", "file"}
-
-# chars. A safety cap: kernel tools write large results to files and return a summary.
-TOOL_RESULT_LIMIT, TOOL_RESULT_SHOWN = 200_000, 20_000
-CHARS_PER_TOKEN = 4          # no tokenizer offline (tiktoken downloads its encodings)
-# An image costs a bounded number of vision tokens however long its base64 is, so it is
-# counted as a fixed, generous estimate instead of by characters.
-IMAGE_TOKENS = 1_500
+SHOW_WHOLE, SHOWN = 100_000, 10_000        # chars of a tool result
+CHARS_PER_TOKEN = 4
+IMAGE_TOKENS = 1_500                       # tokens per image
 IMAGE_BLOCK_TYPES = {"image_url", "image", "input_image"}
 CONTINUATION = (
     "This session is being continued from a previous conversation that ran out of context. "
@@ -71,67 +31,160 @@ CONTINUATION = (
     "Continue the work from where it left off without asking any further questions. "
     "Resume directly: do not acknowledge the summary or recap what was happening."
 )
-
-
-_saved = itertools.count(1)
-
-
-def cap_result(name: str, text: str) -> str:
-    """A result past TOOL_RESULT_LIMIT: saved whole to a file; the model sees its head and tail."""
-    if len(text) <= TOOL_RESULT_LIMIT:
-        return text
-    path = (Path(os.environ.get("AR_WORKSPACE", "/workspace")) / "tool_output"
-            / f"{name}-{time.strftime('%Y%m%d-%H%M%S')}-{next(_saved):04d}.txt")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-    half = TOOL_RESULT_SHOWN // 2
-    return (f"[Long result: {len(text)} chars. Only the first and last {half} are shown; the full result is in "
-            f"{path}.]\n{text[:half]}\n[...]\n{text[-half:]}")
-
-
-class ReactState(TypedDict):
-    messages: Annotated[list[AnyMessage], add_messages]
+GUARDED_TOOLS = ("run_command", "write_file", "edit_file")
+GUARD_TIMEOUT_S = 3600
 
 
 def _content(output: Any) -> str | list:
     if isinstance(output, str) or (isinstance(output, list) and all(
             isinstance(x, dict) and x.get("type") in TOOL_BLOCK_TYPES for x in output)):
         return output
-    try:
-        return json.dumps(output, ensure_ascii=False)
-    except Exception:  # noqa: BLE001
-        return str(output)
+    return json.dumps(output, ensure_ascii=False, default=str)
 
 
 def error_text(name: str, exc: Exception) -> str:
-    """What the model reads when a tool call fails: the message itself, not the exception's repr."""
-    if not isinstance(exc, ToolException):
-        return TOOL_ERROR.format(error=f"{type(exc).__name__}: {exc}")
-    # A kernel tool's error. Pydantic adds a type tag and a documentation link to each schema error.
-    lines = [re.sub(r"\s*\[type=.*\]$", "", line) for line in str(exc).removeprefix(f"Error executing tool {name}: ").splitlines()
-             if "errors.pydantic.dev" not in line]
-    return TOOL_ERROR.format(error="\n".join(lines))
+    if isinstance(exc, ValidationError):
+        fields = "\n".join(f"{'.'.join(str(p) for p in e.get('loc', ()))}: {e.get('msg', 'invalid')}" for e in exc.errors())
+        return f"Error: invalid arguments for {name}:\n{fields}"
+    if isinstance(exc, ToolException):
+        lines = [re.sub(r"\s*\[type=.*\]$", "", line)
+                 for line in str(exc).removeprefix(f"Error executing tool {name}: ").splitlines()
+                 if "errors.pydantic.dev" not in line]
+        return "Error: " + "\n".join(lines)
+    return f"Error: {type(exc).__name__}: {exc}"
 
 
-async def run_tool(tools: dict[str, BaseTool], call: ToolCall) -> ToolMessage:
-    tool = tools.get(call["name"])
-    if tool is None:
-        return ToolMessage(INVALID_TOOL.format(name=call["name"], names=", ".join(tools)),
-                           name=call["name"], tool_call_id=call["id"], status="error")
+_spilled = itertools.count(1)
+
+
+def spill(role: str, name: str, args: dict, content: str | list) -> str | list:
+    """Saves the result to a file; a long text is shown as its head and tail."""
+    text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+    header = f"$ {args.get('command', '')}" if name == "run_command" else f"$ {name} {json.dumps(args, ensure_ascii=False, default=str)}"
+    path = (Path(os.environ.get("AR_WORKSPACE", "/workspace")) / "tool_output"
+            / f"{role}-{name}-{time.strftime('%Y%m%d-%H%M%S')}-{next(_spilled)}.txt")
     try:
-        message = await tool.ainvoke({**call, "type": "tool_call"})
-    except ValidationError as exc:
-        error = "\n".join(f"{'.'.join(str(p) for p in e.get('loc', ()))}: {e.get('msg', 'Unknown error')}"
-                          for e in exc.errors())
-        return ToolMessage(INVALID_ARGS.format(name=call["name"], args=call["args"], error=error),
-                           name=call["name"], tool_call_id=call["id"], status="error")
-    except Exception as exc:  # noqa: BLE001 -- difference 1: report, do not crash
-        return ToolMessage(error_text(call["name"], exc), name=call["name"],
-                           tool_call_id=call["id"], status="error")
-    message.content = _content(message.content)
-    if isinstance(message.content, str):
-        message.content = cap_result(call["name"], message.content)
-    return message
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{header}\n{text}", encoding="utf-8")
+        saved = f"the full result is in {path}"
+    except OSError as exc:
+        saved = f"the full result could not be saved to {path}: {exc}"
+        if not isinstance(content, str):
+            return [*content, {"type": "text", "text": f"[Error: {saved}]"}]
+        if len(content) <= SHOW_WHOLE:
+            return f"{content}\n[Error: {saved}]"
+    if not isinstance(content, str) or len(content) <= SHOW_WHOLE:
+        return content
+    first, _, rest = content.partition("\n") if name == "run_command" else ("", "", content)
+    note = f"[Long result: {len(rest)} chars. Only the first and last {SHOWN} are shown; {saved}.]"
+    return "\n".join(filter(None, [first, note, rest[:SHOWN], "[...]", rest[-SHOWN:]]))
+
+
+class Guard:
+    """Reverts and reports what a non-owner's call changes in a tree."""
+
+    def __init__(self, tree: str, owner: str, git_dir: str) -> None:
+        self.tree, self.owner, self.git_dir = tree, owner, git_dir
+        self.stale = True
+        if os.path.exists(git_dir):
+            shutil.rmtree(git_dir)
+
+    def _git(self, *args: str) -> str:
+        return subprocess.run(["git", "-c", "user.name=guard", "-c", "user.email=guard@agent", "--git-dir",
+                               self.git_dir, "--work-tree", self.tree, *args], capture_output=True, text=True,
+                              check=True, timeout=GUARD_TIMEOUT_S).stdout
+
+    def _changed(self) -> list[str]:
+        return [entry[3:] for entry in self._git("status", "--porcelain", "-z", "--untracked-files=all").split("\0")
+                if entry]
+
+    def _failed(self, exc: Exception) -> str:
+        return f"Error: the write guard of {self.tree} failed: {type(exc).__name__}: {getattr(exc, 'stderr', '') or exc}"
+
+    def baseline(self) -> str | None:
+        try:
+            if self.stale:
+                if not os.path.isdir(self.git_dir):
+                    Path(self.git_dir).mkdir(parents=True)
+                    self._git("init", "-q")
+                self._git("add", "-A")
+                self._git("commit", "-q", "--allow-empty", "--no-verify", "-m", "baseline")
+                self.stale = False
+        except (OSError, subprocess.SubprocessError) as exc:
+            return self._failed(exc)
+        return None
+
+    def check(self, name: str) -> str | None:
+        try:
+            changed = self._changed()
+            if not changed:
+                return None
+            why = ""
+            try:
+                self._git("reset", "-q", "--hard")
+                self._git("clean", "-fdq")
+            except subprocess.SubprocessError as exc:
+                why = f": {getattr(exc, 'stderr', '') or exc}".rstrip()
+            left = set(self._changed())
+        except (OSError, subprocess.SubprocessError) as exc:
+            return self._failed(exc)
+        files = "; ".join(f"{p} ({f'could not revert{why}' if p in left else 'reverted'})" for p in changed)
+        return f"Error: {name} changed files in {self.tree}, which belongs to {self.owner}: {files}"
+
+    def remove(self) -> None:
+        remove_tree(self.git_dir)
+
+
+def remove_tree(path) -> None:
+    """Delete a folder; what could not be removed goes to stderr."""
+    def report(_, p, exc):
+        if not isinstance(exc, FileNotFoundError):
+            print(f"could not remove {p}: {exc}", file=sys.stderr)
+    shutil.rmtree(path, onexc=report)
+
+
+async def _invoke(tool: BaseTool, call: dict) -> tuple[str | list, str]:
+    try:
+        return _content(await tool.ainvoke(call["args"])), "success"
+    except Exception as exc:  # noqa: BLE001
+        return error_text(call["name"], exc), "error"
+
+
+async def run_tool(tools: dict[str, BaseTool], call: dict, role: str, guard: Guard | None) -> ToolMessage:
+    name, tool = call["name"], tools.get(call["name"])
+    guarded = guard is not None and role != guard.owner and name in GUARDED_TOOLS
+    if tool is None:
+        content, status = f"Error: {name} is not a valid tool, try one of [{', '.join(tools)}].", "error"
+    elif guarded and (problem := await asyncio.to_thread(guard.baseline)):
+        content, status = f"{problem}, so {name} was not run", "error"
+    else:
+        content, status = await _invoke(tool, call)
+        if guarded and (problem := await asyncio.to_thread(guard.check, name)):
+            shown = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+            content, status = f"{problem}\n\nWhat {name} returned:\n{shown}", "error"
+    if guard is not None and role == guard.owner:
+        guard.stale = True
+    return ToolMessage(spill(role, name, call["args"], content), name=name, tool_call_id=call["id"], status=status)
+
+
+async def run_batch(tools: dict[str, BaseTool], calls: list[dict], role: str,
+                    guard: Guard | None) -> tuple[list[ToolMessage], bool]:
+    """Returns (results, whether a submit was accepted)."""
+    if all(name in tools and (tools[name].metadata or {}).get("parallel") for name in (c["name"] for c in calls)):
+        return list(await asyncio.gather(*(run_tool(tools, c, role, guard) for c in calls))), False
+    out, skip, submitted = [], None, False
+    for call in calls:
+        if skip:
+            out.append(ToolMessage(skip, name=call["name"], tool_call_id=call["id"]))
+            continue
+        message = await run_tool(tools, call, role, guard)
+        out.append(message)
+        tool = tools.get(call["name"])
+        if tool is not None and tool.return_direct and message.status != "error":
+            skip, submitted = f"Not run: the turn ended when {call['name']} was accepted.", True
+        elif tool is not None and (tool.metadata or {}).get("ends_batch"):
+            skip = f"Not run: {call['name']} ran in this turn; read its result first."
+    return out, submitted
 
 
 def _chars(message: AnyMessage) -> int:
@@ -147,8 +200,7 @@ def _chars(message: AnyMessage) -> int:
 
 
 def estimate_tokens(messages: list[AnyMessage], system_prompt: str | None = None) -> int:
-    """The last reply's reported usage (input + output) plus an estimate for what came after.
-    Without a reported usage (first call, or right after compaction), estimate everything."""
+    """The last reported usage plus an estimate of what came after."""
     for i in range(len(messages) - 1, -1, -1):
         message = messages[i]
         if isinstance(message, AIMessage) and message.usage_metadata:
@@ -160,66 +212,35 @@ def estimate_tokens(messages: list[AnyMessage], system_prompt: str | None = None
 
 def needs_compaction(messages: list[AnyMessage], system_prompt: str | None, context_window: int,
                      compact_at: float) -> bool:
-    # One message cannot be condensed further; let the model call fail loudly instead of looping.
     return len(messages) > 1 and estimate_tokens(messages, system_prompt) >= compact_at * context_window
 
 
-def build_react_agent(model: BaseChatModel, tools: list[BaseTool], system_prompt: str | None = None, *,
-                      context_window: int, compact_at: float,
-                      compact_prompt: str | None = None):
+async def summarize(model, bound, tools: list[BaseTool], prompt: list[AnyMessage]) -> str:
+    """The compaction summary."""
+    prompt = [*prompt, HumanMessage(content=COMPACT_PROMPT.read_text())]
+    reply = await bound.ainvoke(prompt)
+    if reply.tool_calls and not reply.text.strip():
+        reply = await (model.bind_tools(tools, tool_choice="none") if tools else model.bind()).ainvoke(prompt)
+    if not reply.text.strip():
+        raise RuntimeError("compaction produced no summary")
+    return reply.text.strip()
+
+
+async def run_loop(model, tools: list[BaseTool], system: str | None, messages: list[AnyMessage], *, role: str,
+                   pinned: str, compact_at: float, context_window: int, guard: Guard | None = None) -> list[AnyMessage]:
+    """Runs until a reply has no tool call or a submit is accepted; extends `messages` in place."""
     by_name = {t.name: t for t in tools}
-    system = [SystemMessage(content=system_prompt)] if system_prompt is not None else []
-
-    async def call_model(state: ReactState) -> dict:
-        messages, reset = state["messages"], []
+    head = [SystemMessage(content=system)] if system is not None else []
+    while True:
         bound = model.bind_tools(tools, tool_choice=None) if tools else model.bind()
-        if needs_compaction(messages, system_prompt, context_window, compact_at):
-            # The summarizer call branches off the ORIGINAL conversation using the SAME
-            # bound model as the normal call, plus one appended instruction message: the
-            # request is byte-identical to the agent's normal request up to that append,
-            # maximizing prompt-cache hits. The instruction tells the model not to call
-            # tools and to answer with the summary text; if it calls one anyway (no text),
-            # retry once forcing tool_choice="none".
-            instruction = compact_prompt if compact_prompt is not None else COMPACT_PROMPT.read_text()
-            prompt = [*system, *messages, HumanMessage(content=instruction)]
-            reply = await bound.ainvoke(prompt)
-            if reply.tool_calls and not reply.text.strip():
-                fallback = model.bind_tools(tools, tool_choice="none") if tools else model.bind()
-                reply = await fallback.ainvoke(prompt)
-            if not reply.text.strip():
-                raise RuntimeError("compaction produced no summary")
-            messages = [HumanMessage(content=CONTINUATION.format(summary=reply.text.strip()))]
-            reset = [RemoveMessage(id=REMOVE_ALL_MESSAGES), *messages]
-        return {"messages": [*reset, await bound.ainvoke([*system, *messages])]}
-
-    async def call_tool(calls: list[ToolCall]) -> dict:
-        return {"messages": [await run_tool(by_name, call) for call in calls]}
-
-    def after_model(state: ReactState):
-        last = state["messages"][-1]
-        if not last.tool_calls:
-            return END
-        return [Send("tools", [call]) for call in last.tool_calls]
-
-    direct = {t.name for t in tools if t.return_direct}
-
-    def after_tools(state: ReactState):
-        for message in reversed(state["messages"]):
-            if not isinstance(message, ToolMessage):
-                break
-            if message.name in direct and message.status != "error":
-                return END
-        return "model"
-
-    graph = StateGraph(ReactState)
-    graph.add_node("model", call_model)
-    graph.add_edge(START, "model")
-    if tools:
-        graph.add_node("tools", call_tool)
-        graph.add_node("tools_done", lambda state: {})         # runs once, on the merged tool results
-        graph.add_conditional_edges("model", after_model, ["tools", END])
-        graph.add_edge("tools", "tools_done")
-        graph.add_conditional_edges("tools_done", after_tools, ["model", END])
-    else:
-        graph.add_edge("model", END)
-    return graph.compile().with_config({"recursion_limit": RECURSION_LIMIT})
+        if needs_compaction(messages, system, context_window, compact_at):
+            summary = await summarize(model, bound, tools, [*head, *messages])
+            messages[:] = [HumanMessage(content=f"{pinned}\n\n{CONTINUATION.format(summary=summary)}")]
+        reply = await bound.ainvoke([*head, *messages])
+        messages.append(reply)
+        if not tools or not reply.tool_calls:
+            return messages
+        results, submitted = await run_batch(by_name, reply.tool_calls, role, guard)
+        messages += results
+        if submitted:
+            return messages

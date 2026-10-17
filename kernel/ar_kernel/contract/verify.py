@@ -1,16 +1,15 @@
 """Contract verification of a child's code."""
 from __future__ import annotations
 
-import ast
 import json
-import re
 import shutil
 import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from ar_contract.static import ENTRY_POINTS, mentions, static_check
+
 from ..agent_phase import read_result
-from ..eval.score import AGENT_METRICS
 from ..gateway.app import create_gateway_app
 from ..gateway.mock import MockBook
 from ..gateway.store import CallStore
@@ -27,10 +26,12 @@ from ..tools.hf_tools import register_hf_tools
 from ..tools.jobs import JobQueue, register_job_tools
 from ..tools.server import ToolError, ToolKit, build_tool_app, new_mcp
 from ..tools.skills import register_skill_tool
+from ..tools import snapshot
+from ..tools.snapshot import SnapshotStore, register_snapshot_tool
 from ..vcs.agents_repo import CheckoutError
 
 MOCK_MODEL = "mock-model"
-ENTRY_POINTS = ("edit_self", "improve_recipe")
+MOCK_DATA_COMMIT = "0" * 64       # the one data commit the mock data tools hold
 
 
 @dataclass
@@ -46,48 +47,10 @@ class ContractReport:
     steps: list[ContractStep] = field(default_factory=list)
     image: str | None = None
 
-    def to_retry(self) -> dict:
+    def to_record(self) -> dict:
         failed = next((s for s in self.steps if not s.ok), None)
         return {"kind": "contract", "ok": self.ok, "failed_step": failed.name if failed else None,
                 "detail": failed.detail if failed else "", "steps": [asdict(s) for s in self.steps]}
-
-
-def static_check(entry_source: str) -> ContractStep:
-    try:
-        tree = ast.parse(entry_source)
-    except SyntaxError as exc:
-        return ContractStep("static", False, f"syntax error in agent/entry.py: {exc}")
-    except (ValueError, RecursionError, MemoryError) as exc:   # e.g. deeply nested agent source
-        return ContractStep("static", False,
-                            f"cannot parse agent/entry.py: {type(exc).__name__}: {exc}")
-    top = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    for name in ENTRY_POINTS:
-        fn = top.get(name)
-        if fn is None:
-            return ContractStep("static", False, f"agent/entry.py defines no top-level {name}")
-        a = fn.args
-        positional = a.posonlyargs + a.args
-        if len(positional) != 1 or a.vararg or a.kwarg or a.kwonlyargs:
-            return ContractStep("static", False,
-                                f"{name} must take exactly one positional parameter (ctx)")
-    return ContractStep("static", True)
-
-
-_NODE_FACT = re.compile(r"\b(n\d+|" + "|".join(alias for alias, _, _ in AGENT_METRICS.values()) + r")\b")
-
-
-def prompt_check(code: Path) -> ContractStep:
-    """A role prompt holds a mission and general behaviour: it may not name a node or a metric.
-    Checked here, not in the agent's own self-test, which the agent can edit."""
-    prompts = code / "agent" / "prompts"
-    for path in sorted(p for p in prompts.rglob("*.md") if p.is_file() and not p.is_symlink()):
-        found = sorted(set(_NODE_FACT.findall(path.read_text(encoding="utf-8", errors="replace"))))
-        if found:
-            return ContractStep("prompts", False,
-                                f"agent/prompts/{path.relative_to(prompts)} names {', '.join(found)}. A prompt holds a role's "
-                                "mission and general behaviour only: put facts about nodes and metrics in what "
-                                "the role is told first (agent/briefing.py), not in its prompt")
-    return ContractStep("prompts", True)
 
 
 class _MockData:
@@ -107,7 +70,10 @@ class _MockData:
         return {"folder": "/workspace/staging/pool_clips", "copied": 0, "not_in_pool": []}
 
     def commit(self, c, parent, datasets, message, include=()):
-        return {"commit_id": "0" * 64, "datasets": {}}
+        return {"commit_id": MOCK_DATA_COMMIT, "datasets": {}}
+
+    def commit_exists(self, commit_id):
+        return commit_id == MOCK_DATA_COMMIT
 
     def recipe_check(self, c, recipe, data_commit):
         return {"ok": True, "failures": []}
@@ -144,8 +110,9 @@ class _MockLocate:
 
 
 class ContractHarness:
-    def __init__(self, cfg, run_dir: Path, recorder) -> None:
+    def __init__(self, cfg, run_dir: Path, recorder, repo) -> None:
         self.cfg, self.recorder = cfg, recorder
+        self.snapshots = SnapshotStore(run_dir, repo, _MockData().commit_exists)
         self.registry = TokenRegistry(recorder)
         self.services = RunServices(socket_dir_for(Path(run_dir) / "contract-harness"))
         self.queue = JobQueue(recorder, threading.Lock(), wait_cap_s=5.0)
@@ -159,6 +126,7 @@ class ContractHarness:
     def start(self) -> None:
         kit, mcp = ToolKit(self.registry, self.recorder), new_mcp()
         register_data_tools(mcp, kit, _MockData())
+        register_snapshot_tool(mcp, kit, self.snapshots)
         register_hf_tools(mcp, kit, _MockHf())
         register_job_tools(mcp, kit, self.queue)
         register_caption_tool(mcp, kit, self.queue)
@@ -185,12 +153,13 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
     report = ContractReport(ok=False)
     work = Path(run_dir) / "nodes" / node / "contract" / f"attempt-{attempt}"
     shutil.rmtree(work, ignore_errors=True)
+    snapshot.clear(run_dir, repo, node, "contract", attempt)
     code = work / "agent"
 
     def finish(ok: bool) -> ContractReport:
         report.ok = ok
         recorder.event("contract.report", node=node, phase="contract", attempt=attempt,
-                       component="contract", ok=ok, payload=report.to_retry())
+                       component="contract", ok=ok, payload=report.to_record())
         return report
 
     try:
@@ -218,13 +187,14 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
     except (OSError, UnicodeDecodeError) as exc:
         step = ContractStep("static", False, f"cannot read agent/entry.py as UTF-8 text: {exc}")
     else:
-        step = static_check(entry_source)
+        problem = static_check(entry_source)
+        step = ContractStep("static", problem is None, problem or "")
     report.steps.append(step)
     if not step.ok:
         return finish(False)
-    step = prompt_check(code)
-    report.steps.append(step)
-    if not step.ok:
+    hits = mentions(code)
+    report.steps.append(ContractStep("mentions", not hits, "\n".join(hits)))
+    if hits:
         return finish(False)
 
     def run(label: str, command: list[str], timeout_s: float, context: dict | None,
@@ -236,8 +206,10 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
             d.mkdir(parents=True, exist_ok=True)
         if context is not None:
             (ctx_dir / "context.json").write_text(json.dumps(context))
+        edits = label == "smoke:edit_self"
         caller = harness.registry.issue(node=node, phase="contract", attempt=attempt,
-                                        workspace_host=ws, staging_host=staging, mock_script="smoke")
+                                        workspace_host=ws, staging_host=staging, mock_script="smoke",
+                                        agent_host=code if edits else None, base_commit=commit if edits else None)
         # issue() redacted the token only on harness.recorder, which is not `recorder`.
         recorder.add_redaction(caller.token)
         # The two smoke runs get a liveness; the import probe does not.
@@ -255,7 +227,7 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
                                                   "AR_COMPACT_AT": str(cfg.get("agents.compact_at"))},
                             cpus=4, memory_gb=8, timeout_s=timeout_s, liveness=liveness, recorder=recorder,
                             node=node, phase="contract", attempt=attempt,
-                            network="none")         # verification stays offline and deterministic
+                            network=cfg.get("sandbox.network"))
         finally:
             harness.registry.revoke(caller.token)
             harness.queue.cancel_for_token(caller.token)   # as in the phase runner

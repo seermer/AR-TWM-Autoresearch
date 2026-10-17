@@ -54,7 +54,7 @@ COLUMNS = {
     "selection": ["time", "child", "chosen", "seed", "candidates"],
     "candidates": ["node_id", "score", "subtree_mean", "value", "size", "penalty", "w", "P"],
     "by_phase": ["node", "phase", "calls", "tokens", "usd", "latency_s", "errors"],
-    "by_role": ["role (inferred)", "conversations", "calls", "tokens", "usd"],
+    "by_role": ["role", "conversations", "calls", "tokens", "usd"],
     "errors": ["time", "node", "phase", "status"],
     "files": ["name", "type", "bytes", "modified"],
     "problems": ["id", "time", "source", "kind", "node", "phase", "attempt", "where", "summary"],
@@ -170,7 +170,8 @@ def h_node(run, node):
     n = d["node"]
     head = (f"### {node} · {n['status']} · score {n['score']}\n\n**Lineage:** {d['lineage']}"
             + ("\n\n*Baseline: no parent, edit, recipe, rationale or training.*" if d["baseline"] else "")
-            + (f"\n\n**Error:** {n['error']}" if n["error"] else ""))
+            + (f"\n\n**Error:** {n['error']}" if n["error"] else "")
+            + (f"\n\n**Summary (summary.md):** {d['summary']}" if d["summary"] else ""))
     return (head, d["edit"], d["rationale"] or "", diff_html(d["recipe_diff"]) if d["recipe_diff"] else "",
             d["data_commit"], df(d["metrics"], "metrics"), df(d["attempts"], "attempts"), d["timings"], dict(n))
 
@@ -192,8 +193,8 @@ def h_conversations(run, node, attempt_key):
         return gr.update(choices=[], value=None), gr.update(choices=[], value=None)
     phase, attempt = _split(attempt_key)
     convs = views.conversations(run, node, phase, attempt)
-    labels = [f"{c['index']}: {c['role']} (inferred) · {c['calls']} calls · {c['compactions']} compactions · "
-              f"{c['tokens']:,} tokens" for c in convs]
+    labels = [f"{c['index']}: {c['role']} · {c['calls']} calls · {c['compactions']} compactions (inferred) · "
+              f"{c['tool_errors']} tool errors (inferred) · {c['tokens']:,} tokens" for c in convs]
     logs = views.tool_logs(run, node, phase, attempt)
     return (gr.update(choices=labels, value=labels[0] if labels else None),
             gr.update(choices=logs, value=None))
@@ -526,9 +527,9 @@ def build_app(run_dir) -> gr.Blocks:
             with gr.Tab("Conversations"):
                 with gr.Row():
                     cv_attempt = gr.Dropdown(label="Phase-attempt")
-                    cv_conv = gr.Dropdown(label="Conversation (role labels are inferred)")
+                    cv_conv = gr.Dropdown(label="Conversation (role = the agent's own label)")
                 cv_chat = gr.Chatbot(height=900, label="Conversation")
-                cv_log = gr.Dropdown(label="Full run_command outputs (tool_output/)")
+                cv_log = gr.Dropdown(label="Full tool outputs (tool_output/)")
                 cv_log_text = gr.Code(label="Output", lines=20)
                 cv_err = gr.Markdown()
             with gr.Tab("Code edits"):
@@ -591,7 +592,7 @@ def build_app(run_dir) -> gr.Blocks:
             with gr.Tab("Cost"):
                 co_load = gr.Button("Compute")
                 co_phase = gr.Dataframe(headers=COLUMNS["by_phase"], label="By node and phase", interactive=False)
-                co_role = gr.Dataframe(headers=COLUMNS["by_role"], label="By role (inferred)", interactive=False)
+                co_role = gr.Dataframe(headers=COLUMNS["by_role"], label="By role", interactive=False)
                 co_errs = gr.Dataframe(headers=COLUMNS["errors"], label="Non-200 responses", interactive=False)
                 co_err = gr.Markdown()
             with gr.Tab("Files"):

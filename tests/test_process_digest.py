@@ -34,39 +34,44 @@ def test_tool_errors_are_grouped_and_normalised(tmp_path):
     assert len(row["example"]) <= 1000
 
 
-def _reply(text):
-    return {"body": {"choices": [{"message": {"role": "assistant", "content": text}}]}}
-
-
-def test_conversations_turns_and_compactions_per_phase(tmp_path):
+def test_each_phase_attempt_lists_its_conversations_snapshots_and_accepted_snapshot(tmp_path):
     rec = _rec(tmp_path)
-    # c1 is compacted into c2; c3 is another role's conversation, not a compaction.
-    firsts = {"c1": "build data", "c2": "Continued. <summary>\nSUMMARY-TEXT\n</summary>", "c3": "write a recipe"}
-    for conv, turns in (("c1", 3), ("c2", 2), ("c3", 1)):
-        for t in range(turns):
-            rec.event("llm.request", node="n1", phase="improve_recipe", conversation_id=conv,
-                      payload={"body": {"messages": [{"role": "user", "content": firsts[conv]}]}})
-        rec.event("llm.response", node="n1", phase="improve_recipe", conversation_id=conv,
-                  payload=_reply("SUMMARY-TEXT" if conv == "c1" else f"done {conv}"))
-    assert process_digest(tmp_path, "n1")["roles"] == [
-        {"phase": "improve_recipe", "role": "conversation", "conversations": 3, "turns": 6, "compactions": 1}]
+    for attempt, accepted in ((1, None), (2, "s3")):
+        base = dict(node="n1", phase="edit_self", attempt=attempt)
+        rec.event("phase.start", **base)
+        for conv, role, turns in (("p", "edit_planner", 2), ("c", "coder", 1), ("r", None, 1)):
+            for _ in range(turns):
+                rec.event("llm.request", conversation_id=f"{conv}{attempt}", **({"role": role} if role else {}),
+                          payload={"body": {"messages": []}}, **base)
+            if conv == "c":
+                span = rec.event("tool.call", tool="snapshot", component="tools", payload={"args": {}}, **base)
+                rec.event("tool.result", tool="snapshot", parent_span_id=span, component="tools",
+                          payload={"tool": "snapshot", "result": {"snapshot_id": f"s{attempt + 1}"}}, **base)
+        rec.event("phase.end", payload={"result": {"snapshot_id": accepted, "summary": "x"} if accepted else None,
+                                        "error": None if accepted else "no result"}, **base)
+    rec.event("llm.request", node="n1", phase="contract", attempt=1, conversation_id="smoke",
+              payload={"body": {"messages": []}})                                  # the kernel's own smoke run
+    conversations = lambda attempt: [
+        {"role": "edit_planner", "turns": 2, "transcript": f"transcripts/edit_self-{attempt}/01-edit_planner.jsonl"},
+        {"role": "coder", "turns": 1, "transcript": f"transcripts/edit_self-{attempt}/02-coder.jsonl"},
+        {"role": "unlabeled", "turns": 1, "transcript": f"transcripts/edit_self-{attempt}/03-unlabeled.jsonl"}]
+    assert process_digest(tmp_path, "n1")["phases"] == [
+        {"phase": "edit_self", "attempt": 1, "conversations": conversations(1), "snapshots": ["s2"], "accepted": None},
+        {"phase": "edit_self", "attempt": 2, "conversations": conversations(2), "snapshots": ["s3"], "accepted": "s3"}]
 
 
-def test_gates_and_local_errors_and_no_runtimes(tmp_path):
+def test_the_digest_holds_no_seed_conventions_and_no_runtimes(tmp_path):
     rec = _rec(tmp_path)
-    rec.event("phase.start", node="n1", phase="edit_self", attempt=1)
-    rec.event("phase.end", node="n1", phase="edit_self", attempt=1)
-    rec.event("phase.start", node="n1", phase="improve_recipe", attempt=1)      # killed: no end
     rec.event("gate.failed", node="n1", phase="gate")
     rec.event("gate.passed", node="n1", phase="gate")
     rec.event("train.end", node="n1", phase="train", duration_s=12.4)
-    messages = [{"role": "tool", "content": "Error: ToolException('x')"}, {"role": "tool", "content": "exit 2\nboom"},
-                {"role": "tool", "content": "exit 0\nfine"}]
-    rec.event("llm.request", node="n1", phase="edit_self", conversation_id="c", payload={"body": {"messages": messages}})
+    messages = [{"role": "tool", "content": "Error: ToolException('x')"}, {"role": "tool", "content": "exit 2\nboom"}]
+    rec.event("llm.request", node="n1", phase="edit_self", attempt=1, conversation_id="c",
+              payload={"body": {"messages": messages}})
     d = process_digest(tmp_path, "n1")
-    assert "phases" not in d and "train_s" not in json.dumps(d)     # runtimes are not the edit planner's concern
+    assert "train_s" not in json.dumps(d) and "12.4" not in json.dumps(d)
     assert d["gates"] == {"failed": 1, "passed": 1}
-    assert d["local_errors"] == {"tool_error_messages": 1, "run_command_nonzero": 1}
+    assert "local_errors" not in d and "compactions" not in json.dumps(d) and "rounds" not in d
 
 
 def test_the_digest_stays_under_its_size_cap(tmp_path):
@@ -97,22 +102,17 @@ def test_ask_calls_are_not_conversations_turns_or_compactions(tmp_path):
 
     call([{"role": "system", "content": "planner"}, {"role": "user", "content": "42 clips in the pool"}], "ok")
     call([{"role": "user", "content": [{"type": "text", "text": "how many cars?"}]}], "42", tool="ask")
-    assert process_digest(tmp_path, "n1")["roles"] == [
-        {"phase": "improve_recipe", "role": "conversation", "conversations": 1, "turns": 1, "compactions": 0}]
+    [phase] = process_digest(tmp_path, "n1")["phases"]
+    assert phase["conversations"] == [{"role": "unlabeled", "turns": 1,
+                                       "transcript": "transcripts/improve_recipe-1/01-unlabeled.jsonl"}]
     write_transcripts(tmp_path, "n1")
     assert len(list((tmp_path / "nodes" / "n1" / "transcripts").rglob("*.jsonl"))) == 1
 
 
-def test_roles_tools_jobs_ingest_and_rounds(tmp_path):
+def test_tools_jobs_and_ingest(tmp_path):
     rec = _rec(tmp_path)
     base = dict(node="n1", phase="improve_recipe", attempt=1)
 
-    def turn(conv, tool):
-        body = {"messages": [{"role": "user", "content": conv}],
-                "tools": [{"type": "function", "function": {"name": tool}}]}
-        rec.event("llm.request", conversation_id=conv, payload={"body": body}, **base)
-        rec.event("llm.response", conversation_id=conv, latency_s=30.0, payload=_reply("ok"), **base)
-    turn("c1", "submit_plan"), turn("c1", "submit_plan"), turn("c2", "submit_data_and_recipe")
     for tool, failed in (("data_ingest", False), ("data_ingest", True), ("hf_search", False)):
         rec.event("tool.call", tool=tool, component="tools", payload={"tool": tool, "args": {}}, **base)
         if failed:
@@ -122,50 +122,8 @@ def test_roles_tools_jobs_ingest_and_rounds(tmp_path):
     rec.event("ingest.accepted", node="n1", phase="ingest", payload={"clip_id": "x"})
     for _ in range(2):
         rec.event("ingest.rejected", node="n1", phase="ingest", payload={"reasons": ["moving clips need poses/<id>.npz"]})
-    ws = tmp_path / "nodes" / "n1" / "attempts" / "improve_recipe-1" / "workspace"
-    ws.mkdir(parents=True)
-    (ws / "plans.json").write_text(json.dumps([{"plan": {}, "report": "r"}, {"plan": {}}]))
     d = process_digest(tmp_path, "n1")
-    assert d["roles"] == [
-        {"phase": "improve_recipe", "role": "plan", "conversations": 1, "turns": 2, "compactions": 0},
-        {"phase": "improve_recipe", "role": "data_and_recipe", "conversations": 1, "turns": 1, "compactions": 0}]
     assert d["tools"] == {"data_ingest": {"calls": 2, "errors": 1}, "hf_search": {"calls": 1, "errors": 0}}
     assert d["gpu_jobs"] == {"run": 2, "failed": 1}
     assert d["ingest"] == {"accepted": 1, "rejected": 2,
                            "reasons": [{"reason": "moving clips need poses/<id>.npz", "count": 2}]}
-    assert d["rounds"] == {"improve_recipe": {"plans": 2, "reports": 1}}
-
-
-def test_a_plans_file_of_another_shape_does_not_break_the_digest(tmp_path):
-    rec = _rec(tmp_path)
-    rec.event("tool.call", node="n1", phase="edit_self", tool="ask", component="tools", payload={})
-    for attempt, text in ((1, "{not json"), (2, json.dumps({"rounds": "an edited agent's own shape"})),
-                          (3, json.dumps(["a string", {"plan": 1}]))):
-        ws = tmp_path / "nodes" / "n1" / "attempts" / f"edit_self-{attempt}" / "workspace"
-        ws.mkdir(parents=True)
-        (ws / "plans.json").write_text(text)
-    d = process_digest(tmp_path, "n1")
-    assert d["tools"] == {"ask": {"calls": 1, "errors": 0}}
-    assert d["rounds"] == {"edit_self": {"plans": 1, "reports": 0}}
-
-
-def test_the_kernels_own_contract_run_is_not_a_role(tmp_path):
-    rec = _rec(tmp_path)
-    for phase in ("contract", "edit_self"):
-        rec.event("llm.request", node="n1", phase=phase, conversation_id=phase,
-                  payload={"body": {"messages": [{"role": "user", "content": "ping"}]}})
-    assert [r["phase"] for r in process_digest(tmp_path, "n1")["roles"]] == ["edit_self"]
-
-
-def test_a_plans_json_that_is_not_a_regular_file_is_skipped(tmp_path):
-    import os
-    rec = _rec(tmp_path)
-    rec.event("tool.call", node="n1", phase="edit_self", tool="ask", component="tools", payload={})
-    ws = tmp_path / "nodes" / "n1" / "attempts" / "edit_self-1" / "workspace"
-    ws.mkdir(parents=True)
-    os.mkfifo(ws / "plans.json")                    # reading it would block forever
-    ws2 = tmp_path / "nodes" / "n1" / "attempts" / "edit_self-2" / "workspace"
-    ws2.mkdir(parents=True)
-    (tmp_path / "real.json").write_text(json.dumps([{"plan": {}}]))
-    (ws2 / "plans.json").symlink_to(tmp_path / "real.json")
-    assert process_digest(tmp_path, "n1")["rounds"] == {}

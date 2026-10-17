@@ -23,6 +23,7 @@ from .tools.hf_tools import HfTools, register_hf_tools
 from .tools.jobs import JobQueue, register_job_tools
 from .tools.server import ToolKit, build_tool_app, new_mcp
 from .tools.skills import register_skill_tool
+from .tools.snapshot import SnapshotStore, register_snapshot_tool
 from .tools.vllm_server import FREE_WAITS_S, require_free_gpus
 
 
@@ -56,7 +57,7 @@ class RunKit:
                 self.harness.stop()
 
 
-def build_run_kit(cfg, run_dir: Path, gpus: list[int], recorder, environ) -> RunKit:
+def build_run_kit(cfg, run_dir: Path, gpus: list[int], recorder, environ, repo) -> RunKit:
     budget = Budget.from_config(cfg)
     budget.load(run_dir)
     registry = TokenRegistry(recorder, cfg.get("isolation.blocked_names") or [], host_roots(cfg))
@@ -67,7 +68,9 @@ def build_run_kit(cfg, run_dir: Path, gpus: list[int], recorder, environ) -> Run
     for backend in build_gpu_backends(cfg, run_dir, gpus, registry, recorder):
         queue.register(backend)
     kit, mcp = ToolKit(registry, recorder), new_mcp()
-    register_data_tools(mcp, kit, DataTools(cfg, run_dir, recorder, gpus, gpu_lock, require_free))
+    data = DataTools(cfg, run_dir, recorder, gpus, gpu_lock, require_free)
+    register_data_tools(mcp, kit, data)
+    register_snapshot_tool(mcp, kit, SnapshotStore(run_dir, repo, data.commit_exists))
     register_hf_tools(mcp, kit, HfTools(cfg, Path(run_dir) / "hf_tmp"))
     register_job_tools(mcp, kit, queue)
     register_gpu_tools(mcp, kit, queue)
@@ -85,6 +88,6 @@ def build_run_kit(cfg, run_dir: Path, gpus: list[int], recorder, environ) -> Run
         upstream=upstream, mocks=MockBook.default(), budget=budget, censor=censor_names(cfg))
     socket_dir = socket_dir_for(run_dir)
     return RunKit(registry=registry, queue=queue, gpu_lock=gpu_lock, budget=budget,
-                  services=RunServices(socket_dir), harness=ContractHarness(cfg, run_dir, recorder),
+                  services=RunServices(socket_dir), harness=ContractHarness(cfg, run_dir, recorder, repo),
                   socket_dir=socket_dir, default_model=model, gateway_app=gateway,
                   tools_app=build_tool_app(mcp), recorder=recorder)

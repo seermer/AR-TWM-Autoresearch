@@ -184,10 +184,12 @@ def test_aggregates_strata_give_each_dimension_per_group_and_leak_no_case_ids():
 
 
 def test_every_metric_has_one_alias_and_no_alias_is_a_real_name():
+    from ar_contract.metrics import METRICS
     from ar_kernel.eval.score import AGENT_METRICS, DIMENSION_METRICS
     assert set(AGENT_METRICS) == set(DIMENSION_METRICS)
     aliases = [alias for alias, _, _ in AGENT_METRICS.values()]
     assert len(set(aliases)) == len(aliases) and not set(aliases) & set(DIMENSION_METRICS)
+    assert set(aliases) == set(METRICS)                       # the contract's names, each used once
     assert {dim for _, dim, _ in AGENT_METRICS.values()} == {"quality", "consistency", "control", "description", "physics"}
 
 

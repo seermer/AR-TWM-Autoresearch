@@ -167,8 +167,8 @@ def test_filter_and_rows(run_dir):
     row = event_row(llm[0])
     assert row["type"] == "llm.request" and "model=m" in row["summary"] and isinstance(row["seq"], int)
 
-from fixtures.panel_run import BUILDER, COMPACT, PLANNER, SUMMARY
-from panel.chat import chains, chat_items, infer_role, segments
+from fixtures.panel_run import COMPACT, SUMMARY
+from panel.chat import chains, chat_items, segments
 
 
 def _chat(run_dir):
@@ -248,16 +248,13 @@ def test_stitching_ignores_whitespace_and_unrelated_conversations():
     assert [[s.conversation_id for s in ch] for ch in chains([early, a], payloads.get)] == [["E"], ["A"]]
 
 
-def test_roles_are_inferred_from_the_prompt_files():
-    files = {"planner": PLANNER, "data_builder": BUILDER}
-    assert infer_role(BUILDER + "\n\n# Reference: x.md\n\nref", files) == "data_builder"
-    assert infer_role(PLANNER, files) == "planner"
-    assert infer_role("A new role I invented.\nMore.", files) == "A new role I invented."
-    assert infer_role(None, files) == "(no system prompt)"
-    slotted = {"planner": "# Mission\nPlan the data.\nThis run aims to improve {skill_name}.\n\n# Finish\n"}
-    assert infer_role("# Mission\nPlan the data.\nThis run aims to improve rain starting.\n\n# Finish\n", slotted) == "planner"
-    assert infer_role("# Mission\nPlan the data.\n\n# Finish\n", slotted) == "planner"
-    assert infer_role("x", {}) == "x"
+def test_a_conversation_without_a_role_label_is_unlabeled(run_dir):
+    log = EventLog(RunFiles(run_dir))
+    events = [{k: v for k, v in e.items() if k != "role"} for e in log.events()]
+    assert {s.calls[0].role for s in segments(events, "n1", "improve_recipe", 1)} == {None}
+    run = views.Run(run_dir)
+    run.log.events = lambda **kw: events
+    assert {c["role"] for c in views.conversations(run, "n1", "improve_recipe", 1)} == {"unlabeled"}
 
 from panel import views
 
@@ -303,6 +300,7 @@ def test_trace_filters_pages_and_detail(run):
 def test_node_detail(run):
     d = views.node_detail(run, "n1")
     assert d["lineage"] == "root → n1" and d["edit"]["summary"] == "tighter planner"
+    assert d["summary"] == "Tested pool clips.\n"
     assert "+optimizer.lr" in d["recipe_diff"] and d["data_commit"]["datasets"] == {"ds1": 1}
     m1 = next(r for r in d["metrics"] if r["metric"] == "m1")
     assert (m1["node"], m1["parent"], m1["root"]) == (0.7, 0.6, 0.6)
@@ -320,10 +318,12 @@ def test_root_is_a_baseline_everywhere(run):
 def test_conversations_and_logs(run):
     assert ("improve_recipe", 1) in views.agent_attempts(run, "n1")
     convs = views.conversations(run, "n1", "improve_recipe", 1)
-    assert [(c["role"], c["calls"], c["compactions"]) for c in convs] == [("planner", 2, 0), ("data_builder", 5, 1)]
+    assert [(c["role"], c["calls"], c["compactions"], c["tool_errors"]) for c in convs] == [
+        ("planner", 2, 0, 0), ("data_builder", 5, 1, 0)]
     chat = views.conversation_chat(run, "n1", "improve_recipe", 1, 1)
     assert any(i["kind"] == "compaction_request" for i in chat)
     assert views.tool_logs(run, "n1", "improve_recipe", 1) == [
+        "nodes/n1/attempts/improve_recipe-1/workspace/tool_output/data_engineer-data_query-20260927-120001-2.txt",
         "nodes/n1/attempts/improve_recipe-1/workspace/tool_output/run_command-20260927-120000-0001.log"]
 
 
@@ -352,7 +352,7 @@ def test_selection_and_cost(run):
     [sel] = views.selection(run)
     assert sel["child"] == "n1" and sel["chosen"] == "root" and sel["candidates"][0]["P"] == 1.0
     c = views.cost(run)
-    assert {r["role (inferred)"] for r in c["by_role"]} == {"planner", "data_builder"}
+    assert {r["role"] for r in c["by_role"]} == {"planner", "data_builder"}
     assert sum(r["calls"] for r in c["by_phase"]) == 6 and c["errors"] == []
 
 
@@ -549,10 +549,6 @@ def test_a_missing_request_payload_does_not_break_the_chat(run_dir):
     assert any(i["kind"] == "note" and "payload missing" in i["text"] for i in items)
 
 
-def test_a_blank_system_prompt_has_no_role():
-    assert infer_role("  \n ", {"planner": PLANNER}) == "(no system prompt)"
-
-
 # ---- GPU series and trace attempts ----
 
 def test_gpu_series_covers_the_runs_last_hours_not_the_clock(run_dir):
@@ -604,8 +600,8 @@ def _add_problems(run_dir):
     rec.event("job.finished", node="n2", job_id="j1", component="tools", state="done", payload={"error": None, "result": {
         "clips": {"/workspace/a.mp4": {"error": "HTTP 400: too many tokens"}, "/workspace/b.mp4": {"caption": "ok"}}}})
     rec.event("job.finished", node="n2", job_id="j2", component="tools", payload={"error": "worker died", "result": None})
-    rec.event("job.finished", node="n2", job_id="j3", component="tools", state="cancelled", payload={"error": None,
-              "result": {"clips": {"/workspace/c.mp4": {"error": "not asked (cancelled)"}}}})
+    rec.event("job.finished", node="n2", job_id="j3", component="tools", state="canceled", payload={"error": None,
+              "result": {"clips": {"/workspace/c.mp4": {"error": "not asked (canceled)"}}}})
     rec.event("subproc.end", node="n2", phase="render", returncode=1, payload={"stdout": "", "stderr": "Traceback: x"})
     rec.event("subproc.end", node="n2", phase="render", returncode=0, payload={"stdout": "", "stderr": ""})
     rec.event("subproc.cancelled", node="n2", phase="caption_videos", returncode=-15, payload={})

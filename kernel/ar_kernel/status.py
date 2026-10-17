@@ -84,7 +84,7 @@ def format_status(d: dict) -> str:
         score = "-" if n["score"] is None else f"{n['score']:.4f}"
         p = "" if n["P"] is None else f" P={n['P']:.2f}"
         err = f"  ! {n['error'][:120]}" if n["error"] else ""
-        lines.append(f"  {'  ' * n['depth']}{n['node_id']:<6} {n['status']:<14} {score}{p}{err}")
+        lines.append(f"  {'  ' * n['depth']}{n['node_id']:<8} {n['status']:<14} {score}{p}{err}")
     if d["alerts"]:
         lines.append("alerts (latest last):")
         lines += [f"  {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(a['ts']))} [{a['level']}] {a['kind']}: {a['message']}" for a in d["alerts"]]

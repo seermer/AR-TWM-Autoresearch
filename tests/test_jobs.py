@@ -99,7 +99,7 @@ def test_cancel_stops_a_running_job(env):
     job_id = q.submit(a, "sleepy", {"steps": 500, "dt": 0.05})
     time.sleep(0.2)
     q.cancel(a, job_id)
-    assert q.wait(a, job_id, 30)["state"] == "cancelled"
+    assert q.wait(a, job_id, 30)["state"] == "canceled"
 
 
 def test_callers_cannot_see_each_others_jobs(env):
@@ -117,8 +117,8 @@ def test_cancel_for_token_clears_an_ended_phase(env):
     queued = q.submit(a, "sleepy", {"steps": 500})
     time.sleep(0.2)
     assert q.cancel_for_token(a.token) == 2
-    assert q.wait(a, running, 30)["state"] == "cancelled"
-    assert q.status(a, queued)["state"] == "cancelled"
+    assert q.wait(a, running, 30)["state"] == "canceled"
+    assert q.status(a, queued)["state"] == "canceled"
 
 
 def test_unknown_backend_is_a_tool_error(env):
@@ -259,10 +259,10 @@ def test_job_cancelled_while_waiting_for_the_gpu_lock_never_reaches_the_backend(
     with q.gpu_lock:
         job_id = q.submit(a, "recording", {})
         time.sleep(0.3)                      # the worker has dequeued it and waits for the lock
-        assert q.cancel(a, job_id)["state"] == "cancelled"
+        assert q.cancel(a, job_id)["state"] == "canceled"
     follow_up = q.submit(a, "recording", {})
     assert q.wait(a, follow_up, 30)["state"] == "done"
-    assert q.status(a, job_id)["state"] == "cancelled" and calls == [follow_up]
+    assert q.status(a, job_id)["state"] == "canceled" and calls == [follow_up]
 
 
 def test_a_unique_id_prefix_finds_the_job(env):

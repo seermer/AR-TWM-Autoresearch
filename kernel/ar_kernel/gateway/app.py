@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import Mapping
 
@@ -65,6 +66,11 @@ def carries(body: dict, is_part) -> bool:
             if isinstance(item, dict) and (is_part(item) or _has(item.get("content"), is_part)):
                 return True
     return False
+
+
+def role_label(header: str | None) -> str | None:
+    """The X-AR-Role header, safe as a file name."""
+    return re.sub(r"[^A-Za-z0-9_-]", "_", (header or "").strip())[:64] or None
 
 
 def upstream_error(payload) -> dict | None:
@@ -183,7 +189,7 @@ def create_gateway_app(*, registry, store: CallStore, allowed_models: set[str],
             body = upstream.enforce(upstream_path, body)   # before begin: record what is forwarded
         body = censor_request(body, list(censor))    # before begin: the model and the record get the same
         try:
-            meta = store.begin(caller, endpoint, body)
+            meta = store.begin(caller, endpoint, body, role=role_label(request.headers.get("x-ar-role")))
         except TelemetryError as exc:
             return JSONResponse({"error": {"message": f"telemetry unavailable: {exc}"}}, status_code=500)
         started = time.monotonic()

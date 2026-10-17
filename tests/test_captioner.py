@@ -263,7 +263,7 @@ def test_cancel_stops_the_server(make, tmp_path):
     started = time.monotonic()
     q.cancel(caller, job)
     out = q.wait(caller, job, 120)
-    assert out["state"] == "cancelled" and time.monotonic() - started < 30
+    assert out["state"] == "canceled" and time.monotonic() - started < 30
     assert _pid_gone(tmp_path / "run", job)
     assert [e["reason"] for e in rec.read_events("n1") if e["type"] == "caption.server_stopped"] == ["cancelled"]
 
@@ -372,7 +372,7 @@ def test_real_model_captions_two_example_clips(tmp_path):
                      "Write one factual caption (1-3 sentences) describing the scene and how the camera "
                      "moves.")["job_id"]
         out = q.wait(caller, job, 300)
-        while out["state"] not in ("done", "failed", "cancelled"):
+        while out["state"] not in ("done", "failed", "canceled"):
             out = q.wait(caller, job, 300)
         (ws / "paths.json").write_text('["/workspace/staging/cam.mp4"]')       # a second job, its list from a file
         again = q.wait(caller, submit(q, caller, "paths.json", "Name the place in three words.")["job_id"], 300)

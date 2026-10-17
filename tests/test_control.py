@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from ar_kernel.archive.clips import ClipStore
 from ar_kernel.archive.db import open_db
 from ar_kernel.archive.nodes import NodeStore
 from ar_kernel.control import Control, drive, kill_recorded_groups, mark_interrupted
@@ -75,6 +76,9 @@ def test_resume_marks_unfinished_nodes_interrupted_and_keeps_their_files(tmp_pat
     nodes = NodeStore(conn)
     nodes.create("root", None, 0), nodes.record_score("root", 0.7, ["m"], {"m": 0.7})
     nodes.create("n1", "root", 1)                                   # left running by a forced stop
+    ClipStore(conn).add({"clip_id": "a" * 64, "video_digest": "v", "caption_digest": "c", "annotation_digest": "a",
+                         "pose_digest": "p", "metadata": {}, "warnings": [],
+                         "derived_from": {"kind": "model", "name": "x"}, "ingested_by": "n1"})
     work = tmp_path / "nodes" / "n1" / "attempts" / "improve_recipe-1" / "workspace"
     work.mkdir(parents=True), (work / "notes.txt").write_text("keep me")
     (tmp_path / "staging" / "n1").mkdir(parents=True)
@@ -91,6 +95,7 @@ def test_resume_marks_unfinished_nodes_interrupted_and_keeps_their_files(tmp_pat
     assert killed == ["n1"] and nodes.get("root")["status"] == "scored"
     (event,) = [e for e in rec.read_events() if e["type"] == "node.interrupted"]
     assert rec.load_payload(event["payload"])["phase_reached"] == "train"
+    assert [c["ingested_by"] for c in ClipStore(conn).all()] == ["n1interrupted"]      # out of the pool
 
 
 def test_workers_of_a_dead_leader_are_still_killed(tmp_path):

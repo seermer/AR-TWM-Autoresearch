@@ -32,7 +32,7 @@ class Script:
     def __init__(self, tmp, edit=(), contract=(), recipe=(), gate=(), train=(), score=(), slow=None):
         self.tmp, self.q = tmp, {k: list(v) for k, v in dict(edit=edit, contract=contract, recipe=recipe,
                                                                gate=gate, train=train, score=score).items()}
-        self.retries, self.runners, self.slow = [], [], slow
+        self.calls, self.slow = [], slow
 
     def _next(self, key, default):
         return self.q[key].pop(0) if self.q[key] else default
@@ -44,28 +44,30 @@ class Script:
             for _ in range(1200):                    # short steps: a signal is handled within 0.5 s
                 time.sleep(0.5)
 
-    def edit_self(self, env, *, node, base_commit, runner_commit, attempt, retry, **kw):
-        self.retries.append(("edit_self", node, attempt, retry))
-        self.runners.append(runner_commit)
+    def edit_self(self, env, *, node, agent_commit, attempt, **kw):
+        assert "retry" not in kw and "previous_workspace" not in kw       # a retry starts clean
+        self.calls.append(("edit_self", node, attempt, agent_commit))
         d = self.tmp / "nodes" / node / "attempts" / f"edit_self-{attempt}"
         (d / "workspace").mkdir(parents=True, exist_ok=True)
         self._wait("edit_self")
         ok = self._next("edit", True)
-        return outcome(ok, d, {"summary": "s"} if ok else None,
-                       None if ok else "agent failed", commit=base_commit)
+        return outcome(ok, d, {"snapshot_id": agent_commit, "summary": "s"} if ok else None,
+                       None if ok else "agent failed", commit=agent_commit if ok else "f" * 40)   # the failed tree
 
     def contract(self, *, node, attempt, **kw):
         self._wait("contract")
         return ContractReport(ok=self._next("contract", True))
 
-    def improve_recipe(self, env, *, node, attempt, retry, **kw):
-        self.retries.append(("improve_recipe", node, attempt, retry))
+    def improve_recipe(self, env, *, node, attempt, **kw):
+        assert "retry" not in kw and "previous_workspace" not in kw
+        self.calls.append(("improve_recipe", node, attempt))
         d = self.tmp / "nodes" / node / "attempts" / f"improve_recipe-{attempt}"
         (d / "workspace").mkdir(parents=True, exist_ok=True)
         self._wait("improve_recipe")
         ok = self._next("recipe", True)
-        return outcome(ok, d, {"data_commit": "c" * 64, "recipe": {"optimizer.max_steps": 2},
-                               "rationale": "why"} if ok else None, None if ok else "no commit")
+        return outcome(ok, d, {"snapshot_id": "a" * 32, "data_commit": "c" * 64,
+                               "recipe": {"optimizer.max_steps": 2}, "rationale": "why",
+                               "summary": "tested"} if ok else None, None if ok else "no commit")
 
     def gate(self, loop, recipe, data_commit, parent_commit, node, attempt_dir):
         self._wait("gate")
@@ -102,10 +104,10 @@ class Script:
                       gate=self.gate, train=self.train, score=self.score)
 
 
-SCENARIO = dict(gate=[False, True],                                   # n1: no edit_self, a gate retry, then scored
-                edit=[True, False, False, False], contract=[False],   # n2: a contract retry, then invalid_code
-                train=[True, False, False, False],                    # n3: train_failed
-                score=[0.78, 0.80] + [RuntimeError("wbench gpu failed")] * 2)  # root, n1, n4 fails twice -> the run stops
+SCENARIO = dict(gate=[False, True],                                   # node0001: no edit_self, a gate retry, then scored
+                edit=[True, False, False, False], contract=[False],   # node0002: a contract retry, then invalid_code
+                train=[True, False, False, False],                    # node0003: train_failed
+                score=[0.78, 0.80] + [RuntimeError("wbench gpu failed")] * 2)  # root, node0001, node0004 fails twice -> the run stops
 
 
 def build(run: Path, max_nodes: int, script):

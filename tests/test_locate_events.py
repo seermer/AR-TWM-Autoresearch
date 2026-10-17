@@ -206,7 +206,7 @@ def test_a_cancel_while_the_sheets_are_drawn_asks_nothing(env, monkeypatch):
     assert drawing.wait(60)
     q.cancel(caller, job_id)
     out = q.wait(caller, job_id, 120)
-    assert out["state"] == "cancelled"
+    assert out["state"] == "canceled"
     assert not [e for e in rec.read_events("n1") if e["type"] == "locate.piece"]
     assert _server_gone(run, job_id)
 

@@ -99,7 +99,7 @@ def build_tool_app(mcp: MCPServer):
     )
 
 
-EDIT_SELF_TOOLS = {"ask", "read_skill"}       # edit_self improves the agent: no data tools
+EDIT_SELF_TOOLS = {"ask", "read_skill", "snapshot"}
 
 
 class ToolKit:

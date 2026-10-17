@@ -123,6 +123,10 @@ def _run(cfg, args) -> int:
         if args.git_remote and (error := AgentsRepo.check_remote(args.git_remote)):
             print(f"error: cannot reach --git-remote {args.git_remote}: {error}", file=sys.stderr)
             return 2
+        if args.git_remote and AgentsRepo.has_run(args.git_remote, args.run_id):
+            print(f"error: --git-remote {args.git_remote} already has a run named {args.run_id!r}; "
+                  "use another --run-id", file=sys.stderr)
+            return 2
     try:
         ctx = attach_run(cfg, args.run_id, os.environ) if args.resume else bootstrap_run(cfg, args.run_id, os.environ)
     except PreflightError as exc:
@@ -178,7 +182,7 @@ def _run(cfg, args) -> int:
     if killed or partial:
         ctx.recorder.event("run.resume_cleanup", payload={"killed_groups": killed, "hf_tmp": partial})
     mark_interrupted(ctx, "unfinished when the loop stopped (forced stop, kernel death or spent budget)")
-    kit = build_run_kit(run_cfg, ctx.run_dir, ctx.gpus, ctx.recorder, os.environ)
+    kit = build_run_kit(run_cfg, ctx.run_dir, ctx.gpus, ctx.recorder, os.environ, repo)
     loop = Loop(run_cfg, ctx, kit, repo, max_nodes=max_nodes, root_cache=run_cfg.root_cache)
     monitor = Monitor(run_cfg, ctx.run_dir, ctx.recorder, ctx.gpus, kit.budget)
     try:

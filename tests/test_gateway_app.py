@@ -149,6 +149,15 @@ def test_forwarded_call_is_recorded_and_upstream_key_never_reaches_telemetry(mak
     assert not _telemetry_contains(tmp_path, rec, "sk-REALKEY")
 
 
+@pytest.mark.parametrize("header,role", [("coder", "coder"), ("../x y", "___x_y"), (None, None), ("  ", None)])
+def test_the_role_header_labels_both_events(make, header, role):
+    client, caller, rec, _ = make()
+    headers = {"Authorization": f"Bearer {caller.token}", **({"X-AR-Role": header} if header is not None else {})}
+    assert client.post("/v1/responses", json={"model": "gpt-x", "input": "hi"}, headers=headers).status_code == 200
+    events = [e for e in rec.read_events("n1") if e["type"] in ("llm.request", "llm.response")]
+    assert len(events) == 2 and [e.get("role") for e in events] == [role, role]
+
+
 def test_request_is_persisted_before_forwarding(make, monkeypatch):
     """Fail-closed: if the request cannot be recorded, nothing is sent."""
     client, caller, rec, seen = make()

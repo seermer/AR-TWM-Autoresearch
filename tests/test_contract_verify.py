@@ -1,50 +1,29 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
 from ar_contract.models import EditContext, RecipeContext
 
 from ar_kernel.config import KernelConfig
-from ar_kernel.contract.verify import ContractHarness, static_check, verify_contract
+from ar_kernel.contract.verify import ContractHarness, verify_contract
 from ar_kernel.sandbox.runner import RunResult
 from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.vcs.agents_repo import AgentsRepo
 
 CFG = KernelConfig.load()
 FIXTURES = Path(__file__).parent / "fixtures" / "agents"
-_COMMON = {"nodes_remaining": 1, "attempt": 1, "max_attempts": 1, "dry_run": True}
+_COMMON = {"dry_run": True}
 SMOKE = {"edit_self": EditContext(**_COMMON).model_dump(mode="json"),
          "improve_recipe": RecipeContext(**_COMMON).model_dump(mode="json")}
-
-
-# 20,000 nested binary operations exhaust the parser's own AST-construction
-# recursion budget (RecursionError), not Python's own call stack -- distinct
-# from the "too many nested parentheses" SyntaxError the parser raises for
-# nested brackets/calls/parens. Deliberately not a SyntaxError.
-_DEEPLY_NESTED_SRC = ("def edit_self(ctx):\n    return " + "1+" * 20000 + "1\n"
-                     "def improve_recipe(ctx): ...\n")
-
-
-@pytest.mark.parametrize("src,ok,fragment", [
-    ("def edit_self(ctx): ...\ndef improve_recipe(ctx): ...\n", True, ""),
-    ("async def edit_self(ctx): ...\nasync def improve_recipe(ctx): ...\n", True, ""),
-    ("def edit_self(ctx): ...\n", False, "improve_recipe"),
-    ("def edit_self(ctx, extra): ...\ndef improve_recipe(ctx): ...\n", False, "exactly one"),
-    ("def edit_self(*args): ...\ndef improve_recipe(ctx): ...\n", False, "exactly one"),
-    ("def outer():\n    def edit_self(ctx): ...\ndef improve_recipe(ctx): ...\n", False, "edit_self"),
-    ("def edit_self(ctx):\n  return (\n", False, "syntax"),
-    pytest.param(_DEEPLY_NESTED_SRC, False, "cannot parse", id="deeply_nested_recursion_error"),
-])
-def test_static_check(src, ok, fragment):
-    step = static_check(src)
-    assert step.ok is ok and fragment in step.detail
 
 
 def test_each_container_token_is_revoked_and_its_jobs_cancelled(tmp_path, monkeypatch):
     """Like the phase runner: a smoke run must not leave GPU jobs behind on the harness queue.
     No Docker: the image build and the container are faked."""
     run = tmp_path / "run"
-    h = ContractHarness(CFG, run, Recorder(run))
+    repo = AgentsRepo(tmp_path / "agents.git")
+    h = ContractHarness(CFG, run, Recorder(run), repo)
     cancelled, tokens = [], []
     monkeypatch.setattr(h.queue, "cancel_for_token", lambda t: cancelled.append(t) or 0)
     monkeypatch.setattr("ar_kernel.contract.verify.ensure_image", lambda cfg, reqs, **k: "img:test")
@@ -57,15 +36,16 @@ def test_each_container_token_is_revoked_and_its_jobs_cancelled(tmp_path, monkey
         (mounts.workspace / "result.json").write_text(json.dumps({"ok": True, "result": {}}))
         return RunResult(0, False, "", "", 0.1, [], "c")
 
-    repo = AgentsRepo(tmp_path / "agents.git")
+    cfg = KernelConfig(raw={**CFG.raw, "sandbox": {**CFG.raw["sandbox"], "network": "test-net"}},
+                       repo_root=CFG.repo_root)
     try:
-        report = verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo,
+        report = verify_contract(cfg=cfg, run_dir=run, run_id="t", repo=repo,
                                  commit=repo.init(FIXTURES / "good"), harness=h, recorder=Recorder(run),
                                  node="n1", attempt=1, contexts=SMOKE, runner=runner)
     finally:
         h.queue.shutdown()
     assert report.ok, report.steps
-    assert networks and set(networks) == {"none"}          # verification containers stay offline
+    assert networks and set(networks) == {"test-net"}     # the phases' network
     assert len(tokens) == 3 and cancelled == tokens          # import + two smoke runs
     assert all(h.registry.lookup(t) is None for t in tokens)
 
@@ -75,7 +55,8 @@ def test_non_utf8_entry_py_fails_static_instead_of_raising(tmp_path, monkeypatch
     fault and must fail the `static` step, not raise out of
     verify_contract. No Docker: the runner would never even be called."""
     run = tmp_path / "run"
-    h = ContractHarness(CFG, run, Recorder(run))
+    repo = AgentsRepo(tmp_path / "agents.git")
+    h = ContractHarness(CFG, run, Recorder(run), repo)
     monkeypatch.setattr("ar_kernel.contract.verify.ensure_image", lambda cfg, reqs, **k: "img:test")
     agent_src = tmp_path / "agent_src" / "agent"
     agent_src.mkdir(parents=True)
@@ -85,7 +66,6 @@ def test_non_utf8_entry_py_fails_static_instead_of_raising(tmp_path, monkeypatch
     def runner(**kw):
         pytest.fail("the runner must not be invoked once static_check has failed")
 
-    repo = AgentsRepo(tmp_path / "agents.git")
     try:
         report = verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo,
                                  commit=repo.init(agent_src.parent), harness=h, recorder=Recorder(run),
@@ -109,7 +89,8 @@ def test_malformed_result_json_fails_the_smoke_step_instead_of_raising(
     smoke:<kind> step, not raise out of verify_contract. No Docker: the runner
     is faked."""
     run = tmp_path / "run"
-    h = ContractHarness(CFG, run, Recorder(run))
+    repo = AgentsRepo(tmp_path / "agents.git")
+    h = ContractHarness(CFG, run, Recorder(run), repo)
     monkeypatch.setattr("ar_kernel.contract.verify.ensure_image", lambda cfg, reqs, **k: "img:test")
 
     def runner(*, mounts, command, **kw):
@@ -119,7 +100,6 @@ def test_malformed_result_json_fails_the_smoke_step_instead_of_raising(
             (mounts.workspace / "result.json").write_text(json.dumps({"ok": True, "result": {}}))
         return RunResult(0, False, "", "", 0.1, [], "c")
 
-    repo = AgentsRepo(tmp_path / "agents.git")
     try:
         report = verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo,
                                  commit=repo.init(FIXTURES / "good"), harness=h, recorder=Recorder(run),
@@ -134,7 +114,8 @@ def _verify_tree(tmp_path, monkeypatch, mutate, runner=None):
     """verify_contract on a copy of the good fixture changed by `mutate(agent_dir)`; no Docker."""
     import shutil
     run = tmp_path / "run"
-    h = ContractHarness(CFG, run, Recorder(run))
+    repo = AgentsRepo(tmp_path / "agents.git")
+    h = ContractHarness(CFG, run, Recorder(run), repo)
     monkeypatch.setattr("ar_kernel.contract.verify.ensure_image", lambda cfg, reqs, **k: "img:test")
     src = tmp_path / "src"
     shutil.copytree(FIXTURES / "good", src)
@@ -143,7 +124,6 @@ def _verify_tree(tmp_path, monkeypatch, mutate, runner=None):
     def no_runner(**kw):
         pytest.fail("the runner must not be invoked")
 
-    repo = AgentsRepo(tmp_path / "agents.git")
     try:
         return verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo, commit=repo.init(src), harness=h,
                                recorder=Recorder(run), node="n1", attempt=1, contexts=SMOKE, runner=runner or no_runner)
@@ -197,7 +177,8 @@ def test_container_token_printed_by_agent_is_redacted_from_telemetry(tmp_path, m
     `recorder` records. No Docker: the runner is faked, standing in for what a
     real run_container would record via `recorder.event("sandbox.end", ...)`."""
     run = tmp_path / "run"
-    h = ContractHarness(CFG, run, Recorder(run))
+    repo = AgentsRepo(tmp_path / "agents.git")
+    h = ContractHarness(CFG, run, Recorder(run), repo)
     monkeypatch.setattr("ar_kernel.contract.verify.ensure_image", lambda cfg, reqs, **k: "img:test")
     recorder = Recorder(run)
     seen_tokens: list[str] = []
@@ -213,7 +194,6 @@ def test_container_token_printed_by_agent_is_redacted_from_telemetry(tmp_path, m
         (mounts.workspace / "result.json").write_text(json.dumps({"ok": True, "result": {}}))
         return RunResult(0, False, "", "", 0.1, [], "c")
 
-    repo = AgentsRepo(tmp_path / "agents.git")
     try:
         report = verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo,
                                  commit=repo.init(FIXTURES / "good"), harness=h, recorder=recorder,
@@ -243,16 +223,17 @@ def test_container_token_printed_by_agent_is_redacted_from_telemetry(tmp_path, m
 @pytest.fixture(scope="module")
 def harness(tmp_path_factory):
     run = tmp_path_factory.mktemp("run")
-    h = ContractHarness(CFG, run, Recorder(run))
+    repo = AgentsRepo(run / "agents.git")
+    repo.init(FIXTURES / "good")
+    h = ContractHarness(CFG, run, Recorder(run), repo)
     h.start()
-    yield h, run
+    yield h, run, repo
     h.stop()
 
 
 def _verify(harness, tmp_path, fixture, **timeouts):
-    h, run = harness
-    repo = AgentsRepo(tmp_path / "agents.git")
-    commit = repo.init(FIXTURES / fixture)
+    h, run, repo = harness
+    commit = repo.commit_tree(FIXTURES / fixture, None, fixture)
     return verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo, commit=commit, harness=h,
                            recorder=Recorder(run), node="n1", attempt=1, contexts=SMOKE, **timeouts)
 
@@ -265,7 +246,7 @@ def _failed_step(report):
 def test_good_agent_passes_every_step(harness, tmp_path):
     report = _verify(harness, tmp_path, "good")
     assert report.ok, report.steps
-    assert [s.name for s in report.steps] == ["build", "static", "prompts", "import", "smoke:edit_self",
+    assert [s.name for s in report.steps] == ["build", "static", "mentions", "import", "smoke:edit_self",
                                               "smoke:improve_recipe"]
 
 
@@ -277,7 +258,7 @@ def test_good_agent_passes_every_step(harness, tmp_path):
 def test_broken_agents_fail_at_the_right_step(harness, tmp_path, fixture, step):
     report = _verify(harness, tmp_path, fixture)
     assert not report.ok and _failed_step(report).name == step
-    assert report.to_retry()["failed_step"] == step
+    assert report.to_record()["failed_step"] == step
 
 
 @pytest.mark.docker
@@ -287,40 +268,43 @@ def test_hanging_smoke_run_times_out(harness, tmp_path):
     assert failed.name == "smoke:edit_self" and "timed out" in failed.detail
 
 
-@pytest.mark.parametrize("text,ok,fragment", [
-    ("# Mission\nYou choose the data idea.\n", True, ""),
-    ("# Mission\nKeep in mind that n12 scored best.\n", False, "n12"),
-    ("# How you work\nRaise follows_event_instruction first.\n", False, "follows_event_instruction"),
-    ("# Mission\nThe plan needs no nine-step list; turn 1 comes first.\n", True, ""),
+@pytest.mark.parametrize("text,hits", [
+    ("# Mission\nYou choose the data idea.\n", []),
+    ("x = 1\n# Keep in mind that node0012 scored best.\n", ["agent/tools.py:2 mentions node0012"]),
+    ("STEPS = '\\n1. look\\n2. act'  # n1, path/n3.py\n", []),
+    ("PRIORITY = 'follows_event_instruction'\n", ["agent/tools.py:1 mentions follows_event_instruction"]),
+    ("# The plan needs no nine-step list; turn 1 comes first; n_steps = 3.\n", []),
 ])
-def test_prompt_check_refuses_node_ids_and_metric_names(tmp_path, text, ok, fragment):
-    from ar_kernel.contract.verify import prompt_check
-    (tmp_path / "agent" / "prompts").mkdir(parents=True)
-    (tmp_path / "agent" / "prompts" / "planner.md").write_text(text)
-    step = prompt_check(tmp_path)
-    assert step.name == "prompts" and step.ok is ok and fragment in step.detail
+def test_mentions_finds_nodes_and_metrics_in_any_text_file(tmp_path, text, hits):
+    from ar_contract.static import mentions
+    (tmp_path / "agent").mkdir()
+    (tmp_path / "agent" / "tools.py").write_text(text)
+    assert mentions(tmp_path) == hits
 
 
-def test_an_agent_without_a_prompts_folder_passes_the_prompt_check(tmp_path):
-    from ar_kernel.contract.verify import prompt_check
-    assert prompt_check(tmp_path).ok
+def test_mentions_reads_subfolders_and_skips_binaries_symlinks_and_fifos(tmp_path):
+    from ar_contract.static import mentions
+    notes = tmp_path / "agent" / "memory"
+    notes.mkdir(parents=True)
+    (notes / "odd.md").mkdir()                                     # a directory named like a file
+    (notes / "blob.bin").write_bytes(b"\xff\xfe node0004 \x00")           # not text
+    (tmp_path / "agent" / "link.md").symlink_to(tmp_path / "outside.md")
+    (tmp_path / "outside.md").write_text("node0009\n")
+    os.mkfifo(notes / "pipe.md")                                   # reading it would block
+    assert mentions(tmp_path / "agent") == []
+    (notes / "lessons.md").write_text("ok\nnode0007 did well with camera_path_accuracy.\n")
+    assert mentions(tmp_path / "agent") == ["memory/lessons.md:2 mentions camera_path_accuracy",
+                                            "memory/lessons.md:2 mentions node0007"]
 
 
-def test_a_prompt_naming_a_node_fails_verification_before_any_container(tmp_path, monkeypatch):
+def test_the_seed_mentions_no_node_or_metric():
+    from ar_contract.static import mentions
+    assert mentions(Path(__file__).parents[1] / "seed_agent") == []
+
+
+def test_code_naming_a_node_fails_verification_before_any_container(tmp_path, monkeypatch):
     def mutate(agent):
-        (agent / "prompts").mkdir(exist_ok=True)
-        (agent / "prompts" / "planner.md").write_text("Remember: n3 used too many static clips.\n")
+        (agent / "notes.md").write_text("Remember: node0003 used too many static clips.\n")
     report = _verify_tree(tmp_path, monkeypatch, mutate)
     failed = next(s for s in report.steps if not s.ok)
-    assert failed.name == "prompts" and "n3" in failed.detail and "briefing" in failed.detail
-
-
-def test_prompt_check_reads_subfolders_and_skips_what_is_not_a_file(tmp_path):
-    from ar_kernel.contract.verify import prompt_check
-    prompts = tmp_path / "agent" / "prompts"
-    (prompts / "odd.md").mkdir(parents=True)                       # a directory named like a prompt
-    assert prompt_check(tmp_path).ok
-    (prompts / "roles").mkdir()
-    (prompts / "roles" / "planner.md").write_text("n7 did well.\n")
-    step = prompt_check(tmp_path)
-    assert not step.ok and "roles/planner.md" in step.detail and "n7" in step.detail
+    assert failed.name == "mentions" and failed.detail == "agent/notes.md:1 mentions node0003"

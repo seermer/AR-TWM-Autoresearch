@@ -1,6 +1,6 @@
 def edit_self(ctx):
-    return {"summary": ""}
+    return {"snapshot_id": "s", "summary": ""}
 
 
 def improve_recipe(ctx):
-    return {"data_commit": "", "recipe": {}, "rationale": ""}
+    return {"snapshot_id": "", "summary": "s"}

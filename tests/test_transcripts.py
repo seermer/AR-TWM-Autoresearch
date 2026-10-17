@@ -4,14 +4,14 @@ from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.transcripts import write_transcripts
 
 
-def test_one_file_per_conversation_named_by_its_submit_tool_with_a_message_per_line(tmp_path):
+def test_one_file_per_conversation_named_by_its_role_label_with_a_message_per_line(tmp_path):
     rec = Recorder(tmp_path)
     tools = [{"function": {"name": "read_file"}}, {"function": {"name": "submit_plan"}}]
     messages = [{"role": "system", "content": "# Role\nplan"}, {"role": "user", "content": "<context>x</context>"},
                 {"role": "assistant", "content": "", "reasoning": "think",
                  "tool_calls": [{"id": "t1", "function": {"name": "read_file", "arguments": '{"path": "a"}'}}]},
                 {"role": "tool", "tool_call_id": "t1", "content": "file text"}]
-    rec.event("llm.request", node="n1", phase="improve_recipe", attempt=1, conversation_id="c1",
+    rec.event("llm.request", node="n1", phase="improve_recipe", attempt=1, conversation_id="c1", role="plan",
               payload={"body": {"messages": messages, "tools": tools}})
     rec.event("llm.response", node="n1", phase="improve_recipe", attempt=1, conversation_id="c1",
               payload={"body": {"choices": [{"message": {"role": "assistant", "content": "all done"}}]}})
@@ -29,3 +29,11 @@ def test_one_file_per_conversation_named_by_its_submit_tool_with_a_message_per_l
 def test_missing_telemetry_writes_nothing_and_does_not_raise(tmp_path):
     write_transcripts(tmp_path, "n9")
     assert not (tmp_path / "nodes").exists()
+
+
+def test_a_conversation_without_a_label_is_unlabeled(tmp_path):
+    rec = Recorder(tmp_path)
+    rec.event("llm.request", node="n1", phase="edit_self", attempt=2, conversation_id="c1",
+              payload={"body": {"messages": [{"role": "user", "content": "x"}]}})
+    write_transcripts(tmp_path, "n1")
+    assert (tmp_path / "nodes" / "n1" / "transcripts" / "edit_self-2" / "01-unlabeled.jsonl").is_file()

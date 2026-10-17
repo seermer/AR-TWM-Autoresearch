@@ -11,10 +11,6 @@ class _Ctx(BaseModel):
     lineage: list[dict[str, Any]] = Field(default_factory=list)        # root .. parent
     siblings: list[dict[str, Any]] = Field(default_factory=list)       # the parent's finished children
     archive: dict[str, Any] = Field(default_factory=dict)
-    nodes_remaining: int
-    attempt: int
-    max_attempts: int
-    retry: dict[str, Any] | None = None          # the failed attempt's report, when retrying
     folders: dict[str, str] = Field(default_factory=dict)              # container path -> what it is for
     dry_run: bool = False
 
@@ -40,14 +36,23 @@ class RecipeContext(_Ctx):
     tools: list[str] = Field(default_factory=list)   # enabled kernel tool names
 
 
-class EditResult(BaseModel):
-    summary: str = Field(min_length=1)
+SUMMARY_CHARS = 4000
 
 
-class RecipeResult(BaseModel):
-    data_commit: str = Field(min_length=1)
-    recipe: dict[str, Any]
-    rationale: str = Field(min_length=1)
+class _Result(BaseModel):
+    snapshot_id: str = Field(min_length=1, description="the id of the snapshot that holds the work this phase "
+                                                       "hands back")
+    summary: str = Field(min_length=1, max_length=SUMMARY_CHARS,
+                         description="what this node tested and built, the change it was expected to cause, and "
+                                     "why this snapshot; stored with the node and shown to later nodes")
+
+
+class EditResult(_Result):
+    pass
+
+
+class RecipeResult(_Result):
+    pass
 
 
 CONTEXT_MODELS = {"edit_self": EditContext, "improve_recipe": RecipeContext}

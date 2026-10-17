@@ -94,6 +94,7 @@ def test_every_ref_is_pushed_under_the_run_name(tmp_path, seed):
     repo.set_ref(repo.branch_ref("n1"), child)
     assert _remote_refs(remote) == {"refs/heads/run1/node/root": root, "refs/heads/run1/node/n1": child,
                                     "refs/heads/run1/attempts/n1/edit_self-1": child}
+    assert AgentsRepo.has_run(str(remote), "run1") and not AgentsRepo.has_run(str(remote), "run")
 
 
 def test_a_failed_push_is_reported_and_caught_up_later(tmp_path, seed):

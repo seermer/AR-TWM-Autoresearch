@@ -4,6 +4,7 @@ from pathlib import Path
 
 import yaml
 
+from ..archive.clips import hidden
 from ..config import KernelConfig, run_config_path
 from ..subproc import output_tail, run_in_env
 from .recipe import TUNABLE_KEYS, steps_per_epoch, validate_recipe_values, write_resolved_config
@@ -46,6 +47,9 @@ class Gate:
         for name, entry in manifest["datasets"].items():
             if entry["weight"] > 0 and 0 < len(entry["clips"]) < n_gpus:
                 failures.append(f"dataset {name} has {len(entry['clips'])} clips, fewer than {n_gpus} GPUs")
+            gone = sum(hidden(self.commits.clips.get(c)["ingested_by"]) for c in entry["clips"])
+            if gone:
+                failures.append(f"dataset {name} has {gone} clips that are not in the pool")
 
         grad_accum = int(recipe.get("optimizer.grad_accum_steps", base["optimizer"]["grad_accum_steps"]))
         max_steps = int(recipe.get("optimizer.max_steps", base["optimizer"]["max_steps"]))

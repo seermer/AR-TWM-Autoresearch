@@ -45,16 +45,17 @@ class Llm:
     def __init__(self, rec: Recorder, node: str, phase: str, attempt: int) -> None:
         self.rec, self.base = rec, dict(node=node, phase=phase, attempt=attempt, component="gateway")
 
-    def call(self, conv, turn, messages, reply=None, tools=None, prompt_tokens=100) -> str:
+    def call(self, conv, turn, messages, reply=None, tools=None, prompt_tokens=100, role=None) -> str:
         call_id = uuid.uuid4().hex
+        labelled = {"role": role} if role else {}
         self.rec.event("llm.request", payload=chat_request(messages, tools), call_id=call_id,
-                       conversation_id=conv, turn_index=turn, parent_call_id=None, model="m", **self.base)
+                       conversation_id=conv, turn_index=turn, parent_call_id=None, model="m", **labelled, **self.base)
         if reply is not None:
             self.rec.event("llm.response", payload=chat_response(**reply), call_id=call_id,
                            conversation_id=conv, status=200, latency_s=1.5, attempts=1,
                            usage={"prompt_tokens": prompt_tokens, "completion_tokens": 10,
                                   "total_tokens": prompt_tokens + 10},
-                           cost_usd=0.001, mock=False, **self.base)
+                           cost_usd=0.001, mock=False, **labelled, **self.base)
         return call_id
 
 
@@ -75,8 +76,6 @@ def make_run(base: Path, name: str = "r1") -> Path:
 
     # agent code: the seed, two edit_self attempts of n1 (the second on top of the first)
     seed = Path(base) / "seed"
-    _write(seed / "agent" / "prompts" / "planner.md", PLANNER)
-    _write(seed / "agent" / "prompts" / "data_builder.md", BUILDER)
     _write(seed / "agent" / "entry.py", "X = 1\n")
     repo = AgentsRepo(run / "agents.git")
     root_commit = repo.init(seed)
@@ -132,6 +131,7 @@ def make_run(base: Path, name: str = "r1") -> Path:
     # node files
     _write(run / "nodes" / "n1" / "edit.json", {"summary": "tighter planner"})
     _write(run / "nodes" / "n1" / "rationale.md", "Why this recipe.\n")
+    _write(run / "nodes" / "n1" / "summary.md", "Tested pool clips.\n")
     _write(run / "nodes" / "n1" / "recipe.yaml", "optimizer.lr: 1.0e-05\n")
     attempt = run / "nodes" / "n1" / "attempts" / "improve_recipe-1"
     _write(attempt / "train_config.yaml", "optimizer:\n  lr: 1.0e-05\n")
@@ -141,6 +141,7 @@ def make_run(base: Path, name: str = "r1") -> Path:
            "[Train] step=2 epoch=0 source=ds1 loss=0.275391 grad=0.0310 lr=1.50e-05 time=8.08s\n")
     _write(attempt / "workspace" / "tool_output" / "run_command-20260927-120000-0001.log",
            "$ seq 3\nexit 0\n1\n2\n3\n")
+    _write(attempt / "workspace" / "tool_output" / "data_engineer-data_query-20260927-120001-2.txt", "$ data_query {}\n[]\n")
     _write(run / "staging" / "n1" / "improve_recipe-1" / "work" / "v2.mp4", b"\x00rejected")
     for node, score in (("root", 0.6), ("n1", 0.7)):
         work = run / "nodes" / node / "eval" / "work_dirs" / f"ar_{name}_{node}"
@@ -173,26 +174,26 @@ def make_run(base: Path, name: str = "r1") -> Path:
     plan_user = {"role": "user", "content": "CONTEXT"}
     first = {"content": "", "reasoning": "look first", "tool_calls": [tool_call("c1", "list_dir", {"path": "."})]}
     tools = [{"type": "function", "function": {"name": "list_dir", "description": "List a directory"}}]
-    llm.call("p1", 0, [plan_sys, plan_user], first, tools=tools)
+    llm.call("p1", 0, [plan_sys, plan_user], first, tools=tools, role="planner")
     # the harness round-trips reasoning with the assistant message it resends
     llm.call("p1", 1, [plan_sys, plan_user, {"role": "assistant", "content": "", "reasoning": "look first",
                                              "tool_calls": first["tool_calls"]},
                        {"role": "tool", "tool_call_id": "c1", "content": "a\nb"}], {"content": "plan done"},
-             tools=tools)
+             tools=tools, role="planner")
 
     build_sys = {"role": "system", "content": BUILDER + "\n\n# Reference: data_building.md\n\nref"}
     ingest_call = tool_call("c2", "data_ingest", {"candidates": []})
     history = [build_sys, {"role": "user", "content": "PLAN"}]
-    llm.call("b1", 0, history, {"content": "", "tool_calls": [ingest_call]})
+    llm.call("b1", 0, history, {"content": "", "tool_calls": [ingest_call]}, role="data_builder")
     history += [{"role": "assistant", "content": "", "tool_calls": [ingest_call]},
                 {"role": "tool", "tool_call_id": "c2", "content": "[{\"accepted\": true}]"},
                 {"role": "user", "content": COMPACT}]
-    llm.call("b1", 2, history, {"content": "", "tool_calls": [ingest_call]}, prompt_tokens=900)   # compaction, tool call
-    llm.call("b1", 2, history, {"content": SUMMARY}, prompt_tokens=900)                          # forced retry
+    llm.call("b1", 2, history, {"content": "", "tool_calls": [ingest_call]}, prompt_tokens=900, role="data_builder")   # compaction, tool call
+    llm.call("b1", 2, history, {"content": SUMMARY}, prompt_tokens=900, role="data_builder")                          # forced retry
     cont = [build_sys, {"role": "user", "content": CONTINUATION.format(summary=SUMMARY.strip())}]
-    llm.call("b2", 0, cont, {"content": "continuing"}, prompt_tokens=80)
+    llm.call("b2", 0, cont, {"content": "continuing"}, prompt_tokens=80, role="data_builder")
     llm.call("b2", 1, cont + [{"role": "assistant", "content": "continuing"},
-                              {"role": "user", "content": "go on"}], None)                        # no response
+                              {"role": "user", "content": "go on"}], None, role="data_builder")                        # no response
 
     span = rec.event("tool.call", node="n1", phase="improve_recipe", attempt=1, component="tools",
                      tool="data_ingest", payload={"tool": "data_ingest", "args": {"candidates": [

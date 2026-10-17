@@ -54,9 +54,14 @@ class AgentsRepo:
         args = ["commit-tree", tree, "-m", message] + (["-p", parent] if parent else [])
         return self._git(*args).stdout.decode().strip()
 
-    def set_ref(self, ref: str, commit: str) -> None:
+    def set_ref(self, ref: str, commit: str, push: bool = True) -> None:
         self._git("update-ref", ref, commit)
-        self.push()
+        if push:
+            self.push()
+
+    def delete_refs(self, prefix: str) -> None:
+        for ref in self._git("for-each-ref", "--format=%(refname)", prefix).stdout.decode().split():
+            self._git("update-ref", "-d", ref)
 
     @staticmethod
     def check_remote(url: str) -> str | None:
@@ -68,13 +73,20 @@ class AgentsRepo:
             return f"git ls-remote {url} timed out"
         return None if r.returncode == 0 else r.stderr.strip() or f"git ls-remote exited {r.returncode}"
 
+    @staticmethod
+    def has_run(url: str, namespace: str) -> bool:
+        """Whether `url` has branches under `namespace/`."""
+        out = subprocess.run(["git", "ls-remote", "--heads", url], capture_output=True, text=True,
+                             env=_remote_env(), timeout=60, check=True).stdout
+        return any(line.split("\t")[-1].startswith(f"refs/heads/{namespace}/") for line in out.splitlines())
+
     def push(self) -> None:
-        """Push every node branch and attempt ref. Refs are only ever added, so each push also
-        catches up any earlier push that failed."""
+        """Pushes every node branch, attempt ref and snapshot ref."""
         if not self.remote:
             return
         specs = [f"refs/heads/node/*:refs/heads/{self.namespace}/node/*",
-                 f"refs/attempts/*:refs/heads/{self.namespace}/attempts/*"]
+                 f"refs/attempts/*:refs/heads/{self.namespace}/attempts/*",
+                 f"refs/snapshots/*:refs/heads/{self.namespace}/snapshots/*"]
         cmd = ["git", "--git-dir", str(self.path), "push", "--quiet", self.remote, *specs]
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, env=_remote_env(), timeout=120)

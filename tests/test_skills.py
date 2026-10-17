@@ -12,7 +12,7 @@ from ar_kernel.tools.jobs import JobQueue, register_job_tools
 from ar_kernel.tools.server import ToolKit, new_mcp
 from ar_kernel.tools.skills import load_skills, register_skill_tool
 
-SKILLS = {"container", "data_formats", "clip_quality", "retries", "node_files", "large_files", "training_text"}
+SKILLS = {"container", "data_formats", "clip_quality", "node_files", "large_files", "training_text"}
 AGENT_TEXT_NEVER_SAYS = ("window", "per_chunk", "prompt_mode", "camera_motion", "provenance", "license", "round grid",
                          "rounds", "close-up", "clearly visible")
 

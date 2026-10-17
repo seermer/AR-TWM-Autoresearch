@@ -158,7 +158,7 @@ def test_real_zimage_generates_plausible_images(tmp_path):
         job = q.backends["generate_images"].submit(q, caller, {"items": [
             {"prompt": p, "seed": i} for i, p in enumerate(prompts)]})
         out = q.wait(caller, job["job_id"], 1800)
-        while out["state"] not in ("done", "failed", "cancelled"):
+        while out["state"] not in ("done", "failed", "canceled"):
             out = q.wait(caller, job["job_id"], 1800)
     finally:
         q.shutdown()

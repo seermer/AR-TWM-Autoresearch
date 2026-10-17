@@ -284,7 +284,7 @@ def _lock_up(root):
     (root / "sealed").chmod(0)
 
 
-def test_restored_access_lets_a_retry_copy_and_delete_the_tree(tmp_path):
+def test_restored_access_lets_the_kernel_copy_and_delete_the_tree(tmp_path):
     from ar_kernel.sandbox.runner import restore_owner_access
 
     ws = tmp_path / "ws"
@@ -292,9 +292,9 @@ def test_restored_access_lets_a_retry_copy_and_delete_the_tree(tmp_path):
     _lock_up(ws)
     (ws / "link").symlink_to(tmp_path / "elsewhere")          # dangling link: must not be followed
     restore_owner_access(ws)
-    shutil.copytree(ws, tmp_path / "retry", symlinks=True)    # the retry's workspace copy
+    shutil.copytree(ws, tmp_path / "copy", symlinks=True)
     shutil.rmtree(ws)                                         # re-running an attempt number
-    assert (tmp_path / "retry" / "sealed" / "inner.txt").read_text() == "y"
+    assert (tmp_path / "copy" / "sealed" / "inner.txt").read_text() == "y"
 
 
 @pytest.mark.docker
@@ -309,7 +309,7 @@ def test_container_runs_restore_owner_access_on_every_writable_mount(tmp_path, m
     for root in (mounts.agent, mounts.workspace, mounts.staging):
         assert (root / "sealed" / "inner.txt").read_text() == "y"
         assert (root / "locked.txt").read_text() == "x"
-    shutil.copytree(mounts.workspace, tmp_path / "retry", symlinks=True)
+    shutil.copytree(mounts.workspace, tmp_path / "copy", symlinks=True)
     shutil.rmtree(mounts.workspace)
 
 

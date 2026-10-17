@@ -2,6 +2,8 @@ from __future__ import annotations
 import hashlib, json, math, os, re, shutil, sqlite3, time
 from pathlib import Path
 
+from .clips import hidden
+
 BUILTIN_NAMES = {"sekai_real_hq", "spatialvid_hq", "sekai_game_walking", "sekai_real_walking",
                  "mugen_v2", "RealEstate10K", "spatialvid", "veo3", "OpenVid", "mp4_frame_game_3",
                  "sekai_real_mini"}
@@ -55,9 +57,12 @@ class CommitStore:
                     continue
                 seen.add(clip_id)
                 try:
-                    self.clips.get(clip_id)
+                    clip = self.clips.get(clip_id)
                 except KeyError:
                     bad[n] = "unknown clip"
+                    continue
+                if hidden(clip["ingested_by"]):
+                    bad[n] = "not in the pool"
             if bad:
                 raise BadClips(name, clip_ids, bad)
             if weight > 0 and clip_ids:

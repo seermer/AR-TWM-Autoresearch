@@ -182,8 +182,8 @@ def test_cancel_kills_every_worker(env):
     assert len(pids) == 4
     q.cancel(caller, job_id)
     out = q.wait(caller, job_id, 120)
-    assert out["state"] == "cancelled"
-    assert [i["error"] for i in job_result(out)["items"]] == ["no output (cancelled or not reached)"] * 4
+    assert out["state"] == "canceled"
+    assert [i["error"] for i in job_result(out)["items"]] == ["no output (canceled or not reached)"] * 4
     for pid in pids:
         with pytest.raises(ProcessLookupError):
             os.kill(pid, 0)

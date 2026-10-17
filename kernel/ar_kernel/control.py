@@ -8,6 +8,7 @@ import sys
 import threading
 from pathlib import Path
 
+from .archive.clips import hide_clips
 from .archive.nodes import NodeStore
 from .guards import alert
 from .sandbox.runner import kill_run_containers
@@ -109,6 +110,7 @@ def mark_interrupted(ctx, reason: str) -> list[str]:
         phase = state.get("phase") if state.get("node") == nid else None
         containers = kill_run_containers(Path(ctx.run_dir).name, nid)
         nodes.set_status(nid, "interrupted")
+        hide_clips(ctx.conn, ctx.recorder, nid, "interrupted")
         nodes.set_fields(nid, error=f"{reason} (phase {phase})")
         ctx.recorder.event("node.interrupted", child=nid, payload={
             "node": nid, "reason": reason, "phase_reached": phase, "containers": containers})
