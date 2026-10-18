@@ -7,7 +7,7 @@ CFG = KernelConfig.load()
 def test_api_judge_when_key_present():
     j = resolve_judge(CFG, {"VLM_API_KEY": "k", "VLM_MODEL_NAME": "Doubao-Seed-2.0-lite"})
     assert (j.kind, j.model) == ("api", "Doubao-Seed-2.0-lite")
-    assert judge_env(CFG, j, None) == {}
+    assert judge_env(CFG, j, None, None) == {}
 
 
 def test_local_judge_when_key_blank():

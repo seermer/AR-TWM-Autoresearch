@@ -48,11 +48,6 @@ class RunServices:
         for name in ("gateway.sock", "tools.sock"):
             os.chmod(name, 0o600, dir_fd=self._fd)
 
-    @property
-    def client_dir(self) -> Path:
-        """A short path to the sockets for clients on the host, valid until stop()."""
-        return Path(f"/proc/{os.getpid()}/fd/{self._fd}")
-
     def stop(self) -> None:
         for server in self._servers:
             server.should_exit = True

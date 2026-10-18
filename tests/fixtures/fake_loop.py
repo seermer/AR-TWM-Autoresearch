@@ -1,5 +1,5 @@
 """Scripted loop phases and a runnable fake loop for the integration tests: the real
-`drive` in a subprocess, with no GPU, LLM or Docker.
+`drive` in a subprocess, with no GPU, LLM or sandbox.
 Usage: python tests/fixtures/fake_loop.py RUN_DIR MAX_NODES none|pace|<phase>"""
 import sys
 import threading

@@ -14,5 +14,5 @@ description: Use when you need to know what the container provides: installed pr
 - Each kernel GPU tool is a queued job: it returns a job id at once. Jobs run one at a time, in the order they were submitted, so one job with every item is faster than several small ones.
 - A finished job writes its full result to `/workspace/staging/results/<tool>-<job_id>.json`; `job_wait` returns that path and a summary. `data_ingest` and `data_query` do the same. Read these files with a script.
 - A list argument of a kernel tool (paths, items, candidates, clip ids) may be the path of a file that holds the list, so a script can write it.
-- `/workspace/staging` is a separate mount from the rest of `/workspace`: a hard link across the two fails, a copy or a move works. Kernel tools refuse symbolic links and files outside `/workspace`.
+- `/workspace/staging` is a separate mount from the rest of `/workspace`: a hard link across the two fails, a copy or a move works. Kernel tools refuse files outside `/workspace`, and a symbolic link unless it is relative and stays inside `/workspace` or `/workspace/staging`.
 - Background processes: start with `nohup ... &`, list with `ps aux` or `pgrep -f`, stop with `pkill -f`.

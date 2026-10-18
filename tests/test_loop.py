@@ -394,7 +394,7 @@ def test_a_phase_that_crashes_after_reaching_for_the_evaluation_set_is_still_qua
         message = {"role": "assistant", "content": "I will fetch WBench."}
         loop.ctx.recorder.event("llm.response", node=node, phase="edit_self", attempt=attempt, conversation_id="c",
                                 payload={"body": {"choices": [{"message": message}]}})
-        raise RuntimeError("docker died")
+        raise RuntimeError("sandbox died")
     loop.phases.edit_self = crashing_edit
     loop.run()
     assert NodeStore(loop.ctx.conn).get("node0002")["status"] == "quarantined"
@@ -508,7 +508,7 @@ def test_a_quarantined_nodes_clips_leave_the_pool_with_its_failed_attempts(make_
         message = {"role": "assistant", "content": "I will fetch WBench."}
         loop.ctx.recorder.event("llm.response", node=node, phase="improve_recipe", attempt=2, conversation_id="c",
                                 payload={"body": {"choices": [{"message": message}]}})
-        raise RuntimeError("docker died")
+        raise RuntimeError("sandbox died")
     loop.phases.train = reaching_train
     loop.run()
     assert NodeStore(loop.ctx.conn).get("node0001")["status"] == "quarantined"

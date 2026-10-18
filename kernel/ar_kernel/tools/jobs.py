@@ -56,7 +56,7 @@ class Job:
 _TERMINAL = {"done", "failed", "canceled"}
 
 
-def summarise(result: dict) -> dict:
+def summarize(result: dict) -> dict:
     """What a caller is told of a finished job: how many items, how many failed and the first errors."""
     rows = result["items"] if isinstance(result.get("items"), list) else \
         [{"path": path, **row} for path, row in (result.get("clips") or {}).items()]
@@ -205,7 +205,7 @@ class JobQueue:
                     final, error, tb = "failed", f"{type(exc).__name__}: {exc}", traceback.format_exc()
             result_file = summary = None
             if result is not None:
-                summary = summarise(result)
+                summary = summarize(result)
                 try:
                     result_file = publish(job.caller, f"{job.backend}-{job.id}", result)
                 except OSError as exc:                    # the phase ended and took its staging with it

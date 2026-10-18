@@ -1,6 +1,6 @@
 """caption_videos: the vLLM caption job. Unit tests run a fake vLLM server
 (tests/fixtures/fake_vllm.py, no GPU); the `gpu` test runs the real model."""
-from conftest import job_result
+from conftest import client_dir, job_result
 import json
 import os
 import shutil
@@ -341,7 +341,7 @@ def test_caption_videos_over_mcp_queues_a_job_and_reports_path_errors(tmp_path):
     (tmp_path / "staging").mkdir()
 
     async def calls():
-        async with mcp_session(services.client_dir, caller.token) as session:
+        async with mcp_session(client_dir(services), caller.token) as session:
             job = json.loads((await session.call_tool("caption_videos", {"paths": ["a.mp4"], "prompt": "p"}))
                              .content[0].text)["job_id"]
             done = json.loads((await session.call_tool("job_wait", {"job_id": job})).content[0].text)

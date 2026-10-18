@@ -5,6 +5,7 @@ import hashlib
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -101,7 +102,7 @@ ETC_FILES = ("/etc/resolv.conf", "/etc/hosts", "/etc/ssl", "/etc/ca-certificates
 GPU_DEVICES = ("/dev/nvidiactl", "/dev/nvidia-uvm", "/dev/nvidia-uvm-tools")
 
 
-def _bwrap_args(mounts: Mounts, command, env, env_dir: Path, shm_gb: float,
+def bwrap_args(mounts: Mounts, command, env, env_dir: Path, shm_gb: float,
                 gpu_minors=()) -> tuple[list[str], dict[str, str]]:
     """The bwrap argv and the sandbox's whole environment (passed to bwrap as its own, so the token
     never appears on a command line)."""
@@ -109,7 +110,10 @@ def _bwrap_args(mounts: Mounts, command, env, env_dir: Path, shm_gb: float,
                    "PYTHONPATH": "/ar_contract", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1",
                    "AR_SOCKET_DIR": "/run/ar", "AR_AGENT_DIR": "/agent", "AR_CONTEXT_DIR": "/context",
                    "AR_WORKSPACE": "/workspace"}
-    argv = ["bwrap", "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup",
+    bwrap = shutil.which("bwrap")       # the kernel's PATH: Popen would search the sandbox's
+    if bwrap is None:
+        raise FileNotFoundError("bwrap is not on PATH: install bubblewrap")
+    argv = [bwrap, "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup",
             "--disable-userns", "--die-with-parent", "--new-session", "--ro-bind", "/usr", "/usr"]
     for d in ("/bin", "/sbin", "/lib", "/lib64"):
         if os.path.islink(d):
@@ -169,7 +173,7 @@ def run_container(*, name: str, mounts: Mounts, command: list[str], env: dict, e
     proc = None
     try:
         try:
-            argv, environment = _bwrap_args(mounts, command, env, env_dir, shm_gb, device_minors(list(gpus)))
+            argv, environment = bwrap_args(mounts, command, env, env_dir, shm_gb, device_minors(list(gpus)))
             recorder.event("sandbox.start", container=name,
                            payload={"settings": _redacted({"argv": argv, "environment": environment})}, **base)
             with open(out_path, "w") as out, open(err_path, "w") as err:

@@ -303,9 +303,9 @@ def test_runner_exception_still_revokes_token_and_cancels_jobs(env, monkeypatch)
     make, conn, root, _, queue = env
     cancelled = []
     monkeypatch.setattr(queue, "cancel_for_token", lambda t: cancelled.append(t) or 0)
-    runner = FakeRunner(None, raises=RuntimeError("docker exploded"))
+    runner = FakeRunner(None, raises=RuntimeError("sandbox exploded"))
     penv = make(runner)
-    with pytest.raises(RuntimeError, match="docker exploded"):
+    with pytest.raises(RuntimeError, match="sandbox exploded"):
         run_edit_self(penv, conn=conn, node="n1", parent_id="root", agent_commit=root, attempt=1)
     token = runner.calls[0]["env"]["AR_TOKEN"]
     assert penv.registry.lookup(token) is None

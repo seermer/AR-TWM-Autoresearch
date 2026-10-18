@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .config import GpuPolicyError, KernelConfig
 from .guards import check_tools_fit, choose_gpus, device_minors
-from .sandbox.runner import Mounts, _bwrap_args
+from .sandbox.runner import Mounts, bwrap_args
 from .subproc import cache_env, project_env
 
 ENVS = ("alayaworld", "wbench-main", "wbench-vp", "autoresearcher")
@@ -156,7 +156,7 @@ def _in_sandbox(cfg: KernelConfig, command: list[str], gpus=()) -> subprocess.Co
         mounts = Mounts(agent=dirs["agent"], workspace=dirs["workspace"], staging=dirs["staging"],
                         context=dirs["context"], contract=cfg.repo_root / "contract", sockets=dirs["sockets"],
                         agent_readonly=True)
-        argv, env = _bwrap_args(mounts, command, {}, cfg.repo_root / ".envs" / "agent", 1, device_minors(list(gpus)))
+        argv, env = bwrap_args(mounts, command, {}, cfg.repo_root / ".envs" / "agent", 1, device_minors(list(gpus)))
         return subprocess.run(argv, env=env, capture_output=True, text=True)
 
 

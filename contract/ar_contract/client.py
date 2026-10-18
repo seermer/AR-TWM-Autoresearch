@@ -7,9 +7,9 @@ verified on this stack:
 - the chat model speaks Chat Completions, the most widely supported OpenAI-compatible
   endpoint, and round-trips a reply's reasoning when it returns one (see `reasoning_of`);
 - the host is 'localhost' (the MCP server's rebinding guard rejects anything else);
-- MCP calls such as data_ingest run the dataset checker and take minutes, and recipe_check
-  can wait on the GPU lock then run the gate steps while hf_download fetches 20 GiB, so
-  the session read timeout is long (4 h) -- a client timeout shorter than a server op still
+- MCP calls such as data_ingest run the dataset checker, recipe_check can wait on the GPU
+  lock then run the gate steps, and hf_download fetches large files, so the session read
+  timeout is long -- a client timeout shorter than a server op still
   in progress would just make the agent retry work that hasn't failed;
 - the gateway owns upstream retries, so clients never retry.
 """

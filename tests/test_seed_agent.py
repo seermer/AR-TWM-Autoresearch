@@ -1,6 +1,7 @@
 """The seed agent: pure helpers in-process, then both entry points run the way a
 container runs them (python -m ar_contract.run in a subprocess) against the kernel's
 real gateway (scripted mock mode) and the mock tool server, over Unix sockets."""
+from conftest import client_dir
 import asyncio
 import json
 import os
@@ -645,7 +646,7 @@ def _run(kernel, tmp_path, kind, script, node, ctx):
     caller = registry.issue(node=node, phase=kind, attempt=1, workspace_host=ws, staging_host=tmp_path,
                             mock_script=script, agent_host=agent if edits else None,
                             base_commit=repo.commit_tree(agent, None, "copy") if edits else None)
-    env = {**os.environ, "AR_SOCKET_DIR": str(services.client_dir), "AR_TOKEN": caller.token,
+    env = {**os.environ, "AR_SOCKET_DIR": str(client_dir(services)), "AR_TOKEN": caller.token,
            "AR_DEFAULT_MODEL": "mock-model", "AR_WORKSPACE": str(ws), "AR_CONTEXT_DIR": str(ctx_dir),
            "AR_AGENT_DIR": str(agent)}
     proc = subprocess.run([sys.executable, "-m", "ar_contract.run", kind], env=env, cwd=REPO,
@@ -685,11 +686,11 @@ def _users(bodies) -> list[str]:
 
 
 def test_chat_model_works_sync_and_async_over_the_socket(kernel, tmp_path, monkeypatch):
-    """The container has no network: both the sync and the async client must use the socket."""
+    """Both the sync and the async client reach the chat model over the socket."""
     _, registry, services, _, _ = kernel
     caller = registry.issue(node="n-chat", phase="edit_self", attempt=1, workspace_host=tmp_path,
                             staging_host=tmp_path, mock_script="smoke")
-    monkeypatch.setenv("AR_SOCKET_DIR", str(services.client_dir))
+    monkeypatch.setenv("AR_SOCKET_DIR", str(client_dir(services)))
     monkeypatch.setenv("AR_TOKEN", caller.token)
     monkeypatch.setenv("AR_DEFAULT_MODEL", "mock-model")
     from langchain_core.messages import HumanMessage

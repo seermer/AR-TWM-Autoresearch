@@ -42,8 +42,8 @@ FOLDERS = {
                               "nodes",
         "/agent": "read-only: this agent's code",
         **_SHARED,
-        "kernel tool paths": "regular files under /workspace only; a symbolic link is refused, so copy the "
-                             "file instead"},
+        "kernel tool paths": "regular files under /workspace only; a symbolic link is refused unless it is "
+                             "relative and stays inside /workspace or /workspace/staging, so copy the file instead"},
     "edit_self": {
         "/agent": "the agent's code, writable in this phase",
         "/code": "read-only: the parent's code, which is the code running you",

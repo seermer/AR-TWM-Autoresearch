@@ -1,4 +1,5 @@
 """The snapshot tool over the socket, as a container calls it."""
+from conftest import client_dir
 import asyncio
 import json
 
@@ -43,7 +44,7 @@ def _call(services, caller, args):
     from ar_contract.client import mcp_session
 
     async def go():
-        async with mcp_session(services.client_dir, caller.token) as session:
+        async with mcp_session(client_dir(services), caller.token) as session:
             return await session.call_tool("snapshot", args)
     result = asyncio.run(go())
     return result.is_error, result.content[0].text

@@ -29,7 +29,7 @@ def resolve_judge(cfg: KernelConfig, env: Mapping[str, str]) -> Judge:
     return Judge("local", cfg.get("captioner.model"), None)
 
 
-def judge_env(cfg: KernelConfig, judge: Judge, base_url: str | None, api_key: str | None = None) -> dict[str, str]:
+def judge_env(cfg: KernelConfig, judge: Judge, base_url: str | None, api_key: str | None) -> dict[str, str]:
     """Extra environment for WBench's vlm phase. An API judge uses the caller's own VLM_* variables."""
     if judge.kind == "api":
         return {}

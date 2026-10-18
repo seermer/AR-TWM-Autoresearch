@@ -1,4 +1,5 @@
-import json, subprocess
+import json, os, subprocess
+from pathlib import Path
 import numpy as np
 import pytest
 
@@ -94,3 +95,8 @@ def _remember_result_files(monkeypatch):
 def job_result(view: dict) -> dict:
     """The full result of a finished job, read from the file job_wait named."""
     return json.loads(RESULT_FILES[view["result_file"]].read_text(encoding="utf-8"))
+
+
+def client_dir(services) -> Path:
+    """A short host path to a RunServices' sockets (AF_UNIX paths are capped at 107 bytes)."""
+    return Path(f"/proc/{os.getpid()}/fd/{services._fd}")

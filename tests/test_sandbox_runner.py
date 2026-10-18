@@ -5,7 +5,7 @@ import shutil
 import pytest
 
 from ar_kernel.sandbox import runner
-from ar_kernel.sandbox.runner import Mounts, _bwrap_args, container_name, diff, run_container, snapshot
+from ar_kernel.sandbox.runner import Mounts, bwrap_args, container_name, diff, run_container, snapshot
 from ar_kernel.telemetry.recorder import Recorder
 
 ENV_DIR = "/envs/agent"
@@ -33,7 +33,7 @@ def _binds(argv) -> dict[str, tuple[str, str]]:
 
 def test_mounts_keep_todays_layout_and_modes(tmp_path):
     m = _mounts(tmp_path)
-    argv, _ = _bwrap_args(m, ["python", "-m", "x"], {}, ENV_DIR, 64)
+    argv, _ = bwrap_args(m, ["python", "-m", "x"], {}, ENV_DIR, 64)
     b = _binds(argv)
     assert b["/agent"] == ("--bind", str(m.agent)) and b["/workspace"] == ("--bind", str(m.workspace))
     assert b["/workspace/staging"] == ("--bind", str(m.staging))
@@ -44,23 +44,32 @@ def test_mounts_keep_todays_layout_and_modes(tmp_path):
     assert argv[-8:] == ["--remount-ro", "/", "--chdir", "/workspace", "--", "python", "-m", "x"]
     assert {"--unshare-user", "--unshare-pid", "--disable-userns", "--die-with-parent", "--new-session"} <= set(argv)
     assert "--unshare-net" not in argv and "--clearenv" not in argv
-    ro = _bwrap_args(_mounts(tmp_path, agent_readonly=True), ["true"], {}, ENV_DIR, 64)[0]
+    ro = bwrap_args(_mounts(tmp_path, agent_readonly=True), ["true"], {}, ENV_DIR, 64)[0]
     assert _binds(ro)["/agent"] == ("--ro-bind", str(m.agent))
 
 
+def test_bwrap_is_found_on_the_kernels_path(tmp_path, monkeypatch):
+    """Popen would search the sandbox's PATH, which has no /usr/local/bin."""
+    monkeypatch.setattr(runner.shutil, "which", lambda name: "/opt/bin/" + name)
+    assert bwrap_args(_mounts(tmp_path), ["true"], {}, ENV_DIR, 64)[0][0] == "/opt/bin/bwrap"
+    monkeypatch.setattr(runner.shutil, "which", lambda name: None)
+    with pytest.raises(FileNotFoundError, match="install bubblewrap"):
+        bwrap_args(_mounts(tmp_path), ["true"], {}, ENV_DIR, 64)
+
+
 def test_tmp_and_shm_are_sized_tmpfs(tmp_path):
-    argv, _ = _bwrap_args(_mounts(tmp_path), ["true"], {}, ENV_DIR, 8)
+    argv, _ = bwrap_args(_mounts(tmp_path), ["true"], {}, ENV_DIR, 8)
     i, j = argv.index("/tmp"), argv.index("/dev/shm")
     assert argv[i - 3:i] == ["--size", str(4 * 2**30), "--tmpfs"] and argv[j - 3:j] == ["--size", str(8 * 2**30), "--tmpfs"]
 
 
 def test_no_gpu_device_and_no_sys_without_gpus(tmp_path):
-    argv, _ = _bwrap_args(_mounts(tmp_path), ["true"], {}, ENV_DIR, 64)
+    argv, _ = bwrap_args(_mounts(tmp_path), ["true"], {}, ENV_DIR, 64)
     assert not any(a.startswith("/dev/nvidia") for a in argv) and "/sys" not in argv
 
 
 def test_exactly_the_given_minors_with_gpus(tmp_path):
-    argv, _ = _bwrap_args(_mounts(tmp_path), ["true"], {}, ENV_DIR, 64, gpu_minors=[1, 0])
+    argv, _ = bwrap_args(_mounts(tmp_path), ["true"], {}, ENV_DIR, 64, gpu_minors=[1, 0])
     devs = sorted(p for p, (flag, _) in _binds(argv).items() if flag == "--dev-bind")
     assert devs == ["/dev/nvidia-uvm", "/dev/nvidia-uvm-tools", "/dev/nvidia0", "/dev/nvidia1", "/dev/nvidiactl"]
     assert _binds(argv)["/sys"] == ("--ro-bind", "/sys")
@@ -68,7 +77,7 @@ def test_exactly_the_given_minors_with_gpus(tmp_path):
 
 def test_the_environment_holds_only_the_given_variables(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-host")
-    _, env = _bwrap_args(_mounts(tmp_path), ["true"], {"AR_TOKEN": "t", "AR_NODE": "n1"}, ENV_DIR, 64)
+    _, env = bwrap_args(_mounts(tmp_path), ["true"], {"AR_TOKEN": "t", "AR_NODE": "n1"}, ENV_DIR, 64)
     assert env == {"PATH": f"{ENV_DIR}/bin:/usr/bin:/bin", "HOME": "/workspace/.home", "PYTHONPATH": "/ar_contract",
                    "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1", "AR_SOCKET_DIR": "/run/ar",
                    "AR_AGENT_DIR": "/agent", "AR_CONTEXT_DIR": "/context", "AR_WORKSPACE": "/workspace",
@@ -76,9 +85,9 @@ def test_the_environment_holds_only_the_given_variables(tmp_path, monkeypatch):
 
 
 def test_separate_running_code_is_mounted_read_only_and_named_in_the_env(tmp_path):
-    argv, env = _bwrap_args(_mounts(tmp_path, code=tmp_path / "code"), ["true"], {}, ENV_DIR, 64)
+    argv, env = bwrap_args(_mounts(tmp_path, code=tmp_path / "code"), ["true"], {}, ENV_DIR, 64)
     assert _binds(argv)["/code"] == ("--ro-bind", str(tmp_path / "code")) and env["AR_CODE_DIR"] == "/code"
-    assert "AR_CODE_DIR" not in _bwrap_args(_mounts(tmp_path), ["true"], {}, ENV_DIR, 64)[1]
+    assert "AR_CODE_DIR" not in bwrap_args(_mounts(tmp_path), ["true"], {}, ENV_DIR, 64)[1]
 
 
 def test_every_phase_sees_the_same_node_files_and_only_eval_is_hidden(tmp_path):
@@ -87,7 +96,7 @@ def test_every_phase_sees_the_same_node_files_and_only_eval_is_hidden(tmp_path):
     for folder in ("eval", "attempts/improve_recipe-1/context", "contract/attempt-1"):
         (n1 / folder).mkdir(parents=True)
     root.mkdir()
-    argv, _ = _bwrap_args(_mounts(tmp_path, nodes={"n1": n1, "root": root}), ["true"], {}, ENV_DIR, 64)
+    argv, _ = bwrap_args(_mounts(tmp_path, nodes={"n1": n1, "root": root}), ["true"], {}, ENV_DIR, 64)
     b = _binds(argv)
     assert b["/nodes/n1"] == ("--ro-bind", str(n1)) and b["/nodes/root"] == ("--ro-bind", str(root))
     assert [a for a in argv if a.startswith("/nodes/") and a.endswith("/eval")] == ["/nodes/n1/eval"] * 2
