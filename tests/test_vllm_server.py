@@ -1,3 +1,4 @@
+import json
 import sys
 import time
 from pathlib import Path
@@ -57,7 +58,7 @@ def _server(tmp_path, mode, gpus=(0, 1)):
 
 def test_start_waits_for_health_and_stop_ends_the_process(tmp_path):
     s = _server(tmp_path, "ok")
-    load_s = s.start(60)
+    load_s = s.start()
     assert load_s is not None and load_s > 0
     s.stop()
     import httpx
@@ -69,17 +70,19 @@ def test_a_server_that_exits_early_raises_with_the_log_tail(tmp_path):
     s = _server(tmp_path, "exit")
     try:
         with pytest.raises(RuntimeError, match="(?s)exited during startup.*CUDA out of memory"):
-            s.start(60)
+            s.start()
     finally:
         s.stop()
 
 
-def test_a_server_that_is_never_ready_times_out(tmp_path):
+def test_a_server_that_is_never_ready_waits_until_cancelled(tmp_path):
+    import threading
     s = _server(tmp_path, "ok")
     s.command = [sys.executable, "-c", "import time; time.sleep(600)"]
+    cancel = threading.Event()
+    threading.Timer(3, cancel.set).start()
     try:
-        with pytest.raises(RuntimeError, match="not ready within 3 s"):
-            s.start(3)
+        assert s.start(cancel) is None
     finally:
         s.stop()
 
@@ -101,3 +104,22 @@ def test_the_free_check_waits_with_backoff_for_a_job_that_is_still_giving_memory
     with pytest.raises(RuntimeError, match="GPU 0 has 9000 MiB"):
         require_free_gpus([0], 512, gpu_memory=lambda gpus: {0: 9000}, waits=FREE_WAITS_S, sleep=slept.append)
     assert slept == [4, 8, 16, 32, 64]                 # 124 s in all, then the refusal
+
+
+def test_requests_need_the_servers_key_and_telemetry_never_holds_it(tmp_path):
+    import httpx
+    from ar_kernel.subproc import free_port
+    from ar_kernel.telemetry.recorder import Recorder
+    rec, port = Recorder(tmp_path / "run"), free_port()
+    s = VllmServer("autoresearcher", ["python", str(Path(__file__).parent / "fixtures" / "fake_vllm.py"), "m",
+                                      "--host", "127.0.0.1", "--port", str(port)], [0], port, cwd=tmp_path, log_path=tmp_path / "s.log",
+                   recorder=rec, poll_s=0.1)
+    try:
+        s.start()
+        assert httpx.post(f"{s.base_url}/v1/chat/completions", json={}, timeout=5, trust_env=False).status_code == 401
+    finally:
+        s.stop()
+    assert len(s.api_key) > 20 and s.api_key not in rec.events_path().read_text()
+    (start,) = [e for e in rec.read_events() if e["type"] == "subproc.start"]
+    assert rec.load_payload(start["payload"])["extra_env"]["VLLM_API_KEY"] != s.api_key
+    assert s.api_key not in json.dumps(rec.load_payload(start["payload"]))

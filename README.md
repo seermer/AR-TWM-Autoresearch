@@ -8,12 +8,12 @@ Every step ends with a check; do not continue if it fails.
 | | |
 |---|---|
 | OS | Linux x86_64 |
-| GPUs | 4 NVIDIA 24 GB cards (tested: RTX 4090), all idle. A run uses GPUs in groups of 4: of 6 listed it uses the first 4 |
+| GPUs | 4 NVIDIA 24 GB cards of one model (tested: RTX 4090), all idle. A run takes the first `gpus.num_gpus` idle cards (`configs/kernel.yaml`: 4, a multiple of 4) |
 | Driver | `nvidia-smi` shows `CUDA Version: 13.2` or higher |
 | CUDA toolkit | `nvcc --version` works and says 12.x (usually `/usr/local/cuda-12.8`) |
 | RAM | 128 GB minimum, 256 GB recommended |
 | Disk | 850 GB free on one disk (downloads about 600 GB) |
-| Software | `conda` (Miniforge), `git`, `ffmpeg`, `docker` (your user can run `docker ps` without `sudo`) with `nvidia-container-toolkit` (agent containers use the GPUs) |
+| Software | `conda` (Miniforge), `git`, `ffmpeg`, `bwrap` (bubblewrap, with unprivileged user namespaces allowed: agents run in bwrap sandboxes), and `curl`, `wget`, `unzip`, `gcc` (the sandboxes use them from the host) |
 | Accounts | GitHub (SSH key), Hugging Face, an LLM API key (see step 3) |
 
 Check:
@@ -21,7 +21,8 @@ Check:
 ```bash
 nvidia-smi
 nvcc --version
-conda --version && git --version && ffmpeg -version | head -1 && docker ps
+conda --version && git --version && ffmpeg -version | head -1 && which curl wget unzip gcc
+bwrap --unshare-user --ro-bind / / true && echo bwrap ok
 ssh -T git@github.com          # must say "Hi <your-user>!"
 df -h .
 ```
@@ -47,13 +48,13 @@ Check: `ls ../WBench/third_party/mega-sam/base/setup.py` prints the path.
 
 ## 2. Create the environments
 
-Nine conda environments, all created inside `AutoResearcher/.envs/`. Takes 30 to 60 minutes and about 55 GB.
+Ten conda environments, all created inside `AutoResearcher/.envs/`. Takes 30 to 60 minutes and about 62 GB.
 
 ```bash
 scripts/setup_envs.sh
 ```
 
-Check: `ls .envs` lists `alayaworld autoresearcher gen-lightx2v gen-ltx25 gen-wan22 gen-zimage vllm wbench-main wbench-vp`.
+Check: `ls .envs` lists `agent alayaworld autoresearcher gen-lightx2v gen-ltx25 gen-wan22 gen-zimage vllm wbench-main wbench-vp`.
 If it stops on an error, fix the cause and run it again: environments that already exist are skipped.
 To rebuild one, delete `.envs/<name>` and run `scripts/setup_envs.sh <name>`.
 
@@ -175,7 +176,6 @@ Check: the last line says `[Precache] done` and `ls ../WorldModel/cache/text_emb
 
 ```bash
 ar doctor                       # must end with "0 failed"
-docker run --rm hello-world >/dev/null && echo docker ok
 nvidia-smi --query-gpu=index,memory.used --format=csv     # every GPU near 0 MiB
 pytest tests -q                 # optional: unit tests, no GPU needed, about 12 minutes
 ```
@@ -190,9 +190,11 @@ pytest tests -q                 # optional: unit tests, no GPU needed, about 12 
 ```bash
 export RUN=exp1                                  # your run name
 export REMOTE=git@github.com:<you>/AR-run-1.git  # the empty repo from step 3
-CUDA_VISIBLE_DEVICES=0,1,2,3 nohup ar run --run-id $RUN --max-nodes 6 --git-remote $REMOTE \
+nohup ar run --run-id $RUN --max-nodes 6 --git-remote $REMOTE \
   > runs/$RUN.console.log 2>&1 &
 ```
+
+The run takes the first `gpus.num_gpus` cards (`configs/kernel.yaml`, 4) that have no memory in use, and refuses to start while `CUDA_VISIBLE_DEVICES` is set.
 
 The loop first measures the starting model (the "root", about 2 hours), then improves it node by node
 (about 9-14 hours per node measured on 4 GPUs). The root is measured once: it is kept in `root_cache/`
@@ -237,7 +239,7 @@ From another computer: `ssh -L 7860:127.0.0.1:7860 <user>@<server>`, then open t
 ```bash
 ar stop --run-id $RUN                   # stops after the current node finishes (can take hours)
 ar stop --run-id $RUN --force           # stops now, waits until the loop has exited
-CUDA_VISIBLE_DEVICES=0,1,2,3 nohup ar run --run-id $RUN --resume >> runs/$RUN.console.log 2>&1 &
+nohup ar run --run-id $RUN --resume >> runs/$RUN.console.log 2>&1 &
 ```
 
 Resume keeps every finished node; a node that was still in progress is dropped and a new one is started.
@@ -257,12 +259,13 @@ Do not delete files under `runs/$RUN` by hand.
 |---|---|
 | `OPENAI_API_KEY is empty` | Fill `.env` (step 3). Run `ar` from `AutoResearcher`. |
 | `run ... exists; use --resume` | Use a new `--run-id`, or add `--resume` to continue it. |
-| `need at least 4 GPUs` / GPU out of memory at start | Set `CUDA_VISIBLE_DEVICES` to 4 idle GPUs. Check `nvidia-smi` for other processes. |
+| `need 4 free GPUs` / GPU out of memory at start | Fewer idle cards than `gpus.num_gpus`. Check `nvidia-smi` for other processes. |
+| `unset CUDA_VISIBLE_DEVICES` | The run picks its own cards: `unset CUDA_VISIBLE_DEVICES` in that shell. |
 | `eval_failed` alert in `ar status`, and the run stopped | A node's evaluation failed twice in a row, so the run stopped instead of training more nodes. The alert carries the error. Fix it, then `--resume`: that node is dropped and a new one is started. |
 | `enabled tools do not fit GPUs` | A tool needs more GPU memory in total than the run's cards have (`min_total_gpu_gib` in `configs/kernel.yaml`). Give the run more or larger GPUs, or switch that generator off before starting a new run. |
 | `tool_does_not_fit` alert in `ar status`, and the run stopped | A GPU tool found the machine too small while running; the alert names the worker log. Give the run more or larger GPUs, then `--resume`. |
 | `permission denied (publickey)` for the git remote | `ssh-add` your key in the shell that runs `ar`; check with `ssh -T git@github.com`. It shows up as a warning in `ar status`. |
-| `docker: permission denied` | Add your user to the `docker` group, log in again. |
+| `ar doctor` fails at `bwrap` | Install bubblewrap; if a sandbox does not start, an administrator must allow unprivileged user namespaces. |
 | Hugging Face `401` / `403` | Re-run `hf auth login` and accept the licences in step 3. |
 | `ar doctor` reports missing weights or a broken link | Re-run the download command for that folder (step 4). |
 | Evaluation fails with a missing text embedding | Redo step 5. |

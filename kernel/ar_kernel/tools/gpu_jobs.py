@@ -13,7 +13,6 @@ import shutil
 import threading
 import time
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Annotated, Any, Callable
 
 from mcp.server.mcpserver import Context
@@ -188,21 +187,18 @@ class GpuJob:
     """Base JobQueue backend. Subclasses set name/tool, kind ("rollout" | "annotation" | "image"),
     generator (the name in `derived_from`), file_keys (item fields naming workspace files), frame_keys
     (those of them holding an image that must have the job's size, with `frame_size`),
-    optionally config_key (the kernel.yaml block, `self.block`, whose timeout_s overrides
-    the class default) and implement check_args, produce and finish. A job takes any number of items, or at most the block's
+    optionally config_key (the kernel.yaml block, `self.block`) and implement check_args, produce and finish. A job takes any number of items, or at most the block's
     `max_items`."""
     name = tool = kind = generator = description = config_key = ""
     file_keys: tuple[str, ...] = ()
     frame_keys: tuple[str, ...] = ()
     takes_keyframes = False     # items may carry `keyframes` (check_keyframes)
-    timeout_s: float | None = None   # per-job wall-clock cap enforced by run_workers; None = no cap
 
     def __init__(self, cfg, run_dir: Path, gpus: list[int], registry, recorder,
                  gpu_memory=gpu_memory_mib) -> None:
         self.cfg, self.run_dir, self.gpus = cfg, Path(run_dir), list(gpus)
         self.registry, self.recorder, self.gpu_memory = registry, recorder, gpu_memory
         self.block = (cfg.get(self.config_key) if self.config_key else None) or {}
-        self.timeout_s = self.block.get("timeout_s", self.timeout_s)
         self.max_items = self.block.get("max_items")
 
     # ---- submit (tool call; fast; ToolError goes back to the agent) ----
@@ -382,14 +378,11 @@ class GpuJob:
     # ---- workers ----
     def run_workers(self, env: str, argv_for: Callable[[int, int], list[str]], groups: list[list[int]], *,
                     job, work: Path, out: Path, total: int, cancel, report, cwd: Path | None = None,
-                    extra_env: dict | None = None, deadline: float | None = None,
+                    extra_env: dict | None = None,
                     done: Callable[[], int] | None = None) -> tuple[list[int | str], dict[int, str]]:
         """One worker per GPU group, in parallel; each handles items with index % world == rank.
-        A cancel kills every worker's process group, and so does this backend's own `timeout_s`
-        (the deadline is checked in the polling loop, and once passed acts on the workers exactly
-        like an external cancel; `deadline`, a time.monotonic() value, replaces the one computed
-        from `timeout_s` when a backend spent part of that budget before its workers). An item whose worker died without writing its status becomes an
-        item error carrying the worker's exit code (or "timeout after Ns") and log tail.
+        A cancel kills every worker's process group. An item whose worker died without writing its status becomes an
+        item error carrying the worker's exit code and log tail.
 
         Returns (codes, missing): `missing` maps such an item's index to that error message, for
         `run` to pass into `_collect`. The staged items' indices are read back from
@@ -402,16 +395,11 @@ class GpuJob:
             raise ValueError("run_workers: no GPU groups (check the GPU list, gpus_per_worker and workers)")
         indices = [item["index"] for item in json.loads((work / "items.json").read_text(encoding="utf-8"))]
         codes: list[int | str | None] = [None] * len(groups)
-        if deadline is None and self.timeout_s:
-            deadline = time.monotonic() + self.timeout_s
-        timed_out = threading.Event()
-        worker_cancel = cancel if deadline is None else \
-            SimpleNamespace(is_set=lambda: cancel.is_set() or timed_out.is_set())
 
         def one(rank: int, group: list[int]) -> None:
             try:
                 codes[rank] = run_cancellable(
-                    env, argv_for(rank, len(groups)), cwd=cwd or work, cancel=worker_cancel,
+                    env, argv_for(rank, len(groups)), cwd=cwd or work, cancel=cancel,
                     extra_env={**(extra_env or {}), "CUDA_VISIBLE_DEVICES": ",".join(map(str, group)),
                                "CUDA_DEVICE_ORDER": "PCI_BUS_ID"},
                     log_path=work / f"worker{rank}.log", recorder=self.recorder, node=job.node, phase=self.tool)
@@ -423,8 +411,6 @@ class GpuJob:
         for t in threads:
             t.start()
         while any(t.is_alive() for t in threads):
-            if deadline is not None and time.monotonic() > deadline:
-                timed_out.set()
             report({"done": done(), "total": total})
             time.sleep(0.2)             # short poll so a finished job returns promptly
         for t in threads:
@@ -438,13 +424,12 @@ class GpuJob:
             raise RuntimeError(f"{message}:\n{file_tail(log, 2000)}")
         world = len(groups)
         missing: dict[int, str] = {}
-        if cancel.is_set() and not timed_out.is_set():
+        if cancel.is_set():
             return codes, missing           # the cancel killed the workers: _collect's "canceled or not reached"
         for index in indices:
             code = codes[index % world]
             if code not in (0, None) and not (out / f"{index}.json").exists():
-                reason = f"timeout after {self.timeout_s}s" if timed_out.is_set() else f"exit code {code}"
-                missing[index] = (f"worker {index % world} failed ({reason}); log tail:\n"
+                missing[index] = (f"worker {index % world} failed (exit code {code}); log tail:\n"
                                   f"{file_tail(work / f'worker{index % world}.log', 2000)}")
         return codes, missing
 
@@ -456,11 +441,9 @@ JOB_NOTE = (" One call is one job: send every item in it, however many (jobs run
 
 
 def job_description(backend) -> str:
-    limit = getattr(backend, "timeout_s", None)
-    stop = f" A job is stopped after {limit / 3600:g} h; items not finished by then are item errors." if limit else ""
     cap = getattr(backend, "max_items", None)
     most = f" At most {cap} items per job." if cap else ""
-    return backend.description + JOB_NOTE + most + stop
+    return backend.description + JOB_NOTE + most
 
 
 def register_gpu_tools(mcp, kit, q) -> None:

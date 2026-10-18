@@ -19,7 +19,7 @@ from ..data.annotation import FIRST_TURN_FRAMES, FPS, SWITCH
 from ..data.probe import probe_video
 from ..subproc import meminfo_gib
 from .gpu_jobs import IMAGE_EXTS, GpuJob
-from .rollouts import FFMPEG_TIMEOUT_S, SIZE, check_published, check_turn_item, checked_repo, item_annotation
+from .rollouts import SIZE, check_published, check_turn_item, checked_repo, item_annotation
 from .server import ToolError
 
 H3_BRIDGE = Path(__file__).resolve().parents[1] / "bridges" / "h3_generate.py"
@@ -130,7 +130,7 @@ class H3Backend(GpuJob):
     name = tool = "rollout_h3"
     kind = "rollout"
     generator = "minimax-h3"
-    config_key = "generators.h3"        # timeout_s, max_items
+    config_key = "generators.h3"        # max_items
     file_keys = frame_keys = ("image",)
 
     def __init__(self, *args, **kwargs) -> None:
@@ -201,7 +201,7 @@ class H3Backend(GpuJob):
         frames, starts = self._layout(item)
         silent = out / f"{item['index']}.silent.mp4"
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(out / f"{item['index']}.mp4"), "-an",
-                        "-c:v", "copy", str(silent)], check=True, timeout=FFMPEG_TIMEOUT_S)
+                        "-c:v", "copy", str(silent)], check=True)
         info = probe_video(silent)
         if (info.width, info.height) != SIZE:
             raise ValueError(f"rendered clip is {info.width}x{info.height}, not {SIZE[0]}x{SIZE[1]}")

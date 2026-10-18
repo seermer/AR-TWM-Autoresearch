@@ -43,7 +43,7 @@ def _call(services, caller, args):
     from ar_contract.client import mcp_session
 
     async def go():
-        async with mcp_session(services.socket_dir, caller.token) as session:
+        async with mcp_session(services.client_dir, caller.token) as session:
             return await session.call_tool("snapshot", args)
     result = asyncio.run(go())
     return result.is_error, result.content[0].text

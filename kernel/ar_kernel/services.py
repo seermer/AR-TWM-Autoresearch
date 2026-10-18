@@ -1,9 +1,7 @@
 """Start/stop the gateway and tool server on a run's Unix socket directory."""
 from __future__ import annotations
 
-import hashlib
 import os
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -12,15 +10,16 @@ import uvicorn
 
 
 def socket_dir_for(run_dir: Path) -> Path:
-    """A short, private, per-run directory. AF_UNIX paths are capped at 107 bytes
-    and a socket under runs/<run_id>/ is ~125."""
-    digest = hashlib.sha1(str(Path(run_dir).resolve()).encode()).hexdigest()[:12]
-    return Path(tempfile.gettempdir()) / f"ar-{digest}"
+    return Path(run_dir) / "sockets"
 
 
 class RunServices:
+    """Sockets are bound through /proc/self/fd/<folder fd>: AF_UNIX paths are capped at 107 bytes
+    and the real folder path is longer."""
+
     def __init__(self, socket_dir: Path) -> None:
         self.socket_dir = Path(socket_dir)
+        self._fd: int | None = None
         self._servers: list[uvicorn.Server] = []
         self._threads: list[threading.Thread] = []
         self._names: list[str] = []
@@ -28,8 +27,9 @@ class RunServices:
     def start(self, gateway_app, tools_app, ready_timeout_s: float = 20.0) -> None:
         self.socket_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self.socket_dir, 0o700)
+        self._fd = os.open(self.socket_dir, os.O_DIRECTORY)
         for name, app in (("gateway.sock", gateway_app), ("tools.sock", tools_app)):
-            path = self.socket_dir / name
+            path = Path(f"/proc/self/fd/{self._fd}") / name
             if path.exists():
                 path.unlink()
             server = uvicorn.Server(uvicorn.Config(app, uds=str(path), log_level="warning",
@@ -46,7 +46,12 @@ class RunServices:
                 raise RuntimeError(f"services did not start within {ready_timeout_s}s")
             time.sleep(0.05)
         for name in ("gateway.sock", "tools.sock"):
-            os.chmod(self.socket_dir / name, 0o600)
+            os.chmod(name, 0o600, dir_fd=self._fd)
+
+    @property
+    def client_dir(self) -> Path:
+        """A short path to the sockets for clients on the host, valid until stop()."""
+        return Path(f"/proc/{os.getpid()}/fd/{self._fd}")
 
     def stop(self) -> None:
         for server in self._servers:
@@ -58,8 +63,14 @@ class RunServices:
         self._threads.clear()
         self._names.clear()
         # Clean up the sockets before raising, so a stuck thread never leaves one behind.
-        for name in ("gateway.sock", "tools.sock"):
-            (self.socket_dir / name).unlink(missing_ok=True)
+        if self._fd is not None:
+            for name in ("gateway.sock", "tools.sock"):
+                try:
+                    os.unlink(name, dir_fd=self._fd)
+                except FileNotFoundError:
+                    pass
+            os.close(self._fd)
+            self._fd = None
         if stuck:
             raise RuntimeError(f"service thread(s) did not stop within the join timeout: "
                                f"{', '.join(stuck)}")

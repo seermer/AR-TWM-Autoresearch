@@ -1,8 +1,7 @@
 """run_in_env must be safe to use from an unattended multi-day loop.
 
-subprocess.run(timeout=) kills only the `conda run` process and orphans torchrun ranks and
-WBench multiprocessing workers, which keep holding GPUs. A timeout therefore stops the whole
-process group, writes an event and keeps the output captured so far.
+Killing only the `conda run` process orphans torchrun ranks and WBench multiprocessing workers,
+which keep holding GPUs. A cancel therefore stops the whole process group.
 """
 import os
 import threading
@@ -11,8 +10,7 @@ import time
 import pytest
 
 from ar_kernel.config import REPO_ROOT
-from ar_kernel.liveness import Liveness, tree_mark
-from ar_kernel.subproc import SubprocTimeout, conda_command, run_in_env
+from ar_kernel.subproc import conda_command, run_in_env
 from ar_kernel.telemetry.recorder import Recorder
 
 ENV = "autoresearcher"
@@ -62,29 +60,25 @@ def test_success_returns_output_and_code(tmp_path):
     assert "hello" in proc.stdout
 
 
-def test_timeout_kills_the_whole_process_group(tmp_path):
+def test_cancel_kills_the_whole_process_group(tmp_path):
     """A grandchild (standing in for a torchrun rank / spawn worker) must die too."""
     pidfile = tmp_path / "child.pid"
     script = f"sleep 600 & echo $! > {pidfile}; echo started; wait"
-    with pytest.raises(SubprocTimeout):
-        run_in_env(ENV, ["bash", "-c", script], cwd=tmp_path, timeout=8)
+    cancel = threading.Event()
+    threading.Thread(target=lambda: (_wait_for(pidfile), cancel.set()), daemon=True).start()
+    proc = run_in_env(ENV, ["bash", "-c", script], cwd=tmp_path, cancel=cancel, poll_s=0.2)
+    assert proc.cancelled and "started" in proc.stdout
     child = int(pidfile.read_text())
     deadline = time.time() + 15
     while _alive(child) and time.time() < deadline:
         time.sleep(0.2)
-    assert not _alive(child), "grandchild survived the timeout -- it would keep holding the GPU"
+    assert not _alive(child), "grandchild survived the cancel -- it would keep holding the GPU"
 
 
-def test_timeout_records_an_event_with_the_partial_output(tmp_path):
-    rec = Recorder(tmp_path)
-    with pytest.raises(SubprocTimeout) as info:
-        run_in_env(ENV, ["bash", "-c", "echo progress-before-hang; sleep 600"],
-                   cwd=tmp_path, timeout=8, recorder=rec, node="n1", phase="train")
-    assert "progress-before-hang" in (info.value.output or "")
-    kinds = [e["type"] for e in rec.read_events("n1")]
-    assert "subproc.error" in kinds, kinds
-    err = next(e for e in rec.read_events("n1") if e["type"] == "subproc.error")
-    assert "progress-before-hang" in str(rec.load_payload(err["payload"]))
+def _wait_for(path, seconds=60):
+    deadline = time.time() + seconds
+    while not (path.exists() and path.read_text().strip()) and time.time() < deadline:
+        time.sleep(0.1)
 
 
 def test_log_path_streams_output_to_disk(tmp_path):
@@ -95,26 +89,6 @@ def test_log_path_streams_output_to_disk(tmp_path):
     text = log.read_text()
     assert "to-out" in text and "to-err" in text
     assert "to-out" in proc.stdout
-
-
-def test_a_stalled_job_is_killed_by_liveness(tmp_path):
-    rec = Recorder(tmp_path)
-    lv = Liveness(1, probe_window_s=1, extension_frac=0.25, signals=[lambda: 0])
-    started = time.monotonic()
-    with pytest.raises(SubprocTimeout):
-        run_in_env(ENV, ["python", "-c", "import time; time.sleep(120)"], cwd=tmp_path,
-                   recorder=rec, liveness=lv, poll_s=0.2)
-    assert time.monotonic() - started < 30
-    err = [e for e in rec.read_events() if e["type"] == "subproc.error"][-1]
-    assert "no sign of progress" in rec.load_payload(err["payload"])["message"]
-
-
-def test_a_job_that_keeps_writing_is_extended(tmp_path):
-    log = tmp_path / "log.txt"
-    lv = Liveness(1, probe_window_s=1.5, extension_frac=0.5, signals=[lambda: tree_mark(log)])
-    code = "import time\nfor i in range(8):\n    print(i, flush=True); time.sleep(0.5)\n"
-    proc = run_in_env(ENV, ["python", "-c", code], cwd=tmp_path, liveness=lv, poll_s=0.2, log_path=log)
-    assert proc.returncode == 0 and lv.extensions >= 1
 
 
 def test_process_groups_are_recorded_while_running(tmp_path, monkeypatch):

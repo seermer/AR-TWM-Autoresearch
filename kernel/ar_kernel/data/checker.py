@@ -20,7 +20,7 @@ def check_clip(cfg: KernelConfig, clip_dir: Path, base_recipe: Path, recorder=No
         "alayaworld",
         ["python", str(BRIDGE), "--config", str(base_recipe), "--root", str(clip_dir)],
         cwd=cfg.worldmodel, extra_env={"PYTHONPATH": str(cfg.worldmodel)},
-        timeout=600, recorder=recorder, node=node, phase="ingest",
+        recorder=recorder, node=node, phase="ingest",
     )
     if MARK not in proc.stdout:
         raise CheckerError(f"checker bridge failed (rc={proc.returncode}):\n{proc.stdout}\n{proc.stderr}")

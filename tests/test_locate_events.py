@@ -88,7 +88,7 @@ def test_spans_use_the_picked_start_and_end_with_the_last_piece():
 
 
 def fake_cfg(captioner=None, **over) -> KernelConfig:
-    c = {**REAL.get("captioner"), "env": "autoresearcher", "startup_timeout_s": 60, "memory_release_timeout_s": 2,
+    c = {**REAL.get("captioner"), "env": "autoresearcher", "memory_release_timeout_s": 2,
          **(captioner or {})}
     return KernelConfig(raw={"captioner": c, "locate_events": {**REAL.get("locate_events"), **over}},
                         repo_root=REAL.repo_root)

@@ -10,13 +10,14 @@ from .archive.db import open_db, open_db_readonly
 from .archive.nodes import NodeStore
 from .control import Control
 from .doctor import wbench_weight_problems
-from .config import OVERLAY_SNAPSHOT, SNAPSHOT_FILES, KernelConfig, resolve_gpus
+from .config import OVERLAY_SNAPSHOT, SNAPSHOT_FILES, KernelConfig
 from .eval.judge import Judge, resolve_judge
 from .eval.lora import concat_eval_lora
 from .eval.render import build_render_config, render_proxy
 from .eval.score import (DIMENSION_METRICS, aggregates, case_counts, cleanup_eval,
                          score_from_report)
 from .eval.wbench import run_wbench_phases
+from .guards import choose_gpus
 from .telemetry.recorder import Recorder
 
 @dataclass
@@ -78,7 +79,7 @@ def bootstrap_run(cfg: KernelConfig, run_id: str | None, env: Mapping[str, str])
     run_dir = cfg.runs_dir / run_id
     if (run_dir / "config" / "run.json").exists():
         return attach_run(cfg, run_id, env)
-    gpus = resolve_gpus(cfg, env)          # before creating anything
+    gpus = choose_gpus(cfg, env)           # before creating anything
     # A run is identified by the three commits it ran on (its scores, and a reused root, are only
     # comparable for the same code), so nothing may be uncommitted.
     repos = {"worldmodel": cfg.worldmodel, "wbench": cfg.wbench, "kernel": cfg.repo_root}
@@ -168,7 +169,7 @@ def attach_run(cfg: KernelConfig, run_id: str, env: Mapping[str, str]) -> RunCon
     meta = json.loads(meta_path.read_text())
     judge = _stored_judge(cfg, env, meta)
     return RunContext(run_dir=run_dir, conn=open_db(run_dir), recorder=_recorder(run_dir, env),
-                      gpus=resolve_gpus(cfg, env), metric_set=meta["metric_set"],
+                      gpus=choose_gpus(cfg, env), metric_set=meta["metric_set"],
                       case_ids=meta["case_ids"], versions=meta["versions"],
                       expected_n=meta.get("expected_n", {}), judge=judge)
 
@@ -259,7 +260,7 @@ def rescore_node(cfg: KernelConfig, run_id: str, node_id: str, env: Mapping[str,
         raise ValueError(f"node {node_id!r} has no checkpoint to score")
     checkpoint = run_dir / node["checkpoint_path"] if node["checkpoint_path"] else None
     out = cfg.scores_dir / f"{run_id}-{node_id}-{dt.datetime.now():%Y%m%d_%H%M%S}"
-    ctx = RunContext(run_dir=out, conn=None, recorder=_recorder(out, env), gpus=resolve_gpus(run_cfg, env),
+    ctx = RunContext(run_dir=out, conn=None, recorder=_recorder(out, env), gpus=choose_gpus(run_cfg, env),
                      metric_set=meta["metric_set"], case_ids=meta["case_ids"], versions=meta["versions"],
                      expected_n=meta["expected_n"], judge=_stored_judge(run_cfg, env, meta))
     score, detail = score_node(run_cfg, ctx, node_id, checkpoint, node["lora_rank"] or 0)

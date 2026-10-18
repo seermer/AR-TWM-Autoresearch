@@ -8,7 +8,8 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from ar_kernel.config import KernelConfig, resolve_gpus
+from ar_kernel.config import KernelConfig
+from ar_kernel.guards import choose_gpus
 from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools import images
 from ar_kernel.tools.context import TokenRegistry
@@ -123,12 +124,6 @@ def test_workers_get_the_images_config_and_one_gpu_each(env):
         assert item["worker"]["offload"] == REAL.get("images.offload")
 
 
-def test_limits_come_from_the_images_config_block(tmp_path):
-    rec = Recorder(tmp_path / "run")
-    b = ImageBackend(REAL, tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
-    assert b.timeout_s == REAL.get("images.timeout_s")
-
-
 def test_build_gpu_backends_includes_images_only_when_enabled(tmp_path):
     rec = Recorder(tmp_path / "run")
     names = lambda cfg: [b.name for b in build_gpu_backends(cfg, tmp_path / "run", [0, 1, 2, 3],
@@ -143,8 +138,8 @@ def test_build_gpu_backends_includes_images_only_when_enabled(tmp_path):
 
 @pytest.mark.gpu
 def test_real_zimage_generates_plausible_images(tmp_path):
-    """AR_TEST_GPUS=0,1,2,3 pytest tests/test_images.py -m gpu -s -- 8 prompts on 4 GPUs."""
-    gpus = resolve_gpus(REAL, {"CUDA_VISIBLE_DEVICES": __import__("os").environ.get("AR_TEST_GPUS", "0,1,2,3")})
+    """pytest tests/test_images.py -m gpu -s -- 8 prompts on the first gpus.num_gpus free cards."""
+    gpus = choose_gpus(REAL, {})
     run_dir, ws = tmp_path / "run", tmp_path / "ws"
     staging = run_dir / "staging"
     ws.mkdir(parents=True); staging.mkdir(parents=True)

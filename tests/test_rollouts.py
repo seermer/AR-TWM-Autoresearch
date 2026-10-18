@@ -236,8 +236,7 @@ def test_every_listed_action_is_accepted(tmp_path):
 def test_limits_come_from_the_generator_config_block(tmp_path):
     rec = Recorder(tmp_path / "run")
     b = AlayaWorldBackend(REAL, tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
-    a = REAL.get("generators.alayaworld")
-    assert (b.timeout_s, b.max_turns) == (a["timeout_s"], a["max_turns"])
+    assert b.max_turns == REAL.get("generators.alayaworld")["max_turns"]
 
 
 # ---- finish: the whole clip, the commanded camera, the annotation ----
@@ -356,15 +355,15 @@ def test_produce_renders_and_publishes_candidates(env):
     assert not (work / "data").exists() and not (work / "videos").exists()
 
 
-def test_precache_is_charged_to_the_job_timeout(env):
-    """A hung prompt precache is killed at the job's timeout_s, not left running forever."""
+def test_a_hung_precache_runs_until_the_job_is_cancelled(env):
+    """No time limit: a hung prompt precache is killed by a cancel, and the render never starts."""
     import time
     q, caller, _, run_dir = env
-    q.backends["rollout_alayaworld"].timeout_s = 2
-    t0 = time.monotonic()
     job = submit(q, caller, [first_person(scene_prompt="PRECACHE_HANG street")])["job_id"]
-    out = q.wait(caller, job, 60)
-    assert out["state"] == "failed" and "timed out" in out["error"], out
+    assert q.wait(caller, job, 4)["state"] == "running"
+    t0 = time.monotonic()
+    q.cancel(caller, job)
+    assert q.wait(caller, job, 60)["state"] == "canceled"
     assert time.monotonic() - t0 < 30
     assert not (run_dir / "jobs" / job / "fake_wbench.json").exists()        # never reached the render
 
@@ -538,24 +537,23 @@ def _peak_sampler(gpus):
 
 @pytest.mark.gpu
 def test_real_alayaworld_rollout(tmp_path):
-    """AR_TEST_GPUS=0,1,2,3 pytest tests/test_rollouts.py -m gpu -s --basetemp=.cache/pytest/gpu
+    """pytest tests/test_rollouts.py -m gpu -s --basetemp=.cache/pytest/gpu
 
     First person: frame 0 of an example clip. Third person: a generate_images (Z-Image) frame with a
     hand-drawn mask (the tools chain). The candidates carry no pose; each must ingest with its
     annotation and the pose annotate_camera (ViGeo) gives it. Agreement with the commanded camera path is
     printed as a diagnostic only."""
-    import os
     import shutil
     import subprocess
     import time
     from ar_kernel.archive.db import open_db
-    from ar_kernel.config import resolve_gpus
+    from ar_kernel.guards import choose_gpus
     from ar_kernel.data.ingest import Candidate, Ingestor
     from ar_kernel.tools.annotate import AnnotateBackend
     from ar_kernel.tools.images import ImageBackend
     from tests.test_annotate import _rel0, _relative_rotation_errors, _umeyama_ate
 
-    gpus = resolve_gpus(REAL, {"CUDA_VISIBLE_DEVICES": os.environ.get("AR_TEST_GPUS", "0,1,2,3")})
+    gpus = choose_gpus(REAL, {})
     raw = copy.deepcopy(REAL.raw)
     raw["generators"]["alayaworld"]["enabled"] = True
     cfg = KernelConfig(raw=raw, repo_root=REAL.repo_root)
@@ -647,18 +645,18 @@ def test_real_alayaworld_rollout(tmp_path):
 
 @pytest.mark.gpu
 def test_real_alayaworld_rollout_of_a_node(tmp_path):
-    """AR_TEST_CHECKPOINT=<a trained node's checkpoint dir> AR_TEST_RANK=<its LoRA rank> AR_TEST_GPUS=0,1,2,3
+    """AR_TEST_CHECKPOINT=<a trained node's checkpoint dir> AR_TEST_RANK=<its LoRA rank>
     pytest tests/test_rollouts.py -m gpu -s -k of_a_node --basetemp=.cache/pytest/gpu
 
     The same case and seed rendered by the released model and by the node: both publish a candidate,
     and the node's clip differs from the released model's (its fine-tune is applied)."""
     import os
     import subprocess
-    from ar_kernel.config import resolve_gpus
+    from ar_kernel.guards import choose_gpus
 
     if not os.environ.get("AR_TEST_CHECKPOINT"):
         pytest.skip("set AR_TEST_CHECKPOINT and AR_TEST_RANK")
-    gpus = resolve_gpus(REAL, {"CUDA_VISIBLE_DEVICES": os.environ.get("AR_TEST_GPUS", "0,1,2,3")})
+    gpus = choose_gpus(REAL, {})
     raw = copy.deepcopy(REAL.raw)
     raw["generators"]["alayaworld"]["enabled"] = True
     cfg = KernelConfig(raw=raw, repo_root=REAL.repo_root)
@@ -760,13 +758,6 @@ def test_wan_image_must_be_a_path(wan_env):
     q, caller, _ = wan_env
     with pytest.raises(ToolError, match="image"):
         q.backends["rollout_wan22"].submit(q, caller, {"items": [{"prompt": "p", "seed": 1, "image": 3}]})
-
-
-def test_wan_limits_come_from_the_generator_config_block(tmp_path):
-    rec = Recorder(tmp_path / "run")
-    b = Wan22Backend(REAL, tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
-    w = REAL.get("generators.wan22")
-    assert b.timeout_s == w["timeout_s"]
 
 
 def test_wan_produces_and_publishes_a_cropped_candidate_with_its_prompt(wan_env):
@@ -1068,13 +1059,6 @@ def test_ltx_a_disabled_variant_is_refused(ltx_env):
     q = make(enabled=("distilled",))
     with pytest.raises(ToolError, match="variant"):
         q.backends["rollout_ltx25"].submit(q, caller, {"items": [{"prompt": "p", "seed": 1}], "variant": "dev"})
-
-
-def test_ltx_limits_come_from_the_generator_config_block(tmp_path):
-    rec = Recorder(tmp_path / "run")
-    b = Ltx25Backend(REAL, tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
-    blk = REAL.get("generators.ltx25")
-    assert b.timeout_s == blk["timeout_s"]
 
 
 def test_ltx_produces_and_publishes_a_silent_24fps_candidate_with_its_prompt(ltx_env):

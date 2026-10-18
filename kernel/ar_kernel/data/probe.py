@@ -48,7 +48,7 @@ def probe_video(path: Path) -> VideoInfo:
          "stream=nb_read_frames,avg_frame_rate,width,height,duration,sample_aspect_ratio"
          ":stream_tags=rotate:stream_side_data=rotation",
          "-of", "json", str(path)],
-        capture_output=True, text=True, check=True, timeout=600,
+        capture_output=True, text=True, check=True,
     )
     if proc.stderr:     # damage ffprobe reads past, e.g. a truncated file, still exits 0
         reason = re.sub(r"^\[[^\]]*\] ", "", proc.stderr.splitlines()[0])     # ffmpeg's "[h264 @ 0x...] "

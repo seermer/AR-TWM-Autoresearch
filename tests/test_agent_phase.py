@@ -27,8 +27,8 @@ def snapshot_id(penv, env, **recipe) -> str:
 
 class FakeRunner:
     """Stands in for the container; with `snap`, the result names a snapshot taken after the edit."""
-    def __init__(self, result, edit=None, exit_code=0, timed_out=False, staged=None, raises=None, snap=None):
-        self.result, self.edit, self.exit_code, self.timed_out = result, edit, exit_code, timed_out
+    def __init__(self, result, edit=None, exit_code=0, staged=None, raises=None, snap=None):
+        self.result, self.edit, self.exit_code = result, edit, exit_code
         self.staged = staged
         self.raises = raises
         self.snap = snap
@@ -49,7 +49,7 @@ class FakeRunner:
             if self.snap is not None:
                 body["result"]["snapshot_id"] = snapshot_id(self.penv, env, **self.snap)
             (mounts.workspace / "result.json").write_text(json.dumps(body))
-        return RunResult(self.exit_code, self.timed_out, "", "", 1.0, [], "c")
+        return RunResult(self.exit_code, "", "", 1.0, "c")
 
 
 @pytest.fixture
@@ -66,7 +66,6 @@ def env(tmp_path, monkeypatch):
     nodes.set_fields("root", agent_commit=root)
     nodes.create("n1", "root", 1)
     queue = JobQueue(rec, threading.Lock(), wait_cap_s=1)
-    monkeypatch.setattr("ar_kernel.agent_phase.ensure_image", lambda cfg, reqs, **k: "img:test")
 
     def make(runner):
         penv = PhaseEnv(cfg=CFG, run_dir=tmp_path / "run", run_id="t", recorder=rec,
@@ -128,19 +127,13 @@ def test_staged_files_appear_in_the_recorded_diff(env):
     assert rec.load_payload(end["payload"])["diffs"]["staging"]["added"] == ["hf/clip.mp4"]
 
 
-def test_timeout_is_a_failed_attempt(env):
-    make, conn, root, _, _ = env
-    out = run_edit_self(make(FakeRunner(None, timed_out=True, exit_code=None)), conn=conn, node="n1",
-                        parent_id="root", agent_commit=root, attempt=1)
-    assert not out.ok and out.timed_out and "timed out" in out.error
-
-
-def test_runner_gets_a_liveness_with_the_phase_soft_timeout(env):
+def test_runner_gets_the_agent_env_shared_memory_and_the_runs_gpus(env):
     make, conn, root, rec, _ = env
     runner = FakeRunner({"ok": True, "result": {"summary": "s"}}, snap={})
     run_edit_self(make(runner), conn=conn, node="n1", parent_id="root", agent_commit=root, attempt=1)
-    lv = runner.calls[0]["liveness"]
-    assert lv.soft_s == float(CFG.get("timeouts.edit_self_s")) and runner.calls[0]["timeout_s"] == 4 * lv.soft_s
+    call = runner.calls[0]
+    assert call["env_dir"] == CFG.repo_root / ".envs" / "agent" and call["shm_gb"] == CFG.get("sandbox.shm_gb") == 64
+    assert call["gpus"] == [0, 1, 2, 3] and "timeout_s" not in call and "liveness" not in call
 
 
 def test_improve_recipe_mounts_code_read_only_and_rejects_unknown_commits(env):
@@ -234,7 +227,7 @@ def test_malformed_json_result_is_a_failed_attempt_and_still_committed(env):
 
     def bad_json(*, mounts, env, **kw):
         (mounts.workspace / "result.json").write_text("{not valid json")
-        return RunResult(0, False, "", "", 1.0, [], "c")
+        return RunResult(0, "", "", 1.0, "c")
 
     penv = make(bad_json)
     out = run_edit_self(penv, conn=conn, node="n1", parent_id="root", agent_commit=root, attempt=1)
@@ -249,7 +242,7 @@ def test_non_utf8_result_is_a_failed_attempt_not_a_crash(env):
 
     def bad_bytes(*, mounts, env, **kw):
         (mounts.workspace / "result.json").write_bytes(b"\xff\xfe\x00\x01")
-        return RunResult(0, False, "", "", 1.0, [], "c")
+        return RunResult(0, "", "", 1.0, "c")
 
     out = run_edit_self(make(bad_bytes), conn=conn, node="n1", parent_id="root", agent_commit=root,
                         attempt=1)
@@ -263,7 +256,7 @@ def test_non_object_json_result_is_a_failed_attempt_not_a_crash(env):
 
     def array_body(*, mounts, env, **kw):
         (mounts.workspace / "result.json").write_text(json.dumps([1, 2, 3]))
-        return RunResult(0, False, "", "", 1.0, [], "c")
+        return RunResult(0, "", "", 1.0, "c")
 
     out = run_improve_recipe(make(array_body), conn=conn, node="n1", parent_id="root", agent_commit=root,
                              attempt=1)
@@ -280,34 +273,12 @@ def test_symlinked_result_json_is_not_followed_onto_the_host(env, tmp_path):
 
     def symlink_result(*, mounts, env, **kw):
         (mounts.workspace / "result.json").symlink_to(secret)
-        return RunResult(0, False, "", "", 1.0, [], "c")
+        return RunResult(0, "", "", 1.0, "c")
 
     penv = make(symlink_result)
     out = run_edit_self(penv, conn=conn, node="n1", parent_id="root", agent_commit=root, attempt=1)
     assert not out.ok and "no result.json" in out.error
     assert penv.repo.resolve("refs/attempts/n1/edit_self-1") == out.commit
-
-
-def test_image_build_failure_is_a_failed_attempt_and_edit_self_still_commits(env, monkeypatch):
-    """An agent-authored requirements.txt that fails to build must
-    become a failed PhaseOutcome (with phase.end recorded), not an exception
-    that skips edit_self's commit, which keeps the failed tree for the record."""
-    from ar_kernel.sandbox.image import ImageBuildError
-
-    make, conn, root, rec, _ = env
-
-    def boom(cfg, reqs, **k):
-        raise ImageBuildError("pip install exploded")
-
-    monkeypatch.setattr("ar_kernel.agent_phase.ensure_image", boom)
-    runner = FakeRunner({"ok": True, "result": {"summary": "unused"}})
-    penv = make(runner)
-    out = run_edit_self(penv, conn=conn, node="n1", parent_id="root", agent_commit=root, attempt=1)
-    assert not out.ok and "pip install exploded" in out.error
-    assert penv.repo.resolve("refs/attempts/n1/edit_self-1") == out.commit
-    assert runner.calls == []                        # the container never started
-    end = [e for e in rec.read_events("n1") if e["type"] == "phase.end"][0]
-    assert end["ok"] is False
 
 
 def test_rerunning_the_same_attempt_number_clears_stale_staging(env, tmp_path):
@@ -371,7 +342,7 @@ def _edit_then_run_on(make, conn, root, mutate):
         mutate(mounts.agent / "agent")
         result = {"snapshot_id": snapshot_id(penv, env), "summary": "x"}
         (mounts.workspace / "result.json").write_text(json.dumps({"ok": True, "result": result}))
-        return RunResult(0, False, "", "", 1.0, [], "c")
+        return RunResult(0, "", "", 1.0, "c")
 
     penv = make(runner)
     out1 = run_edit_self(penv, conn=conn, node="n1", parent_id="root", agent_commit=root, attempt=1)
@@ -399,6 +370,65 @@ def test_unreadable_requirements_txt_fails_the_phase_instead_of_raising(env, mut
     assert not out2.ok and "cannot read agent/requirements.txt" in out2.error and second.calls == []
 
 
+class InstallingRunner(FakeRunner):
+    """The install sandbox (log_name="install") leaves a package in the workspace's home; `code` is its exit code."""
+    def __init__(self, *a, code=0, **k):
+        super().__init__(*a, **k)
+        self.code = code
+
+    def __call__(self, *, mounts, env, **kw):
+        if kw.get("log_name") != "install":
+            return super().__call__(mounts=mounts, env=env, **kw)
+        self.calls.append({"mounts": mounts, "env": env, **kw})
+        (mounts.workspace / ".home" / ".local" / "pkg").mkdir(parents=True)
+        return RunResult(self.code, "", "No matching distribution found for nope", 1.0, "c")
+
+
+def _with_requirements(make, root, text, tmp):
+    """A commit of the seed whose agent/requirements.txt holds `text`."""
+    repo = make(None).repo
+    repo.checkout(root, tmp)
+    (tmp / "agent" / "requirements.txt").write_text(text)
+    return repo.commit_tree(tmp, root, "requirements")
+
+
+def test_listed_requirements_are_installed_before_the_phase_and_kept_out_of_its_diff(env, tmp_path):
+    make, conn, root, rec, _ = env
+    commit = _with_requirements(make, root, "# a comment\nrich==13.0\n", tmp_path / "src")
+    runner = InstallingRunner({"ok": True, "result": {"summary": "s"}}, snap={})
+    out = run_edit_self(make(runner), conn=conn, node="n2", parent_id="root", agent_commit=commit, attempt=1)
+    install, phase = runner.calls
+    assert install["command"][-2:] == ["-r", "/code/agent/requirements.txt"] and "--user" in install["command"]
+    assert install["mounts"].agent_readonly and "gpus" not in install and install["env"] == {}
+    assert phase.get("log_name") is None and phase["mounts"].workspace == install["mounts"].workspace
+    assert out.ok
+    end = [e for e in rec.read_events("n2") if e["type"] == "phase.end"][0]
+    assert not any(".local" in p for p in rec.load_payload(end["payload"])["diffs"]["workspace"]["added"])
+    recipe = InstallingRunner({"ok": True, "result": {"summary": "s"}})
+    run_improve_recipe(make(recipe), conn=conn, node="n3", parent_id="root", agent_commit=commit, attempt=1)
+    assert recipe.calls[0]["command"][-1] == "/agent/agent/requirements.txt"
+
+
+def test_a_failed_install_is_a_failed_attempt_and_edit_self_still_commits(env, tmp_path):
+    make, conn, root, rec, _ = env
+    commit = _with_requirements(make, root, "nope==0.0\n", tmp_path / "src")
+    runner = InstallingRunner({"ok": True, "result": {"summary": "unused"}}, code=1)
+    penv = make(runner)
+    out = run_edit_self(penv, conn=conn, node="n2", parent_id="root", agent_commit=commit, attempt=1)
+    assert not out.ok and "failed to install (exit code 1)" in out.error and "No matching distribution" in out.error
+    assert [c.get("log_name") for c in runner.calls] == ["install"]          # the phase never started
+    assert penv.repo.resolve("refs/attempts/n2/edit_self-1") == out.commit
+    assert [e for e in rec.read_events("n2") if e["type"] == "phase.end"][0]["ok"] is False
+
+
+def test_a_requirements_file_of_comments_installs_nothing(env, tmp_path):
+    make, conn, root, _, _ = env
+    commit = _with_requirements(make, root, "# nothing yet\n\n", tmp_path / "src")
+    runner = InstallingRunner({"ok": True, "result": {"summary": "s"}}, snap={})
+    run_edit_self(make(runner), conn=conn, node="n2", parent_id="root", agent_commit=commit, attempt=1)
+    assert [c.get("log_name") for c in runner.calls] == [None]
+
+
 def test_uncommittable_agent_tree_is_a_failed_attempt(env):
     """A chmod-000 file the agent leaves in /agent makes `git add` fail."""
     make, conn, root, _, _ = env
@@ -410,14 +440,14 @@ def test_uncommittable_agent_tree_is_a_failed_attempt(env):
     def runner(*, mounts, env, **kw):
         lock(mounts.agent / "agent")
         (mounts.workspace / "result.json").write_text(json.dumps({"ok": True, "result": {"summary": "x"}}))
-        return RunResult(0, False, "", "", 1.0, [], "c")
+        return RunResult(0, "", "", 1.0, "c")
 
     out = run_edit_self(make(runner), conn=conn, node="n1", parent_id="root", agent_commit=root, attempt=1)
     (out.attempt_dir / "agent" / "agent" / "locked.py").chmod(0o644)
     assert not out.ok and "commit" in out.error and out.commit is None
 
 
-@pytest.mark.docker
+@pytest.mark.sandbox
 def test_container_commits_data_through_the_real_tool_server(tmp_path):
     """No LLM: the fixture agent calls data_query and data_commit over the socket;
     the kernel creates a real commit and the phase validates it."""
@@ -455,8 +485,7 @@ def test_container_commits_data_through_the_real_tool_server(tmp_path):
                                       upstream=None, mocks=MockBook.default()), build_tool_app(mcp))
     try:
         penv = PhaseEnv(cfg=CFG, run_dir=run, run_id="e2e", recorder=rec, registry=reg, queue=queue,
-                        repo=repo, socket_dir=services.socket_dir, gpus=[0, 1, 2, 3],
-                        default_model="mock-model")
+                        repo=repo, socket_dir=services.socket_dir, gpus=[], default_model="mock-model")
         out = run_improve_recipe(penv, conn=conn, node="n1", parent_id="root", agent_commit=commit,
                                  attempt=1)
     finally:
@@ -465,13 +494,6 @@ def test_container_commits_data_through_the_real_tool_server(tmp_path):
     assert out.result["rationale"] == "4 clips" and out.result["summary"] == "the pool's first clips"
     kinds = [e["type"] for e in rec.read_events("n1")]
     assert "tool.call" in kinds and "phase.end" in kinds
-
-
-def test_agent_phases_get_the_configured_network(env):
-    make, conn, root, rec, _ = env
-    runner = FakeRunner({"ok": True, "result": {"summary": "s"}}, snap={})
-    run_edit_self(make(runner), conn=conn, node="n1", parent_id="root", agent_commit=root, attempt=1)
-    assert runner.calls[0]["network"] == CFG.get("sandbox.network") == "bridge"
 
 
 def test_agents_see_every_finished_node_under_nodes(env, tmp_path):
@@ -509,7 +531,7 @@ def test_the_accepted_edit_is_the_snapshot_not_the_tree_at_the_end(env):
         result = {"snapshot_id": snapshot_id(penv, env), "summary": "s"}
         entry.write_text("# changed after the snapshot\n")
         (mounts.workspace / "result.json").write_text(json.dumps({"ok": True, "result": result}))
-        return RunResult(0, False, "", "", 1.0, [], "c")
+        return RunResult(0, "", "", 1.0, "c")
 
     penv = make(runner)
     out = run_edit_self(penv, conn=conn, node="n1", parent_id="root", agent_commit=root,

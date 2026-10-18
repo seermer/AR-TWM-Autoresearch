@@ -68,10 +68,7 @@ def test_recorded_orphan_groups_are_killed_and_recycled_pids_are_not(tmp_path):
         orphan.kill(), bystander.kill()
 
 
-def test_resume_marks_unfinished_nodes_interrupted_and_keeps_their_files(tmp_path, monkeypatch):
-    killed = []
-    monkeypatch.setattr("ar_kernel.control.kill_run_containers",
-                        lambda run_id, node=None: killed.append(node) or [f"ar-{run_id}-{node}-x"])
+def test_resume_marks_unfinished_nodes_interrupted_and_keeps_their_files(tmp_path):
     conn, rec = open_db(tmp_path), Recorder(tmp_path)
     nodes = NodeStore(conn)
     nodes.create("root", None, 0), nodes.record_score("root", 0.7, ["m"], {"m": 0.7})
@@ -92,7 +89,7 @@ def test_resume_marks_unfinished_nodes_interrupted_and_keeps_their_files(tmp_pat
     n1 = nodes.get("n1")
     assert n1["status"] == "interrupted" and "phase train" in n1["error"]
     assert (work / "notes.txt").read_text() == "keep me" and (tmp_path / "staging" / "n1").exists()
-    assert killed == ["n1"] and nodes.get("root")["status"] == "scored"
+    assert nodes.get("root")["status"] == "scored"
     (event,) = [e for e in rec.read_events() if e["type"] == "node.interrupted"]
     assert rec.load_payload(event["payload"])["phase_reached"] == "train"
     assert [c["ingested_by"] for c in ClipStore(conn).all()] == ["n1interrupted"]      # out of the pool
@@ -140,8 +137,7 @@ def _stopped(rec):
     return [rec.load_payload(e["payload"])["reason"] for e in rec.read_events() if e["type"] == "run.stopped"]
 
 
-def test_a_signal_during_cleanup_does_not_abort_it(tmp_path, monkeypatch):
-    monkeypatch.setattr("ar_kernel.control.kill_run_containers", lambda run_id, node=None: [])
+def test_a_signal_during_cleanup_does_not_abort_it(tmp_path):
     rec, c = Recorder(tmp_path), Control(tmp_path)
 
     def run():

@@ -2,7 +2,6 @@ import subprocess
 from pathlib import Path
 from ar_kernel.train.runner import classify_failure, newest_checkpoint
 from ar_kernel.config import KernelConfig
-from ar_kernel.subproc import SubprocTimeout
 from ar_kernel.train import runner as runner_mod
 from ar_kernel.train.runner import TrainRunner
 from ar_kernel.telemetry.recorder import Recorder
@@ -87,18 +86,18 @@ def _resolved(tmp_path):
     return cfg, out
 
 
-def test_a_stalled_training_run_is_an_infra_failure_reported_to_the_agent(tmp_path, monkeypatch):
+def test_training_and_its_precache_run_without_a_time_limit(tmp_path, monkeypatch):
     resolved, _ = _resolved(tmp_path)
-    seen = {}
+    seen = []
 
     def fake_run(env, args, **kw):
-        seen.update(kw)
-        kw["liveness"].reason = "no sign of progress for 600s after the 172800s soft timeout"
-        raise SubprocTimeout(args, 0, output="[Setup] rank 0/4\n")
+        seen.append(kw)
+        return subprocess.CompletedProcess(args, 0, "", "")
     monkeypatch.setattr(runner_mod, "run_in_env", fake_run)
-    out = TrainRunner(KernelConfig.load(), Recorder(tmp_path)).train(resolved, [0, 1, 2, 3], "n1", tmp_path / "node")
-    assert seen["timeout"] is None and seen["liveness"].soft_s == 172800
-    assert (out.checkpoint, out.failure) == (None, "infra") and "stalled" in out.detail
+    runner = TrainRunner(KernelConfig.load(), Recorder(tmp_path))
+    runner.precache(resolved, [0, 1, 2, 3], "n1")
+    runner.train(resolved, [0, 1, 2, 3], "n1", tmp_path / "node")
+    assert len(seen) == 2 and not any("timeout" in kw or "liveness" in kw for kw in seen)
 
 
 def test_trainer_state_is_deleted_after_success(tmp_path, monkeypatch):

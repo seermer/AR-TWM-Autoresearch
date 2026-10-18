@@ -55,15 +55,27 @@ def live(tmp_path):
     services.stop()
 
 
-def test_socket_dir_is_short_and_private(tmp_path):
-    d = socket_dir_for(tmp_path / ("x" * 150))
-    assert len(str(d / "gateway.sock")) < 100
-    assert socket_dir_for(tmp_path / ("x" * 150)) == d          # deterministic per run
+def test_sockets_live_in_the_run_folder_even_past_the_socket_path_limit(tmp_path):
+    rec, reg, tools_app = _server(tmp_path)
+    from fastapi import FastAPI
+    run = tmp_path / ("x" * 150)
+    assert socket_dir_for(run) == run / "sockets"
+    services = RunServices(socket_dir_for(run))
+    services.start(FastAPI(), tools_app)
+    try:
+        assert len(str(services.socket_dir / "tools.sock")) > 107
+        assert (services.socket_dir / "tools.sock").exists()
+        caller = reg.issue(node="n1", phase="improve_recipe", attempt=1,
+                           workspace_host=tmp_path, staging_host=tmp_path)
+        assert not asyncio.run(_call(services.client_dir, caller.token, "echo_caller", {"word": "x"})).is_error
+    finally:
+        services.stop()
+    assert not (services.socket_dir / "tools.sock").exists()
 
 
 def test_tool_sees_its_caller_over_the_socket(live):
     rec, _, services, caller = live
-    result = asyncio.run(_call(services.socket_dir, caller.token, "echo_caller", {"word": "hi"}))
+    result = asyncio.run(_call(services.client_dir, caller.token, "echo_caller", {"word": "hi"}))
     assert not result.is_error
     assert json.loads(result.content[0].text) == {"node": "n7", "word": "hi"}
     kinds = [e["type"] for e in rec.read_events("n7")]
@@ -73,7 +85,7 @@ def test_tool_sees_its_caller_over_the_socket(live):
 
 def test_tool_error_reaches_the_agent_as_an_error_result(live):
     rec, _, services, caller = live
-    result = asyncio.run(_call(services.socket_dir, caller.token, "always_fails", {}))
+    result = asyncio.run(_call(services.client_dir, caller.token, "always_fails", {}))
     assert result.is_error and "too large" in result.content[0].text
     assert [e["type"] for e in rec.read_events("n7")][-1] == "tool.error"
 
@@ -81,17 +93,17 @@ def test_tool_error_reaches_the_agent_as_an_error_result(live):
 def test_unexpected_kernel_exception_is_contained(live):
     """A bug in a tool must come back as a tool error, never take the server down."""
     rec, _, services, caller = live
-    result = asyncio.run(_call(services.socket_dir, caller.token, "kernel_bug", {}))
+    result = asyncio.run(_call(services.client_dir, caller.token, "kernel_bug", {}))
     assert result.is_error and "ZeroDivisionError" in result.content[0].text
     err = [e for e in rec.read_events("n7") if e["type"] == "tool.error"][0]
     assert "Traceback" in rec.load_payload(err["payload"])["traceback"]
     # the server still answers afterwards
-    assert not asyncio.run(_call(services.socket_dir, caller.token, "echo_caller", {"word": "x"})).is_error
+    assert not asyncio.run(_call(services.client_dir, caller.token, "echo_caller", {"word": "x"})).is_error
 
 
 def test_unknown_token_is_refused(live):
     _, _, services, _ = live
-    result = asyncio.run(_call(services.socket_dir, "ar-forged", "echo_caller", {"word": "hi"}))
+    result = asyncio.run(_call(services.client_dir, "ar-forged", "echo_caller", {"word": "hi"}))
     assert result.is_error and "token" in result.content[0].text
 
 

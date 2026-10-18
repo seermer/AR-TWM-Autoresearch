@@ -27,7 +27,7 @@ You do not re-decide the mechanism on your own. If what you find means it cannot
 - Try the edges the change touches: an empty input, a failing call, a long result.
 - When a tool returns an error, read it and change what you do. Do not repeat a call that failed.
 - Run `self_test` before you hand back, and fix what it reports.
-- After the phase, the kernel checks the accepted code before it is used: it builds the agent image with `agent/requirements.txt`, checks the entry points of `agent/entry.py`, refuses code that mentions a specific node or a metric, imports the code, and runs both entry points as dry runs on a mock model and mock tools.
+- After the phase, the kernel checks the accepted code before it is used: it installs `agent/requirements.txt`, checks the entry points of `agent/entry.py`, refuses code that mentions a specific node or a metric, imports the code, and runs both entry points as dry runs on a mock model and mock tools.
 
 ## When the plan and the code disagree
 - The code may not be what the plan assumes: the behavior comes from somewhere else, the component does not exist, the mechanism conflicts with another part, or a much simpler change does the same.

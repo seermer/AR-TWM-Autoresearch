@@ -10,7 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from ar_kernel.config import KernelConfig, resolve_gpus
+from ar_kernel.config import KernelConfig
+from ar_kernel.guards import choose_gpus
 from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools import captioner, vllm_server
 from ar_kernel.tools.captioner import CaptionBackend, submit
@@ -23,7 +24,7 @@ REAL = KernelConfig.load()
 
 
 def fake_cfg(**over) -> KernelConfig:
-    c = {**REAL.get("captioner"), "env": "autoresearcher", "startup_timeout_s": 60, "clip_timeout_s": 10,
+    c = {**REAL.get("captioner"), "env": "autoresearcher", "clip_timeout_s": 10,
          "memory_release_timeout_s": 2, **over}
     return KernelConfig(raw={"captioner": c}, repo_root=REAL.repo_root)
 
@@ -277,12 +278,13 @@ def test_server_that_dies_during_startup_fails_the_job_with_its_log(make, tmp_pa
     assert [e["reason"] for e in rec.read_events("n1") if e["type"] == "caption.server_stopped"] == ["failed"]
 
 
-def test_server_that_never_gets_ready_times_out_and_is_killed(make, tmp_path):
-    q, caller, _, ws, _ = make(fake_cfg(extra_args=["--fake-mode", "hang"], startup_timeout_s=8))
+def test_a_server_that_never_gets_ready_waits_until_the_job_is_cancelled(make, tmp_path):
+    q, caller, _, ws, _ = make(fake_cfg(extra_args=["--fake-mode", "hang"]))
     (ws / "a.mp4").write_bytes(b"ok")
     job = submit(q, caller, ["a.mp4"], "Caption.")["job_id"]
-    out = q.wait(caller, job, 120)
-    assert out["state"] == "failed" and "not ready within 8 s" in out["error"]
+    assert q.wait(caller, job, 8)["state"] == "running"          # no start-up limit
+    q.cancel(caller, job)
+    assert q.wait(caller, job, 120)["state"] == "canceled"
     assert _pid_gone(tmp_path / "run", job)
 
 
@@ -339,7 +341,7 @@ def test_caption_videos_over_mcp_queues_a_job_and_reports_path_errors(tmp_path):
     (tmp_path / "staging").mkdir()
 
     async def calls():
-        async with mcp_session(services.socket_dir, caller.token) as session:
+        async with mcp_session(services.client_dir, caller.token) as session:
             job = json.loads((await session.call_tool("caption_videos", {"paths": ["a.mp4"], "prompt": "p"}))
                              .content[0].text)["job_id"]
             done = json.loads((await session.call_tool("job_wait", {"job_id": job})).content[0].text)
@@ -355,8 +357,8 @@ def test_caption_videos_over_mcp_queues_a_job_and_reports_path_errors(tmp_path):
 
 @pytest.mark.gpu
 def test_real_model_captions_two_example_clips(tmp_path):
-    """Run with an explicit device list, e.g. CUDA_VISIBLE_DEVICES=0,1,4,5 pytest -m gpu -k real_model."""
-    gpus = resolve_gpus(REAL, os.environ)
+    """pytest -m gpu -k real_model (the first gpus.num_gpus free cards)."""
+    gpus = choose_gpus(REAL, {})
     rec = Recorder(tmp_path / "run")
     reg = TokenRegistry(rec)
     q = JobQueue(rec, threading.Lock(), wait_cap_s=300)

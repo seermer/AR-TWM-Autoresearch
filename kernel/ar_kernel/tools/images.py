@@ -22,7 +22,7 @@ class ImageBackend(GpuJob):
     name = tool = "generate_images"
     kind = "image"
     generator = "z-image-turbo"
-    config_key = "images"           # timeout_s
+    config_key = "images"
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)

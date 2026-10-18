@@ -81,7 +81,7 @@ class Gate:
         for label, args in checks:
             proc = run_in_env("alayaworld", args, cwd=self.cfg.worldmodel,
                               extra_env={"CUDA_VISIBLE_DEVICES": gpu_list},
-                              timeout=3600, recorder=self.recorder, node=node_id, phase="gate")
+                              recorder=self.recorder, node=node_id, phase="gate")
             if proc.returncode != 0:
                 failures.append(f"{label} failed (rc={proc.returncode}): {output_tail(proc, 2000)}")
 
@@ -90,7 +90,7 @@ class Gate:
             cwd=self.cfg.worldmodel,
             extra_env={"CONFIG_PATH": str(resolved), "CUDA_VISIBLE_DEVICES": gpu_list,
                        "DESCRIBE": "1"},
-            timeout=3600, recorder=self.recorder, node=node_id, phase="gate")
+            recorder=self.recorder, node=node_id, phase="gate")
         if describe.returncode != 0:
             failures.append(f"describe failed (rc={describe.returncode}): {output_tail(describe, 2000)}")
 

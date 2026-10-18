@@ -12,7 +12,7 @@ KILL_FORCE_GRACE_SECONDS = 10
 CACHE_VARS = {"HF_HOME": "huggingface", "XDG_CACHE_HOME": "", "TORCH_HOME": "torch",
               "TRITON_CACHE_DIR": "triton", "TORCHINDUCTOR_CACHE_DIR": "torchinductor",
               "VLLM_CACHE_ROOT": "vllm", "CUDA_CACHE_PATH": "nv", "PIP_CACHE_DIR": "pip",
-              "UV_CACHE_DIR": "uv"}
+              "UV_CACHE_DIR": "uv", "TMPDIR": "tmp"}
 
 
 def free_port() -> int:
@@ -30,6 +30,7 @@ def cache_dir() -> Path:
 
 def cache_env() -> dict[str, str]:
     root = cache_dir()
+    (root / "tmp").mkdir(parents=True, exist_ok=True)
     return {var: str(root / sub) if sub else str(root) for var, sub in CACHE_VARS.items()}
 
 
@@ -72,22 +73,14 @@ def proc_running(pid: int, started: str | None) -> bool:
     return started is not None and fields[19] == started and fields[0] != "Z"
 
 
-class SubprocTimeout(subprocess.TimeoutExpired):
-    """A phase exceeded its timeout; its whole process group has been killed.
-
-    `.output` holds whatever the job printed before it was stopped.
-    """
-
-
 def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None = None,
-               timeout: int | None = None, recorder=None, node: str = "run",
+               recorder=None, node: str = "run",
                phase: str = "-", log_path: Path | None = None,
                cancel: "threading.Event | None" = None,
-               poll_s: float = 1.0,
-               liveness: "object | None" = None) -> subprocess.CompletedProcess:
+               poll_s: float = 1.0) -> subprocess.CompletedProcess:
     """Run `args` inside conda env `env`, in its own session.
 
-    Timeouts, `cancel`, `liveness` expiry and any exception kill the WHOLE process group:
+    `cancel` and any exception kill the WHOLE process group:
     killing only `conda run` orphaned torchrun ranks that kept holding GPUs. With `log_path`,
     output streams to that file and comes back as stdout. The result's `.cancelled` tells a
     cancel apart from an exit code that happens to match. With `AR_PGID_DIR` set, the group
@@ -124,19 +117,8 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
     cancelled = False
     ended = False           # the wait or the kill sequence finished: the group is gone
     try:
-        stdout, stderr, cancelled = _wait(proc, timeout, cancel, poll_s, liveness)
+        stdout, stderr, cancelled = _wait(proc, cancel, poll_s)
         ended = True
-    except subprocess.TimeoutExpired:
-        _kill_group(proc)
-        ended = True
-        stdout, stderr = proc.communicate()
-        if sink is not None:
-            sink.close()
-            stdout, stderr = Path(log_path).read_text(encoding="utf-8", errors="replace"), ""
-        message = liveness.reason if (liveness is not None and liveness.reason) else f"timed out after {timeout}s"
-        _error(recorder, node, phase, f"{message}; process group killed",
-               stdout or "", stderr or "", log_path)
-        raise SubprocTimeout(command, timeout, output=stdout, stderr=stderr) from None
     except BaseException:
         _kill_group(proc)          # e.g. KeyboardInterrupt: never leave the job running
         ended = True
@@ -159,27 +141,22 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
     return result
 
 
-def _wait(proc: subprocess.Popen, timeout: int | None, cancel: "threading.Event | None",
-         poll_s: float, liveness=None) -> tuple[str, str, bool]:
-    """Wait for `proc`; returns (stdout, stderr, cancelled). With `cancel` or `liveness`,
-    poll every `poll_s` (a timed-out communicate() does not kill the child)."""
-    if cancel is None and liveness is None:
-        stdout, stderr = proc.communicate(timeout=timeout)
+def _wait(proc: subprocess.Popen, cancel: "threading.Event | None",
+          poll_s: float) -> tuple[str, str, bool]:
+    """Wait for `proc`; returns (stdout, stderr, cancelled). With `cancel`, poll every `poll_s`
+    (a timed-out communicate() does not kill the child)."""
+    if cancel is None:
+        stdout, stderr = proc.communicate()
         return stdout, stderr, False
-    deadline = time.monotonic() + timeout if timeout is not None else None
     while True:
         try:
             stdout, stderr = proc.communicate(timeout=poll_s)
             return stdout, stderr, False
         except subprocess.TimeoutExpired:
-            if cancel is not None and cancel.is_set():
+            if cancel.is_set():
                 _kill_group(proc)
                 stdout, stderr = proc.communicate()
                 return stdout, stderr, True
-            if liveness is not None and liveness.expired():
-                raise subprocess.TimeoutExpired(proc.args, timeout or 0)
-            if deadline is not None and time.monotonic() >= deadline:
-                raise
 
 
 def kill_group(pgid: int, reap=None) -> bool:

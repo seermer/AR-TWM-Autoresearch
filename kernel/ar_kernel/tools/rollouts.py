@@ -16,9 +16,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-import time
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import yaml
@@ -50,7 +48,6 @@ SWITCH_CODE = {"third_person": "fp_to_tp", "first_person": "tp_to_fp"}
 AR30 = {("paths", "dmd_resume"): None, ("validation", "sampling_steps"): 30,
         ("validation", "scheduler"): "shift", ("validation", "cfg_scale"): 3.0}
 TURN_FRAMES = 96            # one turn of the render path, as in the evaluation
-FFMPEG_TIMEOUT_S = 600      # a wedged/oversize ffmpeg must fail its item, not hang the job
 
 
 def check_turn_item(item: dict, keys: tuple[str, ...], max_turns: int | None = None) -> None:
@@ -182,7 +179,7 @@ def check_published(info) -> None:
 class AlayaWorldBackend(GpuJob):
     name = tool = "rollout_alayaworld"
     kind = "rollout"
-    config_key = "generators.alayaworld"      # timeout_s
+    config_key = "generators.alayaworld"
     file_keys = frame_keys = ("image", "subject_mask")
     description = (
         "Use this tool when a clip's camera has to follow commanded moves, or the clip has to come from a node's "
@@ -272,10 +269,6 @@ class AlayaWorldBackend(GpuJob):
         if not indices:
             return None
         env, wm = self.block["env"], self.cfg.worldmodel
-        # One timeout_s budget for precache + render: the precache is killed at the deadline like a
-        # cancel, and the render gets what is left.
-        deadline = time.monotonic() + self.timeout_s if self.timeout_s else None
-        late = SimpleNamespace(is_set=lambda: deadline is not None and time.monotonic() > deadline)
         try:
             fine_tune = {}
             if job.args.get("node"):
@@ -291,15 +284,13 @@ class AlayaWorldBackend(GpuJob):
             # DiT), so every prompt of these cases is encoded first, into the run's prompt cache.
             code = run_cancellable(
                 env, ["python", *PRECACHE, "--config", str(config), "--device-map", "auto"], cwd=wm,
-                cancel=SimpleNamespace(is_set=lambda: cancel.is_set() or late.is_set()),
+                cancel=cancel,
                 log_path=work / "precache.log", recorder=self.recorder, node=job.node,
                 phase=self.tool, extra_env={"CUDA_VISIBLE_DEVICES": ",".join(map(str, self.gpus[:2])),
                                             "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
                                             "ALAYA_GEMMA_MAX_MEMORY": "0=13GiB,1=13GiB"})
             if cancel.is_set():
                 return None
-            if late.is_set():
-                raise RuntimeError(f"prompt precache timed out (job timeout_s {self.timeout_s}s)")
             if code != 0:
                 raise RuntimeError(f"prompt precache failed (exit {code}):\n"
                                    f"{file_tail(work / 'precache.log', 2000)}")
@@ -309,7 +300,6 @@ class AlayaWorldBackend(GpuJob):
                 "python", *RUN_WBENCH, "--config", str(config), "--gpus", ",".join(map(str, self.gpus)),
                 "--cases", ",".join(map(str, indices)), "--master-port", str(free_port())],
                 [self.gpus], job=job, work=work, out=out, total=len(items), cancel=cancel, report=report, cwd=wm,
-                deadline=deadline,
                 done=lambda: len(items) - len(indices) + len(list(videos.glob("case_*_combined.json"))))
             for i in indices:
                 src = videos / f"case_{i}_combined"
@@ -356,7 +346,7 @@ class Wan22Backend(GpuJob):
     name = tool = "rollout_wan22"
     kind = "rollout"
     generator = "wan2.2-ti2v-5b"
-    config_key = "generators.wan22"      # timeout_s
+    config_key = "generators.wan22"
     file_keys = ("image",)
 
     def __init__(self, *args, **kwargs) -> None:
@@ -409,7 +399,7 @@ class Wan22Backend(GpuJob):
         cropped = out / f"{item['index']}.cropped.mp4"
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(rendered), "-vf",
                         "crop=1248:704:16:0", "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p",
-                        "-an", str(cropped)], check=True, timeout=FFMPEG_TIMEOUT_S)
+                        "-an", str(cropped)], check=True)
         info = probe_video(cropped)
         check_published(info)
         return {"video": cropped, "prompt": item["prompt"], "frames": info.frames}
@@ -425,7 +415,7 @@ class Ltx25Backend(GpuJob):
     pose and no annotation, like Wan's."""
     name = tool = "rollout_ltx25"
     kind = "rollout"
-    config_key = "generators.ltx25"      # timeout_s
+    config_key = "generators.ltx25"
     takes_keyframes = True
 
     def __init__(self, *args, **kwargs) -> None:
@@ -516,7 +506,7 @@ class Ltx25Backend(GpuJob):
         a = job.args
         silent = out / f"{item['index']}.silent.mp4"
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(out / f"{item['index']}.mp4"), "-an",
-                        "-c:v", "copy", str(silent)], check=True, timeout=FFMPEG_TIMEOUT_S)
+                        "-c:v", "copy", str(silent)], check=True)
         info = probe_video(silent)
         if (info.width, info.height) != (a["width"], a["height"]):
             raise ValueError(f"rendered clip is {info.width}x{info.height}, not {a['width']}x{a['height']}")

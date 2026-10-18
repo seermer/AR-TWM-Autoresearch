@@ -2,10 +2,10 @@ from __future__ import annotations
 import argparse, json, os, shutil, signal, sys, time, traceback
 
 from .archive.nodes import NodeStore
-from .config import KernelConfig, load_dotenv, resolve_gpus
+from .config import KernelConfig, load_dotenv
 from .control import Control, drive, exit_process, kill_recorded_groups, mark_interrupted
 from .doctor import report, run_checks
-from .guards import alert, check_tools_fit, check_visible
+from .guards import alert, check_tools_fit, choose_gpus
 from .loop import Loop
 from .monitor import Monitor
 from .run import PreflightError, RunNotFound, attach_run, bootstrap_run, code_changes, rescore_node
@@ -14,7 +14,7 @@ from .status import format_status, run_status
 from .subproc import cache_env, proc_running, proc_start_time
 from .vcs.agents_repo import AgentsRepo
 
-FORCE_STOP_WAIT_S = 300.0     # the kernel's force-stop cleanup kills containers and GPU job groups
+FORCE_STOP_WAIT_S = 300.0     # the kernel's force-stop cleanup kills sandboxes and GPU job groups
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             started = proc_start_time(pid)
             os.kill(pid, signal.SIGTERM)
-            deadline = time.monotonic() + FORCE_STOP_WAIT_S   # its own cleanup: containers, GPU jobs
+            deadline = time.monotonic() + FORCE_STOP_WAIT_S   # its own cleanup: sandboxes, GPU jobs
             while proc_running(pid, started) and time.monotonic() < deadline:
                 time.sleep(0.5)
             if proc_running(pid, started):
@@ -118,8 +118,7 @@ def _run(cfg, args) -> int:
         if not os.environ.get(key, "").strip():
             raise ValueError(f"{key} is empty; set it in AutoResearcher/.env before `ar run`")
     if not args.resume:
-        check_visible(resolve_gpus(cfg, os.environ))          # the live config is what the run will freeze
-        check_tools_fit(cfg, resolve_gpus(cfg, os.environ))
+        check_tools_fit(cfg, choose_gpus(cfg, os.environ))     # the live config is what the run will freeze
         if args.git_remote and (error := AgentsRepo.check_remote(args.git_remote)):
             print(f"error: cannot reach --git-remote {args.git_remote}: {error}", file=sys.stderr)
             return 2
@@ -160,8 +159,7 @@ def _run(cfg, args) -> int:
         print("error: --max-nodes is required for a new run", file=sys.stderr)
         return 2
     run_cfg = KernelConfig.for_run(ctx.run_dir)
-    ctx.gpus = resolve_gpus(run_cfg, os.environ)              # one config per run: never the live one
-    check_visible(ctx.gpus)
+    ctx.gpus = choose_gpus(run_cfg, os.environ)               # one config per run: never the live one
     if args.resume:
         check_tools_fit(run_cfg, ctx.gpus)
         changed = code_changes(cfg, ctx.versions)

@@ -74,18 +74,6 @@ def test_run_workers_refuses_empty_gpu_groups(env):
                             total=0, cancel=threading.Event(), report=lambda p: None)
 
 
-def test_the_timeout_comes_from_the_backends_config_block(tmp_path):
-    rec = Recorder(tmp_path / "run")
-    reg = TokenRegistry(rec)
-
-    class ConfiguredJob(FakeJob):
-        config_key = "annotate"        # configs/kernel.yaml: timeout_s: 21600
-
-    backend = ConfiguredJob(KernelConfig.load(), tmp_path / "run", [0, 1, 4, 5], reg, rec)
-    assert backend.timeout_s == 21600
-    assert FakeJob(KernelConfig.load(), tmp_path / "run", [0, 1, 4, 5], reg, rec).timeout_s is None
-
-
 def test_items_fan_out_one_worker_per_gpu_and_publish_candidates(env):
     q, caller, rec, ws, staging, run = env
     items = [{"src": "a.mp4", "prompt": f"p{i}", "seed": i} for i in range(6)]
@@ -141,13 +129,13 @@ def test_a_truncated_status_file_is_an_item_error_not_a_job_failure(env):
     assert "error" in by[2] and "JSONDecodeError" in by[2]["error"]
 
 
-def test_run_workers_kills_workers_past_its_own_timeout(env):
+def test_a_slow_job_runs_to_its_end(env):
     q, caller, rec, ws, staging, run = env
-    q.backends["rollout_fake"].timeout_s = 1
-    job_id = submit(q, caller, [{"src": "a.mp4", "sleep": 60}])["job_id"]
+    assert not hasattr(q.backends["rollout_fake"], "timeout_s")
+    job_id = submit(q, caller, [{"src": "a.mp4", "sleep": 3}])["job_id"]
     out = q.wait(caller, job_id, 60)
     assert out["state"] == "done", out
-    assert "timeout" in job_result(out)["items"][0]["error"]
+    assert "candidate" in job_result(out)["items"][0]
 
 
 def test_missing_or_escaping_input_is_refused_at_submit(env):

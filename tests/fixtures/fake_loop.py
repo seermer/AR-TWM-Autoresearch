@@ -7,7 +7,6 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-import ar_kernel.control
 from ar_kernel.agent_phase import PhaseOutcome
 from ar_kernel.archive.db import open_db
 from ar_kernel.budget import Budget
@@ -23,7 +22,7 @@ from ar_kernel.vcs.agents_repo import AgentsRepo
 
 
 def outcome(ok, attempt_dir, result=None, error=None, commit=None):
-    return PhaseOutcome(ok, result, error, 0, False, commit, attempt_dir, 1.0)
+    return PhaseOutcome(ok, result, error, 0, commit, attempt_dir, 1.0)
 
 
 class Script:
@@ -126,7 +125,6 @@ def build(run: Path, max_nodes: int, script):
 
 def main() -> None:
     run, max_nodes, slow = Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
-    ar_kernel.control.kill_run_containers = lambda run_id, node=None: []    # no Docker in tests
     script = Script(run, slow=None if slow == "none" else slow, **(SCENARIO if slow == "none" else {}))
     loop, kit = build(run, max_nodes, script)
     drive(loop, kit, Control(run), loop.ctx.recorder)

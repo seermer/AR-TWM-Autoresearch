@@ -37,7 +37,7 @@ def test_a_new_run_without_max_nodes_creates_nothing(tmp_path, monkeypatch, caps
     assert "--max-nodes" in capsys.readouterr().err and not (tmp_path / "r2").exists()
 
 
-def _existing_run(tmp_path, monkeypatch, gpus_default="0,1,2,3", root="scored"):
+def _existing_run(tmp_path, monkeypatch, num_gpus=4, root="scored"):
     monkeypatch.setattr(cli.KernelConfig, "runs_dir", property(lambda self: tmp_path))
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "k")
@@ -48,7 +48,7 @@ def _existing_run(tmp_path, monkeypatch, gpus_default="0,1,2,3", root="scored"):
     judge = {"kind": "local", "model": raw["captioner"]["model"], "url": None}
     (run / "config" / "run.json").write_text(json.dumps(
         {"metric_set": ["m"], "case_ids": ["1"], "versions": {}, "judge": judge}))
-    raw["gpus"]["default"] = gpus_default
+    raw["gpus"]["num_gpus"] = num_gpus
     (run / "config" / "kernel.yaml").write_text(yaml.safe_dump(raw))
     Control(run).save_args(max_nodes=1)
     if root is not None:
@@ -68,7 +68,6 @@ class Reached(Exception):
 def test_resume_claims_the_loop_before_its_cleanup(tmp_path, monkeypatch):
     run = _existing_run(tmp_path, monkeypatch)
     seen = []
-    monkeypatch.setattr(cli, "check_visible", lambda gpus: None)
     monkeypatch.setattr(cli, "check_tools_fit", lambda cfg, gpus: None)
 
     def cleanup(control):
@@ -80,24 +79,32 @@ def test_resume_claims_the_loop_before_its_cleanup(tmp_path, monkeypatch):
     assert seen == [os.getpid()]
 
 
-def test_resume_resolves_gpus_from_the_runs_frozen_config(tmp_path, monkeypatch):
-    _existing_run(tmp_path, monkeypatch, gpus_default="4,5,6,7")     # the live config says 0,1,2,3
-    seen, fit = [], []
+def test_resume_chooses_gpus_by_the_runs_frozen_config(tmp_path, monkeypatch):
+    _existing_run(tmp_path, monkeypatch, num_gpus=8)     # the live config says 4
+    fit = []
 
     def reached(*args, **kwargs):
         raise Reached
-    monkeypatch.setattr(cli, "check_visible", seen.append)
-    monkeypatch.setattr(cli, "check_tools_fit", lambda cfg, gpus: fit.append((cfg.get("gpus.default"), gpus)))
-    monkeypatch.setattr(cli, "AgentsRepo", reached)              # the step after both checks
+    monkeypatch.setattr(cli, "check_tools_fit", lambda cfg, gpus: fit.append((cfg.get("gpus.num_gpus"), gpus)))
+    monkeypatch.setattr(cli, "AgentsRepo", reached)              # the step after the checks
     with pytest.raises(Reached):
         cli.main(["run", "--run-id", "r1", "--resume"])
-    assert seen == [[4, 5, 6, 7]] and fit == [("4,5,6,7", [4, 5, 6, 7])]      # the fit check reads the frozen config too
+    assert fit == [(8, list(range(8)))]      # the fit check reads the frozen config too
+
+
+def test_a_run_with_cuda_visible_devices_set_creates_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli.KernelConfig, "runs_dir", property(lambda self: tmp_path))
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("OPENAI_MODEL", "m")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3")
+    with pytest.raises(GpuPolicyError, match="unset CUDA_VISIBLE_DEVICES"):
+        cli.main(["run", "--run-id", "r2", "--max-nodes", "1"])
+    assert not (tmp_path / "r2").exists()
 
 
 def test_a_new_run_without_the_llm_settings_creates_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.KernelConfig, "runs_dir", property(lambda self: tmp_path))
     monkeypatch.setattr(cli, "load_dotenv", lambda path, env: [])
-    monkeypatch.setattr(cli, "check_visible", lambda gpus: None)
     monkeypatch.setattr(cli, "check_tools_fit", lambda cfg, gpus: None)
     monkeypatch.setenv("OPENAI_API_KEY", "")
     monkeypatch.setenv("OPENAI_MODEL", "m")
@@ -116,16 +123,15 @@ def test_a_resume_without_the_llm_settings_is_refused_before_claiming(tmp_path, 
     assert Control(run).alive_pid() is None
 
 
-def test_a_new_run_on_invisible_gpus_creates_nothing(tmp_path, monkeypatch):
+def test_a_new_run_without_free_gpus_creates_nothing(tmp_path, monkeypatch):
+    from ar_kernel import guards
     monkeypatch.setattr(cli.KernelConfig, "runs_dir", property(lambda self: tmp_path))
     monkeypatch.setenv("OPENAI_API_KEY", "k")
     monkeypatch.setenv("OPENAI_MODEL", "m")
-
-    def invisible(gpus):
-        raise GpuPolicyError("GPU(s) [3] are not visible")
-    monkeypatch.setattr(cli, "check_visible", invisible)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(guards, "gpu_memory_used", lambda: {0: 1, 1: 1, 2: 1, 3: 20000})
     monkeypatch.setattr(cli, "check_tools_fit", lambda cfg, gpus: None)
-    with pytest.raises(GpuPolicyError):
+    with pytest.raises(GpuPolicyError, match="need 4 free GPUs"):
         cli.main(["run", "--run-id", "r2", "--max-nodes", "1"])
     assert not (tmp_path / "r2").exists()
 
@@ -152,7 +158,6 @@ def test_resume_refuses_a_run_whose_root_was_never_scored(tmp_path, monkeypatch,
 def test_a_new_run_with_an_unreachable_git_remote_creates_nothing(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli.KernelConfig, "runs_dir", property(lambda self: tmp_path))
     monkeypatch.setattr(cli, "load_dotenv", lambda path, env: [])
-    monkeypatch.setattr(cli, "check_visible", lambda gpus: None)
     monkeypatch.setattr(cli, "check_tools_fit", lambda cfg, gpus: None)
     monkeypatch.setenv("OPENAI_API_KEY", "k")
     monkeypatch.setenv("OPENAI_MODEL", "m")
@@ -165,7 +170,6 @@ def test_a_new_run_named_like_a_run_on_its_git_remote_creates_nothing(tmp_path, 
     import subprocess
     monkeypatch.setattr(cli.KernelConfig, "runs_dir", property(lambda self: tmp_path))
     monkeypatch.setattr(cli, "load_dotenv", lambda path, env: [])
-    monkeypatch.setattr(cli, "check_visible", lambda gpus: None)
     monkeypatch.setattr(cli, "check_tools_fit", lambda cfg, gpus: None)
     monkeypatch.setenv("OPENAI_API_KEY", "k")
     monkeypatch.setenv("OPENAI_MODEL", "m")
@@ -182,7 +186,6 @@ def test_a_new_run_named_like_a_run_on_its_git_remote_creates_nothing(tmp_path, 
 def test_resume_pushes_to_the_git_remote_the_run_was_started_with(tmp_path, monkeypatch):
     run = _existing_run(tmp_path, monkeypatch)
     Control(run).save_args(git_remote="git@example.com:me/runs.git")
-    monkeypatch.setattr(cli, "check_visible", lambda gpus: None)
     monkeypatch.setattr(cli, "check_tools_fit", lambda cfg, gpus: None)
     made = []
 
@@ -216,7 +219,6 @@ def test_resume_refuses_when_the_runs_git_remote_is_unreachable(tmp_path, monkey
 # ---- stop and resume around a kernel that will not exit ----
 
 def _patch_until_drive(monkeypatch, drive):
-    monkeypatch.setattr(cli, "check_visible", lambda gpus: None)
     monkeypatch.setattr(cli, "check_tools_fit", lambda cfg, gpus: None)
     monkeypatch.setattr(cli, "build_run_kit", lambda *a, **k: SimpleNamespace(budget=None))
     monkeypatch.setattr(cli, "Loop", lambda *a, **k: None)
@@ -304,7 +306,6 @@ def test_a_new_run_whose_tools_do_not_fit_creates_nothing(tmp_path, monkeypatch)
     monkeypatch.setattr(cli.KernelConfig, "runs_dir", property(lambda self: tmp_path))
     monkeypatch.setenv("OPENAI_API_KEY", "k"); monkeypatch.setenv("OPENAI_MODEL", "m")
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    monkeypatch.setattr(cli, "check_visible", lambda gpus: None)
 
     def too_small(cfg, gpus):
         raise GpuPolicyError("enabled tools do not fit")

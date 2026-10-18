@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import threading
 from dataclasses import asdict, dataclass, field
@@ -9,12 +10,10 @@ from pathlib import Path
 
 from ar_contract.static import ENTRY_POINTS, mentions, static_check
 
-from ..agent_phase import read_result
+from ..agent_phase import install_requirements, read_result, requirements_listed
 from ..gateway.app import create_gateway_app
 from ..gateway.mock import MockBook
 from ..gateway.store import CallStore
-from ..liveness import Liveness, tree_mark
-from ..sandbox.image import ImageBuildError, ensure_image
 from ..sandbox.runner import Mounts, container_name, run_container
 from ..services import RunServices, socket_dir_for
 from ..tools.ask import MockAsk, register_ask_tool
@@ -45,7 +44,6 @@ class ContractStep:
 class ContractReport:
     ok: bool
     steps: list[ContractStep] = field(default_factory=list)
-    image: str | None = None
 
     def to_record(self) -> dict:
         failed = next((s for s in self.steps if not s.ok), None)
@@ -145,11 +143,8 @@ class ContractHarness:
 
 def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harness: ContractHarness,
                     recorder, node: str, attempt: int, contexts: dict[str, dict],
-                    import_timeout_s: float | None = None,
-                    smoke_timeout_s: float | None = None, runner=run_container) -> ContractReport:
+                    runner=run_container) -> ContractReport:
     """`contexts`: per entry point, the dry-run context its smoke run receives (agent_phase.smoke_contexts)."""
-    import_timeout_s = import_timeout_s or float(cfg.get("timeouts.contract_import_s"))
-    smoke_timeout_s = smoke_timeout_s or 4 * float(cfg.get("timeouts.contract_smoke_s"))
     report = ContractReport(ok=False)
     work = Path(run_dir) / "nodes" / node / "contract" / f"attempt-{attempt}"
     shutil.rmtree(work, ignore_errors=True)
@@ -168,18 +163,33 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
         report.steps.append(ContractStep("checkout", False, str(exc)))
         return finish(False)
 
-    reqs_path = code / "agent" / "requirements.txt"
+    def folders(label: str) -> tuple:
+        run_dir_l = work / label.replace(":", "_")
+        ws, ctx_dir = run_dir_l / "workspace", run_dir_l / "context"
+        staging = Path(run_dir) / "staging" / node / f"contract-{attempt}-{label.replace(':', '_')}"
+        for d in (ws, ctx_dir, staging):
+            d.mkdir(parents=True, exist_ok=True)
+        return ws, ctx_dir, staging
+
+    installed = work / "build" / "workspace" / ".home" / ".local"     # linked into every run's home
     try:
-        reqs = reqs_path.read_text(encoding="utf-8") if reqs_path.exists() else ""
-    except (OSError, UnicodeDecodeError) as exc:      # e.g. a directory, or not UTF-8
+        listed = requirements_listed(code)
+    except (OSError, UnicodeDecodeError) as exc:
         report.steps.append(ContractStep("build", False, f"cannot read agent/requirements.txt: {exc}"))
         return finish(False)
-    try:
-        report.image = ensure_image(cfg, reqs, recorder=recorder, node=node)
-        report.steps.append(ContractStep("build", True))
-    except ImageBuildError as exc:
-        report.steps.append(ContractStep("build", False, str(exc)))
-        return finish(False)
+    if listed:
+        ws, ctx_dir, staging = folders("build")
+        result = install_requirements(
+            runner, name=container_name(run_id, node, "contract-install", attempt),
+            mounts=Mounts(agent=code, workspace=ws, staging=staging, context=ctx_dir,
+                          contract=cfg.repo_root / "contract", sockets=harness.socket_dir, agent_readonly=True),
+            path="/agent/agent/requirements.txt", cfg=cfg, recorder=recorder, node=node, phase="contract",
+            attempt=attempt)
+        if result.exit_code != 0:
+            report.steps.append(ContractStep("build", False, f"agent/requirements.txt failed to install (exit code "
+                                                             f"{result.exit_code}):\n{result.stderr[-6000:]}"))
+            return finish(False)
+    report.steps.append(ContractStep("build", True))
 
     entry = code / "agent" / "entry.py"
     try:
@@ -197,13 +207,10 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
     if hits:
         return finish(False)
 
-    def run(label: str, command: list[str], timeout_s: float, context: dict | None,
-           with_liveness: bool = False) -> tuple:
-        run_dir_l = work / label.replace(":", "_")
-        ws, ctx_dir = run_dir_l / "workspace", run_dir_l / "context"
-        staging = Path(run_dir) / "staging" / node / f"contract-{attempt}-{label.replace(':', '_')}"
-        for d in (ws, ctx_dir, staging):
-            d.mkdir(parents=True, exist_ok=True)
+    def run(label: str, command: list[str], context: dict | None) -> tuple:
+        ws, ctx_dir, staging = folders(label)
+        if installed.is_dir():
+            shutil.copytree(installed, ws / ".home" / ".local", symlinks=True, copy_function=os.link)
         if context is not None:
             (ctx_dir / "context.json").write_text(json.dumps(context))
         edits = label == "smoke:edit_self"
@@ -212,22 +219,16 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
                                         agent_host=code if edits else None, base_commit=commit if edits else None)
         # issue() redacted the token only on harness.recorder, which is not `recorder`.
         recorder.add_redaction(caller.token)
-        # The two smoke runs get a liveness; the import probe does not.
-        liveness = Liveness.from_config(cfg, float(cfg.get("timeouts.contract_smoke_s")),
-                                        signals=[lambda: tree_mark(ws),
-                                                 lambda: tree_mark(recorder.events_path(node))]) \
-            if with_liveness else None
         try:
-            result = runner(image=report.image, name=container_name(run_id, node, "contract", attempt),
+            result = runner(name=container_name(run_id, node, "contract", attempt),
                             mounts=Mounts(agent=code, workspace=ws, staging=staging, context=ctx_dir,
                                           contract=cfg.repo_root / "contract",
                                           sockets=harness.socket_dir, agent_readonly=True),
                             command=command, env={"AR_TOKEN": caller.token, "AR_DEFAULT_MODEL": MOCK_MODEL,
                                                   "AR_CONTEXT_WINDOW": str(cfg.get("agents.context_window_tokens")),
                                                   "AR_COMPACT_AT": str(cfg.get("agents.compact_at"))},
-                            cpus=4, memory_gb=8, timeout_s=timeout_s, liveness=liveness, recorder=recorder,
-                            node=node, phase="contract", attempt=attempt,
-                            network=cfg.get("sandbox.network"))
+                            env_dir=cfg.repo_root / ".envs" / "agent", shm_gb=8, recorder=recorder,
+                            node=node, phase="contract", attempt=attempt)
         finally:
             harness.registry.revoke(caller.token)
             harness.queue.cancel_for_token(caller.token)   # as in the phase runner
@@ -236,20 +237,15 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
     (Path(run_dir) / "store").mkdir(exist_ok=True)
     probe = ("import sys; sys.path.insert(0, '/agent'); import agent.entry as e; "
              "assert callable(e.edit_self) and callable(e.improve_recipe)")
-    result, _ = run("import", ["python", "-c", probe], import_timeout_s, None)
-    if result.timed_out or result.exit_code != 0:
-        why = f"timed out after {import_timeout_s:.0f}s" if result.timed_out else result.stderr[-6000:]
-        report.steps.append(ContractStep("import", False, why))
+    result, _ = run("import", ["python", "-c", probe], None)
+    if result.exit_code != 0:
+        report.steps.append(ContractStep("import", False, result.stderr[-6000:]))
         return finish(False)
     report.steps.append(ContractStep("import", True))
 
     for kind in ENTRY_POINTS:
-        result, ws = run(f"smoke:{kind}", ["python", "-m", "ar_contract.run", kind], smoke_timeout_s,
-                         contexts[kind], with_liveness=True)
+        result, ws = run(f"smoke:{kind}", ["python", "-m", "ar_contract.run", kind], contexts[kind])
         name = f"smoke:{kind}"
-        if result.timed_out:
-            report.steps.append(ContractStep(name, False, f"timed out after {smoke_timeout_s:.0f}s"))
-            return finish(False)
         # Never follows a symlink or opens a FIFO the agent planted there.
         body = read_result(ws / "result.json") or {"ok": False, "error": "no result.json"}
         if result.exit_code != 0 or not body.get("ok"):

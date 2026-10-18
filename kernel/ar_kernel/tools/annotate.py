@@ -17,7 +17,7 @@ BRIDGE = Path(__file__).resolve().parents[1] / "bridges" / "vigeo_poses.py"
 class AnnotateBackend(GpuJob):
     name = tool = "annotate_camera"
     kind = "annotation"
-    config_key = "annotate"             # timeout_s
+    config_key = "annotate"
     file_keys = ("video",)
     description = ("Estimate per-frame camera poses for video clips (ViGeo). A GPU job: returns {job_id} at "
                    "once; collect with job_wait. `paths`: mp4 files under /workspace, at most {max_frames} frames each. Each result item gives "

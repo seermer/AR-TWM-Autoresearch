@@ -1,9 +1,8 @@
 from __future__ import annotations
-import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 import yaml
 from dotenv import dotenv_values
 
@@ -117,23 +116,3 @@ def load_dotenv(path: Path, env: "dict | os._Environ") -> list[str]:
         env[key] = value
         applied.append(key)
     return applied
-
-
-def resolve_gpus(cfg: KernelConfig, env: Mapping[str, str]) -> list[int]:
-    raw = env.get("CUDA_VISIBLE_DEVICES", "").strip() or str(cfg.get("gpus.default"))
-    entries = [part.strip() for part in raw.split(",") if part.strip()]
-    gpus: list[int] = []
-    for entry in entries:
-        if not entry.isdigit():
-            raise GpuPolicyError(f"CUDA_VISIBLE_DEVICES entry {entry!r} is not an integer")
-        gpus.append(int(entry))
-    if len(set(gpus)) != len(gpus):
-        raise GpuPolicyError(f"CUDA_VISIBLE_DEVICES lists a duplicate GPU: {raw!r}")
-    minimum = int(cfg.get("gpus.min_count"))
-    if len(gpus) < minimum:
-        raise GpuPolicyError(f"need at least {minimum} GPUs, got {len(gpus)}: {raw!r}")
-    keep = len(gpus) - len(gpus) % minimum                 # a run uses whole groups of `minimum` GPUs
-    if keep < len(gpus):
-        logging.getLogger(__name__).warning("using GPUs %s of %r; %s are left out (GPUs are used in groups of %d)",
-                                            gpus[:keep], raw, gpus[keep:], minimum)
-    return gpus[:keep]

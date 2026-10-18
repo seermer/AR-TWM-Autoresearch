@@ -1,21 +1,20 @@
-"""Run one agent call in one container."""
+"""Run one agent call in one bwrap sandbox."""
 from __future__ import annotations
 
 import hashlib
 import os
 import re
 import secrets
-import threading
+import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import docker
-import requests
+from ..guards import device_minors
 
 # Env var names whose value must never reach telemetry, no matter which Recorder
 # is used (defense in depth: a Recorder that was never told about this run's
-# token via add_redaction must still not leak it through the recorded container settings).
+# token via add_redaction must still not leak it through the recorded sandbox settings).
 _SECRET_ENV_KEYS = ("AR_TOKEN",)
 
 
@@ -39,44 +38,15 @@ class Mounts:
 @dataclass
 class RunResult:
     exit_code: int | None
-    timed_out: bool
     stdout: str
     stderr: str
     duration_s: float
-    stats: list[dict] = field(default_factory=list)
     container: str = ""
 
 
 def container_name(run_id: str, node: str, phase: str, attempt: int) -> str:
     raw = f"ar-{run_id}-{node}-{phase}-{attempt}-{secrets.token_hex(3)}"
     return re.sub(r"[^A-Za-z0-9_.-]+", "-", raw)
-
-
-def container_prefix(run_id: str, node: str | None = None) -> str:
-    raw = f"ar-{run_id}-" + (f"{node}-" if node else "")
-    return re.sub(r"[^A-Za-z0-9_.-]+", "-", raw)
-
-
-def kill_run_containers(run_id: str, node: str | None = None) -> list[str]:
-    """Force-remove this run's (or node's) containers: on force stop, and on resume for what a
-    killed kernel left running. Files are never touched."""
-    prefix = container_prefix(run_id, node)
-    try:
-        client = docker.from_env()
-        listed = client.api.containers(all=True, filters={"name": prefix})
-    except (docker.errors.DockerException, requests.RequestException):     # no docker daemon: nothing runs
-        return []
-    names = [n for c in listed for n in (c["Names"][0].lstrip("/"),) if n.startswith(prefix)]
-    for name in names:
-        _remove(client, name)
-    return names
-
-
-def _remove(client, name: str) -> None:
-    try:
-        client.api.remove_container(name, force=True)
-    except (docker.errors.DockerException, requests.RequestException):     # already gone, or no daemon
-        pass
 
 
 def snapshot(root: Path, hash_files: bool) -> dict[str, str]:
@@ -102,13 +72,13 @@ def snapshot(root: Path, hash_files: bool) -> dict[str, str]:
 
 def restore_owner_access(root: Path) -> None:
     """Give the owner rw (and x on directories) on everything under `root` again, never following
-    a link. A chmod-000 file or directory an agent leaves (containers run as the host uid) must not
+    a link. A chmod-000 file or directory an agent leaves (sandboxes run as the host uid) must not
     break the kernel's later hash, copy, commit or delete of the tree."""
     def grant(path: str, bits: int) -> None:
         try:
             if not os.path.islink(path):
                 os.chmod(path, os.lstat(path).st_mode | bits)
-        except OSError:                  # e.g. a mount point docker created as root
+        except OSError:
             pass
 
     grant(str(root), 0o700)
@@ -125,123 +95,99 @@ def diff(before: dict[str, str], after: dict[str, str]) -> dict[str, list[str]]:
             "changed": sorted(k for k in set(before) & set(after) if before[k] != after[k])}
 
 
-def _run_kwargs(image, name, mounts: Mounts, command, env, cpus, memory_gb, network="bridge",
-                gpus=()) -> dict:
-    """The `containers.run` settings of one agent container."""
-    base_env = {"HOME": "/workspace/.home", "PYTHONPATH": "/ar_contract", "AR_SOCKET_DIR": "/run/ar",
-                "AR_AGENT_DIR": "/agent", "AR_CONTEXT_DIR": "/context", "AR_WORKSPACE": "/workspace"}
-    volumes = [f"{mounts.agent}:/agent:{'ro' if mounts.agent_readonly else 'rw'}",
-               f"{mounts.workspace}:/workspace:rw",
-               f"{mounts.staging}:/workspace/staging:rw",
-               f"{mounts.context}:/context:ro",
-               f"{mounts.contract}:/ar_contract:ro",
-               f"{mounts.sockets}:/run/ar:ro"]          # connect works; deleting a socket does not
-    tmpfs = {"/tmp": "rw,size=4g"}
-    base_env["NVIDIA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpus) or "void"
+# Host files the sandbox reads: DNS, TLS certificates, and what the host tools under /usr need.
+ETC_FILES = ("/etc/resolv.conf", "/etc/hosts", "/etc/ssl", "/etc/ca-certificates", "/etc/alternatives",
+             "/etc/ld.so.cache", "/etc/nsswitch.conf")
+GPU_DEVICES = ("/dev/nvidiactl", "/dev/nvidia-uvm", "/dev/nvidia-uvm-tools")
+
+
+def _bwrap_args(mounts: Mounts, command, env, env_dir: Path, shm_gb: float,
+                gpu_minors=()) -> tuple[list[str], dict[str, str]]:
+    """The bwrap argv and the sandbox's whole environment (passed to bwrap as its own, so the token
+    never appears on a command line)."""
+    environment = {"PATH": f"{env_dir}/bin:/usr/bin:/bin", "HOME": "/workspace/.home",
+                   "PYTHONPATH": "/ar_contract", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1",
+                   "AR_SOCKET_DIR": "/run/ar", "AR_AGENT_DIR": "/agent", "AR_CONTEXT_DIR": "/context",
+                   "AR_WORKSPACE": "/workspace"}
+    argv = ["bwrap", "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup",
+            "--disable-userns", "--die-with-parent", "--new-session", "--ro-bind", "/usr", "/usr"]
+    for d in ("/bin", "/sbin", "/lib", "/lib64"):
+        if os.path.islink(d):
+            argv += ["--symlink", os.readlink(d), d]
+        elif os.path.isdir(d):
+            argv += ["--ro-bind", d, d]
+    for f in ETC_FILES:
+        if os.path.exists(f):
+            argv += ["--ro-bind", os.path.realpath(f), f]
+    argv += ["--ro-bind", str(env_dir), str(env_dir), "--proc", "/proc", "--dev", "/dev",
+             "--size", str(4 * 2**30), "--tmpfs", "/tmp", "--size", str(int(shm_gb * 2**30)), "--tmpfs", "/dev/shm"]
+    if gpu_minors:
+        for dev in (*GPU_DEVICES, *(f"/dev/nvidia{m}" for m in gpu_minors)):
+            argv += ["--dev-bind", dev, dev]
+        argv += ["--ro-bind", "/sys", "/sys"]
+    argv += ["--bind" if not mounts.agent_readonly else "--ro-bind", str(mounts.agent), "/agent",
+             "--bind", str(mounts.workspace), "/workspace",
+             "--bind", str(mounts.staging), "/workspace/staging",     # its own mount: no hard link across
+             "--ro-bind", str(mounts.context), "/context",
+             "--ro-bind", str(mounts.contract), "/ar_contract",
+             "--ro-bind", str(mounts.sockets), "/run/ar"]              # connect works; deleting a socket does not
     if mounts.code is not None:
-        volumes.append(f"{mounts.code}:/code:ro")
-        base_env["AR_CODE_DIR"] = "/code"
+        argv += ["--ro-bind", str(mounts.code), "/code"]
+        environment["AR_CODE_DIR"] = "/code"
     for node, path in mounts.nodes.items():
-        volumes.append(f"{path}:/nodes/{node}:ro")
+        argv += ["--ro-bind", str(path), f"/nodes/{node}"]
         if (Path(path) / "eval").is_dir():
-            tmpfs[f"/nodes/{node}/eval"] = "ro,size=4k"
-    memory = int(memory_gb * 2**30)
-    return dict(image=image, command=list(command), name=name, detach=True, network_mode=network,
-                user=f"{os.getuid()}:{os.getgid()}", read_only=True, tmpfs=tmpfs, cap_drop=["ALL"],
-                security_opt=["no-new-privileges"], pids_limit=4096, nano_cpus=int(cpus * 1e9),
-                mem_limit=memory, shm_size=memory, volumes=volumes, environment={**base_env, **env},
-                **({"runtime": "nvidia"} if gpus else {}))     # the NVIDIA runtime exposes exactly these GPUs
+            argv += ["--size", "4096", "--tmpfs", f"/nodes/{node}/eval", "--remount-ro", f"/nodes/{node}/eval"]
+    argv += ["--remount-ro", "/", "--chdir", "/workspace", "--", *command]     # the root folder bwrap made, too
+    return argv, {**environment, **env}
 
 
-def _redacted(kwargs: dict) -> dict:
-    """Copy `kwargs` with the value of each secret env key replaced by a placeholder. Applied to the
-    settings the runner records, independent of the Recorder's own redaction list, so a container
+def _redacted(settings: dict) -> dict:
+    """Copy `settings` with the value of each secret env key replaced by a placeholder. Applied to the
+    settings the runner records, independent of the Recorder's own redaction list, so a sandbox
     token never lands in telemetry even if this Recorder instance was never told about it."""
-    env = {k: "<redacted>" if k in _SECRET_ENV_KEYS else v for k, v in kwargs["environment"].items()}
-    return {**kwargs, "environment": env}
+    env = {k: "<redacted>" if k in _SECRET_ENV_KEYS else v for k, v in settings["environment"].items()}
+    return {**settings, "environment": env}
 
 
-def _cpu_percent(s: dict) -> float:
-    """CPU use as `docker stats` computes it, from one stats sample."""
-    cpu, pre = s["cpu_stats"], s["precpu_stats"]
-    used = cpu["cpu_usage"]["total_usage"] - pre["cpu_usage"]["total_usage"]
-    system = cpu.get("system_cpu_usage", 0) - pre.get("system_cpu_usage", 0)
-    cores = cpu.get("online_cpus") or len(cpu["cpu_usage"].get("percpu_usage") or ())
-    return used / system * cores * 100.0 if used > 0 and system > 0 else 0.0
-
-
-def run_container(*, image: str, name: str, mounts: Mounts, command: list[str], env: dict,
-                  cpus: float, memory_gb: float, timeout_s: float, recorder, node: str, phase: str,
-                  attempt: int, stats_every_s: float = 30.0, liveness=None,
-                  poll_s: float = 5.0, network: str = "bridge", gpus=()) -> RunResult:
-    (Path(mounts.workspace) / ".home").mkdir(parents=True, exist_ok=True)
-    kwargs = _run_kwargs(image, name, mounts, command, env, cpus, memory_gb, network, gpus)
-    base = dict(node=node, phase=phase, attempt=attempt, component="sandbox")
-    recorder.event("sandbox.start", container=name, payload={"kwargs": _redacted(kwargs)}, **base)
-    started = time.monotonic()
-    stats: list[dict] = []
-    stop = threading.Event()
-    client = None
-
-    def sample(container) -> None:
-        while not stop.wait(stats_every_s):
-            try:
-                s = container.stats(stream=False)
-            except (docker.errors.DockerException, requests.RequestException):
-                continue
-            stats.append({"t": time.monotonic() - started, "cpu_percent": _cpu_percent(s),
-                          "memory_bytes": s["memory_stats"].get("usage"), "pids": s["pids_stats"].get("current")})
-
-    exit_code, timed_out, stdout, stderr, reason = None, False, "", "", None
+def _read_output(path: Path, stream: str, recorder, name: str, base: dict) -> str:
     try:
-        # A failed launch can come *after* the container was created (e.g. an OCI runtime
-        # error or a bad bind source): a `Created` container named `name` is left behind
-        # unless the removal below also covers this path.
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        recorder.event("sandbox.error", container=name, payload={"stderr": f"could not read the sandbox's {stream}: {exc}"},
+                       **base)
+        return f"could not read the sandbox's {stream}: {exc}\n"
+
+
+def run_container(*, name: str, mounts: Mounts, command: list[str], env: dict, env_dir: Path, shm_gb: float,
+                  recorder, node: str, phase: str, attempt: int, gpus=(), log_name: str = "sandbox") -> RunResult:
+    """stdout and stderr go to <log_name>.stdout / .stderr next to the workspace folder."""
+    (Path(mounts.workspace) / ".home").mkdir(parents=True, exist_ok=True)
+    base = dict(node=node, phase=phase, attempt=attempt, component="sandbox")
+    started = time.monotonic()
+    out_path, err_path = (Path(mounts.workspace).parent / f"{log_name}.{s}" for s in ("stdout", "stderr"))
+    proc = None
+    try:
         try:
-            client = docker.from_env()
-            container = client.containers.run(**kwargs)
-        except (docker.errors.DockerException, requests.RequestException) as exc:
-            recorder.event("sandbox.error", payload={"stderr": str(exc)}, container=name, **base)
-            return RunResult(None, False, "", str(exc), time.monotonic() - started, [], name)
-        threading.Thread(target=sample, args=(container,), daemon=True).start()
-        if liveness is not None:
-            # Container CPU is a liveness signal: count samples above 1%.
-            liveness.add_signal(lambda: sum(1 for s in stats if s["cpu_percent"] > 1.0))
-        hard = time.monotonic() + timeout_s
-        while True:
-            tick = time.monotonic()
-            try:
-                exit_code = container.wait(timeout=poll_s)["StatusCode"]
-                break
-            except docker.errors.NotFound:              # gone: nothing left to wait for
-                break
-            except (docker.errors.DockerException, requests.RequestException):
-                # The poll tick (a read timeout), or the daemon briefly unreachable: wait again.
-                time.sleep(max(0.0, poll_s - (time.monotonic() - tick)))
-            if time.monotonic() >= hard:
-                reason = f"hard cap of {timeout_s:.0f}s reached"
-            elif liveness is not None:
-                reason = liveness.expired()
-            if reason:
-                timed_out = True
-                try:
-                    container.kill()
-                except docker.errors.APIError:          # it ended meanwhile
-                    pass
-                break
-        try:
-            stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors="replace")
-            stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")
-        except docker.errors.APIError:
-            pass
+            argv, environment = _bwrap_args(mounts, command, env, env_dir, shm_gb, device_minors(list(gpus)))
+            recorder.event("sandbox.start", container=name,
+                           payload={"settings": _redacted({"argv": argv, "environment": environment})}, **base)
+            with open(out_path, "w") as out, open(err_path, "w") as err:
+                proc = subprocess.Popen(argv, env=environment, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                                        start_new_session=True)     # a Ctrl-C to the kernel is not the agent's
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:   # e.g. no bwrap, a card without a minor
+            recorder.event("sandbox.error", payload={"stderr": f"{type(exc).__name__}: {exc}"}, container=name, **base)
+            return RunResult(None, "", f"{type(exc).__name__}: {exc}", time.monotonic() - started, name)
+        exit_code = proc.wait()
     finally:
-        stop.set()
-        if client is not None:
-            _remove(client, name)
+        if proc is not None and proc.poll() is None:
+            proc.kill()                   # --die-with-parent ends everything inside
+            proc.wait()
         for root in (mounts.agent, mounts.workspace, mounts.staging):   # everything the agent can write
             restore_owner_access(root)
-    result = RunResult(exit_code, timed_out, stdout, stderr, time.monotonic() - started, stats, name)
-    recorder.event("sandbox.end", container=name, exit_code=exit_code, timed_out=timed_out,
-                   duration_s=result.duration_s,
-                   payload={"stdout": stdout, "stderr": stderr, "stats": stats, "reason": reason}, **base)
+    stdout = _read_output(out_path, "stdout", recorder, name, base)
+    stderr = _read_output(err_path, "stderr", recorder, name, base)
+    result = RunResult(exit_code, stdout, stderr, time.monotonic() - started, name)
+    recorder.event("sandbox.end", container=name, exit_code=exit_code, duration_s=result.duration_s,
+                   payload={"stdout": stdout, "stderr": stderr}, **base)
     return result

@@ -7,7 +7,7 @@ from ar_kernel.config import REPO_ROOT
 from ar_kernel.subproc import cache_dir, cache_env, run_in_env
 
 VARS = ("HF_HOME", "XDG_CACHE_HOME", "TORCH_HOME", "TRITON_CACHE_DIR", "TORCHINDUCTOR_CACHE_DIR",
-        "VLLM_CACHE_ROOT", "CUDA_CACHE_PATH", "PIP_CACHE_DIR", "UV_CACHE_DIR")
+        "VLLM_CACHE_ROOT", "CUDA_CACHE_PATH", "PIP_CACHE_DIR", "UV_CACHE_DIR", "TMPDIR")
 
 
 def test_default_cache_dir_is_inside_the_repo(monkeypatch):
@@ -17,6 +17,12 @@ def test_default_cache_dir_is_inside_the_repo(monkeypatch):
     assert set(env) == set(VARS)
     assert all(Path(v).is_relative_to(REPO_ROOT / ".cache") for v in env.values())
     assert env["HF_HOME"] == str(REPO_ROOT / ".cache" / "huggingface")
+    assert env["TMPDIR"] == str(REPO_ROOT / ".cache" / "tmp")
+
+
+def test_cache_env_creates_tmpdir(monkeypatch, tmp_path):
+    monkeypatch.setenv("AR_CACHE_DIR", str(tmp_path))
+    assert Path(cache_env()["TMPDIR"]).is_dir()
 
 
 def test_ar_cache_dir_relocates(monkeypatch, tmp_path):

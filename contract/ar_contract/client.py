@@ -8,10 +8,9 @@ verified on this stack:
   endpoint, and round-trips a reply's reasoning when it returns one (see `reasoning_of`);
 - the host is 'localhost' (the MCP server's rebinding guard rejects anything else);
 - MCP calls such as data_ingest run the dataset checker and take minutes, and recipe_check
-  can wait on the GPU lock then run 3600 s gate steps while hf_download fetches 20 GiB, so
+  can wait on the GPU lock then run the gate steps while hf_download fetches 20 GiB, so
   the session read timeout is long (4 h) -- a client timeout shorter than a server op still
-  in progress would just make the agent retry work that hasn't failed. The phase hard cap
-  (enforced elsewhere) bounds real hangs;
+  in progress would just make the agent retry work that hasn't failed;
 - the gateway owns upstream retries, so clients never retry.
 """
 from __future__ import annotations

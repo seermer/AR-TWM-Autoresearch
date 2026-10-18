@@ -120,8 +120,8 @@ class CaptionBackend:
                             phase=TOOL, poll_s=self.poll_s, label="caption server")
         base, load_s, outcome = server.base_url, None, "failed"
         try:
-            load_s = server.start(float(c["startup_timeout_s"]), cancel, on_poll=sample)
-            with local_client(base, float(c["clip_timeout_s"])) as client:
+            load_s = server.start(cancel, on_poll=sample)
+            with local_client(base, float(c["clip_timeout_s"]), server.api_key) as client:
                 if load_s is not None:
                     self.recorder.event("caption.server_ready", node=job.node, component="tools",
                                         job_id=job.id, load_s=load_s,

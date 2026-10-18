@@ -11,7 +11,22 @@ from pathlib import Path
 import psutil
 
 from .guards import alert, smi
-from .liveness import tree_mark
+
+
+def tree_mark(*paths) -> tuple[int, int, int]:
+    """(files, bytes, newest mtime_ns) of the regular files at or under `paths`."""
+    count = size = newest = 0
+    for p in map(Path, paths):
+        files = [p] if p.is_file() else (p.rglob("*") if p.is_dir() else [])
+        for f in files:
+            try:
+                if f.is_symlink() or not f.is_file():
+                    continue
+                st = f.stat()
+            except OSError:
+                continue
+            count, size, newest = count + 1, size + st.st_size, max(newest, st.st_mtime_ns)
+    return count, size, newest
 
 
 def _num(value: str) -> float | None:

@@ -2,7 +2,6 @@
 from conftest import job_result
 import copy
 import json
-import os
 import shutil
 import threading
 from pathlib import Path
@@ -10,7 +9,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ar_kernel.config import KernelConfig, resolve_gpus
+from ar_kernel.config import KernelConfig
+from ar_kernel.guards import choose_gpus
 from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools import annotate
 from ar_kernel.tools.annotate import AnnotateBackend
@@ -114,12 +114,6 @@ def test_non_mp4_is_refused_at_submit(env):
         q.backends["annotate_camera"].submit(q, caller, {"items": [{"video": "x.mov"}]})
 
 
-def test_limits_come_from_the_annotate_config_block(tmp_path):
-    rec = Recorder(tmp_path / "run")
-    b = AnnotateBackend(REAL, tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
-    assert b.timeout_s == REAL.get("annotate.timeout_s")
-
-
 def test_build_gpu_backends_includes_annotate_only_when_enabled(tmp_path):
     rec = Recorder(tmp_path / "run")
     names = lambda cfg: [b.name for b in build_gpu_backends(cfg, tmp_path / "run", [0, 1, 2, 3],
@@ -164,8 +158,8 @@ def _umeyama_ate(src, dst):
 
 @pytest.mark.gpu
 def test_real_vigeo_matches_the_example_poses(tmp_path):
-    """AR_TEST_GPUS=0,1,2,3 pytest tests/test_annotate.py -m gpu -s"""
-    gpus = resolve_gpus(REAL, {"CUDA_VISIBLE_DEVICES": os.environ.get("AR_TEST_GPUS", "0,1,2,3")})
+    """pytest tests/test_annotate.py -m gpu -s (the first gpus.num_gpus free cards)"""
+    gpus = choose_gpus(REAL, {})
     examples = REAL.worldmodel / "data" / "examples" / "video_caption_camera"
     clips = sorted(p.stem for p in (examples / "videos").glob("*.mp4"))
     run_dir, ws = tmp_path / "run", tmp_path / "ws"

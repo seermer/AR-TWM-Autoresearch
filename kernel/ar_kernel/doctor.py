@@ -5,13 +5,14 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import GpuPolicyError, KernelConfig, resolve_gpus
-from .guards import check_tools_fit
-from .subproc import project_env
-from .tools.vllm_server import require_free_gpus
+from .config import GpuPolicyError, KernelConfig
+from .guards import check_tools_fit, choose_gpus, device_minors
+from .sandbox.runner import Mounts, _bwrap_args
+from .subproc import cache_env, project_env
 
 ENVS = ("alayaworld", "wbench-main", "wbench-vp", "autoresearcher")
 
@@ -116,7 +117,7 @@ def _envs(cfg: KernelConfig) -> list[Finding]:
     A named env of the conda installation still works but is reported, so the tree is not
     quietly depending on something outside it."""
     try:
-        raw = subprocess.run(["conda", "env", "list"], capture_output=True, text=True, timeout=60).stdout
+        raw = subprocess.run(["conda", "env", "list"], capture_output=True, text=True).stdout
     except (OSError, subprocess.SubprocessError) as exc:
         raw, listing_error = "", str(exc)
     else:
@@ -143,33 +144,55 @@ def _envs(cfg: KernelConfig) -> list[Finding]:
 def _tools() -> list[Finding]:
     return [Finding("ok", f"tool.{t}", shutil.which(t)) if shutil.which(t)
             else Finding("fail", f"tool.{t}", "not on PATH")
-            for t in ("ffprobe", "ffmpeg", "conda", "git")]
+            for t in ("ffprobe", "ffmpeg", "conda", "git", "curl", "wget", "unzip", "gcc")]   # + the agent's host tools
 
 
-def _gpus(cfg: KernelConfig) -> list[Finding]:
-    """Agent containers get the run's GPUs through docker's NVIDIA runtime, and a kernel GPU job an agent
-    asks for is refused while a GPU is in use."""
+def _in_sandbox(cfg: KernelConfig, command: list[str], gpus=()) -> subprocess.CompletedProcess:
+    """`command` in an agent sandbox over empty folders."""
+    with tempfile.TemporaryDirectory(dir=cache_env()["TMPDIR"]) as tmp:
+        dirs = {k: Path(tmp) / k for k in ("agent", "workspace", "staging", "context", "sockets")}
+        for d in dirs.values():
+            d.mkdir()
+        mounts = Mounts(agent=dirs["agent"], workspace=dirs["workspace"], staging=dirs["staging"],
+                        context=dirs["context"], contract=cfg.repo_root / "contract", sockets=dirs["sockets"],
+                        agent_readonly=True)
+        argv, env = _bwrap_args(mounts, command, {}, cfg.repo_root / ".envs" / "agent", 1, device_minors(list(gpus)))
+        return subprocess.run(argv, env=env, capture_output=True, text=True)
+
+
+def _sandbox(cfg: KernelConfig) -> list[Finding]:
+    """Agents run in bwrap with .envs/agent, on the run's cards: the first gpus.num_gpus free ones."""
+    if not shutil.which("bwrap"):
+        return [Finding("fail", "bwrap", "not on PATH: install bubblewrap")]
+    if project_env("agent", cfg.repo_root) is None:
+        return [Finding("fail", "env.agent", "no .envs/agent: run scripts/setup_envs.sh agent")]
+    out = []
+    r = _in_sandbox(cfg, ["true"])
+    if r.returncode != 0:
+        return [Finding("fail", "bwrap", f"a sandbox does not start (unprivileged user namespaces allowed?): "
+                                         f"{r.stderr.strip()}")]
+    out.append(Finding("ok", "bwrap", "a sandbox starts"))
+    r = _in_sandbox(cfg, ["python", "-c", "import ar_contract.run, ar_contract.client"])
+    out.append(Finding("ok", "env.agent", "imports the contract in a sandbox") if r.returncode == 0
+               else Finding("fail", "env.agent", f"cannot import the contract in a sandbox: {r.stderr.strip()[-2000:]}"))
     try:
-        runtimes = subprocess.run(["docker", "info", "--format", "{{json .Runtimes}}"], capture_output=True,
-                                  text=True, timeout=60).stdout
-    except (OSError, subprocess.SubprocessError) as exc:
-        runtimes = f"{type(exc).__name__}: {exc}"
-    if '"nvidia"' in runtimes and shutil.which("nvidia-container-runtime"):
-        out = [Finding("ok", "docker.nvidia", "runtime present")]
-    else:
-        out = [Finding("fail", "docker.nvidia", "docker has no working `nvidia` runtime: install "
-                                                "nvidia-container-toolkit and run `nvidia-ctk runtime configure`")]
+        gpus = choose_gpus(cfg, os.environ)
+    except GpuPolicyError as exc:
+        return out + [Finding("fail", "gpus.choice", str(exc))]
+    out.append(Finding("ok", "gpus.choice", f"GPUs {gpus}"))
     try:
-        require_free_gpus(resolve_gpus(cfg, os.environ), int(cfg.get("gpus.free_below_mib")))
-        out.append(Finding("ok", "gpus.free", "the run's GPUs are free"))
-    except RuntimeError as exc:
-        out.append(Finding("fail", "gpus.free", str(exc).split(" A kernel GPU job")[0]))
+        r = _in_sandbox(cfg, ["nvidia-smi", "-L"], gpus)
+    except GpuPolicyError as exc:
+        return out + [Finding("fail", "gpus.sandbox", str(exc))]
+    seen = [line for line in r.stdout.splitlines() if line.startswith("GPU ")]
+    out.append(Finding("ok", "gpus.sandbox", f"a sandbox sees {len(seen)} GPUs") if r.returncode == 0 and len(seen) == len(gpus)
+               else Finding("fail", "gpus.sandbox", f"a sandbox on GPUs {gpus} sees {len(seen)}: {r.stdout}{r.stderr}".strip()))
     return out
 
 
 def _fit(cfg: KernelConfig) -> list[Finding]:
     try:
-        check_tools_fit(cfg, resolve_gpus(cfg, os.environ))
+        check_tools_fit(cfg, choose_gpus(cfg, os.environ))
     except GpuPolicyError as exc:
         return [Finding("fail", "gpus.fit", str(exc))]
     return [Finding("ok", "gpus.fit", "every enabled tool's estimate fits the run's GPUs")]
@@ -215,7 +238,7 @@ def run_checks(cfg: KernelConfig | None = None) -> list[Finding]:
     findings += _rel_paths(cfg)
     findings += _siblings(cfg)
     findings += _tools()
-    findings += _gpus(cfg)
+    findings += _sandbox(cfg)
     findings += _fit(cfg)
     findings += _envs(cfg)
     findings += _prefix_envs(cfg)

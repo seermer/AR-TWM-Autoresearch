@@ -1,8 +1,9 @@
-"""Run alerts and the start-time GPU visibility check. There is deliberately no
-wait for idle GPUs."""
+"""Run alerts and the start-time GPU choice. There is deliberately no wait for idle GPUs."""
 from __future__ import annotations
 
+import re
 import subprocess
+from typing import Mapping
 
 from .config import GpuPolicyError
 
@@ -14,24 +15,53 @@ def alert(recorder, kind: str, message: str, *, level: str = "error", **payload)
 
 def smi(args: list[str]) -> str | None:
     try:
-        r = subprocess.run(["nvidia-smi", *args], capture_output=True, text=True, timeout=30)
+        r = subprocess.run(["nvidia-smi", *args], capture_output=True, text=True)
     except (OSError, subprocess.SubprocessError):
         return None
     return r.stdout if r.returncode == 0 else None
 
 
-def visible_gpus() -> set[int] | None:
-    out = smi(["--query-gpu=index", "--format=csv,noheader"])
-    return None if out is None else {int(x) for x in out.split() if x.strip().isdigit()}
+def _nvidia_smi(args: list[str]) -> str:
+    try:
+        r = subprocess.run(["nvidia-smi", *args], capture_output=True, text=True)
+    except OSError as exc:
+        raise GpuPolicyError(f"nvidia-smi failed: {exc}") from exc
+    if r.returncode != 0:
+        raise GpuPolicyError(f"nvidia-smi {' '.join(args)} exited {r.returncode}: {(r.stderr or r.stdout).strip()}")
+    return r.stdout
 
 
-def check_visible(gpus: list[int], visible=visible_gpus) -> None:
-    seen = visible()
-    if seen is None:
-        return
-    missing = [g for g in gpus if g not in seen]
-    if missing:
-        raise GpuPolicyError(f"GPU(s) {missing} are not visible to nvidia-smi (visible: {sorted(seen)})")
+def gpu_memory_used() -> dict[int, int]:
+    """Memory in use on every card, in MiB, by nvidia-smi index."""
+    out = _nvidia_smi(["--query-gpu=index,memory.used", "--format=csv,noheader,nounits"])
+    return {int(i): int(m) for i, m in (line.split(",") for line in out.splitlines() if line.strip())}
+
+
+def choose_gpus(cfg, env: Mapping[str, str], used=None) -> list[int]:
+    """The first `gpus.num_gpus` cards (nvidia-smi index) holding at most `gpus.free_below_mib`."""
+    if env.get("CUDA_VISIBLE_DEVICES", "").strip():
+        raise GpuPolicyError("unset CUDA_VISIBLE_DEVICES: the run picks its cards by gpus.num_gpus")
+    count, group = cfg.get("gpus.num_gpus"), int(cfg.get("gpus.min_count"))
+    if not isinstance(count, int) or count <= 0 or count % group:
+        raise GpuPolicyError(f"gpus.num_gpus must be a positive multiple of {group}, got {count!r}")
+    limit = int(cfg.get("gpus.free_below_mib"))
+    memory = (used or gpu_memory_used)()
+    free = [g for g in sorted(memory) if memory[g] <= limit]
+    if len(free) < count:
+        raise GpuPolicyError(f"need {count} free GPUs (at most {limit} MiB in use), found {len(free)}: "
+                             + ", ".join(f"GPU {g} {m} MiB" for g, m in sorted(memory.items())))
+    return free[:count]
+
+
+def device_minors(gpus: list[int]) -> list[int]:
+    """Each card's /dev/nvidia<minor> number; it can differ from the nvidia-smi index."""
+    out = []
+    for g in gpus:
+        found = re.search(r"Minor Number\s*:\s*(\d+)", _nvidia_smi(["-q", "-i", str(g)]))
+        if found is None:
+            raise GpuPolicyError(f"nvidia-smi -q -i {g} shows no Minor Number")
+        out.append(int(found.group(1)))
+    return out
 
 
 def gpu_total_gib(gpus: list[int]) -> dict[int, int] | None:

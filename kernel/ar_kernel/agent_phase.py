@@ -5,7 +5,7 @@ import json
 import shutil
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ar_contract.models import RESULT_MODELS
@@ -17,8 +17,6 @@ from .archive.commits import CommitStore
 from .archive.nodes import NOT_SHOWN, NodeStore
 from .context_bundle import build_edit_context, build_recipe_context, write_bundle
 from .isolation import host_roots, scrub
-from .liveness import Liveness, tree_mark
-from .sandbox.image import ImageBuildError, ensure_image
 from .sandbox.runner import Mounts, RunResult, container_name, diff, run_container, snapshot
 from .tools import snapshot as snapshots
 from .vcs.agents_repo import CheckoutError
@@ -45,7 +43,6 @@ class PhaseOutcome:
     result: dict | None
     error: str | None
     exit_code: int | None
-    timed_out: bool
     commit: str | None
     attempt_dir: Path
     duration_s: float
@@ -65,12 +62,29 @@ def finished_node_dirs(conn, run_dir: Path) -> dict[str, Path]:
 
 
 def _failed_before_start(dirs: dict, started: float, error: str) -> tuple:
-    """An attempt that fails before its container starts: a failed attempt recorded like
+    """An attempt that fails before its sandbox starts: a failed attempt recorded like
     any other, never an exception that skips edit_self's commit of the attempt tree."""
     empty = {"added": [], "removed": [], "changed": []}
-    result = RunResult(None, False, "", error, time.monotonic() - started, [], "")
+    result = RunResult(None, "", error, time.monotonic() - started, "")
     diffs = {"agent": dict(empty), "workspace": dict(empty), "staging": dict(empty)}
     return dirs, result, {"ok": False, "error": error}, diffs, time.monotonic() - started
+
+
+def requirements_listed(code: Path) -> bool:
+    """Whether `code`/agent/requirements.txt names a package. Raises OSError or UnicodeDecodeError
+    when it cannot be read (e.g. a directory, or not UTF-8)."""
+    path = Path(code) / "agent" / "requirements.txt"
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    return any(line.split("#")[0].strip() for line in text.splitlines())
+
+
+def install_requirements(runner, *, name: str, mounts: Mounts, path: str, cfg, recorder, node: str, phase: str,
+                         attempt: int) -> RunResult:
+    """`pip install --user -r path` in a sandbox with `mounts`, without GPUs: the packages land in the
+    workspace's home, where the sandboxes that follow on the same workspace find them."""
+    return runner(name=name, mounts=mounts, env={}, env_dir=cfg.repo_root / ".envs" / "agent", shm_gb=1,
+                  command=["python", "-m", "pip", "install", "--user", "--no-warn-script-location", "-r", path],
+                  recorder=recorder, node=node, phase=phase, attempt=attempt, log_name="install")
 
 
 def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str, ctx,
@@ -97,15 +111,22 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
         dirs[key].mkdir(parents=True, exist_ok=True)
     (Path(env.run_dir) / "store").mkdir(exist_ok=True)
     write_bundle(ctx, dirs["context"], env.cfg.get("isolation.blocked_names") or [], host_roots(env.cfg))
-    reqs = running / "agent" / "requirements.txt"
+    mounts = Mounts(agent=dirs["agent"], workspace=dirs["workspace"], staging=dirs["staging"], context=dirs["context"],
+                    contract=env.cfg.repo_root / "contract", sockets=env.socket_dir, agent_readonly=agent_readonly,
+                    nodes=nodes, code=None if agent_readonly else running)
     try:
-        reqs_text = reqs.read_text(encoding="utf-8") if reqs.exists() else ""
-    except (OSError, UnicodeDecodeError) as exc:     # e.g. a directory, or not UTF-8
+        listed = requirements_listed(running)
+    except (OSError, UnicodeDecodeError) as exc:
         return _failed_before_start(dirs, started, f"cannot read agent/requirements.txt: {exc}")
-    try:
-        image = ensure_image(env.cfg, reqs_text, recorder=env.recorder, node=node)
-    except ImageBuildError as exc:
-        return _failed_before_start(dirs, started, f"agent image failed to build: {exc}")
+    if listed:          # before the snapshot below: the installed packages are not the agent's changes
+        installed = install_requirements(
+            env.runner, name=container_name(env.run_id, node, f"{phase}-install", attempt),
+            mounts=replace(mounts, agent_readonly=True),
+            path=f"{'/agent' if agent_readonly else '/code'}/agent/requirements.txt", cfg=env.cfg,
+            recorder=env.recorder, node=node, phase=phase, attempt=attempt)
+        if installed.exit_code != 0:
+            return _failed_before_start(dirs, started, f"agent/requirements.txt failed to install (exit code "
+                                                       f"{installed.exit_code}):\n{installed.stderr[-6000:]}")
 
     caller = env.registry.issue(node=node, phase=phase, attempt=attempt, workspace_host=dirs["workspace"],
                                 staging_host=dirs["staging"], mock_script=mock_script,
@@ -115,33 +136,19 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
     # phase could keep the GPUs.
     try:
         env.recorder.add_redaction(caller.token)   # idempotent, regardless of who redacted it first
-        soft = float(env.cfg.get(f"timeouts.{phase}_s"))
-        liveness = Liveness.from_config(env.cfg, soft, signals=[
-            lambda: tree_mark(dirs["workspace"], dirs["staging"]),          # workspace changes
-            lambda: tree_mark(Path(env.run_dir) / "hf_tmp"),                 # a download in progress
-            lambda: tree_mark(env.recorder.events_path(node)),               # gateway + tool calls
-            lambda: env.queue.active_for_token(caller.token) and time.monotonic()])  # own GPU jobs
         # /workspace/staging is mounted from its own host directory, so it is snapshotted separately.
         before = {"agent": snapshot(dirs["agent"], True), "workspace": snapshot(dirs["workspace"], False),
                   "staging": snapshot(dirs["staging"], False)}
         env.recorder.event("phase.start", node=node, phase=phase, attempt=attempt, component="kernel",
-                           payload={"code_commit": code_commit, "image": image})
+                           payload={"code_commit": code_commit})
         result = env.runner(
-            image=image, name=container_name(env.run_id, node, phase, attempt),
-            mounts=Mounts(agent=dirs["agent"], workspace=dirs["workspace"], staging=dirs["staging"],
-                          context=dirs["context"],
-                          contract=env.cfg.repo_root / "contract", sockets=env.socket_dir,
-                          agent_readonly=agent_readonly, nodes=nodes,
-                          code=None if agent_readonly else running),
+            name=container_name(env.run_id, node, phase, attempt), mounts=mounts,
             command=["python", "-m", "ar_contract.run", phase],
             env={"AR_TOKEN": caller.token, "AR_DEFAULT_MODEL": env.default_model, "AR_NODE": node,
                  "AR_PHASE": phase, "AR_ATTEMPT": str(attempt),
                  "AR_CONTEXT_WINDOW": str(env.cfg.get("agents.context_window_tokens")),
                  "AR_COMPACT_AT": str(env.cfg.get("agents.compact_at"))},
-            cpus=env.cfg.get("sandbox.cpus"), memory_gb=env.cfg.get("sandbox.memory_gb"),
-            network=env.cfg.get("sandbox.network"), gpus=env.gpus,
-            timeout_s=4 * soft,                 # hard cap
-            liveness=liveness,
+            env_dir=env.cfg.repo_root / ".envs" / "agent", shm_gb=env.cfg.get("sandbox.shm_gb"), gpus=env.gpus,
             recorder=env.recorder, node=node, phase=phase, attempt=attempt)
     finally:
         try:
@@ -185,8 +192,6 @@ def _validate_result(phase: str, body: dict) -> tuple[bool, dict | None, str | N
 
 def _judge(phase, result, body, resolve) -> tuple[bool, dict | None, str | None]:
     """(ok, result, error); `resolve` maps the validated result to (result, None) or (None, error)."""
-    if result.timed_out:
-        return False, None, "the agent call timed out and was killed"
     if body is None:
         return False, None, f"no result.json (exit code {result.exit_code}): {result.stderr[-6000:]}"
     ok, res, error = _validate_result(phase, body)
@@ -198,9 +203,9 @@ def _judge(phase, result, body, resolve) -> tuple[bool, dict | None, str | None]
 
 def _outcome(env, phase, node, attempt, dirs, result, verdict, diffs, duration, commit):
     ok, res, error = verdict
-    outcome = PhaseOutcome(ok, res, error, result.exit_code, result.timed_out, commit, dirs["attempt"], duration)
+    outcome = PhaseOutcome(ok, res, error, result.exit_code, commit, dirs["attempt"], duration)
     env.recorder.event("phase.end", node=node, phase=phase, attempt=attempt, component="kernel",
-                       ok=ok, timed_out=result.timed_out, exit_code=result.exit_code,
+                       ok=ok, exit_code=result.exit_code,
                        payload={"result": res, "error": error, "diffs": diffs, "commit": commit})
     return outcome
 

@@ -16,11 +16,6 @@ from ar_kernel.telemetry.recorder import Recorder
 FIX = Path(__file__).parent / "fixtures"
 
 
-@pytest.fixture(autouse=True)
-def no_docker(monkeypatch):
-    monkeypatch.setattr("ar_kernel.control.kill_run_containers", lambda run_id, node=None: [])
-
-
 @pytest.fixture
 def spawn():
     procs = []

@@ -5,8 +5,7 @@ from pathlib import Path
 import yaml
 
 from ..config import KernelConfig
-from ..liveness import Liveness, tree_mark
-from ..subproc import SubprocTimeout, output_tail, run_in_env
+from ..subproc import output_tail, run_in_env
 
 RECIPE_SIGNATURES = (
     "CUDA out of memory", "torch.OutOfMemoryError", "loss=nan", "loss=inf",
@@ -84,7 +83,7 @@ class TrainRunner:
              "--device-map", "auto"],
             cwd=self.cfg.worldmodel,
             extra_env={"CUDA_VISIBLE_DEVICES": two, "ALAYA_GEMMA_MAX_MEMORY": "0=13GiB,1=13GiB"},
-            timeout=7200, recorder=self.recorder, node=node_id, phase="precache")
+            recorder=self.recorder, node=node_id, phase="precache")
         if proc.returncode != 0:
             raise RuntimeError(f"prompt precache failed (rc={proc.returncode}): {output_tail(proc)}")
 
@@ -93,25 +92,17 @@ class TrainRunner:
         output_dir = Path(config["run"]["output_dir"])
         log_path = Path(node_dir) / "train" / "train.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        liveness = Liveness.from_config(self.cfg, float(self.cfg.get("timeouts.train_s")),
-                                        signals=[lambda: tree_mark(log_path)])
         with self.recorder.span("train", node=node_id, phase="train",
                                 payload={"config": str(resolved), "gpus": gpus}):
-            try:
-                # Streams to train.log as it runs rather than buffering up to 48 h
-                # of output in memory until exit.
-                proc = run_in_env(
-                    "alayaworld", ["bash", "scripts/finetune/lowcompute_4x4090.sh"],
-                    cwd=self.cfg.worldmodel,
-                    extra_env={"CONFIG_PATH": str(resolved),
-                               "CUDA_VISIBLE_DEVICES": ",".join(str(g) for g in gpus),
-                               "LOG_FILTER": "all", "ALAYA_LOG_MEMORY": "1",
-                               "ALAYA_DATASET_CACHE_DIR": str(Path(node_dir) / "dataset_cache")},
-                    timeout=None, liveness=liveness, recorder=self.recorder, node=node_id,
-                    phase="train", log_path=log_path)
-            except SubprocTimeout:
-                return TrainOutcome(checkpoint=None, failure="infra", log_path=log_path,
-                                    detail=f"training stalled: {liveness.reason}")
+            # Streams to train.log as it runs rather than buffering days of output in memory until exit.
+            proc = run_in_env(
+                "alayaworld", ["bash", "scripts/finetune/lowcompute_4x4090.sh"],
+                cwd=self.cfg.worldmodel,
+                extra_env={"CONFIG_PATH": str(resolved),
+                           "CUDA_VISIBLE_DEVICES": ",".join(str(g) for g in gpus),
+                           "LOG_FILTER": "all", "ALAYA_LOG_MEMORY": "1",
+                           "ALAYA_DATASET_CACHE_DIR": str(Path(node_dir) / "dataset_cache")},
+                recorder=self.recorder, node=node_id, phase="train", log_path=log_path)
         log = proc.stdout
         checkpoint = newest_checkpoint(output_dir)
         failure = final_failure(log, proc.returncode, checkpoint is not None)

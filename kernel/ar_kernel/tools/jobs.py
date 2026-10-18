@@ -148,12 +148,6 @@ class JobQueue:
             self._cancel_locked(job)
             return self._view(job)
 
-    def active_for_token(self, token: str) -> int:
-        """Jobs queued or running for `token` (a liveness signal: a phase whose
-        own GPU job is still working is not stalled)."""
-        with self._cond:
-            return sum(1 for j in self._jobs.values() if j.token == token and j.state not in _TERMINAL)
-
     def cancel_for_token(self, token: str) -> int:
         with self._cond:
             live = [j for j in self._jobs.values() if j.token == token and j.state not in _TERMINAL]

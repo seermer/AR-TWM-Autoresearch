@@ -3,7 +3,6 @@ from pathlib import Path
 import yaml
 
 from ..config import KernelConfig
-from ..liveness import Liveness, tree_mark
 from ..subproc import output_tail, run_in_env
 
 def build_render_config(cfg: KernelConfig, eval_lora: Path | None, node_rank: int, history_encoder: Path,
@@ -41,18 +40,15 @@ def render_proxy(cfg: KernelConfig, render_config: Path, gpus: list[int], node_i
         cwd=cfg.worldmodel,
         extra_env={"CUDA_VISIBLE_DEVICES": ",".join(str(g) for g in gpus[:2]),
                    "ALAYA_GEMMA_MAX_MEMORY": "0=13GiB,1=13GiB"},
-        timeout=7200, recorder=recorder, node=node_id, phase="precache")
+        recorder=recorder, node=node_id, phase="precache")
     if proc.returncode != 0:
         raise RuntimeError(f"prompt precache failed (rc={proc.returncode}): {output_tail(proc)}")
     with recorder.span("render", node=node_id, phase="render", payload={"cases": case_ids}):
-        liveness = Liveness.from_config(cfg, float(cfg.get("timeouts.eval_s")),
-                                        signals=[lambda: tree_mark(videos_dir, render_config.parent / "logs")])
         proc = run_in_env(
             "alayaworld",
             ["python", "scripts/tools/run_wbench.py", "--config", str(render_config),
              "--gpus", ",".join(str(g) for g in gpus), "--cases", ",".join(case_ids)],
-            cwd=cfg.worldmodel, timeout=None, liveness=liveness, recorder=recorder, node=node_id,
-            phase="render")
+            cwd=cfg.worldmodel, recorder=recorder, node=node_id, phase="render")
     if proc.returncode != 0:
         raise RuntimeError(f"render failed (rc={proc.returncode}): {output_tail(proc)}")
     rendered = sorted(videos_dir.glob("case_*_combined.mp4"))

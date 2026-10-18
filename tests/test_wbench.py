@@ -55,9 +55,9 @@ def _make_test_env(tmp_path, monkeypatch):
 
 def _fake_judge_server(monkeypatch, wbench_mod, events, fail_vlm=False):
     class Server:
-        base_url = "http://127.0.0.1:1"
+        base_url, api_key = "http://127.0.0.1:1", "k"
 
-        def start(self, timeout_s, **kw):
+        def start(self, **kw):
             events.append("server_start")
             return 1.0
 
@@ -78,7 +78,7 @@ def test_local_judge_phase_order_is_server_around_vlm_then_vp_then_report(tmp_pa
             phases.append("vp")
             return Mock(returncode=0)
         if "vlm" in args:
-            assert kw["extra_env"]["VLM_API_KEY"] == "local"
+            assert kw["extra_env"]["VLM_API_KEY"] == "k"          # the judge server's own key
         return real(env, args, **kw)
     monkeypatch.setattr(wbench_mod, "run_in_env", logged)
     _fake_judge_server(monkeypatch, wbench_mod, phases)

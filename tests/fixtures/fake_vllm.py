@@ -4,7 +4,8 @@ Called with the real command line minus `vllm serve`. `--fake-mode`: ok (default
 during startup), hang (never becomes ready), slow (every caption takes 60 s), second (1 s each). A clip whose bytes
 start with BAD gets a 400, like a video the server cannot decode. Writes its pid to fake_vllm.pid
 and its argv to fake_vllm.argv.json in its working directory; refuses to start without
-HF_HUB_OFFLINE=1; captions name the CUDA_VISIBLE_DEVICES it was given.
+HF_HUB_OFFLINE=1 or VLLM_API_KEY; captions name the CUDA_VISIBLE_DEVICES it was given. A request
+without the key gets a 401, as from vLLM.
 
 A request with a `response_format` is a locate_events sheet: the reply is JSON in the asked shape.
 An event whose sentence holds NEVER is not there; any other is happening, and starts at the sheet's
@@ -32,6 +33,9 @@ Path("fake_vllm.argv.json").write_text(json.dumps(sys.argv[1:]))
 if os.environ.get("HF_HUB_OFFLINE") != "1":
     print("HF_HUB_OFFLINE is not 1: the server could download", flush=True)
     sys.exit(4)
+if not os.environ.get("VLLM_API_KEY"):
+    print("no VLLM_API_KEY: anyone on the machine could call the server", flush=True)
+    sys.exit(5)
 if args.fake_mode == "exit":
     print("RuntimeError: CUDA out of memory while loading the model", flush=True)
     sys.exit(3)
@@ -56,6 +60,8 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(200 if self.path == "/health" else 404, {})
 
     def do_POST(self):
+        if self.headers.get("Authorization") != f"Bearer {os.environ['VLLM_API_KEY']}":
+            return self.reply(401, {"error": "Unauthorized"})
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         if "response_format" in body:
             return self.locate(body)

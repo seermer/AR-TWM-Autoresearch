@@ -67,7 +67,7 @@ def decode(video: Path, width: int) -> list[Image.Image]:
     height = round(info.height * width / info.width / 2) * 2
     raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(video), "-vf", f"scale={width}:{height}",
                           "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
-                         capture_output=True, check=True, timeout=600).stdout
+                         capture_output=True, check=True).stdout
     size = width * height * 3
     return [Image.frombytes("RGB", (width, height), raw[i:i + size]) for i in range(0, len(raw) - size + 1, size)]
 
@@ -186,8 +186,7 @@ class LocateEventsBackend:
         load_s, answers, failed, lock, done = None, {}, {}, threading.Lock(), [0]
         abandon = threading.Event()                 # ends a start still waiting when there is nothing to ask
         loader = ThreadPoolExecutor(max_workers=1)  # the model loads while the sheets are drawn
-        starting = loader.submit(server.start, float(c["startup_timeout_s"]),
-                                 SimpleNamespace(is_set=lambda: cancel.is_set() or abandon.is_set()))
+        starting = loader.submit(server.start, SimpleNamespace(is_set=lambda: cancel.is_set() or abandon.is_set()))
         try:
             for i, item in enumerate(job.args["items"]):
                 video = item["video"]
@@ -205,7 +204,7 @@ class LocateEventsBackend:
                     results[video] = {"error": f"{type(exc).__name__}: {exc}"[:500]}
             if calls:
                 load_s = starting.result()
-                with local_client(server.base_url, float(self.block["request_timeout_s"])) as client:
+                with local_client(server.base_url, float(self.block["request_timeout_s"]), server.api_key) as client:
                     def one(video, n, k, url, times) -> None:
                         if cancel.is_set() or load_s is None:
                             return

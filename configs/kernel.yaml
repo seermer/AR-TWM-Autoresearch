@@ -5,22 +5,18 @@ paths:
   root_cache: root_cache           # scored roots shared across runs, one dir per run.root_key
   scores_dir: scores               # `ar score-node` output, one dir per <run>-<node>-<time>; never inside a run
 gpus:
-  default: "0,1,2,3"
+  num_gpus: 4                     # the run takes the first num_gpus free cards; a positive multiple of min_count
   min_count: 4
   # Each GPU tool's block has `min_total_gpu_gib`: the memory it needs across the run's cards, an
   # estimate of 96 (4 x 24 GB) or 48 (2 x 24 GB). A run does not start while an enabled tool needs more.
   free_below_mib: 512            # a kernel GPU job an agent asked for is refused while a GPU holds more than
-                                 # this (the agent container sees the same GPUs; a display server uses less)
+                                 # this (the agent sandbox sees the same GPUs; a display server uses less)
 retries:
   edit_self: 3
   improve_recipe: 3
 budget:                          # run-wide LLM spend cap in dollars, enforced by the gateway
   max_usd: null                  # null = no cap (the default)
   usd_per_mtok: {input: null, cached_input: null, output: null}   # needed for max_usd and for cost in `ar status`
-liveness:
-  probe_window_min: 10
-  extension_frac: 0.25
-  probe_every_s: 30              # during a probe window, read the progress signals at most this often
 alerts:
   stall_min: 30
   gateway_error_rate: 0.2
@@ -97,7 +93,6 @@ captioner:                       # caption_videos GPU job: a local vLLM server, 
   speculative_config: null       # e.g. {method: mtp, num_speculative_tokens: 3}; off by default
   media_io_kwargs: {video: {num_frames: 64, fps: 2}}   # vLLM's Qwen3-VL loader ignores num_frames: it samples
                                  # 2 frames/s (4..768) and resizes frames to the model's video pixel budget
-  startup_timeout_s: 1200        # model load + warm-up
   clip_timeout_s: 300
   memory_release_timeout_s: 120  # after the server stops, wait up to this long for GPU memory to free
   extra_args: []                 # more `vllm serve` flags
@@ -117,18 +112,7 @@ agents:                          # passed to agent containers as AR_CONTEXT_WIND
   context_window_tokens: 1000000 # set to the agent model's context window (deepseek-flash: 1M)
   compact_at: 0.6                # the harness auto-compacts at this fraction of the window
 sandbox:
-  image: ar-agent
-  cpus: 16
-  memory_gb: 64
-  network: bridge                # default: docker's bridge, outbound internet for pip, curl, wget in the
-                                 # edit_self, improve_recipe and contract containers; `none` = offline.
-timeouts:                        # soft timeouts; the hard cap is 4x soft
-  edit_self_s: 7200
-  improve_recipe_s: 86400
-  contract_import_s: 60
-  contract_smoke_s: 900
-  train_s: 172800                # 48 h soft; liveness = train.log growth
-  eval_s: 43200                  # 12 h soft per render / WBench phase; liveness = output files
+  shm_gb: 64                     # /dev/shm of the edit_self and improve_recipe sandboxes
 annotate:                         # annotate_camera GPU job
   enabled: true
   env: alayaworld
@@ -136,7 +120,6 @@ annotate:                         # annotate_camera GPU job
   repo: third_party/ViGeo         # relative to paths.worldmodel
   checkpoint: third_party/ViGeo/checkpoints/ViGeo1.1
   max_frames: 1200                # longer clips are refused per clip (memory)
-  timeout_s: 21600
 images:                           # generate_images GPU job (Z-Image-Turbo first frames)
   enabled: true                   # verified: 8 prompts on 4 GPUs, gpu_memory_released true
   env: .envs/gen-zimage           # a conda-prefix env inside the repo
@@ -147,7 +130,6 @@ images:                           # generate_images GPU job (Z-Image-Turbo first
   default_size: [544, 960]        # [height, width]
   offload: model                  # from the fit spike: `none` OOMs at 1920x1088 (peaks > 24 GB);
                                    # `model` (enable_model_cpu_offload) fits every allowed size, peak 12.8 GB
-  timeout_s: 7200
 generators:                       # rollout_* GPU jobs; switched on only after a smoke run
   alayaworld:
     env: alayaworld
@@ -155,7 +137,6 @@ generators:                       # rollout_* GPU jobs; switched on only after a
     # Rendered with the 30-step AR teacher (the DMD LoRA off). Clips carry no pose; agents run annotate_camera.
     enabled: true
     max_turns: 9
-    timeout_s: 43200
   wan22:
     env: .envs/gen-wan22           # a conda-prefix env inside the repo
     min_total_gpu_gib: 48
@@ -171,7 +152,6 @@ generators:                       # rollout_* GPU jobs; switched on only after a
     # Fit test (1280x704, 121 frames, 50 steps, 24 GB card): no-offload OOMs in the VAE
     # decode; T5 on GPU is no faster (9:41 vs 9:24 wall). Peak 22.9 GiB allocated: the whole card.
     extra_args: {offload_model: true, t5_cpu: true}
-    timeout_s: 43200
   ltx25:
     env: .envs/gen-ltx25           # a conda-prefix env inside the repo
     min_total_gpu_gib: 48
@@ -195,8 +175,6 @@ generators:                       # rollout_* GPU jobs; switched on only after a
     frames: [121, 241]            # [default, max]; 8k+1
     resolutions: [[576, 1024]]    # [height, width], first = default; each divisible by 64 (two-stage) and
                                   # within ingest.aspect_tolerance of 16:9
-    timeout_s: 28800              # 8 h. Worst case from measurements: 100 cold 241-frame clips on 4 workers =
-                                  # 25 per worker x ~900 s (2x the ~400 s cold 121-frame clip) ~ 6.3 h
   h3:
     env: .envs/gen-lightx2v         # a conda-prefix env inside the repo (LightX2V, SageAttention)
     repo: third_party/LightX2V      # relative to the AutoResearcher repo; gitignored
@@ -211,4 +189,3 @@ generators:                       # rollout_* GPU jobs; switched on only after a
     max_items: 80
     peak_rss_gib: 140               # host RAM of one job; a job starts only while
     host_reserve_gib: 60            # MemAvailable - host_reserve_gib >= peak_rss_gib
-    timeout_s: 43200

@@ -645,7 +645,7 @@ def _run(kernel, tmp_path, kind, script, node, ctx):
     caller = registry.issue(node=node, phase=kind, attempt=1, workspace_host=ws, staging_host=tmp_path,
                             mock_script=script, agent_host=agent if edits else None,
                             base_commit=repo.commit_tree(agent, None, "copy") if edits else None)
-    env = {**os.environ, "AR_SOCKET_DIR": str(services.socket_dir), "AR_TOKEN": caller.token,
+    env = {**os.environ, "AR_SOCKET_DIR": str(services.client_dir), "AR_TOKEN": caller.token,
            "AR_DEFAULT_MODEL": "mock-model", "AR_WORKSPACE": str(ws), "AR_CONTEXT_DIR": str(ctx_dir),
            "AR_AGENT_DIR": str(agent)}
     proc = subprocess.run([sys.executable, "-m", "ar_contract.run", kind], env=env, cwd=REPO,
@@ -689,7 +689,7 @@ def test_chat_model_works_sync_and_async_over_the_socket(kernel, tmp_path, monke
     _, registry, services, _, _ = kernel
     caller = registry.issue(node="n-chat", phase="edit_self", attempt=1, workspace_host=tmp_path,
                             staging_host=tmp_path, mock_script="smoke")
-    monkeypatch.setenv("AR_SOCKET_DIR", str(services.socket_dir))
+    monkeypatch.setenv("AR_SOCKET_DIR", str(services.client_dir))
     monkeypatch.setenv("AR_TOKEN", caller.token)
     monkeypatch.setenv("AR_DEFAULT_MODEL", "mock-model")
     from langchain_core.messages import HumanMessage
@@ -791,7 +791,7 @@ def test_edit_self_plans_builds_reviews_and_accepts_a_snapshot(kernel, tmp_path)
     assert coder_first.startswith("<context>") and "- Components of this agent:" in coder_first and "<plan>" in coder_first
 
 
-@pytest.mark.docker
+@pytest.mark.sandbox
 def test_seed_agent_passes_contract_verification(tmp_path):
     """On a context with a lineage and siblings, as a real node gets: the dry run builds every context."""
     from ar_contract.models import EditContext, RecipeContext

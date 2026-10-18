@@ -437,7 +437,7 @@ def test_the_root_key_follows_what_changes_the_roots_score(tmp_path):
     assert root_key(ctx, changed(captioner={**real.raw["captioner"], "max_model_len": 4096})) != key
     # what does not change the root's metric means leaves the key alone
     assert root_key(ctx, changed(eval={**real.raw["eval"], "score_weights": {}})) == key
-    assert root_key(ctx, changed(captioner={**real.raw["captioner"], "startup_timeout_s": 5})) == key
+    assert root_key(ctx, changed(captioner={**real.raw["captioner"], "clip_timeout_s": 5})) == key
     api = SimpleNamespace(**{**vars(ctx), "judge": Judge("api", "model", "http://x")})
     assert root_key(api, changed(captioner={**real.raw["captioner"], "max_model_len": 4096})) == root_key(api, real)
 

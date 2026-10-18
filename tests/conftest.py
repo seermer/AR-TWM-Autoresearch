@@ -66,6 +66,16 @@ def _skip_eval_prerequisites(request, monkeypatch):
     monkeypatch.setattr(run, "_uncommitted", lambda repo: False)
 
 
+@pytest.fixture(autouse=True)
+def _all_gpus_free(request, monkeypatch):
+    """The GPU choice reads nvidia-smi; outside GPU tests every card counts as free, so a run in
+    progress on this machine does not change the outcome."""
+    if request.node.get_closest_marker("gpu") or request.node.get_closest_marker("manual"):
+        return
+    from ar_kernel import guards
+    monkeypatch.setattr(guards, "gpu_memory_used", lambda: {g: 1 for g in range(8)})
+
+
 RESULT_FILES = {}           # container path of a job's result file -> where it is on the host
 
 

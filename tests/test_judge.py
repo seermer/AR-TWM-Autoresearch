@@ -13,9 +13,9 @@ def test_api_judge_when_key_present():
 def test_local_judge_when_key_blank():
     j = resolve_judge(CFG, {"VLM_API_KEY": "  "})
     assert j.kind == "local" and j.model == CFG.get("captioner.model")
-    env = judge_env(CFG, j, "http://127.0.0.1:8123")
+    env = judge_env(CFG, j, "http://127.0.0.1:8123", "server-key")
     assert env["VLM_API_URL"] == "http://127.0.0.1:8123/v1/chat/completions"
-    assert env["VLM_API_KEY"] == "local" and env["VLM_MODEL_NAME"] == j.model
+    assert env["VLM_API_KEY"] == "server-key" and env["VLM_MODEL_NAME"] == j.model
     assert '"enable_thinking": false' in env["VLM_EXTRA_BODY"]
 
 

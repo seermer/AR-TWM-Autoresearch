@@ -66,18 +66,14 @@ class AgentsRepo:
     @staticmethod
     def check_remote(url: str) -> str | None:
         """None if `url` is a reachable git repo, else why not."""
-        try:
-            r = subprocess.run(["git", "ls-remote", "--heads", url], capture_output=True, text=True,
-                               env=_remote_env(), timeout=60)
-        except subprocess.TimeoutExpired:
-            return f"git ls-remote {url} timed out"
+        r = subprocess.run(["git", "ls-remote", "--heads", url], capture_output=True, text=True, env=_remote_env())
         return None if r.returncode == 0 else r.stderr.strip() or f"git ls-remote exited {r.returncode}"
 
     @staticmethod
     def has_run(url: str, namespace: str) -> bool:
         """Whether `url` has branches under `namespace/`."""
         out = subprocess.run(["git", "ls-remote", "--heads", url], capture_output=True, text=True,
-                             env=_remote_env(), timeout=60, check=True).stdout
+                             env=_remote_env(), check=True).stdout
         return any(line.split("\t")[-1].startswith(f"refs/heads/{namespace}/") for line in out.splitlines())
 
     def push(self) -> None:
@@ -88,11 +84,8 @@ class AgentsRepo:
                  f"refs/attempts/*:refs/heads/{self.namespace}/attempts/*",
                  f"refs/snapshots/*:refs/heads/{self.namespace}/snapshots/*"]
         cmd = ["git", "--git-dir", str(self.path), "push", "--quiet", self.remote, *specs]
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True, env=_remote_env(), timeout=120)
-            error = None if r.returncode == 0 else r.stderr.strip() or f"git push exited {r.returncode}"
-        except subprocess.TimeoutExpired:
-            error = "git push timed out after 120 s"
+        r = subprocess.run(cmd, capture_output=True, text=True, env=_remote_env())
+        error = None if r.returncode == 0 else r.stderr.strip() or f"git push exited {r.returncode}"
         if error and self.on_push_error:
             self.on_push_error(f"push to {self.remote} failed: {error}")
 

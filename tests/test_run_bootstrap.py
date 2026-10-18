@@ -29,7 +29,7 @@ def test_a_skill_benchmark_scores_the_metrics_its_cases_list(tmp_path, monkeypat
     monkeypatch.setattr("ar_kernel.run.wbench_weight_problems", lambda cfg: [])
     monkeypatch.setattr("ar_kernel.run._uncommitted", lambda repo: False)
     cfg = KernelConfig.load(overlay=CFG.repo_root / "configs" / "rain_start.yaml")
-    ctx = bootstrap_run(cfg, run_id="rain", env={"CUDA_VISIBLE_DEVICES": "0,1,2,3"})
+    ctx = bootstrap_run(cfg, run_id="rain", env={})
     assert ctx.case_ids == [str(i) for i in range(1001, 1061)]
     assert len(ctx.metric_set) == 17 and "event_edit_adherence" in ctx.metric_set
     assert "subject_action_adherence" not in ctx.metric_set
@@ -50,7 +50,7 @@ def test_a_metric_the_kernel_does_not_know_is_refused(tmp_path, monkeypatch):
 
 def test_bootstrap_creates_run_layout_and_records_versions(tmp_path, monkeypatch):
     monkeypatch.setattr(KernelConfig, "runs_dir", property(lambda self: tmp_path))
-    ctx = bootstrap_run(CFG, run_id="testrun", env={"CUDA_VISIBLE_DEVICES": "0,1,2,3"})
+    ctx = bootstrap_run(CFG, run_id="testrun", env={})
     assert (ctx.run_dir / "archive.db").exists()
     assert (ctx.run_dir / "config" / "kernel.yaml").exists()
     versions = json.loads((ctx.run_dir / "config" / "versions.json").read_text())
@@ -65,7 +65,7 @@ def test_bootstrap_refuses_uncommitted_changes_and_creates_nothing(tmp_path, mon
     monkeypatch.setattr(KernelConfig, "runs_dir", property(lambda self: tmp_path))
     monkeypatch.setattr(run, "_uncommitted", lambda repo: repo == CFG.wbench)
     with pytest.raises(run.PreflightError, match=f"uncommitted changes in {CFG.wbench}; commit"):
-        bootstrap_run(CFG, run_id="dirty", env={"CUDA_VISIBLE_DEVICES": "0,1,2,3"})
+        bootstrap_run(CFG, run_id="dirty", env={})
     assert not (tmp_path / "dirty").exists()
 
 
@@ -79,21 +79,21 @@ def test_uncommitted_sees_modified_and_untracked_files(tmp_path):
     assert _uncommitted(tmp_path)
 
 
-def test_bootstrap_refuses_too_few_gpus(tmp_path, monkeypatch):
+def test_bootstrap_refuses_too_few_free_gpus(tmp_path, monkeypatch):
+    from ar_kernel import guards
+    from ar_kernel.config import GpuPolicyError
     monkeypatch.setattr(KernelConfig, "runs_dir", property(lambda self: tmp_path))
-    try:
-        bootstrap_run(CFG, run_id="bad", env={"CUDA_VISIBLE_DEVICES": "0,1"})
-    except Exception as exc:
-        assert "at least 4" in str(exc)
-    else:
-        raise AssertionError("expected a GpuPolicyError")
+    monkeypatch.setattr(guards, "gpu_memory_used", lambda: {0: 1, 1: 1})
+    with pytest.raises(GpuPolicyError, match="need 4 free GPUs"):
+        bootstrap_run(CFG, run_id="bad", env={})
+    assert not (tmp_path / "bad").exists()
 
 
 def _runs(tmp_path, monkeypatch):
     monkeypatch.setattr(KernelConfig, "runs_dir", property(lambda self: tmp_path))
 
 
-ENV4 = {"CUDA_VISIBLE_DEVICES": "0,1,2,3"}
+ENV4 = {}
 
 
 def test_attaching_to_a_missing_run_is_an_error_not_a_new_run(tmp_path, monkeypatch):

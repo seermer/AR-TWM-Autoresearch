@@ -71,9 +71,8 @@ def recorded(run: Run) -> list[dict]:
         elif kind in ("subproc.end", "subproc.error") and (kind == "subproc.error" or e.get("returncode") != 0):
             p = load(e.get("payload")) or {}
             add("subprocess", f"{e.get('phase')}: rc={e.get('returncode')} " + (p.get("stderr") or p.get("error") or "")[-200:])
-        elif kind in ("sandbox.end", "sandbox.error") and (kind == "sandbox.error" or e.get("exit_code") not in (0, None)
-                                                           or e.get("timed_out")):
-            add("sandbox", f"container exit={e.get('exit_code')} timed_out={e.get('timed_out')}")
+        elif kind in ("sandbox.end", "sandbox.error") and (kind == "sandbox.error" or e.get("exit_code") not in (0, None)):
+            add("sandbox", f"sandbox exit={e.get('exit_code')}")
         elif kind.endswith(".error") and kind not in HANDLED_ERRORS:
             add("error_event", f"{kind}: {(load(e.get('payload')) or {}).get('error', '')}")
         elif kind.endswith(".warning"):

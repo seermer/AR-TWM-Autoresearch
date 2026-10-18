@@ -94,3 +94,13 @@ def test_a_failing_gpu_sample_does_not_stop_the_checks_and_is_logged_once(tmp_pa
     m.poll()
     assert "disk_low" in kinds(rec)
     assert len([e for e in rec.read_events() if e["type"] == "monitor.error"]) == 1
+
+
+def test_tree_mark_sees_new_and_grown_files(tmp_path):
+    from ar_kernel.monitor import tree_mark
+    a = tree_mark(tmp_path)
+    (tmp_path / "x").write_text("1")
+    b = tree_mark(tmp_path)
+    (tmp_path / "x").write_text("12")
+    assert a != b != tree_mark(tmp_path)
+    assert tree_mark(tmp_path / "missing") == (0, 0, 0)

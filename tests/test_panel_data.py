@@ -605,8 +605,8 @@ def _add_problems(run_dir):
     rec.event("subproc.end", node="n2", phase="render", returncode=1, payload={"stdout": "", "stderr": "Traceback: x"})
     rec.event("subproc.end", node="n2", phase="render", returncode=0, payload={"stdout": "", "stderr": ""})
     rec.event("subproc.cancelled", node="n2", phase="caption_videos", returncode=-15, payload={})
-    rec.event("sandbox.end", exit_code=1, timed_out=False, component="sandbox",
-              payload={"stdout": "", "stderr": "crash", "reason": None}, **base)
+    rec.event("sandbox.end", exit_code=1, component="sandbox",
+              payload={"stdout": "", "stderr": "crash"}, **base)
     rec.event("render.error", node="n2", phase="render", payload={"error": "RuntimeError('x')", "traceback": "tb"})
     rec.event("run.warning", payload={"message": "disk low"}, message="disk low")
     rec.event("phase.end", **base)

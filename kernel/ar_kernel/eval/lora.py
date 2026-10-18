@@ -14,7 +14,7 @@ def concat_eval_lora(cfg: KernelConfig, checkpoint: Path, node_dir: Path, record
             ["python", "scripts/tools/concat_loras.py", "--loras",
              str(cfg.worldmodel / "weights/alaya-world-dmd/lora.safetensors"),
              str(Path(checkpoint) / "lora.safetensors"), "--output", str(out)],
-            cwd=cfg.worldmodel, timeout=1800, recorder=recorder, node=node_id, phase="eval")
+            cwd=cfg.worldmodel, recorder=recorder, node=node_id, phase="eval")
     if proc.returncode != 0:
         raise RuntimeError(f"LoRA concatenation failed (rc={proc.returncode}): {output_tail(proc)}")
     return out

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 import subprocess
 import threading
 import time
@@ -19,9 +20,9 @@ log = logging.getLogger(__name__)
 RELEASE_SLACK_MIB = 512          # GPU memory counts as released within this of its pre-job level
 
 
-def local_client(base_url: str, timeout_s: float) -> OpenAI:
+def local_client(base_url: str, timeout_s: float, api_key: str) -> OpenAI:
     """The OpenAI client for a server on this machine: no proxy lookup."""
-    return OpenAI(base_url=f"{base_url}/v1", api_key="none",
+    return OpenAI(base_url=f"{base_url}/v1", api_key=api_key,
                   http_client=httpx.Client(timeout=timeout_s, trust_env=False))
 
 
@@ -29,7 +30,7 @@ def gpu_memory_mib(gpus: list[int]) -> dict[int, int] | None:
     """memory.used per GPU (nvidia-smi indices, i.e. PCI bus order), or None when it cannot be read."""
     try:
         out = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used", "--format=csv,noheader,nounits"],
-                             capture_output=True, text=True, timeout=30, check=True).stdout
+                             capture_output=True, text=True, check=True).stdout
         used = {int(i): int(m) for i, m in (line.split(",") for line in out.strip().splitlines())}
     except (OSError, subprocess.SubprocessError, ValueError):    # ValueError: "[N/A]", "[Not Supported]"
         return None
@@ -110,6 +111,7 @@ def serve_command(c: dict, gpus: list[int], port: int, served_name: str,
 
 class VllmServer:
     """Runs `command` (from `serve_command`) in conda env `env` on `gpus` and waits for /health.
+    Requests need `api_key`: the agent's sandbox shares the host network.
 
     `start` returns the load time in seconds, or None when `cancel` was set first. `stop` kills the
     process group, waits for it, and returns its exit code."""
@@ -120,6 +122,9 @@ class VllmServer:
         self.env, self.command, self.gpus, self.port = env, command, list(gpus), port
         self.cwd, self.log_path, self.recorder, self.node, self.phase = Path(cwd), Path(log_path), recorder, node, phase
         self.poll_s, self.label = poll_s, label
+        self.api_key = secrets.token_urlsafe(24)
+        if recorder is not None:
+            recorder.add_redaction(self.api_key)
         self._stop, self._cancel, self._exit, self._thread = threading.Event(), None, [], None
 
     @property
@@ -132,17 +137,17 @@ class VllmServer:
                 self.env, self.command, cwd=self.cwd, log_path=self.log_path,
                 cancel=SimpleNamespace(is_set=lambda: self._stop.is_set() or bool(self._cancel and self._cancel.is_set())),
                 extra_env={"CUDA_VISIBLE_DEVICES": ",".join(map(str, self.gpus)),
-                           "CUDA_DEVICE_ORDER": "PCI_BUS_ID", "HF_HUB_OFFLINE": "1"},
+                           "CUDA_DEVICE_ORDER": "PCI_BUS_ID", "HF_HUB_OFFLINE": "1",
+                           "VLLM_API_KEY": self.api_key},       # not --api-key: a command line is public
                 recorder=self.recorder, node=self.node, phase=self.phase))
         except Exception as exc:              # noqa: BLE001 -- reported as a startup failure
             self._exit.append(f"launch failed: {type(exc).__name__}: {exc}")
 
-    def start(self, startup_timeout_s: float, cancel=None, on_poll=None) -> float | None:
+    def start(self, cancel=None, on_poll=None) -> float | None:
         self._cancel = cancel
         self._thread = threading.Thread(target=self._serve, name=f"ar-vllm-{self.port}", daemon=True)
         started = time.monotonic()
         self._thread.start()
-        deadline = started + startup_timeout_s
         with httpx.Client(timeout=5, trust_env=False) as http:
             while not (cancel and cancel.is_set()):
                 if not self._thread.is_alive():
@@ -155,9 +160,6 @@ class VllmServer:
                         return time.monotonic() - started
                 except httpx.HTTPError:
                     pass
-                if time.monotonic() > deadline:
-                    raise RuntimeError(f"the {self.label} was not ready within {startup_timeout_s:g} s:"
-                                       f"\n{file_tail(self.log_path, 3000)}")
                 if on_poll:
                     on_poll()
                 time.sleep(self.poll_s)

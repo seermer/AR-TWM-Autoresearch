@@ -11,7 +11,6 @@ from pathlib import Path
 from .archive.clips import hide_clips
 from .archive.nodes import NodeStore
 from .guards import alert
-from .sandbox.runner import kill_run_containers
 from .subproc import kill_group, proc_start_time
 
 
@@ -96,8 +95,7 @@ def kill_recorded_groups(control: Control) -> list[int]:
 def mark_interrupted(ctx, reason: str) -> list[str]:
     """On resume: every non-root node still `running` was cut off (forced stop, kernel death or a
     spent budget). It is never resumed and never cleaned up: its status
-    becomes `interrupted`, its files and archive rows stay, and only containers a killed kernel left
-    running are removed. A fresh cycle then starts. The root is never marked: a run whose root
+    becomes `interrupted`, and its files and archive rows stay. A fresh cycle then starts. The root is never marked: a run whose root
     was never scored is refused before this (cli)."""
     nodes = NodeStore(ctx.conn)
     state_file = Path(ctx.run_dir) / "control" / "state.json"
@@ -108,12 +106,11 @@ def mark_interrupted(ctx, reason: str) -> list[str]:
             continue
         nid = node["node_id"]
         phase = state.get("phase") if state.get("node") == nid else None
-        containers = kill_run_containers(Path(ctx.run_dir).name, nid)
         nodes.set_status(nid, "interrupted")
         hide_clips(ctx.conn, ctx.recorder, nid, "interrupted")
         nodes.set_fields(nid, error=f"{reason} (phase {phase})")
         ctx.recorder.event("node.interrupted", child=nid, payload={
-            "node": nid, "reason": reason, "phase_reached": phase, "containers": containers})
+            "node": nid, "reason": reason, "phase_reached": phase})
         alert(ctx.recorder, "node_interrupted", f"{nid} was interrupted in phase {phase}; kept as is",
               level="warning", node_id=nid)
         marked.append(nid)
@@ -162,7 +159,6 @@ def drive(loop, kit, control: Control, recorder, monitor=None) -> str:
         reason = loop.run()
     except ForceStop as exc:
         reason = f"force stop ({exc})"
-        kill_run_containers(Path(loop.ctx.run_dir).name)
     except Exception as exc:
         reason = f"crashed: {type(exc).__name__}: {exc}"
         raise

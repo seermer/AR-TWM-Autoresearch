@@ -40,7 +40,7 @@ COMPONENTS = {
     "harness": "agent/harness.py -- the single-agent loop logic",
     "prompts": "agent/prompts/*.md -- the role prompts and the compaction prompt",
     "entry": "agent/entry.py -- the two entry points, and the settings",
-    "requirements": "agent/requirements.txt -- the packages added to the agent image",
+    "requirements": "agent/requirements.txt -- the packages installed before every phase",
 }
 
 

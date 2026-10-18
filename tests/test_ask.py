@@ -148,7 +148,7 @@ def test_live_ask_over_the_tool_socket(tmp_path):
     services.start(FastAPI(), build_tool_app(mcp))
 
     async def calls():
-        async with mcp_session(services.socket_dir, caller.token) as session:
+        async with mcp_session(services.client_dir, caller.token) as session:
             tools = {t.name: t for t in (await session.list_tools()).tools}
             text = await session.call_tool("ask", {"question": "What is 17 + 25? Answer with the number only."})
             image = await session.call_tool("ask", {"question": "Name the two shapes and their colours.",

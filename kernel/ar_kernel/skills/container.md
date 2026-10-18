@@ -5,8 +5,8 @@ description: Use when you need to know what the container provides: installed pr
 
 # The container
 
-- Internet access is on. `pip install --user`, `curl`, `wget`, `git`, `unzip` and `7z` work. Models and other files can be downloaded directly in the container as well as with `hf_download`.
-- Installed: `torch`, `torchvision`, `torchaudio` (CUDA), `pandas`, `pyarrow`, `numpy`, `opencv-python-headless`, `Pillow`, `ffmpeg`, `ffprobe`, `gcc`.
+- Internet access is on. `pip install --user`, `curl`, `wget`, `git` and `unzip` work. Models and other files can be downloaded directly in the container as well as with `hf_download`.
+- Installed: `torch`, `torchvision`, `torchaudio` (CUDA), `pandas`, `pyarrow`, `numpy`, `opencv-python-headless`, `Pillow`, `py7zr` (7z archives), `ffmpeg`, `ffprobe`, `gcc`.
 - `/workspace` is writable. `/workspace/staging/` is where files for the kernel's data tools go: the kernel reads candidates only from there, and GPU jobs and downloads publish their results there.
 - `/agent` is the agent's code: writable in `edit_self`, read-only in `improve_recipe`. In `edit_self`, `/code` is the parent's code, which is the code that is running, read-only.
 - `/context/context.json` is the full context of this phase. `/nodes/<node>/` holds what each finished node left behind, read-only (skill `node_files`).

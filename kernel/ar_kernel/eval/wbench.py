@@ -3,7 +3,6 @@ import json
 from pathlib import Path
 
 from ..config import KernelConfig
-from ..liveness import Liveness, tree_mark
 from ..subproc import output_tail, run_in_env
 from ..tools.vllm_server import gpu_memory_mib, wait_gpu_release
 from .judge import Judge, judge_env, judge_server
@@ -15,19 +14,16 @@ def run_wbench_phases(cfg: KernelConfig, work_dir: Path, model: str, gpus: list[
     visual plausibility, report. Every phase runs whatever the metric set."""
     gpu_arg = ",".join(str(g) for g in gpus)
 
-    def wbench(env: str, args: list[str], name: str, extra_env: dict | None = None, timeout=None) -> None:
+    def wbench(env: str, args: list[str], name: str, extra_env: dict | None = None) -> None:
         with recorder.span(f"wbench.{name}", node=node_id, phase="eval"):
-            liveness = Liveness.from_config(cfg, float(cfg.get("timeouts.eval_s")),
-                                            signals=[lambda: tree_mark(Path(work_dir) / model)]) \
-                if timeout is None else None
-            proc = run_in_env(env, args, cwd=cfg.wbench, extra_env=extra_env, timeout=timeout,
-                              liveness=liveness, recorder=recorder, node=node_id, phase="eval")
+            proc = run_in_env(env, args, cwd=cfg.wbench, extra_env=extra_env,
+                              recorder=recorder, node=node_id, phase="eval")
         if proc.returncode != 0:
             raise RuntimeError(f"wbench {name} failed (rc={proc.returncode}): {output_tail(proc)}")
 
-    def main_phase(phase: str, extra_env: dict | None = None, timeout=None) -> None:
+    def main_phase(phase: str, extra_env: dict | None = None) -> None:
         wbench("wbench-main", ["python", "main.py", "--model", model, "--work_dir", str(work_dir),
-                               "--data", str(cfg.eval_data), "--phase", phase, "--gpus", gpu_arg], phase, extra_env, timeout)
+                               "--data", str(cfg.eval_data), "--phase", phase, "--gpus", gpu_arg], phase, extra_env)
 
     def vlm(extra_env: dict | None = None) -> None:
         main_phase("vlm", extra_env)
@@ -48,7 +44,7 @@ def run_wbench_phases(cfg: KernelConfig, work_dir: Path, model: str, gpus: list[
                          "--work_dir", str(work_dir),
                          "--model_path", str(cfg.wbench / cfg.get("eval.vp_weights"))],
            "visual_plausibility", {"CUDA_VISIBLE_DEVICES": gpu_arg})
-    main_phase("report", timeout=3600)
+    main_phase("report")
     report_path = Path(work_dir) / model / "evaluation" / "report.json"
     return json.loads(report_path.read_text())
 
@@ -59,10 +55,10 @@ def _vlm_with_local_judge(cfg, judge, gpus, work_dir, recorder, node_id, vlm) ->
     before = gpu_memory_mib(gpus)
     try:
         with recorder.span("wbench.judge_server", node=node_id, phase="eval"):
-            load_s = server.start(float(cfg.get("captioner.startup_timeout_s")))
+            load_s = server.start()
         recorder.event("judge.server_ready", node=node_id, component="eval", load_s=load_s,
                        payload={"gpus": gpus, "model": judge.model})
-        vlm(judge_env(cfg, judge, server.base_url))
+        vlm(judge_env(cfg, judge, server.base_url, server.api_key))
     finally:
         server.stop()
         _, released = wait_gpu_release(gpu_memory_mib, gpus, before, float(cfg.get("captioner.memory_release_timeout_s")))

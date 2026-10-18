@@ -21,7 +21,7 @@ def _tree(tmp_path, *, worldmodel="../WorldModel", wbench="../WBench"):
     (tmp_path / "WBench").mkdir()
     (root / "configs" / "kernel.yaml").write_text(yaml.safe_dump({
         "paths": {"worldmodel": worldmodel, "wbench": wbench, "runs_dir": "runs"},
-        "gpus": {"default": "0,1,2,3", "min_count": 4, "free_below_mib": 512},
+        "gpus": {"num_gpus": 4, "min_count": 4, "free_below_mib": 512},
     }))
     return root
 
@@ -180,19 +180,44 @@ def test_links_an_agent_left_in_a_run_are_not_tree_problems(tmp_path):
     assert [link for link, _ in found] == [tmp_path / "weights" / "link.mp4"]
 
 
-def test_a_missing_nvidia_runtime_and_busy_gpus_are_failures(monkeypatch):
+def test_sandbox_checks_name_what_is_missing(monkeypatch):
     from ar_kernel import doctor
     cfg = KernelConfig.load()
-    monkeypatch.setattr(doctor.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, '{"runc":{}}', ""))
-    monkeypatch.setattr(doctor, "require_free_gpus", lambda gpus, limit: (_ for _ in ()).throw(
-        RuntimeError("the GPUs are not free: GPU 1 has 3200 MiB in use (limit 512 MiB). A kernel GPU job needs")))
-    found = {f.check: f for f in doctor._gpus(cfg)}
-    assert found["docker.nvidia"].level == "fail" and "nvidia-container-toolkit" in found["docker.nvidia"].detail
-    assert found["gpus.free"].level == "fail" and found["gpus.free"].detail.endswith("(limit 512 MiB).")
-    monkeypatch.setattr(doctor.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, '{"nvidia":{}}', ""))
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+    assert [(f.level, f.check) for f in doctor._sandbox(cfg)] == [("fail", "bwrap")]
     monkeypatch.setattr(doctor.shutil, "which", lambda name: "/usr/bin/" + name)
-    monkeypatch.setattr(doctor, "require_free_gpus", lambda gpus, limit: None)
-    assert {f.level for f in doctor._gpus(cfg)} == {"ok"}
+    monkeypatch.setattr(doctor, "project_env", lambda name, root: None)
+    assert [(f.level, f.check) for f in doctor._sandbox(cfg)] == [("fail", "env.agent")]
+
+
+def test_sandbox_checks_run_the_contract_import_and_count_the_chosen_gpus(monkeypatch):
+    from ar_kernel import doctor
+    from ar_kernel.config import GpuPolicyError
+    cfg = KernelConfig.load()
+    seen = []
+
+    def sandbox(cfg, command, gpus=()):
+        seen.append((command, list(gpus)))
+        out = "".join(f"GPU {g}: card\n" for g in gpus) if command[0] == "nvidia-smi" else ""
+        return subprocess.CompletedProcess(command, 0, out, "")
+    monkeypatch.setattr(doctor, "_in_sandbox", sandbox)
+    assert {f.check: f.level for f in doctor._sandbox(cfg)} == {
+        "bwrap": "ok", "env.agent": "ok", "gpus.choice": "ok", "gpus.sandbox": "ok"}
+    assert seen[1][0][:2] == ["python", "-c"] and seen[2] == (["nvidia-smi", "-L"], [0, 1, 2, 3])
+
+    def busy(cfg, env):
+        raise GpuPolicyError("need 4 free GPUs (at most 512 MiB in use), found 2: GPU 0 9000 MiB")
+    monkeypatch.setattr(doctor, "choose_gpus", busy)
+    found = {f.check: f for f in doctor._sandbox(cfg)}
+    assert found["gpus.choice"].level == "fail" and "found 2" in found["gpus.choice"].detail
+    assert "gpus.sandbox" not in found
+
+
+@pytest.mark.sandbox
+def test_a_real_sandbox_starts_and_imports_the_contract():
+    from ar_kernel import doctor
+    r = doctor._in_sandbox(KernelConfig.load(), ["python", "-c", "import ar_contract.run, ar_contract.client"])
+    assert r.returncode == 0, r.stderr
 
 
 def test_a_tool_that_does_not_fit_the_gpus_is_a_failure(monkeypatch):
