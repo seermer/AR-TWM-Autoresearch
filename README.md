@@ -102,6 +102,10 @@ VLM_API_KEY=
 # Login for the monitoring panel (step 8)
 PANEL_USER=<choose a user name>
 PANEL_PASSWORD=<choose a password>
+
+# Optional. A Hugging Face token with write access: after every phase the run uploads itself to a private
+# dataset repo <token's user>/<run id> (step 8), and agents use it for gated repos. Empty: no upload.
+HFK=
 EOF
 chmod 600 .env
 ln -s ../AutoResearcher/.env ../WorldModel/.env
@@ -233,6 +237,13 @@ Web panel (every conversation, tool call, code edit, training curve, video and s
 
 Open http://127.0.0.1:7860 and log in with `PANEL_USER` / `PANEL_PASSWORD`.
 From another computer: `ssh -L 7860:127.0.0.1:7860 <user>@<server>`, then open the same address locally.
+
+With `HFK` set, another machine with this setup (step 1, the `autoresearcher` env and `.env`) can download the run
+and open the panel on it; run it again to catch up with later phases:
+
+```bash
+ar fetch --run-id $RUN     # into runs/$RUN, from <HFK's user>/$RUN
+```
 
 ## 9. Stop and resume
 

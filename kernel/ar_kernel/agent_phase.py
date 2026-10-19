@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -148,7 +149,8 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
             env={"AR_TOKEN": caller.token, "AR_DEFAULT_MODEL": env.default_model, "AR_NODE": node,
                  "AR_PHASE": phase, "AR_ATTEMPT": str(attempt),
                  "AR_CONTEXT_WINDOW": str(env.cfg.get("agents.context_window_tokens")),
-                 "AR_COMPACT_AT": str(env.cfg.get("agents.compact_at"))},
+                 "AR_COMPACT_AT": str(env.cfg.get("agents.compact_at")),
+                 **({"HF_TOKEN": os.environ["HFK"]} if os.environ.get("HFK", "").strip() else {})},  # gated repos
             env_dir=env.cfg.repo_root / ".envs" / "agent", shm_gb=env.cfg.get("sandbox.shm_gb"), gpus=env.gpus,
             recorder=env.recorder, node=node, phase=phase, attempt=attempt, cancel=caller.fault.event,
             on_start=lambda pid: caller.sandbox.update(pid=pid))

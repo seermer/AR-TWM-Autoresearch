@@ -118,6 +118,16 @@ def test_token_is_revoked_and_jobs_cancelled_after_the_phase(env, monkeypatch):
     assert penv.registry.lookup(token) is None and cancelled == [token]
 
 
+def test_the_sandbox_gets_hfk_as_its_hf_token_only_when_it_is_set(env, monkeypatch):
+    make, conn, root, _, _ = env
+    runner = FakeRunner({"ok": True, "result": {"summary": "x"}}, snap={})
+    penv = make(runner)
+    run_edit_self(penv, conn=conn, node="n1", parent_id="root", agent_commit=root, attempt=1)
+    monkeypatch.setenv("HFK", "hf-key")
+    run_edit_self(penv, conn=conn, node="n1", parent_id="root", agent_commit=root, attempt=2)
+    assert "HF_TOKEN" not in runner.calls[0]["env"] and runner.calls[1]["env"]["HF_TOKEN"] == "hf-key"
+
+
 def test_staged_files_appear_in_the_recorded_diff(env):
     """/workspace/staging is a separate host directory (a nested mount), so the
     workspace snapshot alone would miss every staged download."""

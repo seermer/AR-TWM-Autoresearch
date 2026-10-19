@@ -25,7 +25,7 @@ SEED = Path(__file__).resolve().parents[1] / "seed_agent"
 def make_loop(tmp_path):
     run = tmp_path / "run"
 
-    def make(script, max_nodes=1, budget=None):
+    def make(script, max_nodes=1, budget=None, upload=None):
         (run / "config").mkdir(parents=True, exist_ok=True)
         (run / "config" / "run.json").write_text("{}")
         rec = Recorder(run)
@@ -33,7 +33,7 @@ def make_loop(tmp_path):
                          metric_set=["m"], case_ids=["1"], versions={})
         kit = SimpleNamespace(env=None, gpu_lock=threading.Lock(), budget=budget or Budget(), harness=None)
         return Loop(CFG, ctx, kit, AgentsRepo(run / "agents.git"), max_nodes=max_nodes,
-                    phases=script.phases())
+                    phases=script.phases(), upload=upload)
     return run, make
 
 
@@ -303,6 +303,29 @@ def test_an_exception_in_a_phase_twice_stops_the_run(make_loop):
     loop = make(script, max_nodes=1)
     assert "KeyError" in loop.run()
     assert NodeStore(loop.ctx.conn).get("node0001")["status"] == "running"
+
+
+def test_every_phase_is_uploaded_once_when_it_ends(make_loop):
+    run, make = make_loop
+    uploads = []
+    loop = make(Script(run, edit=[False, True], recipe=[False, True]), max_nodes=2,
+                upload=lambda *phase: uploads.append((*phase, NodeStore(loop.ctx.conn).all()[-1]["status"])))
+    loop.run()
+    assert [u[:3] for u in uploads] == [
+        ("root", "eval", 0), ("node0001", "improve_recipe", 1), ("node0001", "improve_recipe", 2),
+        ("node0001", "train", 2), ("node0001", "eval", 0), ("node0002", "edit_self", 1), ("node0002", "edit_self", 2),
+        ("node0002", "improve_recipe", 1), ("node0002", "train", 1), ("node0002", "eval", 0)]
+    assert uploads[4][3] == "scored"                 # after the node's own bookkeeping
+
+
+def test_the_phase_a_stop_ends_is_uploaded(make_loop):
+    run, make = make_loop
+    uploads = []
+    script = Script(run)
+    script.resolve = lambda *a, **k: (_ for _ in ()).throw(KeyError("boom"))
+    loop = make(script, max_nodes=1, upload=lambda *phase: uploads.append(phase))
+    assert "KeyError" in loop.run()
+    assert uploads == [("root", "eval", 0), ("node0001", "improve_recipe", 1)]
 
 
 def test_an_exception_in_loop_code_outside_a_phase_is_raised(make_loop):

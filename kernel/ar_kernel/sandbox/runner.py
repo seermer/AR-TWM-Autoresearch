@@ -18,7 +18,7 @@ from ..guards import device_minors
 # Env var names whose value must never reach telemetry, no matter which Recorder
 # is used (defense in depth: a Recorder that was never told about this run's
 # token via add_redaction must still not leak it through the recorded sandbox settings).
-_SECRET_ENV_KEYS = ("AR_TOKEN",)
+_SECRET_ENV_KEYS = ("AR_TOKEN", "HF_TOKEN")
 
 
 @dataclass

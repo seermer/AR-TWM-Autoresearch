@@ -242,7 +242,7 @@ def test_a_check_refuses_a_submission_or_adds_to_it(orch):
 class FakeRole:
     def __init__(self, results, log, name="coder"):
         self.results, self.log, self.name, self.closed = results, log, name, False
-        self.tools, self.submit = [], f"submit_{name}"
+        self.tools, self.submit, self.compact_on_delegation = [], f"submit_{name}", False
 
     async def run(self, briefing):
         self.log.append((self.name, briefing))
@@ -272,7 +272,7 @@ def test_the_delegate_tool_runs_the_builder_then_a_fresh_reviewer_and_hands_back
     assert log[0][1].startswith("<plan>\n") and log[1] == ("edit_reviewer", "REVIEW s0") and reviewers[0].closed
     asyncio.run(tool.ainvoke(plan))
     assert log[2][1].startswith("The planner revised the plan.\n\n<plan>") and len(reviewers) == 2
-    assert tool.metadata == {"ends_batch": True} and tool.name == "coder"
+    assert tool.metadata == {"ends_batch": True, "delegates": True} and tool.name == "coder"
     for _ in range(MAX_ROUNDS - 2):
         asyncio.run(tool.ainvoke(plan))
     with pytest.raises(ToolException, match=f"No calls left: coder was called {MAX_ROUNDS} times"):
@@ -295,6 +295,53 @@ def test_a_builder_that_fails_reaches_the_planner_as_an_error_and_uses_a_call(or
     assert handbacks == []
     asyncio.run(run_tool({"coder": tool}, call, "edit_planner", None))
     assert [h["snapshot_id"] for h in handbacks] == ["s"]
+
+
+def test_a_builder_with_compaction_on_delegation_compacts_after_it_submits_before_the_review(orch):
+    o, replies, seen = orch
+    from agent.harness import CONTINUATION
+    replies["coder"] = [("", [("submit_coder", {"report": "one"})]), ("SUMMARY", []),
+                        ("", [("submit_coder", {"report": "two"})]), ("SUMMARY 2", [])]
+
+    async def check(value):
+        return {"snapshot_id": "s"}
+    builder = o.Role("coder", lambda scratch: "C", [], "submit_coder", Schema.Report, check,
+                     compact_on_delegation=True)
+    log = []
+
+    def reviewer():
+        log.append([m.type for m in builder.messages])
+        return FakeRole([{"verdict": "carries_out_plan", "findings": "f"}], [], "edit_reviewer")
+    tool = o.delegate(builder, reviewer, o.EditPlan, [], lambda briefing, b: "x")
+    plan = dict(problem="p", evidence="e", mechanism="m", check="c")
+    asyncio.run(tool.ainvoke(plan))
+    assert log == [["human"]] and builder.messages[0].content == (
+        f"{builder.pinned}\n\n{CONTINUATION.format(summary='SUMMARY')}")
+    asyncio.run(tool.ainvoke(plan))
+    assert [m.type for m in seen[2][1]] == ["system", "human", "human"]
+    assert seen[2][1][2].content.startswith("The planner revised the plan.")
+    builder.close()
+
+
+def test_only_the_builders_compact_on_delegation_and_a_reviewer_may_not(orch, monkeypatch):
+    o = orch[0]
+    built = {}
+    real = o.Role.__init__
+
+    def record(self, name, *a, **k):
+        real(self, name, *a, **k)
+        built[name] = self.compact_on_delegation
+    monkeypatch.setattr(o.Role, "__init__", record)
+    o.check_roles()
+    assert built == {"data_engineer": True, "coder": True, "recipe_planner": False, "edit_planner": False,
+                     "recipe_reviewer": False, "edit_reviewer": False}
+
+    def reviewer_too(self, name, *a, **k):
+        record(self, name, *a, **{**k, "compact_on_delegation": name.endswith("reviewer") or
+                                  k.get("compact_on_delegation", False)})
+    monkeypatch.setattr(o.Role, "__init__", reviewer_too)
+    with pytest.raises(ValueError, match="a reviewer is new for every review"):
+        o.check_roles()
 
 
 def test_submit_result_accepts_only_a_handed_back_snapshot_and_lists_the_valid_ones(orch):
@@ -532,6 +579,11 @@ def _call(name, args):
     return function_call(name, args, f"call_{uuid.uuid4().hex[:12]}")
 
 
+def _text(text):
+    from ar_kernel.gateway.mock import message
+    return message(text)
+
+
 PLAN = {"hypothesis": "more walking clips", "expected_change": "camera path accuracy up",
         "data": "forward-walking clips with poses from the pool"}
 EDIT_PLAN = {"problem": "the planner sees too many siblings", "evidence": "the first message is long",
@@ -547,12 +599,14 @@ def _scripts():
          _call("hf_download", {"repo": "x/y", "revision": "main", "patterns": ["*.mp4"]})],
         [_call("submit_data_engineer", {"report": "r", "data_commit": C0})],           # refused: not all three
         [_call("submit_data_engineer", {"report": "downloads are disabled; the pool has clips"})],      # SNAP1
+        [_text("ENGINEER SUMMARY 1")],                                                  # compaction on delegation
         [_call("submit_review", {"verdict": "falls_short", "findings": "no data commit"})],
         [_call("submit_result", {"snapshot_id": "SNAP1", "summary": "s"})],             # planner: refused
         [_call("data_engineer", {**PLAN, "hypothesis": "pool clips suffice"})],
         [_call("submit_data_engineer", {"report": "pool clips, 200 steps", "data_commit": C0,      # SNAP2
                                         "recipe": {"optimizer.max_steps": 200.4, "optimizer.lr": 1e-5},
                                         "rationale": "fits the data"})],
+        [_text("ENGINEER SUMMARY 2")],
         [_call("submit_review", {"verdict": "carries_out_plan", "findings": "checked 3 clips"})],
         [_call("submit_result", {"snapshot_id": "SNAP2", "summary": "Pool clips suffice; trained for 200 steps."})],
     ]
@@ -570,6 +624,7 @@ def _scripts():
         [_call("edit_file", {"path": "agent/briefing.py", "old_string": "SIBLINGS_SHOWN = 10",
                              "new_string": "SIBLINGS_SHOWN = 8"})],
         [_call("submit_coder", {"report": "The briefing now shows eight siblings."})],                 # SNAP1
+        [_text("CODER SUMMARY")],                                                       # compaction on delegation
         [_call("self_test", {}),                                                                        # reviewer
          _call("run_command", {"command": "grep -c 'SIBLINGS_SHOWN = 8' $AR_AGENT_DIR/agent/briefing.py"})],
         [_call("submit_review", {"verdict": "carries_out_plan", "findings": "briefing.py shows eight"})],
@@ -750,7 +805,9 @@ def test_improve_recipe_full_flow(kernel, tmp_path):
     engineer = _users(roles["data_engineer"])
     assert engineer[0].startswith("<context>") and "<plan>" in engineer[0] and "- name: rain starting" in engineer[0]
     assert "LoRA (rank/alpha): 48/48." in engineer[0]
-    assert engineer[-1].startswith("The planner revised the plan.") and "pool clips suffice" in engineer[-1]
+    # its last request compacts on delegation; the revised plan came after the first compaction's summary
+    assert engineer[-2].startswith("The planner revised the plan.") and "pool clips suffice" in engineer[-2]
+    assert "ENGINEER SUMMARY 1" in engineer[0] and engineer[-1] == (SEED / "agent" / "prompts" / "compact.md").read_text()
     reviewer_first = _users(roles["recipe_reviewer"])[0]
     assert "<report>\npool clips, 200 steps\n</report>" in reviewer_first and '"rationale": "fits the data"' in reviewer_first
     handbacks = [json.loads(m["content"]) for m in roles["recipe_planner"][-1]["messages"]

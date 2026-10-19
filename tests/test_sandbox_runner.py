@@ -193,12 +193,13 @@ def test_a_failed_launch_is_recorded_and_only_the_recorded_settings_are_redacted
     secret = "ar-super-secret-token-value"
     recorder = Recorder(tmp_path / "run")
     with pytest.raises(KernelFault, match="bwrap"):
-        _run(tmp_path, mounts, env={"AR_TOKEN": secret}, recorder=recorder)
-    assert seen[0]["AR_TOKEN"] == secret
+        _run(tmp_path, mounts, env={"AR_TOKEN": secret, "HF_TOKEN": "hf-secret"}, recorder=recorder)
+    assert seen[0]["AR_TOKEN"] == secret and seen[0]["HF_TOKEN"] == "hf-secret"
     events = recorder.read_events("n1")
     (start,) = [e for e in events if e["type"] == "sandbox.start"]
     payload = recorder.load_payload(start["payload"])
     assert payload["settings"]["environment"]["AR_TOKEN"] == "<redacted>" and secret not in json.dumps(payload)
+    assert payload["settings"]["environment"]["HF_TOKEN"] == "<redacted>" and "hf-secret" not in json.dumps(payload)
     assert secret not in " ".join(payload["settings"]["argv"])
     assert [e for e in events if e["type"] == "sandbox.error"]
     assert secret not in recorder.events_path("n1").read_text()

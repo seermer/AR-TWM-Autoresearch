@@ -96,8 +96,11 @@ class Phases:
 
 class Loop:
     def __init__(self, cfg, ctx, kit, repo, *, max_nodes: int, phases: Phases | None = None,
-                 root_cache: Path | None = None) -> None:
+                 root_cache: Path | None = None, upload: Callable | None = None) -> None:
+        """`upload(node, phase, attempt)`: called after every phase (HfUpload)."""
         self.cfg, self.ctx, self.kit, self.repo, self.max_nodes = cfg, ctx, kit, repo, int(max_nodes)
+        self.upload = upload
+        self._current: tuple | None = None      # the phase running, for the upload when it ends
         self.root_cache = root_cache            # None: always score the root
         self.phases = phases or Phases()
         self.nodes = NodeStore(ctx.conn)
@@ -108,10 +111,19 @@ class Loop:
 
     # -- bookkeeping -------------------------------------------------------------------------
     def _state(self, node: str | None, phase: str, attempt: int = 0) -> None:
+        """A phase ends when the state moves on: its upload first."""
+        if self._current is not None and self._current != (node, phase, attempt):
+            self._phase_ended()
+        self._current = None if phase in ("select", "idle") else (node, phase, attempt)
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.state_path.with_suffix(".tmp")
         tmp.write_text(json.dumps({"node": node, "phase": phase, "attempt": attempt, "since": time.time()}))
         tmp.replace(self.state_path)
+
+    def _phase_ended(self) -> None:
+        current, self._current = self._current, None
+        if self.upload is not None:
+            self.upload(*current)
 
     def _process(self, node: str, phase: str, attempt: int) -> dict:
         """The failed attempt's process, for the record."""
@@ -197,17 +209,23 @@ class Loop:
     # -- the run -----------------------------------------------------------------------------
     def run(self) -> str:
         try:
-            self.ensure_root()
-            self.resume()                       # before the stop, max_nodes and budget checks: it is one of the nodes
-            while True:
-                if self.graceful.is_set():
-                    return "graceful stop"
-                if self._children() >= self.max_nodes:
-                    return "max_nodes reached"
-                self._check_budget()
-                self.cycle()
+            why = self._run()
         except StopRun as exc:
-            return str(exc)
+            why = str(exc)
+        if self._current is not None:           # the phase a StopRun ended
+            self._phase_ended()
+        return why
+
+    def _run(self) -> str:
+        self.ensure_root()
+        self.resume()                           # before the stop, max_nodes and budget checks: it is one of the nodes
+        while True:
+            if self.graceful.is_set():
+                return "graceful stop"
+            if self._children() >= self.max_nodes:
+                return "max_nodes reached"
+            self._check_budget()
+            self.cycle()
 
     def ensure_root(self) -> None:
         """Create and score the root of a new run; a root a stopped run left unscored is evaluated again."""

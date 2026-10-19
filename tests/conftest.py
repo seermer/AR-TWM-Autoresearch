@@ -77,6 +77,13 @@ def _all_gpus_free(request, monkeypatch):
     monkeypatch.setattr(guards, "gpu_memory_used", lambda: {g: 1 for g in range(8)})
 
 
+@pytest.fixture(autouse=True)
+def _no_hf_token(monkeypatch):
+    """No test uploads to Hugging Face or hands HFK to a sandbox; set first so a .env a test loads is undone."""
+    monkeypatch.setenv("HFK", "")
+    monkeypatch.delenv("HFK")
+
+
 RESULT_FILES = {}           # container path of a job's result file -> where it is on the host
 
 

@@ -25,12 +25,13 @@ CHARS_PER_TOKEN = 4
 IMAGE_TOKENS = 1_500                       # tokens per image
 IMAGE_BLOCK_TYPES = {"image_url", "image", "input_image"}
 CONTINUATION = (
-    "This session is being continued from a previous conversation that ran out of context. "
+    "This session is being continued from a previous conversation. "
     "The summary below covers the earlier portion of the conversation.\n\n"
     "<summary>\n{summary}\n</summary>\n\n"
     "Continue the work from where it left off without asking any further questions. "
     "Resume directly: do not acknowledge the summary or recap what was happening."
 )
+PENDING = "Not run yet: {name} runs after this summary; its result follows it."
 GUARDED_TOOLS = ("run_command", "write_file", "edit_file")
 GUARD_TIMEOUT_S = 3600
 
@@ -226,21 +227,52 @@ async def summarize(model, bound, tools: list[BaseTool], prompt: list[AnyMessage
     return reply.text.strip()
 
 
+def bind(model, tools: list[BaseTool]):
+    return model.bind_tools(tools, tool_choice=None) if tools else model.bind()
+
+
+async def compact(model, bound, tools: list[BaseTool], system: str | None, messages: list[AnyMessage],
+                  pinned: str) -> None:
+    """Replaces `messages` with `pinned` and a summary of them."""
+    head = [SystemMessage(content=system)] if system is not None else []
+    summary = await summarize(model, bound, tools, [*head, *messages])
+    messages[:] = [HumanMessage(content=f"{pinned}\n\n{CONTINUATION.format(summary=summary)}")]
+
+
+def _as_user(results: list[ToolMessage]) -> HumanMessage:
+    """Tool results whose call was compacted away."""
+    blocks = []
+    for r in results:
+        blocks.append({"type": "text", "text": f"{r.name} returned:"})
+        blocks += [{"type": "text", "text": r.content}] if isinstance(r.content, str) else r.content
+    return HumanMessage(content=blocks)
+
+
 async def run_loop(model, tools: list[BaseTool], system: str | None, messages: list[AnyMessage], *, role: str,
-                   pinned: str, compact_at: float, context_window: int, guard: Guard | None = None) -> list[AnyMessage]:
-    """Runs until a reply has no tool call or a submit is accepted; extends `messages` in place."""
+                   pinned: str, compact_at: float, context_window: int, guard: Guard | None = None,
+                   compact_on_delegation: bool = False) -> list[AnyMessage]:
+    """Runs until a reply has no tool call or a submit is accepted; extends `messages` in place.
+    `compact_on_delegation`: compact when a reply calls a delegating tool, before it runs."""
     by_name = {t.name: t for t in tools}
     head = [SystemMessage(content=system)] if system is not None else []
     while True:
-        bound = model.bind_tools(tools, tool_choice=None) if tools else model.bind()
+        bound = bind(model, tools)
         if needs_compaction(messages, system, context_window, compact_at):
-            summary = await summarize(model, bound, tools, [*head, *messages])
-            messages[:] = [HumanMessage(content=f"{pinned}\n\n{CONTINUATION.format(summary=summary)}")]
+            await compact(model, bound, tools, system, messages, pinned)
         reply = await bound.ainvoke([*head, *messages])
         messages.append(reply)
         if not tools or not reply.tool_calls:
             return messages
+        delegating = compact_on_delegation and any(
+            (getattr(by_name.get(c["name"]), "metadata", None) or {}).get("delegates") for c in reply.tool_calls)
+        if delegating:
+            messages += [ToolMessage(PENDING.format(name=c["name"]), name=c["name"], tool_call_id=c["id"])
+                         for c in reply.tool_calls]
+            await compact(model, bound, tools, system, messages, pinned)
         results, submitted = await run_batch(by_name, reply.tool_calls, role, guard)
-        messages += results
+        if delegating:
+            messages.append(_as_user(results))
+        else:
+            messages += results
         if submitted:
             return messages

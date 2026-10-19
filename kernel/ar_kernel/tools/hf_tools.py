@@ -1,6 +1,7 @@
 """hf_search / hf_list_files / hf_download, for dataset and model repos. The kernel downloads, with its own token."""
 from __future__ import annotations
 
+import functools
 import os
 import re
 import shutil
@@ -83,8 +84,9 @@ class HfTools:
         self.private_dir = Path(private_dir)
         if api is None or snapshot is None:
             import huggingface_hub
-            api = api or huggingface_hub.HfApi()
-            snapshot = snapshot or huggingface_hub.snapshot_download
+            token = os.environ.get("HFK", "").strip() or None      # gated repos; None: the default token
+            api = api or huggingface_hub.HfApi(token=token)
+            snapshot = snapshot or functools.partial(huggingface_hub.snapshot_download, token=token)
         self.api, self.snapshot, self.cfg = api, snapshot, cfg
 
     def search(self, caller, query: str, kind: str = "dataset", limit: int = 20) -> list[dict]:

@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from .briefing import (coder_context, data_engineer_context, edit_planner_context, edit_reviewer_context,
                        recipe_planner_context, recipe_reviewer_context)
 from .entry import AGENT_ROOT, BRIEF_CHARS, COMPACT_AT, CONTEXT_WINDOW, MAX_ROUNDS, MODEL, WORKSPACE
-from .harness import Guard, remove_tree, run_loop
+from .harness import Guard, bind, compact, remove_tree, run_loop
 from .tools import kernel_tools, local_tools, result_text
 
 AGENT_PKG = Path(__file__).resolve().parent
@@ -59,12 +59,16 @@ class Role:
     _ids = itertools.count(1)
 
     def __init__(self, name: str, context, tools: list, submit: str, schema: type[BaseModel], check=None, *,
-                 owns: str | None = None, papers: bool = False, guard: Guard | None = None) -> None:
+                 owns: str | None = None, papers: bool = False, guard: Guard | None = None,
+                 compact_on_delegation: bool = False) -> None:
+        """`compact_on_delegation`: compact when the work passes to another role (stateful roles only)."""
         self.name, self.context_fn, self.submit, self.guard = name, context, submit, guard
+        self.compact_on_delegation = compact_on_delegation
         self.scratch = SCRATCH / f"{name}-{next(Role._ids)}"
         self.system = (AGENT_PKG / "prompts" / f"{name}.md").read_text()
         self.messages: list = []
         self.context: str | None = None
+        self.pinned = ""
         self.value: dict | None = None
 
         async def accept(**kwargs) -> str:
@@ -84,18 +88,21 @@ class Role:
         self.scratch.mkdir(parents=True, exist_ok=True)
         if self.context is None:
             self.context = brief(self.context_fn(str(self.scratch)))
-        pinned = f"{self.context}\n\n{briefing}"
+        self.pinned = f"{self.context}\n\n{briefing}"
         self.value = None
-        self.messages.append(HumanMessage(content=briefing if len(self.messages) else pinned))
+        self.messages.append(HumanMessage(content=briefing if len(self.messages) else self.pinned))
         for k in range(REMINDERS + 1):
             if k:
                 self.messages.append(HumanMessage(content=REMIND.format(tool=self.submit)))
             self.messages = await run_loop(self.model, self.tools, self.system, self.messages, role=self.name,
-                                           pinned=pinned, compact_at=COMPACT_AT, context_window=CONTEXT_WINDOW,
-                                           guard=self.guard)
+                                           pinned=self.pinned, compact_at=COMPACT_AT, context_window=CONTEXT_WINDOW,
+                                           guard=self.guard, compact_on_delegation=self.compact_on_delegation)
             if self.value is not None:
                 return self.value
         raise NoSubmission(f"{self.name} ended its turn without calling {self.submit}, after {REMINDERS} reminders")
+
+    async def compact(self) -> None:
+        await compact(self.model, bind(self.model, self.tools), self.tools, self.system, self.messages, self.pinned)
 
     def close(self) -> None:
         remove_tree(self.scratch)
@@ -133,6 +140,8 @@ def delegate(builder: Role, reviewer, schema: type[BaseModel], handbacks: list, 
         plan = schema.model_validate(kwargs)
         briefing = f"<plan>\n{plan.model_dump_json(indent=1)}\n</plan>"
         built = await builder.run(briefing if calls == 1 else f"The planner revised the plan.\n\n{briefing}")
+        if builder.compact_on_delegation:
+            await builder.compact()
         review_role = reviewer()
         try:
             review = await review_role.run(describe(briefing, built))
@@ -144,7 +153,7 @@ def delegate(builder: Role, reviewer, schema: type[BaseModel], handbacks: list, 
 
     tools = ", ".join(t.name for t in builder.tools if t.name != builder.submit)
     return StructuredTool(name=builder.name, description=f"{schema.__doc__} Its tools: {tools}", args_schema=schema,
-                          coroutine=call, metadata={"ends_batch": True})
+                          coroutine=call, metadata={"ends_batch": True, "delegates": True})
 
 
 def result_check(handbacks: list, needs_result: bool):
@@ -221,7 +230,7 @@ def recipe_roles(ctx: RecipeContext | None, session, ktools: list) -> tuple:
     read_only = [t for t in ktools if t.name in READ_ONLY_KERNEL_TOOLS]
     handbacks: list = []
     engineer = Role("data_engineer", lambda s: data_engineer_context(ctx, s), ktools, "submit_data_engineer",
-                    DataHandback, built, owns=WORKSPACE, papers=True)
+                    DataHandback, built, owns=WORKSPACE, papers=True, compact_on_delegation=True)
     reviewer = lambda: Role("recipe_reviewer", lambda s: recipe_reviewer_context(ctx, s), read_only, "submit_review",
                             Review)
     planner = Role("recipe_planner", lambda s: recipe_planner_context(ctx, s),
@@ -324,7 +333,7 @@ def edit_roles(ctx: EditContext | None, session, ktools: list, guard: Guard | No
     kernel = [t for t in ktools if t.name in EDIT_KERNEL_TOOLS]
     handbacks: list = []
     coder = Role("coder", lambda s: coder_context(ctx, COMPONENTS, s), [*kernel, SELF_TEST], "submit_coder",
-                 CodeHandback, built, owns=AGENT_ROOT, guard=guard)
+                 CodeHandback, built, owns=AGENT_ROOT, guard=guard, compact_on_delegation=True)
     reviewer = lambda: Role("edit_reviewer", lambda s: edit_reviewer_context(ctx, COMPONENTS, s),
                             [*kernel, SELF_TEST], "submit_review", Review, guard=guard)
     planner = Role("edit_planner", lambda s: edit_planner_context(ctx, COMPONENTS, s),
@@ -353,4 +362,6 @@ async def run_meta(ctx: EditContext) -> EditResult:
 def check_roles() -> None:
     """Builds every role without a model call."""
     for _, _, reviewer in (recipe_roles(None, None, []), edit_roles(None, None, [], None)):
-        reviewer()
+        if reviewer().compact_on_delegation:
+            raise ValueError("compact_on_delegation needs a role that keeps its conversation; a reviewer is new "
+                             "for every review")

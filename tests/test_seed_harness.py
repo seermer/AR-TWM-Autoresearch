@@ -315,6 +315,34 @@ def test_compaction_falls_back_to_tool_choice_none_when_the_model_calls_a_tool_i
     assert messages[0]["content"].endswith(CONTINUATION.format(summary="SUMMARY TEXT"))
 
 
+def test_compaction_on_delegation_runs_before_the_delegate_and_its_results_come_as_a_user_message(monkeypatch):
+    async def builder(briefing: str) -> str:
+        return f"built {briefing}"
+    delegate = StructuredTool.from_function(coroutine=builder, name="coder", description="Brief the coder.",
+                                            metadata={"ends_batch": True, "delegates": True})
+    monkeypatch.setattr(harness, "COMPACT_PROMPT", type("P", (), {"read_text": lambda self: "COMPACT NOW"})())
+    script = [_ai("", [("add", {"a": 1, "b": 2}, "c1"), ("coder", {"briefing": "x"}, "c2")]),
+              _ai("SUMMARY TEXT"), _ai("done")]
+    messages, log = asyncio.run(_run(_Ours, script, [add, delegate], "sys", [HumanMessage("PINNED")],
+                                     compact_on_delegation=True))
+    summarizer = log["prompts"][1]
+    assert [m["type"] for m in summarizer] == ["system", "human", "ai", "tool", "tool", "human"]
+    assert summarizer[3]["content"] == harness.PENDING.format(name="add")
+    assert [m["type"] for m in messages] == ["human", "human", "ai"]
+    assert messages[0]["content"] == "PINNED\n\n" + CONTINUATION.format(summary="SUMMARY TEXT")
+    assert [b["text"] for b in messages[1]["content"]] == ["add returned:", "3", "coder returned:", "built x"]
+
+
+def test_without_compaction_on_delegation_a_delegate_call_is_not_compacted():
+    async def builder(briefing: str) -> str:
+        return "built"
+    delegate = StructuredTool.from_function(coroutine=builder, name="coder", description="Brief the coder.",
+                                            metadata={"ends_batch": True, "delegates": True})
+    script = [_ai("", [("coder", {"briefing": "x"}, "c1")]), _ai("done")]
+    messages, log = asyncio.run(_run(_Ours, script, [delegate], None, [HumanMessage("go")]))
+    assert [m["type"] for m in messages] == ["human", "ai", "tool", "ai"] and len(log["prompts"]) == 2
+
+
 def test_an_empty_summary_raises(monkeypatch):
     script = [_ai("", [("add", {"a": 1, "b": 2}, "c1")], total=900), _ai("  ")]
     with pytest.raises(RuntimeError, match="no summary"):

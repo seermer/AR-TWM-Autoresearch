@@ -65,7 +65,7 @@ class PreflightError(RuntimeError):
     """The environment cannot produce a complete, comparable score."""
 
 
-_SECRET_KEYS = {"OPENAI_API_KEY", "VLM_API_KEY", "HF_TOKEN"}
+_SECRET_KEYS = {"OPENAI_API_KEY", "VLM_API_KEY", "HF_TOKEN", "HFK"}
 
 
 def _recorder(run_dir: Path, env: Mapping[str, str]) -> Recorder:

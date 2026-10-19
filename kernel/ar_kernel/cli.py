@@ -5,6 +5,7 @@ from .config import KernelConfig, load_dotenv
 from .control import Control, drive, exit_process, kill_recorded_groups
 from .doctor import report, run_checks
 from .guards import alert, check_tools_fit, choose_gpus
+from .hf_upload import HfUpload, fetch
 from .loop import Loop
 from .monitor import Monitor
 from .run import PreflightError, RunNotFound, attach_run, bootstrap_run, code_changes, rescore_node
@@ -40,6 +41,9 @@ def main(argv: list[str] | None = None) -> int:
     stop = sub.add_parser("stop", help="stop a running loop")
     stop.add_argument("--run-id", required=True)
     stop.add_argument("--force", action="store_true")
+    fetchp = sub.add_parser("fetch", help="download a run that uploaded itself to Hugging Face (HFK), for the panel")
+    fetchp.add_argument("--run-id", required=True)
+    fetchp.add_argument("--repo", default=None, help="the dataset repo; default <HFK's user>/<run id>")
     doctor = sub.add_parser("doctor", help="check this tree is runnable here (paths, envs, symlinks)")
     doctor.add_argument("--strict", action="store_true", help="exit non-zero on warnings too")
     args = parser.parse_args(argv)
@@ -54,6 +58,11 @@ def main(argv: list[str] | None = None) -> int:
     # Before bootstrap_run: diagnostics must not create a run dir or rewrite versions.json.
     if args.command == "doctor":
         return report(run_checks(cfg), strict=args.strict)
+    if args.command == "fetch":
+        if not os.environ.get("HFK", "").strip():
+            raise ValueError("HFK is empty; set it in AutoResearcher/.env before `ar fetch`")
+        print(fetch(cfg.runs_dir / args.run_id, args.repo, os.environ["HFK"]))
+        return 0
 
     if args.command == "run":
         return _run(cfg, args)
@@ -168,7 +177,8 @@ def _run(cfg, args) -> int:
     if killed or partial:
         ctx.recorder.event("run.resume_cleanup", payload={"killed_groups": killed, "hf_tmp": partial})
     kit = build_run_kit(run_cfg, ctx.run_dir, ctx.gpus, ctx.recorder, os.environ, repo)
-    loop = Loop(run_cfg, ctx, kit, repo, max_nodes=max_nodes, root_cache=run_cfg.root_cache)
+    upload = HfUpload(ctx.run_dir, ctx.recorder, os.environ["HFK"]) if os.environ.get("HFK", "").strip() else None
+    loop = Loop(run_cfg, ctx, kit, repo, max_nodes=max_nodes, root_cache=run_cfg.root_cache, upload=upload)
     monitor = Monitor(run_cfg, ctx.run_dir, ctx.recorder, ctx.gpus, kit.budget)
     try:
         reason = drive(loop, kit, control, ctx.recorder, monitor)
