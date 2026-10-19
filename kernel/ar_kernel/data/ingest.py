@@ -9,6 +9,7 @@ import numpy as np
 from ..archive.blobs import BlobStore
 from ..archive.clips import ClipStore
 from ..config import KernelConfig, run_config_path
+from ..faults import disk_fault
 from ..isolation import EXCLUDED_CLIP, copies_held_out
 from . import annotation as ann
 from .checker import CheckerError, check_clip
@@ -61,6 +62,7 @@ class IngestResult:
     clip_id: str | None = None
     warnings: list[str] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
+    checker_failed: bool = False    # rejected because the clip checker itself failed
 
 class Ingestor:
     def __init__(self, cfg: KernelConfig, run_dir: Path, conn, recorder,
@@ -147,9 +149,13 @@ class Ingestor:
             checked = self._check_files(candidate, held, node_id)
         except (subprocess.SubprocessError, OSError, ValueError, IndexError, KeyError, CheckerError) as exc:
             # A file ffprobe, decoding or the checker bridge cannot handle: record a rejection
-            # and carry on with the batch instead of failing the whole call.
+            # and carry on with the batch instead of failing the whole call. A full disk is the machine's.
+            if disk_fault(exc):
+                _discard(held)
+                raise
             checked = self._reject(candidate, node_id, [
                 f"could not read the candidate: {type(exc).__name__}: {exc}"[:500]])
+            checked.checker_failed = isinstance(exc, CheckerError)
         except BaseException:
             _discard(held)
             raise

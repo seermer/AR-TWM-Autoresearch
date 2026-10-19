@@ -25,7 +25,7 @@ def _pool(conn) -> dict:
 
 @pytest.mark.parametrize("label, is_hidden", [
     ("node0005", False), ("node0005fail1", True), ("node0005fail12", True), ("node0005quarantine", True),
-    ("node0005interrupted", True), ("node0005fail0", False), ("fail1", False), ("node0005failed", False)])
+    ("node0005interrupted", False), ("node0005fail0", False), ("fail1", False), ("node0005failed", False)])
 def test_only_the_exact_marks_hide_a_clip(label, is_hidden):
     assert hidden(label) is is_hidden
 
@@ -68,5 +68,5 @@ def test_the_gate_refuses_a_data_commit_holding_hidden_clips(tmp_path):
     store = {i: {"ingested_by": "node0005fail1" if i == ids[0] else "node0005"} for i in ids}
     commits = SimpleNamespace(manifest=lambda c: {"datasets": {"d": {"weight": 1.0, "clips": ids}}},
                               clips=SimpleNamespace(get=store.__getitem__))
-    result = Gate(CFG, commits, Recorder(tmp_path)).check({}, "c", None, "n1", tmp_path / "n1", tmp_path, [0, 1, 2, 3])
-    assert not result.ok and "dataset d has 1 clips that are not in the pool" in result.failures
+    failures = Gate(CFG, commits, Recorder(tmp_path)).check({}, "c", None, "n1", tmp_path / "n1", tmp_path, [0, 1, 2, 3])
+    assert failures and "dataset d has 1 clips that are not in the pool" in failures

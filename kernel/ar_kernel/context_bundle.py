@@ -20,9 +20,8 @@ from .tools.data_tools import clip_source, dataset_stats, pool_clips
 from .train.recipe import RECIPE_RULES, TUNABLE_KEYS
 from .train.recipe_guide import recipe_guide
 
-# A failure inside the kernel is not the agent's doing, and its raw text can name what agents never see.
-KERNEL_FAILURES = {"eval_failed": "the kernel's evaluation of this node failed",
-                   "crashed": "the kernel failed while running this node"}
+# A failed eval's raw error can name what agents never see.
+KERNEL_FAILURES = {"eval_failed": "the evaluation of this node's model failed"}
 
 
 # What each folder of the container is for, per phase: a role is told this first, so it need not find out.

@@ -113,6 +113,17 @@ def test_probe_reports_display_geometry(env):
     assert tools.probe(caller, "staging/probe_me.mp4") == info      # relative to /workspace, like caption_videos
 
 
+def test_probe_of_a_missing_non_video_or_damaged_file_is_a_tool_error(env):
+    tools, caller, _, _ = env
+    (caller.staging_host / "notes.mp4").write_text("not a video")
+    make_mp4(caller.staging_host / "cut.mp4", seconds=3.0)
+    data = (caller.staging_host / "cut.mp4").read_bytes()
+    (caller.staging_host / "cut.mp4").write_bytes(data[: len(data) // 2])
+    for name in ("missing.mp4", "notes.mp4", "cut.mp4"):
+        with pytest.raises(ToolError, match=name):
+            tools.probe(caller, f"staging/{name}")
+
+
 def test_query_returns_the_archive_wide_pool_with_what_each_clip_was_derived_from(env):
     tools, caller, results, _ = env
     out = tools.query(caller, {})
@@ -226,7 +237,8 @@ def test_recipe_check_reports_gate_failures_without_leaving_a_view(env, monkeypa
     def fake_run_in_env(env_name, args, **kwargs):
         views = list((caller.workspace_host.parent / "recipe_check").glob("*/view"))
         seen_populated_view.append(bool(views) and any(any(v.rglob("*.mp4")) for v in views))
-        return subprocess.CompletedProcess(args, 1, "", "monkeypatched: no GPU job in unit tests")
+        return subprocess.CompletedProcess(args, 1, '===AR_FINDINGS===["monkeypatched finding"]\n',
+                                           "monkeypatched: no GPU job in unit tests")
 
     monkeypatch.setattr("ar_kernel.train.gate.run_in_env", fake_run_in_env)
 
@@ -239,9 +251,24 @@ def test_recipe_check_reports_gate_failures_without_leaving_a_view(env, monkeypa
     assert seen_populated_view and all(seen_populated_view), \
         "the gate must have actually built and populated a view before the GPU-job steps ran"
     assert out["ok"] is False
-    assert any("failed" in f for f in out["failures"]), out["failures"]
+    assert "check_dataset: monkeypatched finding" in out["failures"], out["failures"]
     leftovers = list((caller.workspace_host.parent / "recipe_check").glob("*"))
     assert leftovers == []
+
+
+def test_a_snapshot_skips_the_gate_recipe_check_passed_in_this_attempt(env, monkeypatch):
+    tools, caller, results, _ = env
+    commit = tools.commit(caller, None, {"cam": {"weight": 1.0, "clips": [r["clip_id"] for r in results]}},
+                          "for check")["commit_id"]
+    runs = []
+    monkeypatch.setattr("ar_kernel.train.gate.run_in_env",
+                        lambda env_name, args, **kw: runs.append(args) or subprocess.CompletedProcess(args, 0, "", ""))
+    recipe = {"optimizer.max_steps": 1, "optimizer.epochs": 1, "optimizer.grad_accum_steps": 1}
+    assert tools.recipe_check(caller, recipe, commit)["ok"] and len(runs) == 3
+    assert tools.snapshot_gate(caller, dict(recipe), commit) == [] and len(runs) == 3      # skipped
+    assert tools.snapshot_gate(caller, {**recipe, "optimizer.epochs": 2}, commit) == [] and len(runs) == 6
+    tools.forget(caller.token)                                                             # its phase ended
+    assert tools.snapshot_gate(caller, dict(recipe), commit) == [] and len(runs) == 9
 
 
 def test_recipe_check_is_refused_at_once_while_a_gpu_job_holds_the_gpus(env):

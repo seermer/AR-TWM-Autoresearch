@@ -31,8 +31,6 @@ def candidates(nodes: list[dict], cfg) -> list[dict]:
             nxt = []
             for pid in frontier:
                 for child in kids.get(pid, []):
-                    if child["status"] == "interrupted":    # it and anything under it count nowhere
-                        continue
                     nxt.append(child["node_id"])
                     size += decay ** (k - 1)
                     if child["status"] == "scored" and child["score"] is not None:

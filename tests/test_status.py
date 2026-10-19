@@ -18,7 +18,7 @@ def test_status_is_plain_json(tmp_path):
     nodes.create("root", None, 0), nodes.record_score("root", 0.78, ["m"], {"m": 0.78})
     nodes.create("n1", "root", 1), nodes.set_status("n1", "invalid_code")
     nodes.set_fields("n1", error="contract import failed")
-    nodes.create("n2", "root", 1), nodes.set_status("n2", "interrupted")
+    nodes.create("n2", "root", 1)                                  # left running by a stopped run
     rec.event("llm.response", node="n1", usage={"prompt_tokens": 1000, "completion_tokens": 100}, mock=False)
     alert(rec, "node_failed", "n1 ended invalid_code")
     (tmp_path / "control").mkdir()
@@ -31,7 +31,7 @@ def test_status_is_plain_json(tmp_path):
     assert [a["kind"] for a in d["alerts"]] == ["node_failed"]
     text = format_status(d)
     assert "n1" in text and "invalid_code" in text and "contract import failed" in text
-    assert "nodes: 1 of 5" in text                              # interrupted n2 is not counted
+    assert "nodes: 2 of 5" in text                              # the running n2 is counted: resume finishes it
 
 
 def test_a_node_is_listed_under_its_own_parent():

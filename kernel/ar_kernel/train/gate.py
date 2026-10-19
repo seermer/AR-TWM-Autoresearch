@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass, field
+import json
 from pathlib import Path
 
 import yaml
@@ -9,11 +9,26 @@ from ..config import KernelConfig, run_config_path
 from ..subproc import output_tail, run_in_env
 from .recipe import TUNABLE_KEYS, steps_per_epoch, validate_recipe_values, write_resolved_config
 
-@dataclass
-class GateResult:
-    ok: bool
-    failures: list[str] = field(default_factory=list)
-    resolved_path: Path | None = None
+FINDINGS = "===AR_FINDINGS==="      # a WorldModel check script's findings line: the marker, then a JSON list
+
+
+def findings(label: str, proc) -> list[str]:
+    """What a check script found wrong. A failure without its findings line is a crash: it raises."""
+    if proc.returncode == 0:
+        return []
+    for line in proc.stdout.splitlines():
+        if line.startswith(FINDINGS):
+            return [f"{label}: {f}" for f in json.loads(line[len(FINDINGS):])]
+    raise RuntimeError(f"{label} crashed (rc={proc.returncode}): {output_tail(proc, 2000)}")
+
+
+def resolve_config(cfg: KernelConfig, commits, run_dir: Path, recipe: dict, data_commit: str, node_id: str,
+                   out_dir: Path) -> Path:
+    """The training config of `recipe` over the run's base recipe, on the data commit's view in `out_dir`."""
+    roots = commits.materialize(data_commit, Path(out_dir) / "view")
+    return write_resolved_config(run_config_path(cfg, run_dir, "base_recipe.yaml"), recipe, roots,
+                                 commits.manifest(data_commit), node_id, Path(out_dir), Path(run_dir))
+
 
 class Gate:
     def __init__(self, cfg: KernelConfig, commits, recorder) -> None:
@@ -22,7 +37,8 @@ class Gate:
         self.recorder = recorder
 
     def check(self, recipe: dict, commit_id: str, parent_commit: str | None, node_id: str,
-              node_dir: Path, run_dir: Path, gpus: list[int]) -> GateResult:
+              node_dir: Path, run_dir: Path, gpus: list[int]) -> list[str]:
+        """The recipe's failures; none when it passes."""
         failures = [f"{key} is not tunable; allowed: {sorted(TUNABLE_KEYS)}"
                     for key in recipe if key not in TUNABLE_KEYS]
         value_failures = validate_recipe_values(recipe)
@@ -68,9 +84,7 @@ class Gate:
         if failures:
             return self._failed(node_id, recipe, failures)
 
-        roots = self.commits.materialize(commit_id, Path(node_dir) / "view")
-        resolved = write_resolved_config(base_recipe, recipe, roots, manifest, node_id, Path(node_dir),
-                                         Path(run_dir))
+        resolved = resolve_config(self.cfg, self.commits, run_dir, recipe, commit_id, node_id, node_dir)
         gpu_list = ",".join(str(g) for g in gpus)
         checks = [
             ("check_dataset", ["python", "scripts/tools/check_dataset.py", "--config",
@@ -82,8 +96,7 @@ class Gate:
             proc = run_in_env("alayaworld", args, cwd=self.cfg.worldmodel,
                               extra_env={"CUDA_VISIBLE_DEVICES": gpu_list},
                               recorder=self.recorder, node=node_id, phase="gate")
-            if proc.returncode != 0:
-                failures.append(f"{label} failed (rc={proc.returncode}): {output_tail(proc, 2000)}")
+            failures += findings(label, proc)
 
         describe = run_in_env(
             "alayaworld", ["bash", "scripts/finetune/lowcompute_4x4090.sh"],
@@ -91,16 +104,14 @@ class Gate:
             extra_env={"CONFIG_PATH": str(resolved), "CUDA_VISIBLE_DEVICES": gpu_list,
                        "DESCRIBE": "1"},
             recorder=self.recorder, node=node_id, phase="gate")
-        if describe.returncode != 0:
-            failures.append(f"describe failed (rc={describe.returncode}): {output_tail(describe, 2000)}")
+        failures += list(dict.fromkeys(findings("describe", describe)))      # every rank prints its own
 
-        ok = not failures
-        self.recorder.event("gate.passed" if ok else "gate.failed", node=node_id, phase="gate",
+        self.recorder.event("gate.failed" if failures else "gate.passed", node=node_id, phase="gate",
                             payload={"failures": failures, "recipe": recipe,
                                      "resolved": str(resolved)})
-        return GateResult(ok=ok, failures=failures, resolved_path=resolved if ok else None)
+        return failures
 
-    def _failed(self, node_id: str, recipe: dict, failures: list[str]) -> GateResult:
+    def _failed(self, node_id: str, recipe: dict, failures: list[str]) -> list[str]:
         self.recorder.event("gate.failed", node=node_id, phase="gate",
                             payload={"failures": failures, "recipe": recipe})
-        return GateResult(ok=False, failures=failures)
+        return failures

@@ -168,3 +168,92 @@ def test_an_edit_self_caller_gets_only_the_tools_of_its_phase(tmp_path):
     assert asyncio.run(kit.call(edit, "ask", {}, lambda c: "answer")) == "answer"
     with pytest.raises(ToolError, match="not available in edit_self"):
         asyncio.run(kit.call(edit, "data_query", {}, lambda c: "clips"))
+
+
+def _direct(tmp_path, alert_after=3):
+    """A ToolKit called in-process, as an agent's call would reach it."""
+    from ar_kernel.tools.server import ToolHealth
+    rec = Recorder(tmp_path / "run")
+    reg = TokenRegistry(rec)
+    kit = ToolKit(reg, rec, ToolHealth(rec, alert_after))
+    caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=tmp_path, staging_host=tmp_path)
+    request = type("R", (), {"headers": {"authorization": f"Bearer {caller.token}"}})()
+    ctx = type("C", (), {"request_context": type("RC", (), {"request": request})()})()
+    return rec, kit, caller, lambda name, fn: asyncio.run(kit.call(ctx, name, {}, fn))
+
+
+def _raise(exc):
+    def fn(_caller):
+        raise exc
+    return fn
+
+
+def _tool_alerts(rec):
+    return [rec.load_payload(e["payload"]) for e in rec.read_events() if e["type"] == "alert"]
+
+
+def test_a_refusal_is_not_counted_and_a_kernel_bug_is(tmp_path):
+    rec, kit, caller, call = _direct(tmp_path, alert_after=2)
+    for _ in range(3):
+        with pytest.raises(ToolError):
+            call("t", _raise(ToolError("bad argument")))
+    assert _tool_alerts(rec) == [] and not caller.fault.event.is_set()
+    for _ in range(3):
+        with pytest.raises(ToolError, match="KeyError"):
+            call("t", _raise(KeyError("x")))
+    [alert] = _tool_alerts(rec)                                   # once per streak
+    assert alert["kind"] == "tool_failing" and alert["tool"] == "t" and not caller.fault.event.is_set()
+
+
+def test_a_success_ends_the_streak(tmp_path):
+    rec, kit, caller, call = _direct(tmp_path, alert_after=2)
+    with pytest.raises(ToolError):
+        call("t", _raise(RuntimeError("x")))
+    assert call("t", lambda c: "ok") == "ok"
+    with pytest.raises(ToolError):
+        call("t", _raise(RuntimeError("x")))
+    with pytest.raises(ToolError):
+        call("other", _raise(RuntimeError("x")))
+    assert _tool_alerts(rec) == []
+
+
+@pytest.mark.parametrize("exc", [OSError(28, "No space left on device"), OSError(5, "Input/output error")],
+                         ids=["ENOSPC", "EIO"])
+def test_a_disk_error_or_kernel_fault_stops_the_phase(tmp_path, exc):
+    from ar_kernel.faults import KernelFault
+    for error in (exc, KernelFault("GPUs held by another process")):
+        rec, kit, caller, call = _direct(tmp_path / type(error).__name__)
+        with pytest.raises(ToolError, match="stops this phase"):
+            call("t", _raise(error))
+        assert caller.fault.event.is_set() and _tool_alerts(rec) == []
+
+
+def test_other_os_errors_are_counted_not_faults(tmp_path):
+    rec, kit, caller, call = _direct(tmp_path, alert_after=1)
+    with pytest.raises(ToolError, match="PermissionError"):
+        call("t", _raise(PermissionError(13, "Permission denied")))
+    assert not caller.fault.event.is_set() and _tool_alerts(rec)[0]["kind"] == "tool_failing"
+
+
+def test_a_cancelled_call_stays_in_flight_until_its_thread_returns(tmp_path):
+    """The MCP server cancels a request whose client went away; the tool's thread still runs."""
+    import threading
+    import time
+    rec, kit, caller, _ = _direct(tmp_path)
+    request = type("R", (), {"headers": {"authorization": f"Bearer {caller.token}"}})()
+    ctx = type("C", (), {"request_context": type("RC", (), {"request": request})()})()
+    loop = asyncio.new_event_loop()
+    threading.Thread(target=loop.run_forever, daemon=True).start()
+    started, finished = threading.Event(), threading.Event()
+
+    def slow(_caller):
+        started.set()
+        time.sleep(0.5)
+        finished.set()
+    call = asyncio.run_coroutine_threadsafe(kit.call(ctx, "data_ingest", {}, slow), loop)
+    assert started.wait(5)
+    call.cancel()
+    kit.registry.revoke(caller.token)
+    kit.registry.wait_idle(caller.token)
+    assert finished.is_set()
+    loop.call_soon_threadsafe(loop.stop)

@@ -79,3 +79,28 @@ def test_on_revoke_fires_once_per_revoke(caller):
     # revoking an unknown/already-revoked token does not fire the callback again
     reg.revoke(c.token)
     assert calls == [c.token]
+
+
+def test_wait_idle_returns_once_the_calls_in_flight_end_and_a_revoked_token_starts_none(caller):
+    import threading
+    import time
+    reg, c = caller
+    assert reg.begin(c.token) == c
+    reg.revoke(c.token)
+    assert reg.begin(c.token) is None
+    done = threading.Event()
+    threading.Thread(target=lambda: (reg.wait_idle(c.token), done.set()), daemon=True).start()
+    time.sleep(0.2)
+    assert not done.is_set()
+    reg.end(c.token)
+    assert done.wait(5)
+
+
+def test_fail_is_recorded_once_with_its_first_reason(tmp_path):
+    rec = Recorder(tmp_path)
+    c = TokenRegistry(rec).issue(node="n1", phase="improve_recipe", attempt=2, workspace_host=tmp_path,
+                                 staging_host=tmp_path)
+    c.fail("disk full")
+    c.fail("later")
+    assert c.fault.event.is_set() and c.fault.reason == "disk full"
+    assert [e["type"] for e in rec.read_events("n1")].count("phase.fault") == 1

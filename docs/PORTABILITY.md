@@ -49,6 +49,8 @@ usual dotfiles under `$HOME`. `ar_kernel.subproc.cache_env()` sets `HF_HOME`,
 its own process too, so in-process `huggingface_hub` calls (e.g. HfTools) also use the
 project cache. Set `AR_CACHE_DIR` to relocate the whole cache tree elsewhere (a symlink
 farm on a bigger disk, say) without touching any of the variable names above.
+`TMPDIR` is `/tmp/ar-<user>-<hash>`, a symlink to `cache_dir()/tmp` (the only thing written
+outside the project): Unix socket paths (vLLM, DataLoader workers) are capped at 107 bytes.
 
 On a new machine, `AutoResearcher/.cache/` starts empty, so the captioner's model
 (`Qwen/Qwen3.8-27B-FP8`, ~29 GB) needs to be copied from an existing `~/.cache/huggingface/hub/`

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from ar_kernel.config import KernelConfig
+from ar_kernel.tools.server import ToolError
 from ar_kernel.tools.vllm_server import VllmServer, parallelism, serve_command
 
 CFG = KernelConfig.load().get("captioner")
@@ -91,8 +92,20 @@ def test_gpus_holding_more_than_the_limit_are_named_and_a_display_server_is_let_
     from ar_kernel.tools.vllm_server import require_free_gpus
     require_free_gpus([0, 1], 512, gpu_memory=lambda gpus: {0: 9, 1: 300})          # e.g. Xorg
     require_free_gpus([0, 1], 512, gpu_memory=lambda gpus: None)                    # unreadable: not refused
-    with pytest.raises(RuntimeError, match=r"GPU 1 has 3200 MiB in use \(limit 512 MiB\).*nvidia-smi"):
-        require_free_gpus([0, 1], 512, gpu_memory=lambda gpus: {0: 9, 1: 3200})
+    with pytest.raises(ToolError, match=r"GPU 1 has 3200 MiB in use \(limit 512 MiB\).*nvidia-smi"):
+        require_free_gpus([0, 1], 512, gpu_memory=lambda gpus: {0: 9, 1: 3200}, own=lambda: {7, 8},
+                          processes=lambda gpus: {8})
+
+
+def test_busy_gpus_are_the_agents_doing_only_when_its_sandbox_holds_them():
+    from ar_kernel.faults import KernelFault
+    from ar_kernel.tools.vllm_server import require_free_gpus
+    busy = dict(gpus=[0], limit_mib=512, gpu_memory=lambda gpus: {0: 9000}, own=lambda: {7})
+    with pytest.raises(KernelFault, match="outside its sandbox.*pids 9"):
+        require_free_gpus(**busy, processes=lambda gpus: {7, 9})
+    with pytest.raises(RuntimeError, match="lists no process") as info:
+        require_free_gpus(**busy, processes=lambda gpus: set())
+    assert not isinstance(info.value, (ToolError, KernelFault))         # a counted tool error
 
 
 def test_the_free_check_waits_with_backoff_for_a_job_that_is_still_giving_memory_back():
@@ -102,7 +115,8 @@ def test_the_free_check_waits_with_backoff_for_a_job_that_is_still_giving_memory
     assert slept == [4, 8, 16]
     slept.clear()
     with pytest.raises(RuntimeError, match="GPU 0 has 9000 MiB"):
-        require_free_gpus([0], 512, gpu_memory=lambda gpus: {0: 9000}, waits=FREE_WAITS_S, sleep=slept.append)
+        require_free_gpus([0], 512, gpu_memory=lambda gpus: {0: 9000}, waits=FREE_WAITS_S, sleep=slept.append,
+                          processes=lambda gpus: set())
     assert slept == [4, 8, 16, 32, 64]                 # 124 s in all, then the refusal
 
 

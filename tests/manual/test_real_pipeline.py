@@ -9,7 +9,7 @@ from ar_kernel.config import KernelConfig
 from ar_kernel.data.ingest import Candidate, Ingestor
 from ar_kernel.run import bootstrap_run, score_node
 from ar_kernel.telemetry.recorder import Recorder
-from ar_kernel.train.gate import Gate
+from ar_kernel.train.gate import Gate, resolve_config
 from ar_kernel.train.runner import TrainRunner
 
 pytestmark = pytest.mark.manual
@@ -57,17 +57,16 @@ def test_two_step_training_writes_a_checkpoint(tmp_path):
     commits = CommitStore(conn, ing.blobs, ing.clips)
     commit = commits.commit(None, {"cam": {"weight": 1.0, "clips": clips}}, "manual", node_id="m1")
     node_dir = ctx.run_dir / "nodes" / "m1"
-    gate = Gate(CFG, commits, ctx.recorder)
-    result = gate.check({"optimizer.max_steps": 2, "optimizer.grad_accum_steps": 1,
-                         "optimizer.epochs": 500},
-                        commit, None, "m1", node_dir, ctx.run_dir, ctx.gpus)
-    assert result.ok, result.failures
+    recipe = {"optimizer.max_steps": 2, "optimizer.grad_accum_steps": 1, "optimizer.epochs": 500}
+    failures = Gate(CFG, commits, ctx.recorder).check(recipe, commit, None, "m1", tmp_path / "check",
+                                                      ctx.run_dir, ctx.gpus)
+    assert not failures, failures
+    resolved = resolve_config(CFG, commits, ctx.run_dir, recipe, commit, "m1", node_dir)
     runner = TrainRunner(CFG, ctx.recorder)
-    runner.precache(result.resolved_path, ctx.gpus, "m1")
-    outcome = runner.train(result.resolved_path, ctx.gpus, "m1", node_dir)
-    assert outcome.failure == "none", outcome.log_path.read_text()[-4000:]
-    assert (outcome.checkpoint / "lora.safetensors").exists()
-    assert (outcome.checkpoint / "history_encoder.pt").exists()
+    runner.precache(resolved, ctx.gpus, "m1")
+    checkpoint = runner.train(resolved, ctx.gpus, "m1", node_dir)
+    assert (checkpoint / "lora.safetensors").exists()
+    assert (checkpoint / "history_encoder.pt").exists()
 
 # Two WBench metric inputs are stochastic, so a single tolerance cannot cover all
 # metrics. Measured by re-running the reference generation end to end:

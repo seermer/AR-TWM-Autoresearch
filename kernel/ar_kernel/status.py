@@ -72,7 +72,7 @@ def format_status(d: dict) -> str:
     usd = "n/a (no prices)" if spend["usd"] is None else f"${spend['usd']:.4f}"
     cap = "none" if spend["max_usd"] is None else f"${spend['max_usd']}"
     lines.append(f"spend: {usd}, {spend['tokens']} tokens, {spend['calls']} calls; cap: {cap}")
-    done = sum(1 for n in d["nodes"] if n["parent_id"] is not None and n["status"] != "interrupted")
+    done = sum(1 for n in d["nodes"] if n["parent_id"] is not None)
     lines.append(f"nodes: {done} of {d['max_nodes']}; best: {d['best']}")
     children: dict[str | None, list[dict]] = {}
     for n in d["nodes"]:

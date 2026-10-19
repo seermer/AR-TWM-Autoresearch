@@ -2,8 +2,8 @@ from __future__ import annotations
 import json, re, sqlite3, time
 
 # A clip's `ingested_by` is the id of the node that ingested it, or that id marked hidden from agents:
-# <node>fail<k> (attempt k failed, or the node crashed in it), <node>quarantine, <node>interrupted.
-_HIDDEN = re.compile(r".+(fail[1-9][0-9]*|quarantine|interrupted)")
+# <node>fail<k> (attempt k failed, or the node ended by a fault after it), <node>quarantine.
+_HIDDEN = re.compile(r".+(fail[1-9][0-9]*|quarantine)")
 
 
 def hidden(ingested_by: str) -> bool:
@@ -21,10 +21,12 @@ class ClipStore:
         self.conn = conn
 
     def add(self, record: dict) -> str | None:
-        """Store a clip. A clip already stored under a hidden mark moves to this node; returns that mark."""
+        """Store a clip. A clip already stored under a hidden mark moves to this node; returns that mark,
+        which is kept in `moved_from`."""
         row = self.conn.execute("SELECT ingested_by FROM clips WHERE clip_id=?", (record["clip_id"],)).fetchone()
         if row is not None and hidden(row[0]):
-            self.conn.execute("UPDATE clips SET ingested_by=? WHERE clip_id=?", (record["ingested_by"], record["clip_id"]))
+            self.conn.execute("UPDATE clips SET ingested_by=?, moved_from=? WHERE clip_id=?",
+                              (record["ingested_by"], row[0], record["clip_id"]))
             return row[0]
         self.conn.execute(
             """INSERT OR IGNORE INTO clips (clip_id, video_digest, caption_digest, annotation_digest,
@@ -42,6 +44,12 @@ class ClipStore:
         failed = " OR ingested_by GLOB ?" if mark == "quarantine" else ""
         return self.conn.execute(f"UPDATE clips SET ingested_by=? WHERE ingested_by=?{failed}",
                                  (node + mark, node, *([node + "fail[1-9]*"] if failed else []))).rowcount
+
+    def remove_ingested(self, node: str) -> int:
+        """Undo `node`'s ingests: a clip it took from a hidden mark gets that mark back, the rest are deleted."""
+        moved = self.conn.execute("UPDATE clips SET ingested_by=moved_from, moved_from=NULL "
+                                  "WHERE ingested_by=? AND moved_from IS NOT NULL", (node,)).rowcount
+        return moved + self.conn.execute("DELETE FROM clips WHERE ingested_by=?", (node,)).rowcount
 
     @staticmethod
     def _row(row: sqlite3.Row) -> dict:

@@ -7,10 +7,12 @@ import re
 import secrets
 import shutil
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..faults import KernelFault
 from ..guards import device_minors
 
 # Env var names whose value must never reach telemetry, no matter which Recorder
@@ -164,8 +166,11 @@ def _read_output(path: Path, stream: str, recorder, name: str, base: dict) -> st
 
 
 def run_container(*, name: str, mounts: Mounts, command: list[str], env: dict, env_dir: Path, shm_gb: float,
-                  recorder, node: str, phase: str, attempt: int, gpus=(), log_name: str = "sandbox") -> RunResult:
-    """stdout and stderr go to <log_name>.stdout / .stderr next to the workspace folder."""
+                  recorder, node: str, phase: str, attempt: int, gpus=(), log_name: str = "sandbox",
+                  cancel: threading.Event | None = None, on_start=None, poll_s: float = 1.0) -> RunResult:
+    """stdout and stderr go to <log_name>.stdout / .stderr next to the workspace folder. `cancel` kills the
+    sandbox; `on_start` gets bwrap's pid. Raises KernelFault when the sandbox itself fails (bwrap cannot
+    start or set it up)."""
     (Path(mounts.workspace) / ".home").mkdir(parents=True, exist_ok=True)
     base = dict(node=node, phase=phase, attempt=attempt, component="sandbox")
     started = time.monotonic()
@@ -181,8 +186,19 @@ def run_container(*, name: str, mounts: Mounts, command: list[str], env: dict, e
                                         start_new_session=True)     # a Ctrl-C to the kernel is not the agent's
         except (OSError, ValueError, subprocess.SubprocessError) as exc:   # e.g. no bwrap, a card without a minor
             recorder.event("sandbox.error", payload={"stderr": f"{type(exc).__name__}: {exc}"}, container=name, **base)
-            return RunResult(None, "", f"{type(exc).__name__}: {exc}", time.monotonic() - started, name)
-        exit_code = proc.wait()
+            raise KernelFault(f"the sandbox could not start: {type(exc).__name__}: {exc}") from exc
+        if on_start is not None:
+            on_start(proc.pid)
+        cancelled = False
+        while True:
+            try:
+                exit_code = proc.wait(timeout=poll_s)
+                break
+            except subprocess.TimeoutExpired:
+                if cancel is not None and cancel.is_set():
+                    proc.kill()           # --die-with-parent ends everything inside
+                    exit_code, cancelled = proc.wait(), True
+                    break
     finally:
         if proc is not None and proc.poll() is None:
             proc.kill()                   # --die-with-parent ends everything inside
@@ -193,5 +209,7 @@ def run_container(*, name: str, mounts: Mounts, command: list[str], env: dict, e
     stderr = _read_output(err_path, "stderr", recorder, name, base)
     result = RunResult(exit_code, stdout, stderr, time.monotonic() - started, name)
     recorder.event("sandbox.end", container=name, exit_code=exit_code, duration_s=result.duration_s,
-                   payload={"stdout": stdout, "stderr": stderr}, **base)
+                   cancelled=cancelled, payload={"stdout": stdout, "stderr": stderr}, **base)
+    if exit_code != 0 and stderr.startswith("bwrap: "):        # bwrap's own error: the command never ran
+        raise KernelFault(f"the sandbox could not be set up: {stderr.splitlines()[0]}")
     return result

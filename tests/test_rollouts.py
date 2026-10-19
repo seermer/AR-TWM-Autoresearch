@@ -4,7 +4,7 @@ submit checks, finish (crop/probe, CPU), the real produce with a fake worker, pl
 gpu smoke. And rollout_ltx25 (LTX-2.5 distilled/dev): submit checks, the host-RAM worker rule,
 finish (audio strip/probe, CPU), the real produce with a fake worker, plus one real gpu smoke
 per enabled variant."""
-from conftest import job_result
+from conftest import job_result, job_folder
 import copy
 import json
 import threading
@@ -343,7 +343,7 @@ def test_produce_renders_and_publishes_candidates(env):
     assert by[0]["candidate"]["actions"] == ["W", "left"]
     assert by[1]["candidate"]["actions"] == ["W+left", "stop"]
     assert q.status(caller, job)["progress"] == {"done": 2, "total": 2}
-    work = run_dir / "jobs" / job
+    work = job_folder(run_dir, job)
     wb = json.loads((work / "fake_wbench.json").read_text())
     argv = wb["argv"]
     assert argv[argv.index("--gpus") + 1] == "0,1,4,5" and argv[argv.index("--cases") + 1] == "0,1"
@@ -365,7 +365,7 @@ def test_a_hung_precache_runs_until_the_job_is_cancelled(env):
     q.cancel(caller, job)
     assert q.wait(caller, job, 60)["state"] == "canceled"
     assert time.monotonic() - t0 < 30
-    assert not (run_dir / "jobs" / job / "fake_wbench.json").exists()        # never reached the render
+    assert not (job_folder(run_dir, job) / "fake_wbench.json").exists()        # never reached the render
 
 
 def test_a_case_without_video_fails_alone(env):
@@ -398,7 +398,7 @@ def test_an_image_changed_after_submit_fails_only_its_own_item(env):
     from types import SimpleNamespace
     q, caller, staging, run_dir = env
     Image.new("RGB", (1024, 576), (1, 2, 3)).save(staging.parent / "ws" / "other.png")
-    job = SimpleNamespace(id="j1", token=caller.token, node="n1", args={
+    job = SimpleNamespace(id="j1", token=caller.token, node="n1", phase="improve_recipe", attempt=1, args={
         "items": [first_person(image="other.png"), first_person()]})
     out = q.backends["rollout_alayaworld"].run(job, threading.Event(), lambda progress: None)
     assert out["items"][0]["error"].startswith("input: image is 1024x576, but the job renders 960x544")
@@ -409,7 +409,7 @@ def test_a_job_renders_with_the_ar_teacher(env):
     q, caller, _, run_dir = env
     job, by = run_job(q, caller, [first_person(turns=[_turn()])])
     assert by[0]["candidate"]["derived_from"]["name"] == "alayaworld-ar30"
-    cfg = yaml.safe_load((run_dir / "jobs" / job / "render_config.yaml").read_text())
+    cfg = yaml.safe_load((job_folder(run_dir, job) / "render_config.yaml").read_text())
     assert cfg["validation"]["sampling_steps"] == 30 and cfg["paths"]["dmd_resume"] is None
 
 
@@ -454,7 +454,7 @@ def test_a_node_job_renders_with_the_nodes_fine_tune(env):
     checkpoint = _scored_node(run_dir)
     job, by = run_job(q, caller, [first_person(turns=[_turn()])], node="n2")
     assert by[0]["candidate"]["derived_from"] == {"kind": "model", "name": "alayaworld-ar30@n2"}
-    cfg = yaml.safe_load((run_dir / "jobs" / job / "render_config.yaml").read_text())
+    cfg = yaml.safe_load((job_folder(run_dir, job) / "render_config.yaml").read_text())
     assert cfg["paths"]["dmd_resume"] == str(checkpoint) and cfg["lora"]["rank"] == 32
     assert cfg["paths"]["history_encoder"] == str(checkpoint / "history_encoder.pt")
 
@@ -687,7 +687,7 @@ def test_real_alayaworld_rollout_of_a_node(tmp_path):
             assert "candidate" in got, got
             assert got["candidate"]["derived_from"]["name"] == "alayaworld-ar30" + (f"@{node}" if node else "")
             assert job_result(out)["gpu_memory_released"] is True
-            assert not (run_dir / "jobs" / out["id"] / "eval").exists()
+            assert not (job_folder(run_dir, out["id"]) / "eval").exists()
             video = staging / Path(got["candidate"]["video"]).relative_to("/workspace/staging")
             frames[node] = np.frombuffer(subprocess.run(
                 ["ffmpeg", "-loglevel", "error", "-i", str(video), "-vf", "scale=160:90", "-f", "rawvideo",

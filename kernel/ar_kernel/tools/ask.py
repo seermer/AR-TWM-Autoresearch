@@ -10,12 +10,14 @@ import base64
 import io
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated, Any
 
 from mcp.server.mcpserver import Context
 from PIL import Image
 from pydantic import Field
 
+from ..faults import KernelFault
 from ..gateway.app import upstream_error
 from .captioner import clip_host_path
 from .context import PathError
@@ -78,7 +80,7 @@ class Ask:
             "model": self.model, "messages": [{"role": "user", "content": parts}]})
         meta = self.store.begin(caller, ENDPOINT, body, tool="ask")
         started = time.monotonic()
-        status, payload, attempts = asyncio.run(self.upstream.post("/chat/completions", body))
+        status, payload, attempts, gave_up = asyncio.run(self.upstream.post("/chat/completions", body))
         usage = payload.get("usage") if isinstance(payload, dict) else None
         self.store.end(meta, caller, status=status, body=payload, latency_s=time.monotonic() - started,
                        attempts=attempts, cost_usd=self.budget.record(status, usage))
@@ -89,7 +91,12 @@ class Ask:
         if status != 200 or not answer:
             with self._lock:                        # a failed call costs no images
                 self._used[caller.token] -= len(images)
-            raise ToolError(f"the model gave no answer: {no_answer(status, payload)}")
+            why = f"the model gave no answer: {no_answer(status, payload)}"
+            if gave_up:
+                raise KernelFault(f"the LLM provider kept failing for the whole wait; {why}")
+            if status == 200 and finish_reason(payload) != "length":
+                raise RuntimeError(why)             # a model output error: counted
+            raise ToolError(why)
         return {"answer": answer, "images_left": self.per_phase - self._used[caller.token]}
 
 
@@ -98,14 +105,18 @@ def no_answer(status: int, payload) -> str:
     error = upstream_error(payload)
     if error or status != 200:
         return f"HTTP {status}: {str((error or {}).get('message') or payload)[:300]}. Ask again."
-    try:
-        reason = payload["choices"][0].get("finish_reason")
-    except (KeyError, IndexError, TypeError, AttributeError):
-        reason = None
+    reason = finish_reason(payload)
     if reason == "length":
         return ("it used up its output before answering. Ask for less in one question: fewer images, fewer "
                 "rows per image, or a shorter answer.")
     return f"an empty reply (finish_reason {reason!r}). Ask again."
+
+
+def finish_reason(payload) -> str | None:
+    try:
+        return payload["choices"][0].get("finish_reason")
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return None
 
 
 class MockAsk:
@@ -117,6 +128,8 @@ class MockAsk:
 
 
 def register_ask_tool(mcp, kit, ask) -> None:
+    pool = ThreadPoolExecutor(thread_name_prefix="ar-ask")    # a call can wait out a provider outage: not in the shared pool
+
     @mcp.tool(name="ask", description=ask.description)
     async def ask_tool(
             question: Annotated[str, Field(description="the whole question: the model sees nothing else of your conversation")],
@@ -124,4 +137,4 @@ def register_ask_tool(mcp, kit, ask) -> None:
             images: Annotated[list[str] | None, Field(description="image files under /workspace to show with the question")] = None,
     ) -> dict[str, Any]:
         return await kit.call(ctx, "ask", {"question": question, "images": images or []},
-                              lambda c: ask.ask(c, question, images or []))
+                              lambda c: ask.ask(c, question, images or []), executor=pool)

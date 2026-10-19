@@ -21,7 +21,6 @@ Your job is to find the one place where the system made its roles waste effort, 
 - Look outside the run for ideas: how other agent systems handle the same problem, in papers, on the web and in the design of open-source agent implementations. Take the general idea and fit it to this system.
 - The kernel's tools and skills are fixed. Only the agent's own code changes.
 - `agent/entry.py` must keep `edit_self(ctx)` and `improve_recipe(ctx)`, each with exactly one parameter.
-- After the phase, the kernel checks the accepted code before it is used: it installs `agent/requirements.txt`, checks the entry points of `agent/entry.py`, refuses code that mentions a specific node or a metric, imports the code, and runs both entry points as dry runs on a mock model and mock tools.
 
 ## Briefing the coder
 - Call `coder` with the problem, the evidence, the mechanism and the check. The check says what a later reader of the process lines and transcripts would see if the change worked.

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import threading
 import uuid
 from pathlib import Path
 from typing import Annotated, Any, Callable
@@ -50,8 +51,13 @@ def edit_snapshot(repo, node: str, phase: str, attempt: int, snapshot_id: str) -
 
 
 class SnapshotStore:
-    def __init__(self, run_dir: Path, repo, commit_exists: Callable[[str], bool]) -> None:
+    """`gate(caller, recipe, data_commit)` -> findings, and `verify(caller, commit)` -> ContractReport, check a
+    snapshot before it is stored; None (the contract's smoke runs) checks nothing."""
+
+    def __init__(self, run_dir: Path, repo, commit_exists: Callable[[str], bool], gate=None, verify=None) -> None:
         self.run_dir, self.repo, self.commit_exists = Path(run_dir), repo, commit_exists
+        self.gate, self.verify = gate, verify
+        self._verifying = threading.Lock()        # one contract check at a time: they share its work folder
 
     def take(self, caller, data_commit: str | None, recipe: dict | None, rationale: str | None) -> dict:
         given = [v is not None for v in (data_commit, recipe, rationale)]
@@ -63,12 +69,26 @@ class SnapshotStore:
                                             f"{caller.node} {caller.phase} attempt {caller.attempt} snapshot")
             except subprocess.CalledProcessError as exc:
                 raise ToolError(f"cannot commit the /agent tree: {exc.stderr.decode(errors='replace')}") from exc
+            if self.verify is not None:
+                with self._verifying:
+                    record = self.verify(caller, sha).to_record()
+                if not record["ok"]:
+                    raise ToolError(f"the contract check refused this snapshot at step {record['failed_step']}:\n"
+                                    f"{record['detail'][-6000:]}")
             self.repo.set_ref(ref_prefix(caller.node, caller.phase, caller.attempt) + sha, sha, push=False)
             return {"snapshot_id": sha}
         if any(given) and not all(given):
             raise ToolError("give data_commit, recipe and rationale together, or none of them")
         if all(given) and not self.commit_exists(data_commit):
             raise ToolError(f"data commit {data_commit!r} does not exist")
+        if all(given):
+            try:
+                rationale.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise ToolError(f"rationale is not valid UTF-8 text: {exc}") from exc
+            failures = self.gate(caller, recipe, data_commit) if self.gate is not None else []
+            if failures:
+                raise ToolError("the recipe check refused this snapshot:\n" + "\n".join(failures))
         body = {"has_result": all(given), "data_commit": data_commit, "recipe": recipe, "rationale": rationale}
         snapshot_id = uuid.uuid4().hex
         path = folder(self.run_dir, caller.node, caller.phase, caller.attempt)

@@ -71,9 +71,9 @@ def test_large_subtree_is_down_weighted():
     assert rows["a"]["w"] / rows["b"]["w"] == pytest.approx(0.5)              # size 4, scale 4
 
 
-def test_failed_children_count_in_size_but_not_the_mean_and_interrupted_counts_nowhere():
+def test_failed_children_count_in_size_but_not_the_mean():
     tree = [node("a", None, score=0.8), node("a1", "a", status="invalid_code"),
-            node("a2", "a", status="crashed"), node("a3", "a", status="interrupted")]
+            node("a2", "a", status="train_failed")]
     (row,) = candidates(tree, CFG)
     assert row["value"] == pytest.approx(0.8) and row["size"] == 2 and row["penalty"] == pytest.approx(2 / 3)
 
@@ -100,13 +100,6 @@ def test_update_values_writes_the_value(tmp_path):
     update_values(conn, CFG)
     assert nodes.get("root")["subtree_value"] == pytest.approx(0.7 * 0.7 + 0.3 * (0.7 + 0.45) / 1.5)
     assert nodes.get("n1")["subtree_value"] == pytest.approx(0.9)
-
-
-def test_descendants_of_an_interrupted_node_count_nowhere():
-    tree = [node("a", None, score=0.8), node("a1", "a", status="interrupted"),
-            node("a11", "a1", score=0.2), node("a12", "a1", status="crashed")]
-    row = by_id(candidates(tree, CFG))["a"]
-    assert row["value"] == pytest.approx(0.8) and row["size"] == 0
 
 
 import random

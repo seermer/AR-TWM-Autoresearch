@@ -8,6 +8,7 @@ from ar_kernel.agent_phase import PhaseEnv, attempt_dirs, run_edit_self, run_imp
 from ar_kernel.archive.db import open_db
 from ar_kernel.archive.nodes import NodeStore
 from ar_kernel.config import KernelConfig
+from ar_kernel.faults import KernelFault
 from ar_kernel.sandbox.runner import RunResult
 from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools.context import TokenRegistry
@@ -312,6 +313,14 @@ def test_runner_exception_still_revokes_token_and_cancels_jobs(env, monkeypatch)
     assert cancelled == [token]
 
 
+def test_a_summary_that_is_not_utf8_fails_the_attempt(env):
+    """The result models refuse a lone surrogate, so it never reaches summary.md."""
+    make, conn, root, _, _ = env
+    out = run_edit_self(make(FakeRunner({"ok": True, "result": {"summary": "fixed \ud800"}}, snap={})), conn=conn,
+                        node="n1", parent_id="root", agent_commit=root, attempt=1)
+    assert not out.ok and "string_unicode" in out.error
+
+
 def test_ok_must_be_the_literal_true_not_merely_truthy(env):
     """`{"ok": 1}` (truthy but not True) must not be treated as success."""
     make, conn, root, _, _ = env
@@ -409,16 +418,34 @@ def test_listed_requirements_are_installed_before_the_phase_and_kept_out_of_its_
     assert recipe.calls[0]["command"][-1] == "/agent/agent/requirements.txt"
 
 
-def test_a_failed_install_is_a_failed_attempt_and_edit_self_still_commits(env, tmp_path):
+def test_a_failed_install_of_contract_checked_code_is_a_kernel_fault(env, tmp_path):
     make, conn, root, rec, _ = env
     commit = _with_requirements(make, root, "nope==0.0\n", tmp_path / "src")
     runner = InstallingRunner({"ok": True, "result": {"summary": "unused"}}, code=1)
-    penv = make(runner)
-    out = run_edit_self(penv, conn=conn, node="n2", parent_id="root", agent_commit=commit, attempt=1)
-    assert not out.ok and "failed to install (exit code 1)" in out.error and "No matching distribution" in out.error
+    with pytest.raises(KernelFault, match="No matching distribution"):
+        run_edit_self(make(runner), conn=conn, node="n2", parent_id="root", agent_commit=commit, attempt=1)
     assert [c.get("log_name") for c in runner.calls] == ["install"]          # the phase never started
-    assert penv.repo.resolve("refs/attempts/n2/edit_self-1") == out.commit
-    assert [e for e in rec.read_events("n2") if e["type"] == "phase.end"][0]["ok"] is False
+
+
+def test_a_caller_failed_mid_phase_cancels_the_sandbox_and_raises(env):
+    make, conn, root, _, _ = env
+
+    class FailingRunner(FakeRunner):
+        def __call__(self, **kw):
+            caller = self.penv.registry.lookup(kw["env"]["AR_TOKEN"])
+            caller.fail("disk full while ingesting")
+            assert kw["cancel"].is_set()
+            return super().__call__(**kw)
+    with pytest.raises(KernelFault, match="disk full while ingesting"):
+        run_edit_self(make(FailingRunner({"ok": True, "result": {"summary": "x"}}, snap={})), conn=conn,
+                      node="n1", parent_id="root", agent_commit=root, attempt=1)
+
+
+def test_an_agent_killed_after_start_is_a_failed_attempt(env):
+    make, conn, root, _, _ = env
+    out = run_edit_self(make(FakeRunner(None, exit_code=137)), conn=conn, node="n1", parent_id="root",
+                        agent_commit=root, attempt=1)
+    assert not out.ok and "exit code 137" in out.error
 
 
 def test_a_requirements_file_of_comments_installs_nothing(env, tmp_path):

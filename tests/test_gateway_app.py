@@ -5,7 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ar_kernel.budget import Budget
-from ar_kernel.gateway.app import Upstream, create_gateway_app
+from ar_kernel.gateway.app import PROBE_PROMPT, Upstream, create_gateway_app
 from ar_kernel.gateway.mock import MockBook, function_call, message
 from ar_kernel.gateway.store import CallStore
 from ar_kernel.telemetry.recorder import Recorder, TelemetryError
@@ -18,7 +18,7 @@ def _upstream_that(handler, seen):
         return handler(request)
     async def no_sleep(_s):
         pass
-    return Upstream("https://api.example/v1", "sk-REALKEY", timeout_s=5, retries=3,
+    return Upstream("https://api.example/v1", "sk-REALKEY", timeout_s=5, wait_s=7,     # sleeps 1+2+4: four tries
                     transport=httpx.MockTransport(wrapped), sleep=no_sleep)
 
 
@@ -179,20 +179,50 @@ def test_upstream_429_is_retried_then_succeeds(make):
     assert response_event["attempts"] == 3
 
 
-@pytest.mark.parametrize("status", [401, 402, 403])
-def test_an_upstream_key_or_credit_error_is_retried_like_an_outage(make, status):
+def _is_probe(request) -> bool:
+    return PROBE_PROMPT in request.content.decode()
+
+
+@pytest.mark.parametrize("status", [400, 401, 402, 403, 404, 422])
+def test_a_4xx_the_provider_also_gives_the_probe_is_waited_out(make, status):
+    """A rejected key, spent credits, a field the provider rejects: the agent cannot fix any of them."""
     calls = {"n": 0}
     def flaky(request):
         calls["n"] += 1
-        return httpx.Response(status, json={"error": "try later"}) if calls["n"] < 3 else _ok(request)
-    client, caller, *_ = make(handler=flaky)
-    assert _post(client, caller.token, {"model": "gpt-x", "input": "hi"}).status_code == 200 and calls["n"] == 3
+        return httpx.Response(status, json={"error": "no"}) if calls["n"] < 3 else _ok(request)
+    client, caller, rec, seen = make(handler=flaky)
+    assert _post(client, caller.token, {"model": "gpt-x", "input": "hi"}).status_code == 200
+    assert calls["n"] == 3 and PROBE_PROMPT in json.dumps(seen[1])          # the call, its probe, the call
+    assert not caller.fault.event.is_set()
 
 
-def test_persistent_upstream_failure_returns_its_status(make):
+@pytest.mark.parametrize("status", [400, 403, 404, 413, 422])
+def test_a_4xx_only_the_agents_request_gets_goes_back_to_the_agent_at_once(make, status):
+    client, caller, rec, seen = make(handler=lambda r: _ok(r) if _is_probe(r) else
+                                     httpx.Response(status, json={"error": {"message": "context too long"}}))
+    r = _post(client, caller.token, {"model": "gpt-x", "input": "hi"})
+    assert r.status_code == status and "context too long" in r.json()["error"]["message"]
+    assert len(seen) == 2 and PROBE_PROMPT in json.dumps(seen[1]) and not caller.fault.event.is_set()
+
+
+def test_a_probe_verdict_is_reused_for_a_while(make):
+    client, caller, _, seen = make(handler=lambda r: _ok(r) if _is_probe(r) else httpx.Response(400, json={"error": "bad"}))
+    for _ in range(3):
+        assert _post(client, caller.token, {"model": "gpt-x", "input": "hi"}).status_code == 400
+    assert len(seen) == 4                     # three calls, one probe
+
+
+def test_persistent_upstream_failure_returns_its_status_and_stops_the_phase(make):
     client, caller, _, seen = make(handler=lambda r: httpx.Response(503, json={"error": "down"}))
     assert _post(client, caller.token, {"model": "gpt-x", "input": "hi"}).status_code == 503
-    assert len(seen) == 4                     # 1 try + 3 retries
+    assert len(seen) == 4                     # waited out: 1 + 2 + 4 s of the 7 s wait
+    assert caller.fault.event.is_set() and "HTTP 503" in caller.fault.reason
+
+
+def test_a_persistent_4xx_the_probe_also_gets_stops_the_phase(make):
+    client, caller, _, seen = make(handler=lambda r: httpx.Response(401, json={"error": "bad key"}))
+    assert _post(client, caller.token, {"model": "gpt-x", "input": "hi"}).status_code == 401
+    assert caller.fault.event.is_set()
 
 
 def test_non_json_upstream_error_is_retried_recorded_and_returned(make):
@@ -241,7 +271,7 @@ def test_upstream_base_url_defaults_to_openai_v1_and_is_not_rewritten():
         seen.append(str(request.url))
         return httpx.Response(200, json={})
     for base in (None, "", "https://proxy.example/api/v3/"):
-        up = Upstream(base, "k", timeout_s=5, retries=0, transport=httpx.MockTransport(record))
+        up = Upstream(base, "k", timeout_s=5, wait_s=0, transport=httpx.MockTransport(record))
         asyncio.run(up.post("/responses", {}))
     assert seen == ["https://api.openai.com/v1/responses", "https://api.openai.com/v1/responses",
                     "https://proxy.example/api/v3/responses"]
@@ -346,10 +376,10 @@ def test_a_non_object_reasoning_field_is_replaced_not_a_crash(tmp_path):
 
 def test_upstream_from_env():
     up = Upstream.from_env({"OPENAI_BASE_URL": "https://llm.example", "OPENAI_API_KEY": "sk-x",
-                            "OPENAI_EFFORT": "low"}, timeout_s=5, retries=1)
+                            "OPENAI_EFFORT": "low"}, timeout_s=5, wait_s=1)
     assert (up._base, up._headers, up.effort) == ("https://llm.example",
                                                   {"Authorization": "Bearer sk-x"}, "low")
-    up = Upstream.from_env({"OPENAI_EFFORT": ""}, timeout_s=5, retries=1)
+    up = Upstream.from_env({"OPENAI_EFFORT": ""}, timeout_s=5, wait_s=1)
     assert (up._base, up.effort) == ("https://api.openai.com/v1", None)
 
 

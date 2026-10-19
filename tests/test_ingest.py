@@ -160,6 +160,25 @@ def test_a_checker_crash_rejects_only_its_candidate(tmp_path, monkeypatch):
     assert "checker bridge failed" in crashed.reasons[0]
 
 
+def test_a_full_disk_while_checking_is_raised_not_a_rejection(tmp_path, monkeypatch):
+    from ar_kernel.data import ingest
+
+    def full(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(ingest, "check_clip", full)
+    with pytest.raises(OSError, match="No space left"):
+        _ingestor(tmp_path).ingest([_candidate(tmp_path, "a")], node_id="n1")
+    assert not list((tmp_path / "quarantine").glob("*/*"))          # its held copy is discarded
+
+
+def test_every_candidate_hitting_a_checker_crash_marks_them(tmp_path, monkeypatch):
+    from ar_kernel.data import ingest
+    from ar_kernel.data.checker import CheckerError
+    monkeypatch.setattr(ingest, "check_clip", lambda *a, **k: (_ for _ in ()).throw(CheckerError("bridge died")))
+    results = _ingestor(tmp_path).ingest([_candidate(tmp_path, "a"), _candidate(tmp_path, "b")], node_id="n1")
+    assert all(not r.accepted and r.checker_failed for r in results)
+
+
 def test_a_clip_whose_frames_cannot_be_extracted_is_rejected_alone(tmp_path, monkeypatch):
     """ffmpeg exits 0 without writing a frame when a clip's stated duration is longer than what
     decodes: opening the missing frame raised FileNotFoundError out of the whole call."""

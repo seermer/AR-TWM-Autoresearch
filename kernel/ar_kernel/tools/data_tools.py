@@ -21,7 +21,7 @@ from ..archive.nodes import NodeStore
 from ..data.annotation import DERIVED_KINDS
 from ..data.ingest import Candidate, Ingestor
 from ..data.leakage import LeakageChecker
-from ..data.probe import probe_video
+from ..data.probe import readable_video
 from ..train.gate import Gate
 from .context import STAGING, WORKSPACE, PathError, to_host
 from .gpu_jobs import items_schema
@@ -40,11 +40,12 @@ def clip_id_list(caller, value) -> list[str]:
 
 class DataTools:
     def __init__(self, cfg, run_dir: Path, recorder, gpus: list[int], gpu_lock: threading.Lock,
-                 require_free=lambda: None) -> None:
+                 require_free=lambda caller: None) -> None:
         self.cfg, self.run_dir, self.recorder = cfg, Path(run_dir), recorder
         self.gpus, self.gpu_lock, self.require_free = list(gpus), gpu_lock, require_free
         self._leakage: LeakageChecker | None = None
         self._leakage_lock = threading.Lock()
+        self._passed: dict[str, set] = {}          # token -> (recipe, data commit) recipe_check passed
 
     def _leakage_checker(self) -> LeakageChecker:
         """Built on first ingest and shared: it hashes every WBench case image (7.5 s warm,
@@ -61,7 +62,11 @@ class DataTools:
             raise ToolError(str(exc)) from exc
 
     def probe(self, caller, path: str) -> dict:
-        info = probe_video(self._host(caller, path if path.startswith("/") else str(WORKSPACE / path)))
+        host = self._host(caller, path if path.startswith("/") else str(WORKSPACE / path))
+        try:
+            info = readable_video(host)
+        except ValueError as exc:
+            raise ToolError(f"{path} is not a readable video: {exc}") from exc
         return {"frames": info.frames, "fps": info.fps, "width": info.width, "height": info.height,
                 "duration": info.duration, "rotation": info.rotation, "sar": info.sar,
                 "display_aspect": info.display_aspect}
@@ -102,6 +107,8 @@ class DataTools:
             results = ingestor.ingest(built, node_id=caller.node)
         finally:
             conn.close()
+        if results and all(r.checker_failed for r in results):     # a counted tool error, not the agent's
+            raise RuntimeError(f"the clip checker failed on every candidate: {results[0].reasons[0]}")
         rows = [{"index": i, "video": c["video"], "accepted": r.accepted, "clip_id": r.clip_id,
                  "warnings": r.warnings, "reasons": r.reasons} for i, (c, r) in enumerate(zip(candidates, results))]
         # the panel's ingest table: one row per candidate, with what the agent staged
@@ -199,7 +206,23 @@ class DataTools:
             conn.close()
         return True
 
+    def forget(self, token: str) -> None:
+        self._passed.pop(token, None)
+
     def recipe_check(self, caller, recipe: dict, data_commit: str) -> dict:
+        failures = self._gate(caller, recipe, data_commit)
+        if not failures:
+            self._passed.setdefault(caller.token, set()).add((json.dumps(recipe, sort_keys=True), data_commit))
+        return {"ok": not failures, "failures": failures}
+
+    def snapshot_gate(self, caller, recipe: dict, data_commit: str) -> list[str]:
+        """The gate's findings for a snapshot; none when recipe_check passed the same recipe and data commit
+        in this phase attempt."""
+        if (json.dumps(recipe, sort_keys=True), data_commit) in self._passed.get(caller.token, ()):
+            return []
+        return self._gate(caller, recipe, data_commit)
+
+    def _gate(self, caller, recipe: dict, data_commit: str) -> list[str]:
         scratch = caller.workspace_host.parent / "recipe_check" / uuid.uuid4().hex
         conn = open_db(self.run_dir)
         try:
@@ -213,18 +236,15 @@ class DataTools:
                 raise ToolError("a GPU job is running and the check needs the GPUs: "
                                 "call again once your jobs have finished (job_wait).")
             try:
-                try:
-                    self.require_free()
-                except RuntimeError as exc:
-                    raise ToolError(str(exc)) from exc
-                result = Gate(self.cfg, store, self.recorder).check(
+                self.require_free(caller)
+                failures = Gate(self.cfg, store, self.recorder).check(
                     recipe, data_commit, parent_commit, caller.node, scratch, self.run_dir, self.gpus)
             finally:
                 self.gpu_lock.release()
         finally:
             conn.close()
             shutil.rmtree(scratch, ignore_errors=True)
-        return {"ok": result.ok, "failures": result.failures}
+        return failures
 
 
 class Dataset(TypedDict, total=False):

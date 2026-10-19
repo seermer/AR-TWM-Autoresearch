@@ -75,11 +75,12 @@ def test_new_fields_and_eval_failed(tmp_path):
     assert (got["recipe_path"], got["error"], got["status"]) == ("nodes/n1/recipe.yaml", "render failed", "eval_failed")
 
 
-def test_interrupted_is_a_status(tmp_path):
+def test_interrupted_and_crashed_are_not_statuses(tmp_path):
     nodes = NodeStore(open_db(tmp_path))
     nodes.create("n1", None, 0)
-    nodes.set_status("n1", "interrupted")
-    assert nodes.get("n1")["status"] == "interrupted"
+    for status in ("interrupted", "crashed"):
+        with pytest.raises(ValueError):
+            nodes.set_status("n1", status)
 
 
 def test_run_relative_paths(tmp_path):

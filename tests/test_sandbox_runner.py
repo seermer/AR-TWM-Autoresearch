@@ -1,9 +1,12 @@
 import json
 import os
 import shutil
+import subprocess
+import threading
 
 import pytest
 
+from ar_kernel.faults import KernelFault
 from ar_kernel.sandbox import runner
 from ar_kernel.sandbox.runner import Mounts, bwrap_args, container_name, diff, run_container, snapshot
 from ar_kernel.telemetry.recorder import Recorder
@@ -130,7 +133,7 @@ class _FakePopen:
     def poll(self):
         return self.returncode
 
-    def wait(self):
+    def wait(self, timeout=None):
         if self.raises is not None:
             raises, self.raises = self.raises, None
             raise raises
@@ -189,8 +192,8 @@ def test_a_failed_launch_is_recorded_and_only_the_recorded_settings_are_redacted
     monkeypatch.setattr(runner.subprocess, "Popen", no_bwrap)
     secret = "ar-super-secret-token-value"
     recorder = Recorder(tmp_path / "run")
-    res = _run(tmp_path, mounts, env={"AR_TOKEN": secret}, recorder=recorder)
-    assert res.exit_code is None and "bwrap" in res.stderr
+    with pytest.raises(KernelFault, match="bwrap"):
+        _run(tmp_path, mounts, env={"AR_TOKEN": secret}, recorder=recorder)
     assert seen[0]["AR_TOKEN"] == secret
     events = recorder.read_events("n1")
     (start,) = [e for e in events if e["type"] == "sandbox.start"]
@@ -201,21 +204,21 @@ def test_a_failed_launch_is_recorded_and_only_the_recorded_settings_are_redacted
     assert secret not in recorder.events_path("n1").read_text()
 
 
-def test_a_card_without_a_minor_is_a_failed_launch(tmp_path, mounts, monkeypatch):
+def test_a_card_without_a_minor_is_a_kernel_fault(tmp_path, mounts, monkeypatch):
     from ar_kernel.config import GpuPolicyError
 
     def no_minor(gpus):
         raise GpuPolicyError("nvidia-smi -q -i 9 shows no Minor Number")
     monkeypatch.setattr(runner, "device_minors", no_minor)
     recorder = Recorder(tmp_path / "run")
-    res = _run(tmp_path, mounts, gpus=[9], recorder=recorder)
-    assert res.exit_code is None and "Minor Number" in res.stderr
+    with pytest.raises(KernelFault, match="Minor Number"):
+        _run(tmp_path, mounts, gpus=[9], recorder=recorder)
     assert [e for e in recorder.read_events("n1") if e["type"] == "sandbox.error"]
 
 
 def test_an_unreadable_output_file_is_recorded(tmp_path, mounts, monkeypatch):
     class Unreadable(_FakePopen):
-        def wait(self):
+        def wait(self, timeout=None):
             (tmp_path / "sandbox.stderr").unlink()
             (tmp_path / "sandbox.stderr").mkdir()
             return super().wait()
@@ -225,6 +228,38 @@ def test_an_unreadable_output_file_is_recorded(tmp_path, mounts, monkeypatch):
     assert res.stdout == "out" and res.stderr.startswith("could not read the sandbox's stderr:")
     errors = [recorder.load_payload(e["payload"]) for e in recorder.read_events("n1") if e["type"] == "sandbox.error"]
     assert errors and "stderr" in errors[0]["stderr"]
+
+
+def test_bwraps_own_error_is_a_kernel_fault_and_the_agents_exit_is_not(tmp_path, mounts, monkeypatch):
+    monkeypatch.setattr(runner.subprocess, "Popen", _FakePopen(err="bwrap: Can't mount tmpfs on /tmp\n", code=1))
+    with pytest.raises(KernelFault, match="Can't mount tmpfs"):
+        _run(tmp_path, mounts)
+    monkeypatch.setattr(runner.subprocess, "Popen", _FakePopen(err="Traceback ...\n", code=137))
+    assert _run(tmp_path, mounts).exit_code == 137
+
+
+def test_on_start_gets_the_sandbox_pid(tmp_path, mounts, monkeypatch):
+    fake, seen = _FakePopen(), []
+    fake.pid = 4242
+    monkeypatch.setattr(runner.subprocess, "Popen", fake)
+    run_container(name="c", mounts=mounts, command=["true"], env={}, env_dir=tmp_path / "env", shm_gb=8,
+                  recorder=Recorder(tmp_path / "run"), node="n1", phase="test", attempt=1, on_start=seen.append)
+    assert seen == [4242]
+
+
+def test_cancel_kills_a_running_sandbox(tmp_path, mounts, monkeypatch):
+    class Sleeping(_FakePopen):
+        def wait(self, timeout=None):
+            if not self.killed:
+                raise subprocess.TimeoutExpired("bwrap", timeout)
+            return super().wait()
+    fake, cancel = Sleeping(), threading.Event()
+    monkeypatch.setattr(runner.subprocess, "Popen", fake)
+    threading.Timer(0.3, cancel.set).start()
+    res = run_container(name="c", mounts=mounts, command=["true"], env={}, env_dir=tmp_path / "env", shm_gb=8,
+                        recorder=Recorder(tmp_path / "run"), node="n1", phase="test", attempt=1,
+                        cancel=cancel, poll_s=0.05)
+    assert fake.killed and res.exit_code == -9
 
 
 def test_snapshot_skips_fifos_and_marks_unreadable_files(tmp_path):

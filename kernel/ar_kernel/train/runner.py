@@ -1,20 +1,20 @@
 from __future__ import annotations
-from dataclasses import dataclass
+import json
 from pathlib import Path
 
+import numpy as np
 import yaml
 
 from ..config import KernelConfig
+from ..faults import KernelFault, NodeFault
 from ..subproc import output_tail, run_in_env
 
-RECIPE_SIGNATURES = (
-    "CUDA out of memory", "torch.OutOfMemoryError", "loss=nan", "loss=inf",
-    "no enabled data sources", "Loaded 0 samples",
-)
+DIVERGENCE_SIGNATURES = ("loss=nan", "loss=inf")
 # Match only tokens that a FAILING run emits. A healthy multi-GPU run prints the
 # "NCCL version ..." banner and several ProcessGroupNCCL.cpp warnings, so a bare
-# "NCCL" substring classifies every successful distributed run as an infra failure.
-INFRA_SIGNATURES = (
+# "NCCL" substring would name every successful distributed run.
+MACHINE_SIGNATURES = (
+    "CUDA out of memory", "torch.OutOfMemoryError",
     "exitcode: -9", "No space left on device", "CUDA driver error", "Killed",
     "NCCL error", "ncclInternalError", "ncclSystemError", "ncclUnhandledCudaError",
     "ncclRemoteError", "NCCL communicator was aborted",
@@ -23,44 +23,42 @@ INFRA_SIGNATURES = (
     # loader.py::_text_encoder_disabled, raised when the precache is incomplete.
     "missed the on-disk embedding cache",
 )
-
-@dataclass
-class TrainOutcome:
-    checkpoint: Path | None
-    failure: str
-    log_path: Path
-    detail: str = ""        # human-readable reason, surfaced to the agent on failure
-
-def machine_error(outcome: TrainOutcome) -> str | None:
-    """The known machine error a failed run's log names (NCCL, disk full, ...), or None: a crash
-    with no such line may be the recipe's or the data's doing."""
-    if outcome.failure != "infra" or not Path(outcome.log_path).is_file():
-        return None
-    log = Path(outcome.log_path).read_text(encoding="utf-8", errors="replace")
-    return next((sig for sig in INFRA_SIGNATURES if sig in log), None)
-
-def classify_failure(log: str, returncode: int) -> str:
-    if any(sig in log for sig in RECIPE_SIGNATURES):
-        return "recipe"
-    if any(sig in log for sig in INFRA_SIGNATURES):
-        return "infra"
-    return "none" if returncode == 0 else "infra"
-
-DIVERGENCE_SIGNATURES = ("loss=nan", "loss=inf")
+NONFINITE_BITS = {"BF16": (np.uint16, 0x7F80), "F16": (np.uint16, 0x7C00), "F32": (np.uint32, 0x7F800000)}
 
 
-def final_failure(log: str, returncode: int, checkpoint_exists: bool) -> str:
-    """Outcome of a finished training run.
+def outcome(log: str, returncode: int, checkpoint: Path | None, log_name: str) -> Path:
+    """A finished run's checkpoint, or the fault, in this order: a clean exit with a checkpoint and no
+    diverged loss succeeded (a stray "Killed" from a helper does not undo it); a diverged loss is the
+    node's (whatever else the log says); a known machine error, or a clean exit without a checkpoint, is
+    the kernel's; any other crash is the node's."""
+    diverged = next((sig for sig in DIVERGENCE_SIGNATURES if sig in log), None)
+    if returncode == 0 and checkpoint is not None and not diverged:
+        return checkpoint
+    if diverged:
+        raise NodeFault(f"the training loss diverged ({diverged}); log: {log_name}")
+    machine = next((sig for sig in MACHINE_SIGNATURES if sig in log), None)
+    if machine:
+        raise KernelFault(f"training hit a machine error ({machine}); log: {log_name}")
+    if returncode == 0:
+        raise KernelFault(f"training exited cleanly but wrote no checkpoint; log: {log_name}")
+    raise NodeFault(f"training crashed (exit code {returncode}); log: {log_name}")
 
-    A clean exit that wrote a checkpoint is trusted unless the loss diverged: a
-    loose infra token (e.g. "Killed" from some helper process) must not discard a
-    good run. Anything else goes through signature classification, which lets
-    log content override an exit code.
-    """
-    if returncode == 0 and checkpoint_exists:
-        return "recipe" if any(sig in log for sig in DIVERGENCE_SIGNATURES) else "none"
-    failure = classify_failure(log, returncode)
-    return "recipe" if failure == "none" and not checkpoint_exists else failure
+
+def nonfinite_tensors(path: Path) -> list[str]:
+    """The tensors of a .safetensors file holding NaN or inf (floating point: an all-ones exponent)."""
+    with open(path, "rb") as f:
+        size = int.from_bytes(f.read(8), "little")
+        header = json.loads(f.read(size))
+    data = np.memmap(path, dtype=np.uint8, mode="r", offset=8 + size)
+    bad = []
+    for name, info in header.items():
+        if name == "__metadata__" or info["dtype"] not in NONFINITE_BITS:
+            continue
+        kind, mask = NONFINITE_BITS[info["dtype"]]
+        begin, end = info["data_offsets"]
+        if np.any(data[begin:end].view(kind) & kind(mask) == kind(mask)):
+            bad.append(name)
+    return bad
 
 
 def newest_checkpoint(output_dir: Path) -> Path | None:
@@ -84,10 +82,11 @@ class TrainRunner:
             cwd=self.cfg.worldmodel,
             extra_env={"CUDA_VISIBLE_DEVICES": two, "ALAYA_GEMMA_MAX_MEMORY": "0=13GiB,1=13GiB"},
             recorder=self.recorder, node=node_id, phase="precache")
-        if proc.returncode != 0:
-            raise RuntimeError(f"prompt precache failed (rc={proc.returncode}): {output_tail(proc)}")
+        if proc.returncode != 0:            # the gate's dry run of the same pass passed at submit
+            raise KernelFault(f"prompt precache failed (rc={proc.returncode}): {output_tail(proc)}")
 
-    def train(self, resolved: Path, gpus: list[int], node_id: str, node_dir: Path) -> TrainOutcome:
+    def train(self, resolved: Path, gpus: list[int], node_id: str, node_dir: Path) -> Path:
+        """The checkpoint; raises NodeFault or KernelFault (`outcome`), or NodeFault for a LoRA holding NaN/inf."""
         config = yaml.safe_load(Path(resolved).read_text(encoding="utf-8"))
         output_dir = Path(config["run"]["output_dir"])
         log_path = Path(node_dir) / "train" / "train.log"
@@ -103,12 +102,10 @@ class TrainRunner:
                            "LOG_FILTER": "all", "ALAYA_LOG_MEMORY": "1",
                            "ALAYA_DATASET_CACHE_DIR": str(Path(node_dir) / "dataset_cache")},
                 recorder=self.recorder, node=node_id, phase="train", log_path=log_path)
-        log = proc.stdout
-        checkpoint = newest_checkpoint(output_dir)
-        failure = final_failure(log, proc.returncode, checkpoint is not None)
-        detail = ""
-        if failure == "recipe" and proc.returncode == 0 and checkpoint is None:
-            detail = "training exited cleanly but wrote no checkpoint"
-        if checkpoint is not None and failure == "none":
-            (checkpoint / "trainer_state.pt").unlink(missing_ok=True)
-        return TrainOutcome(checkpoint=checkpoint, failure=failure, log_path=log_path, detail=detail)
+        log_name = str(Path("attempts", Path(node_dir).name, "train", "train.log"))     # under /nodes/<node>/
+        checkpoint = outcome(proc.stdout, proc.returncode, newest_checkpoint(output_dir), log_name)
+        bad = nonfinite_tensors(checkpoint / "lora.safetensors")
+        if bad:
+            raise NodeFault(f"the trained LoRA holds NaN or inf in {len(bad)} tensors, e.g. {bad[0]}; log: {log_name}")
+        (checkpoint / "trainer_state.pt").unlink(missing_ok=True)
+        return checkpoint

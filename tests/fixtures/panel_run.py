@@ -107,10 +107,10 @@ def make_run(base: Path, name: str = "r1") -> Path:
     conn.execute("INSERT INTO data_commits VALUES (?,?,?,?,?,?,?)",
                  ("dc1", None, "n1", 1, json.dumps({"datasets": {"ds1": {"clips": ["clip1"]}}}),
                   "ds1: one clip", 1.0))
-    conn.execute("INSERT INTO clips VALUES (?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO clips VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                  ("clip1", "vd1", "cd1", "ad1", "pd1",
                   json.dumps({"frames": 5, "fps": 24.0, "width": 960, "height": 544, "turns": 1}),
-                  json.dumps([]), json.dumps({"kind": "dataset", "name": "org/ds"}), "n1", 1.0))
+                  json.dumps([]), json.dumps({"kind": "dataset", "name": "org/ds"}), "n1", 1.0, None))
     conn.execute("INSERT INTO selection_events (child_id, chosen, seed, candidates, created_at) "
                  "VALUES (?,?,?,?,?)", ("n1", "root", 7, json.dumps(
                      [{"node_id": "root", "value": 0.7, "penalty": 1.0, "P": 1.0}]), 1.0))

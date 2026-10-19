@@ -233,3 +233,21 @@ def test_torch_in_the_sandbox_computes_on_exactly_the_chosen_gpus(tmp_path, moun
     uuids = {int(i): u.strip() for i, u in (line.split(",") for line in host.splitlines())}
     assert sorted(line.strip() for line in lines[1:] if line.strip()) == sorted(uuids[g] for g in gpus)
     assert device_minors(gpus)
+
+
+def test_cancel_ends_a_real_sandbox(tmp_path, mounts):
+    cancel = threading.Event()
+    threading.Timer(2.0, cancel.set).start()
+    started = time.monotonic()
+    res = run_container(name=container_name("t", "n1", "test", 1), mounts=mounts, command=["sleep", "600"], env={},
+                        env_dir=ENV_DIR, shm_gb=2, recorder=Recorder(tmp_path / "run"), node="n1", phase="test",
+                        attempt=1, cancel=cancel)
+    assert res.exit_code == -9 and time.monotonic() - started < 30
+
+
+def test_a_missing_command_is_a_kernel_fault(tmp_path, mounts):
+    from ar_kernel.faults import KernelFault
+    with pytest.raises(KernelFault, match="bwrap: execvp"):
+        run_container(name=container_name("t", "n1", "test", 1), mounts=mounts, command=["/no/such/command"],
+                      env={}, env_dir=ENV_DIR, shm_gb=2, recorder=Recorder(tmp_path / "run"), node="n1",
+                      phase="test", attempt=1)

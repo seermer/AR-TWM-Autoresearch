@@ -1,6 +1,6 @@
 """caption_videos: the vLLM caption job. Unit tests run a fake vLLM server
 (tests/fixtures/fake_vllm.py, no GPU); the `gpu` test runs the real model."""
-from conftest import client_dir, job_result
+from conftest import client_dir, job_result, job_folder
 import json
 import os
 import shutil
@@ -57,7 +57,7 @@ def make(tmp_path):
 
 
 def _pid_gone(run_dir: Path, job_id: str) -> bool:
-    pid = int((run_dir / "jobs" / job_id / "fake_vllm.pid").read_text())
+    pid = int((job_folder(run_dir, job_id) / "fake_vllm.pid").read_text())
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         try:
@@ -85,9 +85,9 @@ def test_batch_success_captions_every_clip_then_stops_the_server(make, tmp_path)
     assert out["result_file"] == f"/workspace/staging/results/caption_videos-{job}.json"
     assert out["progress"] == {"captioned": 2, "total": 2}
     run = tmp_path / "run"
-    assert _pid_gone(run, job) and not (run / "jobs" / job / "media").exists()
-    argv = json.loads((run / "jobs" / job / "fake_vllm.argv.json").read_text())
-    assert argv[argv.index("--allowed-local-media-path") + 1] == str(run / "jobs" / job / "media")
+    assert _pid_gone(run, job) and not (job_folder(run, job) / "media").exists()
+    argv = json.loads((job_folder(run, job) / "fake_vllm.argv.json").read_text())
+    assert argv[argv.index("--allowed-local-media-path") + 1] == str(job_folder(run, job) / "media")
     assert argv[argv.index("--host") + 1] == "127.0.0.1"
     events = rec.read_events("n1")
     assert [(e["reason"], e["exit_code"]) for e in events if e["type"] == "caption.server_stopped"] == \

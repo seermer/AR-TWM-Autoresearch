@@ -272,7 +272,7 @@ def test_a_job_fails_without_running_while_the_gpus_are_in_use(tmp_path):
     """The agent's container sees the run's GPUs: a job that starts beside its processes would run out of memory."""
     rec, busy = Recorder(tmp_path), [True]
 
-    def require_free():
+    def require_free(caller):
         if busy[0]:
             raise RuntimeError("the GPUs are not free: GPU 0 has 3200 MiB in use")
     q = JobQueue(rec, threading.Lock(), wait_cap_s=5.0, require_free=require_free)
@@ -285,5 +285,110 @@ def test_a_job_fails_without_running_while_the_gpus_are_in_use(tmp_path):
         assert out["progress"] == {} and not q.gpu_lock.locked()
         busy[0] = False
         assert q.wait(a, q.submit(a, "sleepy", {"steps": 1}), 30)["state"] == "done"
+    finally:
+        q.shutdown()
+
+
+def test_drain_waits_for_a_cancelled_running_job(env):
+    q, a, _, _ = env
+    job = q.submit(a, "sleepy", {"steps": 40, "dt": 0.05})
+    deadline = time.monotonic() + 10
+    while q.status(a, job)["state"] != "running" and time.monotonic() < deadline:
+        time.sleep(0.02)
+    q.cancel_for_token(a.token)
+    q.drain(a.token)
+    assert q.status(a, job)["state"] == "canceled"
+
+
+def test_a_job_folder_is_named_by_its_phase_attempt(env, tmp_path):
+    q, a, _, _ = env
+    job = q._jobs[q.submit(a, "sleepy", {"steps": 1})]
+    assert jobs_module.job_dir(tmp_path, job) == tmp_path / "jobs" / "n1" / "improve_recipe-1" / job.id
+
+
+class ScriptedBackend:
+    """Each run raises or returns the next of `outcomes`."""
+    name, tool = "scripted", "rollout_scripted"
+
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+
+    def run(self, job, cancel, report):
+        out = self.outcomes.pop(0)
+        if isinstance(out, BaseException):
+            raise out
+        return out
+
+
+def _queue(tmp_path, outcomes, alert_after=2):
+    from ar_kernel.tools.server import ToolHealth
+    rec = Recorder(tmp_path)
+    q = JobQueue(rec, threading.Lock(), wait_cap_s=30, health=ToolHealth(rec, alert_after))
+    q.register(ScriptedBackend(outcomes))
+    caller = TokenRegistry(rec).issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=tmp_path,
+                                      staging_host=tmp_path)
+    run = lambda: q.wait(caller, q.submit(caller, "scripted", {}), 30)
+    alerts = lambda: [rec.load_payload(e["payload"]) for e in rec.read_events() if e["type"] == "alert"]
+    return q, caller, run, alerts
+
+
+def test_job_failures_count_per_tool_and_refusals_do_not(tmp_path):
+    q, caller, run, alerts = _queue(tmp_path, [ToolError("bad item"), ToolError("bad item"),
+                                               RuntimeError("vLLM exited during startup"), {"items": [{"error": "OOM"}]}])
+    try:
+        assert [run()["state"] for _ in range(2)] == ["failed", "failed"] and alerts() == []
+        assert run()["state"] == "failed" and run()["state"] == "done"
+        [alert] = alerts()
+        assert alert["kind"] == "tool_failing" and alert["tool"] == "rollout_scripted job"
+        assert not caller.fault.event.is_set()
+    finally:
+        q.shutdown()
+
+
+def test_input_errors_are_left_out_and_one_good_item_ends_the_streak(tmp_path):
+    bad_input = {"items": [{"error": "input: no such file"}, {"error": "input: not 960x544"}]}
+    mixed = {"items": [{"error": "worker crashed"}, {"clip": "c.mp4"}]}
+    failed = {"items": [{"error": "input: no such file"}, {"error": "worker crashed"}]}
+    q, caller, run, alerts = _queue(tmp_path, [failed, mixed, failed, bad_input, bad_input, failed])
+    try:
+        for _ in range(6):
+            assert run()["state"] == "done"
+        [alert] = alerts()                         # only the last failed job completes a streak of two
+        assert "worker crashed" in alert["message"]
+    finally:
+        q.shutdown()
+
+
+def test_a_disk_error_or_kernel_fault_in_a_job_stops_the_phase(tmp_path):
+    from ar_kernel.faults import KernelFault
+    for n, exc in enumerate((OSError(28, "No space left on device"), KernelFault("GPUs held by pid 9"))):
+        q, caller, run, alerts = _queue(tmp_path / str(n), [exc])
+        try:
+            assert run()["state"] == "failed" and caller.fault.event.is_set() and alerts() == []
+        finally:
+            q.shutdown()
+
+
+def test_a_cancelled_job_ends_canceled_whatever_it_raised(tmp_path):
+    rec = Recorder(tmp_path)
+    q = JobQueue(rec, threading.Lock(), wait_cap_s=30)
+    started = threading.Event()
+
+    class Dying:
+        name, tool = "dying", "rollout_dying"
+
+        def run(self, job, cancel, report):
+            started.set()
+            cancel.wait(30)
+            raise RuntimeError("killed")
+    q.register(Dying())
+    caller = TokenRegistry(rec).issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=tmp_path,
+                                      staging_host=tmp_path)
+    try:
+        job = q.submit(caller, "dying", {})
+        assert started.wait(10)
+        q.cancel_for_token(caller.token)
+        q.drain(caller.token)
+        assert q.status(caller, job)["state"] == "canceled" and not caller.fault.event.is_set()
     finally:
         q.shutdown()

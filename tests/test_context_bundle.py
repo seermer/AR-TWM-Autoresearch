@@ -88,7 +88,7 @@ def test_siblings_are_the_parents_finished_children(world):
     nodes = NodeStore(conn)                                    # n1 is the node being built (running)
     nodes.create("n2", "root", 1), nodes.record_score("n2", 0.8, ["aesthetic_quality"], {"aesthetic_quality": 0.8})
     nodes.create("n3", "root", 1), nodes.set_status("n3", "train_failed")
-    nodes.create("n4", "root", 1), nodes.set_status("n4", "interrupted")
+    nodes.create("n4", "root", 1), nodes.set_status("n4", "quarantined")
     nodes.create("n5", "n2", 2), nodes.set_status("n5", "scored")
     assert [(s["node_id"], s["status"], s["score"]) for s in siblings(conn, run, repo, "root", "improve_recipe")] == [
         ("n2", "scored", 0.8), ("n3", "train_failed", None)]
@@ -103,7 +103,7 @@ def test_every_finished_node_is_mounted_but_not_the_one_being_built(world):
     conn, _, run = world
     nodes = NodeStore(conn)
     nodes.create("n2", "root", 1), nodes.set_status("n2", "eval_failed")
-    nodes.create("n3", "n2", 2), nodes.set_status("n3", "interrupted")
+    nodes.create("n3", "n2", 2), nodes.set_status("n3", "quarantined")
     for node in ("n1", "n2", "n3"):
         (run / "nodes" / node).mkdir(parents=True)
     assert finished_node_dirs(conn, run) == {"root": run / "nodes" / "root", "n2": run / "nodes" / "n2"}
@@ -156,7 +156,7 @@ def test_kernel_failures_show_a_fixed_error_and_agent_failures_their_own(world):
     nodes.set_fields("n1", error="RuntimeError: wbench gpu failed (rc=1)")
     for phase in ("edit_self", "improve_recipe"):
         entry = lineage(conn, run, repo, "n1", phase)[-1]
-        assert entry["error"] == "the kernel's evaluation of this node failed"
+        assert entry["error"] == "the evaluation of this node's model failed"
         if phase == "improve_recipe":                          # failed before scoring: nothing to alias
             assert entry["aggregates"] is None and entry["metrics"] == {}
 
@@ -182,8 +182,8 @@ def test_a_quarantined_node_is_in_no_context_and_its_clips_leave_the_pool(world)
     assert ctx.clip_pool_stats == {"by_node": {"n1": 1}, "by_source": {"model:alayaworld": 1}}
     assert "/workspace/staging" in ctx.folders and "separate mount" in ctx.folders["/workspace/staging"]
     nodes = NodeStore(conn)
-    nodes.create("n9", "root", 1), nodes.set_status("n9", "interrupted")
-    for phase in ("edit_self", "improve_recipe"):          # an interrupted node is not listed
+    nodes.create("n9", "root", 1), nodes.set_status("n9", "quarantined")
+    for phase in ("edit_self", "improve_recipe"):          # a quarantined node is not listed
         assert "n9" not in [n["node_id"] for n in archive_summary(conn, phase)["nodes"]]
 
 

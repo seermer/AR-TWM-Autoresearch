@@ -1,36 +1,39 @@
-"""The loop: one node at a time. Nothing pauses: a
-failure the agent can act on costs an attempt, and the next one starts clean; any other
-failure ends the node with a status and an error that later agents see in the lineage."""
+"""The loop: one node at a time. Nothing pauses: a failure the agent can act on costs an attempt, and the
+next one starts clean. A phase that fails otherwise runs once more after a cleanup; failing again stops
+the run (KernelFault, or any other exception), or ends the node when either failure was a NodeFault."""
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import re
 import shutil
 import threading
 import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 import yaml
 
-from .agent_phase import PhaseEnv, run_edit_self, run_improve_recipe, smoke_contexts
+from .agent_phase import run_edit_self, run_improve_recipe
 from .archive.blobs import BlobStore
 from .archive.clips import ClipStore, hide_clips
 from .archive.commits import CommitStore
 from .archive.nodes import NOT_SHOWN, NodeStore, run_rel
-from .contract.verify import verify_contract
+from .faults import KernelFault, NodeFault, disk_fault
 from .guards import alert
 from .process_digest import attempt_process
 from .isolation import audit, host_roots, scrub_train_files
 from .eval.score import weighted_score
 from .run import record_root_counts, root_key, score_node
 from .selection import select_parent, selection_seed, update_values
-from .subproc import file_tail
-from .train.gate import Gate
+from .train.gate import resolve_config
 from .train.recipe import lora_of
-from .train.runner import TrainOutcome, TrainRunner, machine_error
+from .tools.hf_tools import clear_hf_tmp
+from .tools.jobs import attempt_jobs_dir
+from .train.runner import TrainRunner
 from .transcripts import write_transcripts
 
 
@@ -48,42 +51,31 @@ def save_root(cache: Path, eval_dir: Path, metrics: dict, expected_n: dict, run_
         tmp.rename(cache)
 
 
-def _submitted(result: dict) -> dict:
-    """What a failed improve_recipe attempt submitted, for the record."""
-    return {k: result[k] for k in ("data_commit", "recipe", "rationale")}
-
-
 class StopRun(Exception):
-    """End the run now (budget spent); resume marks the running node `interrupted`."""
+    """End the run now; the node it leaves running starts its stopped phase again on resume."""
 
 
 class Quarantined(Exception):
     """An agent phase reached for the evaluation set: the node ends here, with no retry."""
 
 
-def _gate(loop, recipe, data_commit, parent_commit, node, attempt_dir):
+def _resolve(loop, recipe: dict, data_commit: str, node: str, attempt_dir: Path) -> Path:
+    """The training config of an accepted snapshot (the gate passed it at submit): the data commit's view,
+    and the recipe over the run's base recipe."""
     conn = loop.ctx.conn
     store = CommitStore(conn, BlobStore(loop.ctx.run_dir, conn), ClipStore(conn))
-    with loop.kit.gpu_lock:
-        return Gate(loop.cfg, store, loop.ctx.recorder).check(
-            recipe, data_commit, parent_commit, node, attempt_dir, loop.ctx.run_dir, loop.ctx.gpus)
+    return resolve_config(loop.cfg, store, loop.ctx.run_dir, recipe, data_commit, node, attempt_dir)
 
 
-def _contract(*, loop, node, parent_id, commit, attempt):
-    contexts = smoke_contexts(loop.env, conn=loop.ctx.conn, node=node, parent_id=parent_id)
-    return verify_contract(cfg=loop.cfg, run_dir=loop.ctx.run_dir, run_id=Path(loop.ctx.run_dir).name,
-                           repo=loop.repo, commit=commit, harness=loop.kit.harness,
-                           recorder=loop.ctx.recorder, node=node, attempt=attempt, contexts=contexts)
+def _attempt_of(node: dict) -> int:
+    """The improve_recipe attempt whose recipe the node recorded."""
+    return int(re.search(r"improve_recipe-(\d+)", node["resolved_config_path"]).group(1))
 
 
-def _train(loop, resolved, node, attempt_dir):
+def _train(loop, resolved, node, attempt_dir) -> Path:
     runner = TrainRunner(loop.cfg, loop.ctx.recorder)
     with loop.kit.gpu_lock:
-        try:
-            runner.precache(resolved, loop.ctx.gpus, node)
-        except RuntimeError as exc:
-            return TrainOutcome(None, "infra", Path(attempt_dir) / "train" / "train.log",
-                                detail=f"prompt precache failed: {exc}")
+        runner.precache(resolved, loop.ctx.gpus, node)
         return runner.train(resolved, loop.ctx.gpus, node, attempt_dir)
 
 
@@ -96,9 +88,8 @@ def _score(loop, node, checkpoint, resolved):
 @dataclass
 class Phases:
     edit_self: Callable = run_edit_self
-    contract: Callable = _contract
     improve_recipe: Callable = run_improve_recipe
-    gate: Callable = _gate
+    resolve: Callable = _resolve
     train: Callable = _train
     score: Callable = _score
 
@@ -112,9 +103,8 @@ class Loop:
         self.nodes = NodeStore(ctx.conn)
         self.graceful = threading.Event()
         self.state_path = Path(ctx.run_dir) / "control" / "state.json"
-        self.env = PhaseEnv(cfg=cfg, run_dir=ctx.run_dir, run_id=Path(ctx.run_dir).name,
-                            recorder=ctx.recorder, registry=kit.registry, queue=kit.queue, repo=repo,
-                            socket_dir=kit.socket_dir, gpus=ctx.gpus, default_model=kit.default_model)
+        self._node_faults = 0                   # nodes in a row ended by a NodeFault
+        self.env = kit.env
 
     # -- bookkeeping -------------------------------------------------------------------------
     def _state(self, node: str | None, phase: str, attempt: int = 0) -> None:
@@ -128,12 +118,12 @@ class Loop:
         return attempt_process(self.ctx.run_dir, node, phase, attempt)
 
     def _children(self) -> int:
-        """Nodes counted toward max_nodes: every child except `interrupted` ones."""
-        return sum(1 for n in self.nodes.all() if n["parent_id"] is not None and n["status"] != "interrupted")
+        """Nodes counted toward max_nodes: every child."""
+        return sum(1 for n in self.nodes.all() if n["parent_id"] is not None)
 
     def _next_id(self) -> str:
-        """From the archive, not telemetry: rows are never deleted (interrupted nodes stay), and a
-        kill between nodes.create and the node.created event must not hand out the id again."""
+        """From the archive, not telemetry: a kill between nodes.create and the node.created event must
+        not hand out the id again."""
         nums = [int(n["node_id"][4:]) for n in self.nodes.all()
                 if n["node_id"].startswith("node") and n["node_id"][4:].isdigit()]
         return f"node{max(nums, default=0) + 1:04d}"
@@ -142,18 +132,6 @@ class Loop:
         why = self.kit.budget.exhausted()
         if why:
             alert(self.ctx.recorder, "budget", why)
-            raise StopRun(why)
-
-    def _check_failed_attempt(self) -> None:
-        """After a failed agent attempt: a spent budget (the gateway's 402) or an LLM provider outage
-        is not the agent's fault, so it stops the run instead of charging the attempt:
-        a stop, never a pause."""
-        self._check_budget()
-        rate, calls = self.kit.budget.error_rate(60 * float(self.cfg.get("gateway.outage_window_min")))
-        if calls >= int(self.cfg.get("gateway.outage_min_calls")) and \
-                rate >= float(self.cfg.get("gateway.outage_error_rate")):
-            why = f"LLM provider outage: {rate:.0%} of the last {calls} calls failed upstream; resume later"
-            alert(self.ctx.recorder, "llm_outage", why)
             raise StopRun(why)
 
     def _node_dir(self, node: str) -> Path:
@@ -165,29 +143,85 @@ class Loop:
             self.ctx.recorder.event("isolation.audit", node=node, phase=phase, attempt=attempt, payload={"hits": hits})
             raise Quarantined(f"the model wrote {', '.join(hits)}")
 
+    # -- phase retry -------------------------------------------------------------------------
+    def _phase(self, node: str, phase: str, attempt: int, run: Callable, cleanup: Callable,
+               node_fault_status: str | None = None):
+        """`run()`; after a failure that is not the agent's, `cleanup()` and `run()` once more. A second
+        failure raises StopRun, or NodeFault(status=node_fault_status) when either failure was a NodeFault."""
+        first = None
+        while True:
+            try:
+                return run()
+            except (StopRun, Quarantined):
+                raise
+            except Exception as exc:                              # noqa: BLE001 -- retried, then stops the run
+                hits = audit(self.cfg, self.ctx.recorder, node)  # a phase that raised was not audited
+                if hits:
+                    raise Quarantined(f"the model wrote {', '.join(hits)}") from exc
+                why = f"{node} {phase}{f' attempt {attempt}' if attempt else ''}: {type(exc).__name__}: {exc}"
+                if first is None:
+                    first = exc
+                    alert(self.ctx.recorder, "phase_retry", f"{why}; running the phase once more", level="warning",
+                          node_id=node, traceback=traceback.format_exc())
+                    cleanup()
+                    continue
+                if isinstance(first, NodeFault) or isinstance(exc, NodeFault):
+                    raise NodeFault(f"{why} (failed twice)", node_fault_status) from exc
+                alert(self.ctx.recorder, "phase_failed", f"{why}; failed twice", node_id=node,
+                      traceback=traceback.format_exc())
+                raise StopRun(f"{why} (failed twice; fix it, then resume)") from exc
+
+    def _clean_recipe(self, node: str, attempt: int) -> None:
+        """What an abandoned improve_recipe attempt made outside its folders (which `_run` clears)."""
+        conn, run_dir = self.ctx.conn, self.ctx.run_dir
+        clips = ClipStore(conn).remove_ingested(node)
+        commits = CommitStore(conn, None, None).remove(node, attempt)
+        blobs = BlobStore(run_dir, conn).remove_unreferenced()
+        self._clean_dirs(node, "improve_recipe", attempt, [attempt_jobs_dir(run_dir, node, "improve_recipe", attempt)],
+                         clips=clips, data_commits=commits, blobs=blobs, hf_tmp=clear_hf_tmp(run_dir))
+
+    def _clean_dirs(self, node: str, phase: str, attempt: int, dirs: list[Path], **payload) -> None:
+        removed = [p for p in dirs if p.exists()]
+        for path in removed:
+            shutil.rmtree(path)
+        self.ctx.recorder.event("phase.cleanup", node=node, phase=phase, attempt=attempt,
+                                payload={**payload, "removed": [str(p) for p in removed]})
+
+    def _clean_train(self, node: str, attempt: int, attempt_dir: Path) -> None:
+        self._clean_dirs(node, "train", attempt, [attempt_dir / "train" / "outputs", attempt_dir / "train" / "logs",
+                                                  attempt_dir / "dataset_cache"])
+
+    def _clean_eval(self, node: str) -> None:
+        self._clean_dirs(node, "eval", 0, [self._node_dir(node) / "eval"])
+
     # -- the run -----------------------------------------------------------------------------
     def run(self) -> str:
-        self.ensure_root()
-        while True:
-            if self.graceful.is_set():
-                return "graceful stop"
-            if self._children() >= self.max_nodes:
-                return "max_nodes reached"
-            try:
+        try:
+            self.ensure_root()
+            self.resume()                       # before the stop, max_nodes and budget checks: it is one of the nodes
+            while True:
+                if self.graceful.is_set():
+                    return "graceful stop"
+                if self._children() >= self.max_nodes:
+                    return "max_nodes reached"
                 self._check_budget()
                 self.cycle()
-            except StopRun as exc:
-                return str(exc)
+        except StopRun as exc:
+            return str(exc)
 
     def ensure_root(self) -> None:
-        """Create and score the root of a new run. A run whose root never got a score is not
-        resumable (cli refuses it), so a resumed run always finds a scored root here."""
+        """Create and score the root of a new run; a root a stopped run left unscored is evaluated again."""
         try:
-            if self.nodes.get("root")["status"] == "scored":
-                return
+            root = self.nodes.get("root")
         except KeyError:
-            pass
-        self.nodes.create("root", None, 0)
+            root = None
+        if root is not None and root["status"] == "scored":
+            return
+        if root is None:
+            self.nodes.create("root", None, 0)
+        else:
+            self.nodes.set_status("root", "running")
+            self._clean_eval("root")
         commit = self.repo.resolve(self.repo.branch_ref("root")) or \
             self.repo.init(self.cfg.repo_root / "seed_agent")
         self.nodes.set_fields("root", agent_commit=commit)
@@ -197,13 +231,14 @@ class Loop:
             self._reuse_root(cache)
             return
         try:
-            score, detail = self._eval("root", None, None)
-        except Exception as exc:                # ends the run; the run cannot be resumed
-            error = f"{type(exc).__name__}: {exc}"
+            score, detail = self._phase("root", "eval", 0, lambda: self.phases.score(self, "root", None, None),
+                                        lambda: self._clean_eval("root"))
+        except (StopRun, NodeFault) as exc:     # ends the run; resume evaluates the root again
+            error = str(exc)
             self.nodes.set_status("root", "eval_failed")
             self.nodes.set_fields("root", error=error)
             alert(self.ctx.recorder, "root_failed", error, node_id="root")
-            raise
+            raise StopRun(f"the root could not be evaluated: {error}") from exc
         record_root_counts(self.ctx, detail["counts"])     # every later node must match the root's
         self._record_score("root", score, detail)
         if cache is not None:
@@ -222,159 +257,197 @@ class Loop:
         self.ctx.recorder.event("root.reused", node="root", phase="eval",
                                 payload={"cache": str(cache), "scored_by_run": saved["run_id"]})
 
-    def cycle(self) -> None:
-        child = self._next_id()
-        self._state(child, "select")
-        parent_id = select_parent(self.ctx.conn, self.cfg, child,
-                                  selection_seed(Path(self.ctx.run_dir).name, child), self.ctx.recorder)
-        parent = self.nodes.get(parent_id)
-        self.nodes.create(child, parent_id, parent["depth"] + 1)
-        self.ctx.recorder.event("node.created", payload={"node": child, "parent": parent_id}, child=child)
-        started, status, error = time.time(), "scored", None
-        self._recipe_attempt = 0
+    def resume(self) -> None:
+        """The node a stopped run left running starts again at the phase it stopped in, from scratch (after
+        the cleanup a phase retry does); a restarted attempt keeps its number."""
+        running = [n for n in self.nodes.all() if n["parent_id"] is not None and n["status"] == "running"]
+        if len(running) > 1:
+            raise RuntimeError(f"more than one node was left running: {[n['node_id'] for n in running]}")
+        if not running:
+            return
+        node = running[0]
+        phase, k = self._resume_point(node)
+        nid, run_dir = node["node_id"], Path(self.ctx.run_dir)
+        if phase == "improve_recipe":
+            self._clean_recipe(nid, k)
+        elif phase == "train":
+            self._clean_train(nid, k, (run_dir / node["resolved_config_path"]).parent)
+        elif phase == "eval":
+            self._clean_eval(nid)
+        alert(self.ctx.recorder, "node_resumed", f"{nid} starts again at {phase}" + (f" attempt {k}" if k else ""),
+              level="warning", node_id=nid)
+        self.cycle(node, phase, k)
+
+    def _resume_point(self, node: dict) -> tuple[str, int]:
+        """Where `node` stopped, from its records: eval once it has a checkpoint; train k when attempt k's
+        recipe is recorded but has no attempt row; otherwise the next edit_self or improve_recipe attempt."""
+        nid = node["node_id"]
+        if node["checkpoint_path"]:
+            return "eval", 0
+        if node["agent_commit"] is None:
+            return "edit_self", len(self.nodes.attempts(nid, "edit_self")) + 1
+        done = {a["idx"] for a in self.nodes.attempts(nid, "improve_recipe")}
+        if node["resolved_config_path"] and _attempt_of(node) not in done:
+            return "train", _attempt_of(node)
+        return "improve_recipe", len(done) + 1
+
+    def cycle(self, resumed: dict | None = None, phase: str = "edit_self", k: int = 1) -> None:
+        """One node: a new one, or `resumed` from `phase` attempt `k`."""
+        if resumed is None:
+            child = self._next_id()
+            self._state(child, "select")
+            parent_id = select_parent(self.ctx.conn, self.cfg, child,
+                                      selection_seed(Path(self.ctx.run_dir).name, child), self.ctx.recorder)
+            parent = self.nodes.get(parent_id)
+            self.nodes.create(child, parent_id, parent["depth"] + 1)
+            self.ctx.recorder.event("node.created", payload={"node": child, "parent": parent_id}, child=child)
+        else:
+            child, parent = resumed["node_id"], self.nodes.get(resumed["parent_id"])
+        started, status, error, hide = time.time(), "scored", None, None
+        self._recipe_attempt = _attempt_of(resumed) if phase == "eval" else 0 if phase == "edit_self" else k
+        run_dir = Path(self.ctx.run_dir)
         try:
-            code, error = self._edit(child, parent)
-            if code is None:
-                status = "invalid_code"
-                return
-            trained, status, error = self._recipe(child, parent, code)
-            if trained is None:
-                return
-            checkpoint, resolved = trained
+            if phase == "edit_self":
+                code, error = self._edit(child, parent, start=k)
+                if code is None:
+                    status = "invalid_code"
+                    return
+                phase, k = "improve_recipe", 1
+            else:
+                code = resumed["agent_commit"]
+            if phase == "eval":
+                checkpoint, resolved = run_dir / resumed["checkpoint_path"], run_dir / resumed["resolved_config_path"]
+            else:
+                trained, status, error = self._recipe(
+                    child, parent, code, start=k,
+                    resolved=run_dir / resumed["resolved_config_path"] if phase == "train" else None)
+                if trained is None:
+                    return
+                checkpoint, resolved = trained
             self._state(child, "eval")
-            try:
-                score, detail = self._eval(child, checkpoint, resolved)
-            except Exception as exc:                              # noqa: BLE001 -- LoRA concat/render/WBench
-                # Twice in a row: the evaluation itself is broken, and every later node would train and fail the same way.
-                why = (f"{child} could not be evaluated, twice ({type(exc).__name__}: {exc}); "
-                       "fix the evaluation, then resume")
-                alert(self.ctx.recorder, "eval_failed", why, node_id=child)
-                raise StopRun(why) from exc
+            score, detail = self._phase(child, "eval", 0, lambda: self._evaluate(child, checkpoint, resolved),
+                                        lambda: self._clean_eval(child), "eval_failed")
             self._record_score(child, score, detail)
         except StopRun:
-            status = None                                         # left running: interrupted on resume
+            status = None                                         # left running: restarted on resume
             raise
         except Quarantined as exc:
             status, error = "quarantined", f"quarantined: {exc}"
-        except Exception as exc:                                  # noqa: BLE001
-            status, error = "crashed", f"{type(exc).__name__}: {exc}"
-            hits = audit(self.cfg, self.ctx.recorder, child)      # a phase that raised was not audited
-            if hits:
-                status, error = "quarantined", f"quarantined: the model wrote {', '.join(hits)}"
-        except BaseException:                                     # ForceStop / KeyboardInterrupt
-            status = None                                         # left running: interrupted on resume
+        except NodeFault as exc:
+            status, error = exc.status, str(exc)
+            hide = f"fail{self._recipe_attempt}" if self._recipe_attempt else None
+            self._node_faults += 1
+            if self._node_faults >= 2:
+                why = f"two nodes in a row ended by a fault, the last: {exc}; fix it, then resume"
+                alert(self.ctx.recorder, "node_faults", why, node_id=child)
+                raise StopRun(why) from exc
+        except BaseException:                                     # ForceStop / KeyboardInterrupt, or a loop error
+            status = None                                         # left running: restarted on resume
             raise
         finally:
             if status is not None:
-                self._finish(child, status, error, started)
+                self._finish(child, status, error, started, hide)
 
-    def _eval(self, node: str, checkpoint, resolved):
-        """Score a node; a failed eval is run once more before it counts (a judge or GPU hiccup
-        must not cost a trained node)."""
+    def _evaluate(self, node: str, checkpoint, resolved):
+        """A node's eval failing is the node's (its LoRA renders or scores badly), unless a disk or kernel
+        fault says otherwise; the root's always stops the run."""
         try:
             return self.phases.score(self, node, checkpoint, resolved)
+        except (KernelFault, StopRun, Quarantined):
+            raise
         except Exception as exc:                                  # noqa: BLE001 -- LoRA concat/render/WBench
-            alert(self.ctx.recorder, "eval_retry", f"{node}: {type(exc).__name__}: {exc}; evaluating once more",
-                  level="warning", node_id=node)
-        return self.phases.score(self, node, checkpoint, resolved)
+            if disk_fault(exc):
+                raise
+            raise NodeFault(f"the evaluation failed: {type(exc).__name__}: {exc}") from exc
 
     # -- steps 3-4 ---------------------------------------------------------------------------
-    def _edit(self, child: str, parent: dict) -> tuple[str | None, str | None]:
+    def _last_failure(self, child: str, phase: str) -> dict | None:
+        """A resumed node's last failed attempt of `phase`, for its error if no attempt is left."""
+        failed = [a["detail"] for a in self.nodes.attempts(child, phase) if a["outcome"] == "failed"]
+        return failed[-1] if failed else None
+
+    def _edit(self, child: str, parent: dict, start: int = 1) -> tuple[str | None, str | None]:
         if not any(n["node_id"] != "root" and n["status"] not in NOT_SHOWN for n in self.nodes.all()):
             # Root runs no roles, so before any other node is shown there is no evidence to edit from.
             self.repo.set_ref(self.repo.branch_ref(child), parent["agent_commit"])
             self.nodes.set_fields(child, agent_commit=parent["agent_commit"])
             return parent["agent_commit"], None
         n = int(self.cfg.get("retries.edit_self"))
-        failure = None
-        for k in range(1, n + 1):
+        failure = self._last_failure(child, "edit_self")
+        for k in range(start, n + 1):
             self._check_budget()
-            self._state(child, "edit_self", k)
-            out = self.phases.edit_self(self.env, conn=self.ctx.conn, node=child, parent_id=parent["node_id"],
-                                        agent_commit=parent["agent_commit"], attempt=k)
-            self._audit(child, "edit_self", k)
+
+            def attempt(k=k):
+                self._state(child, "edit_self", k)
+                out = self.phases.edit_self(self.env, conn=self.ctx.conn, node=child, parent_id=parent["node_id"],
+                                            agent_commit=parent["agent_commit"], attempt=k)
+                self._audit(child, "edit_self", k)
+                return out
+            out = self._phase(child, "edit_self", k, attempt, lambda: None)
             if not out.ok:
-                self._check_failed_attempt()
+                self._check_budget()                     # a spent budget is not the agent's: stop, not charge
                 failure = {"kind": "edit_self", "error": out.error, "process": self._process(child, "edit_self", k)}
                 self.nodes.add_attempt(child, "edit_self", k, "failed", failure)
                 continue
-            self._state(child, "contract", k)
-            report = self.phases.contract(loop=self, node=child, parent_id=parent["node_id"],
-                                          commit=out.commit, attempt=k)
-            if not report.ok:
-                failure = {**report.to_record(), "process": self._process(child, "edit_self", k)}
-                self.nodes.add_attempt(child, "edit_self", k, "contract_failed", failure)
-                continue
-            self.nodes.add_attempt(child, "edit_self", k, "passed", {"commit": out.commit})
             self.repo.set_ref(self.repo.branch_ref(child), out.commit)
             self._node_dir(child).mkdir(parents=True, exist_ok=True)
             (self._node_dir(child) / "edit.json").write_text(json.dumps(out.result, indent=1))
-            self.nodes.set_fields(child, agent_commit=out.commit)
+            self.nodes.set_fields(child, agent_commit=out.commit)                # first: resume reads it
+            self.nodes.add_attempt(child, "edit_self", k, "passed", {"commit": out.commit})
             return out.commit, None
         cause = {key: v for key, v in failure.items() if key != "process"}
         return None, f"edit_self retries exhausted; last failure: {json.dumps(cause)[:2000]}"
 
     # -- steps 5-7 ---------------------------------------------------------------------------
-    def _recipe(self, child: str, parent: dict, code: str):
+    def _recipe(self, child: str, parent: dict, code: str, start: int = 1, resolved: Path | None = None):
+        """improve_recipe attempts from `start`, then training; `resolved`: attempt `start`'s recipe is
+        already recorded (a resumed node starts at its training)."""
         n = int(self.cfg.get("retries.improve_recipe"))
-        failure, status = None, "invalid_recipe"
-        for k in range(1, n + 1):
-            self._check_budget()
-            self._state(child, "improve_recipe", k)
+        failure = self._last_failure(child, "improve_recipe")
+        for k in range(start, n + 1):
             self._recipe_attempt = k
-            out = self.phases.improve_recipe(self.env, conn=self.ctx.conn, node=child,
-                                             parent_id=parent["node_id"], agent_commit=code, attempt=k)
-            self._audit(child, "improve_recipe", k)
-            adir = Path(out.attempt_dir)
+            if resolved is not None:
+                return self._train(child, k, resolved)
+            self._check_budget()
+
+            def attempt(k=k):
+                self._state(child, "improve_recipe", k)
+                out = self.phases.improve_recipe(self.env, conn=self.ctx.conn, node=child,
+                                                 parent_id=parent["node_id"], agent_commit=code, attempt=k)
+                self._audit(child, "improve_recipe", k)
+                if not out.ok:
+                    return out, None
+                return out, self.phases.resolve(self, out.result["recipe"], out.result["data_commit"], child,
+                                                Path(out.attempt_dir))
+            out, resolved = self._phase(child, "improve_recipe", k, attempt, lambda k=k: self._clean_recipe(child, k))
             if not out.ok:
-                self._check_failed_attempt()
-                failure, status = {"kind": "improve_recipe", "error": out.error,
-                                   "process": self._process(child, "improve_recipe", k)}, "invalid_recipe"
+                self._check_budget()                     # a spent budget is not the agent's: stop, not charge
+                failure = {"kind": "improve_recipe", "error": out.error,
+                           "process": self._process(child, "improve_recipe", k)}
                 self.nodes.add_attempt(child, "improve_recipe", k, "failed", failure)
                 hide_clips(self.ctx.conn, self.ctx.recorder, child, f"fail{k}")
                 continue
-            res = out.result
-            self._state(child, "gate", k)
-            gate = self.phases.gate(self, res["recipe"], res["data_commit"], parent["data_commit"], child, adir)
-            if not gate.ok:
-                failure, status = {"kind": "gate", "failures": gate.failures, **_submitted(res),
-                                   "process": self._process(child, "improve_recipe", k)}, "invalid_recipe"
-                self.nodes.add_attempt(child, "improve_recipe", k, "gate_failed", failure)
-                hide_clips(self.ctx.conn, self.ctx.recorder, child, f"fail{k}")
-                continue
-            self._record_recipe(child, res, gate.resolved_path)
-            self._state(child, "train", k)
-            trained = self.phases.train(self, gate.resolved_path, child, adir)
-            if machine_error(trained):          # not the agents' doing: train once more before it costs an attempt
-                alert(self.ctx.recorder, "train_retry", f"{child} attempt {k}: {machine_error(trained)}; "
-                      "training once more", level="warning", node_id=child)
-                shutil.rmtree(adir / "train" / "outputs", ignore_errors=True)
-                trained = self.phases.train(self, gate.resolved_path, child, adir)
-            if trained.checkpoint is None or trained.failure != "none":   # e.g. nan loss after a checkpoint
-                failure = {"kind": "train", "failure": trained.failure, "detail": trained.detail,
-                           "log_tail": file_tail(trained.log_path, 20_000), **_submitted(res),
-                           "process": self._process(child, "improve_recipe", k)}
-                status = "train_failed"
-                self.nodes.add_attempt(child, "improve_recipe", k, "train_failed", failure)
-                hide_clips(self.ctx.conn, self.ctx.recorder, child, f"fail{k}")
-                alert(self.ctx.recorder, "train_failed", f"{child} attempt {k}: {trained.failure} "
-                      f"{trained.detail}".strip(), level="warning", node_id=child)
-                continue
-            self.nodes.add_attempt(child, "improve_recipe", k, "passed",
-                                   {"checkpoint": run_rel(self.ctx.run_dir, trained.checkpoint)})
-            self.nodes.set_fields(child, checkpoint_path=run_rel(self.ctx.run_dir, trained.checkpoint))
-            self._recipe_attempt = 0                    # a later crash is not this attempt's: its clips stay
-            return (trained.checkpoint, gate.resolved_path), "scored", None
-        # The node's error line: what failed, without the log tail and the submission (both are in its files).
-        cause = {k: v for k, v in failure.items() if k not in ("log_tail", "data_commit", "recipe", "rationale", "process")}
-        return None, status, f"improve_recipe retries exhausted; last failure: {json.dumps(cause)[:2000]}"
+            self._record_recipe(child, out.result, resolved)
+            return self._train(child, k, resolved)
+        cause = {key: v for key, v in failure.items() if key != "process"}
+        return None, "invalid_recipe", f"improve_recipe retries exhausted; last failure: {json.dumps(cause)[:2000]}"
+
+    def _train(self, child: str, k: int, resolved: Path):
+        """Train attempt `k`'s recorded recipe (`resolved` lies in the attempt's folder)."""
+        adir = resolved.parent
+        self._state(child, "train", k)
+        checkpoint = self._phase(child, "train", k, lambda: self.phases.train(self, resolved, child, adir),
+                                 lambda: self._clean_train(child, k, adir), "train_failed")
+        self.nodes.set_fields(child, checkpoint_path=run_rel(self.ctx.run_dir, checkpoint))      # first: resume reads it
+        self.nodes.add_attempt(child, "improve_recipe", k, "passed", {"checkpoint": run_rel(self.ctx.run_dir, checkpoint)})
+        return (checkpoint, resolved), "scored", None
 
     def _record_recipe(self, child: str, res: dict, resolved: Path) -> None:
         d = self._node_dir(child)
         d.mkdir(parents=True, exist_ok=True)
-        (d / "recipe.yaml").write_text(yaml.safe_dump(res["recipe"], sort_keys=True))
-        (d / "rationale.md").write_text(res["rationale"])
-        (d / "summary.md").write_text(res["summary"])
+        (d / "recipe.yaml").write_text(yaml.safe_dump(res["recipe"], sort_keys=True), encoding="utf-8")
+        (d / "rationale.md").write_text(res["rationale"], encoding="utf-8")
+        (d / "summary.md").write_text(res["summary"], encoding="utf-8")
         rank, alpha = lora_of(resolved)
         self.nodes.set_fields(
             child, data_commit=res["data_commit"],
@@ -385,17 +458,19 @@ class Loop:
 
     # -- steps 8-9 ---------------------------------------------------------------------------
     def _record_score(self, node: str, score: float, detail: dict) -> None:
+        self._node_faults = 0
         self.nodes.record_score(node, score, self.ctx.metric_set, detail["metrics"])
         agg = self._node_dir(node) / "eval" / "aggregates.json"
         agg.parent.mkdir(parents=True, exist_ok=True)
         agg.write_text(json.dumps(detail["aggregates"], indent=1))
         update_values(self.ctx.conn, self.cfg)
 
-    def _finish(self, node: str, status: str, error: str | None, started: float) -> None:
+    def _finish(self, node: str, status: str, error: str | None, started: float, hide: str | None = None) -> None:
+        """`hide`: the mark for the node's clips when a fault ended it."""
         if status == "quarantined":
             hide_clips(self.ctx.conn, self.ctx.recorder, node, "quarantine")
-        elif status == "crashed" and self._recipe_attempt:
-            hide_clips(self.ctx.conn, self.ctx.recorder, node, f"fail{self._recipe_attempt}")
+        elif hide:
+            hide_clips(self.ctx.conn, self.ctx.recorder, node, hide)
         if status != "scored":
             self.nodes.set_status(node, status)
             alert(self.ctx.recorder, "node_failed", f"{node} ended {status}: {error}", node_id=node)
@@ -406,7 +481,7 @@ class Loop:
         # candidate the agent or a GPU job prepared stays, ingested or not.
         for raw in (Path(self.ctx.run_dir) / "staging" / node).glob("*/hf"):
             shutil.rmtree(raw, ignore_errors=True)
-        write_transcripts(self.ctx.run_dir, node)
+        write_transcripts(self.ctx.run_dir, node, self.ctx.recorder)
         scrub_train_files(self._node_dir(node), self.cfg.get("isolation.blocked_names") or [], host_roots(self.cfg))
         self.ctx.recorder.event("node.end", payload={"node": node, "status": status, "error": error},
                                 child=node, status=status)

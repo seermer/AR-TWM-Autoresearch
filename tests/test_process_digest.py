@@ -105,7 +105,7 @@ def test_ask_calls_are_not_conversations_turns_or_compactions(tmp_path):
     [phase] = process_digest(tmp_path, "n1")["phases"]
     assert phase["conversations"] == [{"role": "unlabeled", "turns": 1,
                                        "transcript": "transcripts/improve_recipe-1/01-unlabeled.jsonl"}]
-    write_transcripts(tmp_path, "n1")
+    write_transcripts(tmp_path, "n1", rec)
     assert len(list((tmp_path / "nodes" / "n1" / "transcripts").rglob("*.jsonl"))) == 1
 
 

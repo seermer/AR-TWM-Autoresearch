@@ -16,6 +16,7 @@ from .archive.clips import ClipStore
 from .archive.commits import CommitStore
 from .archive.nodes import NOT_SHOWN, NodeStore
 from .context_bundle import build_edit_context, build_recipe_context, write_bundle
+from .faults import KernelFault
 from .isolation import host_roots, scrub
 from .sandbox.runner import Mounts, RunResult, container_name, diff, run_container, snapshot
 from .tools import snapshot as snapshots
@@ -55,7 +56,7 @@ def attempt_dirs(run_dir: Path, node: str, phase: str, attempt: int) -> dict[str
 
 
 def finished_node_dirs(conn, run_dir: Path) -> dict[str, Path]:
-    """The node dir of every finished node, by node id: not the node being built, nor an interrupted one."""
+    """The node dir of every finished node, by node id: not the node being built."""
     out = {n["node_id"]: Path(run_dir) / "nodes" / n["node_id"] for n in NodeStore(conn).all()
            if n["status"] not in NOT_SHOWN}
     return {node: path for node, path in out.items() if path.is_dir()}
@@ -124,9 +125,9 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
             mounts=replace(mounts, agent_readonly=True),
             path=f"{'/agent' if agent_readonly else '/code'}/agent/requirements.txt", cfg=env.cfg,
             recorder=env.recorder, node=node, phase=phase, attempt=attempt)
-        if installed.exit_code != 0:
-            return _failed_before_start(dirs, started, f"agent/requirements.txt failed to install (exit code "
-                                                       f"{installed.exit_code}):\n{installed.stderr[-6000:]}")
+        if installed.exit_code != 0:        # the contract installed this commit's requirements before
+            raise KernelFault(f"agent/requirements.txt failed to install (exit code {installed.exit_code}):\n"
+                              f"{installed.stderr[-6000:]}")
 
     caller = env.registry.issue(node=node, phase=phase, attempt=attempt, workspace_host=dirs["workspace"],
                                 staging_host=dirs["staging"], mock_script=mock_script,
@@ -149,12 +150,17 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
                  "AR_CONTEXT_WINDOW": str(env.cfg.get("agents.context_window_tokens")),
                  "AR_COMPACT_AT": str(env.cfg.get("agents.compact_at"))},
             env_dir=env.cfg.repo_root / ".envs" / "agent", shm_gb=env.cfg.get("sandbox.shm_gb"), gpus=env.gpus,
-            recorder=env.recorder, node=node, phase=phase, attempt=attempt)
+            recorder=env.recorder, node=node, phase=phase, attempt=attempt, cancel=caller.fault.event,
+            on_start=lambda pid: caller.sandbox.update(pid=pid))
     finally:
         try:
             env.registry.revoke(caller.token)
         finally:
             env.queue.cancel_for_token(caller.token)     # an ended phase must not keep the GPUs
+            env.registry.wait_idle(caller.token)         # nothing of this attempt writes after it ends
+            env.queue.drain(caller.token)
+    if caller.fault.event.is_set():
+        raise KernelFault(caller.fault.reason)
     out_file = dirs["workspace"] / "result.json"
     body = read_result(out_file)
     diffs = {"agent": diff(before["agent"], snapshot(dirs["agent"], True)),

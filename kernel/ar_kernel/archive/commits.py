@@ -87,6 +87,10 @@ class CommitStore:
         )
         return commit_id
 
+    def remove(self, node_id: str, attempt: int) -> int:
+        """Delete the commits a cleaned-up attempt made."""
+        return self.conn.execute("DELETE FROM data_commits WHERE node_id=? AND attempt=?", (node_id, attempt)).rowcount
+
     def get(self, commit_id: str) -> dict:
         row = self.conn.execute("SELECT * FROM data_commits WHERE commit_id=?", (commit_id,)).fetchone()
         if row is None:

@@ -11,10 +11,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
+import psutil
 from openai import OpenAI
 
+from ..faults import KernelFault
 from ..subproc import file_tail
 from .jobs import run_cancellable
+from .server import ToolError
 
 log = logging.getLogger(__name__)
 RELEASE_SLACK_MIB = 512          # GPU memory counts as released within this of its pre-job level
@@ -40,20 +43,58 @@ def gpu_memory_mib(gpus: list[int]) -> dict[int, int] | None:
 FREE_WAITS_S = (4, 8, 16, 32, 64)        # before a job: a job that just ended may still be giving memory back
 
 
-def require_free_gpus(gpus: list[int], limit_mib: int, gpu_memory=gpu_memory_mib, waits=(), sleep=time.sleep) -> None:
+def gpu_processes(gpus: list[int]) -> set[int] | None:
+    """The pids of the compute processes on `gpus`, or None when nvidia-smi cannot list them."""
+    def query(what: str) -> list[list[str]]:
+        out = subprocess.run(["nvidia-smi", f"--query-{what}", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, check=True).stdout
+        return [[f.strip() for f in line.split(",")] for line in out.strip().splitlines() if line.strip()]
+    try:
+        index = {uuid: int(i) for i, uuid in query("gpu=index,uuid")}
+        return {int(pid) for pid, uuid in query("compute-apps=pid,gpu_uuid") if index.get(uuid) in gpus}
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def process_tree(pid: int | None) -> set[int]:
+    """`pid` and every process under it (a sandbox: bwrap and what runs inside)."""
+    try:
+        root = psutil.Process(pid) if pid else None
+        return {pid, *(p.pid for p in root.children(recursive=True))} if root else set()
+    except psutil.Error:
+        return set()
+
+
+def _names(pids) -> str:
+    def name(pid: int) -> str:
+        try:
+            return f"{pid} ({psutil.Process(pid).name()})"
+        except psutil.Error:
+            return str(pid)
+    return ", ".join(name(p) for p in sorted(pids))
+
+
+def require_free_gpus(gpus: list[int], limit_mib: int, gpu_memory=gpu_memory_mib, waits=(), sleep=time.sleep,
+                      own=set, processes=gpu_processes) -> None:
     """Raise when a GPU holds more than `limit_mib`, checking again after each of `waits` seconds: the
     agent's container sees the same GPUs, and a kernel job that starts beside the agent's own processes
-    runs out of memory."""
+    runs out of memory. ToolError when only `own()` processes (the caller's sandbox) hold them; KernelFault
+    when another process does."""
     for wait in (*waits, None):
         busy = {g: used for g, used in (gpu_memory(gpus) or {}).items() if used > limit_mib}
         if not busy or wait is None:
             break
         sleep(wait)
-    if busy:
-        raise RuntimeError(
-            "the GPUs are not free: " + ", ".join(f"GPU {g} has {used} MiB in use" for g, used in busy.items())
-            + f" (limit {limit_mib} MiB). A kernel GPU job needs them empty: stop your own processes that "
-              "hold GPU memory (`nvidia-smi` lists them), then call again.")
+    if not busy:
+        return
+    usage = ", ".join(f"GPU {g} has {used} MiB in use" for g, used in busy.items())
+    pids = processes(list(busy)) or set()
+    if outside := pids - own():
+        raise KernelFault(f"the run's GPUs are held by processes outside its sandbox: {usage}; pids {_names(outside)}")
+    if pids:
+        raise ToolError(f"the GPUs are not free: {usage} (limit {limit_mib} MiB). A kernel GPU job needs them "
+                        "empty: stop your own processes that hold GPU memory (`nvidia-smi` lists them), then call again.")
+    raise RuntimeError(f"the GPUs are not free and nvidia-smi lists no process on them: {usage} (limit {limit_mib} MiB)")
 
 
 def wait_gpu_release(gpu_memory, gpus: list[int], before: dict | None,

@@ -150,8 +150,8 @@ def test_download_refuses_a_staging_symlink_that_leaves_staging(tmp_path):
     assert list(outside.iterdir()) == []
 
 
-def _hub_error(cls, message):
-    resp = httpx.Response(404, request=httpx.Request("GET", "https://huggingface.co/api/datasets/org/x"))
+def _hub_error(cls, message, status=404):
+    resp = httpx.Response(status, request=httpx.Request("GET", "https://huggingface.co/api/datasets/org/x"))
     return cls(message, response=resp)
 
 
@@ -178,6 +178,18 @@ def test_dataset_info_hub_errors_become_tool_errors(cls, message, tmp_path):
 
     with pytest.raises(ToolError, match=message):
         tools.download(caller, "org/walks", "main", ["*"])
+
+
+def test_a_hub_5xx_is_a_counted_error_not_a_tool_error(tmp_path):
+    reg = TokenRegistry(Recorder(tmp_path))
+    caller = reg.issue(node="n1", phase="improve_recipe", attempt=1,
+                       workspace_host=tmp_path / "ws", staging_host=tmp_path / "staging")
+    (tmp_path / "staging").mkdir()
+    exc = _hub_error(hf_errors.HfHubHTTPError, "503 Server Error: unavailable", status=503)
+    tools = HfTools(CFG, tmp_path / "hf_tmp", api=DatasetInfoRaisesApi(exc), snapshot=fake_snapshot)
+    with pytest.raises(hf_errors.HfHubHTTPError) as info:
+        tools.download(caller, "org/walks", "main", ["*"])
+    assert not isinstance(info.value, ToolError)
 
 
 def test_snapshot_download_hub_error_becomes_tool_error(env):

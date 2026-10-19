@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, signal, socket, subprocess, threading, time
+import hashlib, os, pwd, signal, socket, subprocess, threading, time
 from pathlib import Path
 
 import psutil
@@ -12,7 +12,7 @@ KILL_FORCE_GRACE_SECONDS = 10
 CACHE_VARS = {"HF_HOME": "huggingface", "XDG_CACHE_HOME": "", "TORCH_HOME": "torch",
               "TRITON_CACHE_DIR": "triton", "TORCHINDUCTOR_CACHE_DIR": "torchinductor",
               "VLLM_CACHE_ROOT": "vllm", "CUDA_CACHE_PATH": "nv", "PIP_CACHE_DIR": "pip",
-              "UV_CACHE_DIR": "uv", "TMPDIR": "tmp"}
+              "UV_CACHE_DIR": "uv"}
 
 
 def free_port() -> int:
@@ -28,10 +28,30 @@ def cache_dir() -> Path:
     return Path(os.environ.get("AR_CACHE_DIR") or REPO_ROOT / ".cache")
 
 
+TMP_LINK_DIR = Path("/tmp")
+
+
+def tmp_link() -> Path:
+    """A short symlink to <cache>/tmp, used as TMPDIR: Unix socket paths (vLLM, DataLoader workers)
+    are capped at 107 bytes and the project path is too long; the files stay in the project."""
+    target = cache_dir() / "tmp"
+    target.mkdir(parents=True, exist_ok=True)
+    target = target.resolve()
+    link = TMP_LINK_DIR / f"ar-{pwd.getpwuid(os.getuid()).pw_name}-{hashlib.sha1(str(target).encode()).hexdigest()[:8]}"
+    try:
+        link.symlink_to(target)
+    except FileExistsError:
+        pass
+    if not (link.is_symlink() and link.resolve() == target):
+        raise RuntimeError(f"{link} exists and is not a symlink to {target}: remove it")
+    return link
+
+
 def cache_env() -> dict[str, str]:
     root = cache_dir()
-    (root / "tmp").mkdir(parents=True, exist_ok=True)
-    return {var: str(root / sub) if sub else str(root) for var, sub in CACHE_VARS.items()}
+    env = {var: str(root / sub) if sub else str(root) for var, sub in CACHE_VARS.items()}
+    env["TMPDIR"] = str(tmp_link())
+    return env
 
 
 def project_env(name: str, root: Path | None = None) -> Path | None:

@@ -16,8 +16,9 @@ from pydantic import Field
 
 from mcp.server.mcpserver import Context
 
+from ..faults import disk_fault
 from ..subproc import KILL_FORCE_GRACE_SECONDS, KILL_GRACE_SECONDS, run_in_env
-from .server import SHOWN, ToolError, publish
+from .server import SHOWN, ToolError, ToolHealth, fault_or_count, publish
 
 _DEFAULT_POLL_S = 1.0
 # Worst case a worker thread can be stuck inside a real backend's run_cancellable:
@@ -43,6 +44,8 @@ class Job:
     node: str
     token: str
     caller: Any = None                # who submitted it: where its result file goes
+    phase: str = "-"
+    attempt: int = 0
     state: str = "queued"
     progress: dict = field(default_factory=dict)
     result_file: str | None = None    # /workspace/staging/results/<backend>-<id>.json, once finished
@@ -56,10 +59,23 @@ class Job:
 _TERMINAL = {"done", "failed", "canceled"}
 
 
+def attempt_jobs_dir(run_dir: Path, node: str, phase: str, attempt: int) -> Path:
+    """The kernel-private work folders of a phase attempt's jobs."""
+    return Path(run_dir) / "jobs" / node / f"{phase}-{attempt}"
+
+
+def job_dir(run_dir: Path, job: Job) -> Path:
+    return attempt_jobs_dir(run_dir, job.node, job.phase, job.attempt) / job.id
+
+
+def _rows(result: dict) -> list[dict]:
+    return result["items"] if isinstance(result.get("items"), list) else \
+        [{"path": path, **row} for path, row in (result.get("clips") or {}).items()]
+
+
 def summarize(result: dict) -> dict:
     """What a caller is told of a finished job: how many items, how many failed and the first errors."""
-    rows = result["items"] if isinstance(result.get("items"), list) else \
-        [{"path": path, **row} for path, row in (result.get("clips") or {}).items()]
+    rows = _rows(result)
     failed = [row for row in rows if "error" in row]
     return {"items": len(rows), "failed": len(failed),
             "errors": [{"item": row.get("index", row.get("path")), "error": str(row["error"])[:300]}
@@ -75,9 +91,10 @@ class JobQueue:
     """
 
     def __init__(self, recorder, gpu_lock: threading.Lock, wait_cap_s: float,
-                 require_free: Callable[[], None] = lambda: None) -> None:
+                 require_free: Callable[[Any], None] = lambda caller: None, health: ToolHealth | None = None) -> None:
         self.recorder, self.gpu_lock, self.wait_cap_s = recorder, gpu_lock, float(wait_cap_s)
         self.require_free = require_free          # raises when the GPUs are in use: the job then fails
+        self.health = health or ToolHealth(recorder)
         self._backends: dict[str, JobBackend] = {}
         self._jobs: dict[str, Job] = {}
         self._cancel: dict[str, threading.Event] = {}
@@ -114,7 +131,7 @@ class JobQueue:
         if backend_name not in self._backends:
             raise ToolError(f"generator {backend_name!r} is not enabled on this run")
         job = Job(id=uuid.uuid4().hex, backend=backend_name, args=dict(args),
-                  node=caller.node, token=caller.token, caller=caller)
+                  node=caller.node, token=caller.token, caller=caller, phase=caller.phase, attempt=caller.attempt)
         with self._cond:
             self._jobs[job.id] = job
             self._cancel[job.id] = threading.Event()
@@ -155,6 +172,12 @@ class JobQueue:
                 self._cancel_locked(job)
             return len(live)
 
+    def drain(self, token: str) -> None:
+        """After cancel_for_token(): until every job of the token has finished."""
+        with self._cond:
+            while any(j.token == token and j.state not in _TERMINAL for j in self._jobs.values()):
+                self._cond.wait()
+
     def _cancel_locked(self, job: Job) -> None:
         self._cancel[job.id].set()
         if job.state == "queued":
@@ -188,7 +211,7 @@ class JobQueue:
                     _job.progress = dict(progress)
                     self._cond.notify_all()
 
-            result, error, tb = None, None, None
+            result, error, tb, failure = None, None, None, None
             with self.gpu_lock:
                 # Running starts once the GPUs are held, so gpu_seconds excludes the lock
                 # wait; a job cancelled before or during that wait is already final.
@@ -198,11 +221,11 @@ class JobQueue:
                     job.state, job.started = "running", time.time()
                     self._cond.notify_all()
                 try:
-                    self.require_free()
+                    self.require_free(job.caller)
                     result = self._backends[job.backend].run(job, cancel, report)
-                    final = "canceled" if cancel.is_set() else "done"
+                    final = "done"
                 except Exception as exc:                  # noqa: BLE001 -- a job failure, not a crash
-                    final, error, tb = "failed", f"{type(exc).__name__}: {exc}", traceback.format_exc()
+                    final, error, tb, failure = "failed", f"{type(exc).__name__}: {exc}", traceback.format_exc(), exc
             result_file = summary = None
             if result is not None:
                 summary = summarize(result)
@@ -210,6 +233,11 @@ class JobQueue:
                     result_file = publish(job.caller, f"{job.backend}-{job.id}", result)
                 except OSError as exc:                    # the phase ended and took its staging with it
                     final, error = "failed", f"the result could not be written: {type(exc).__name__}: {exc}"
+                    failure = exc if disk_fault(exc) else None
+            if cancel.is_set():                           # its phase ended or the agent cancelled it
+                final = "canceled"
+            else:
+                self._judge(job, final, failure, result)
             with self._cond:
                 job.state, job.error, job.finished = final, error, time.time()
                 job.result_file, job.summary = result_file, summary
@@ -218,6 +246,19 @@ class JobQueue:
                                 state=final, gpu_seconds=job.finished - job.started,
                                 payload={"result": result, "error": error,
                                          "traceback": tb if final == "failed" else None})
+
+    def _judge(self, job: Job, final: str, failure: Exception | None, result: dict | None) -> None:
+        """Counts toward "<tool> job" failures: a job that raised (not a ToolError), or one whose items all
+        failed, leaving out those whose input was bad. A disk error or KernelFault stops the phase."""
+        key = f"{self._backends[job.backend].tool} job"
+        if failure is not None and not isinstance(failure, ToolError):
+            fault_or_count(job.caller, self.health, key, failure)
+        rows = [row for row in (_rows(result) if final == "done" and result is not None else [])
+                if not str(row.get("error", "")).startswith("input:")]
+        if any("error" not in row for row in rows):
+            self.health.ok(key)
+        elif rows:
+            self.health.failed(key, str(rows[0]["error"])[:300])
 
 
 def run_cancellable(env: str, args: list[str], *, cwd: Path, cancel: threading.Event,

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import secrets
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Callable
 
@@ -18,6 +18,13 @@ STAGING = WORKSPACE / "staging"
 
 class PathError(ValueError):
     """A path argument does not name something inside the caller's workspace."""
+
+
+class Fault:
+    """Set once by a kernel thread when the caller's phase must stop; the loop then raises KernelFault."""
+
+    def __init__(self, recorder=None) -> None:
+        self.recorder, self.reason, self.event, self._lock = recorder, None, threading.Event(), threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -33,6 +40,19 @@ class Caller:
     host_roots: tuple = ()                 # isolation.host_roots: replaced likewise
     agent_host: Path | None = None         # None in improve_recipe
     base_commit: str | None = None         # that tree's parent commit
+    fault: Fault = field(default_factory=Fault, compare=False, repr=False)
+    sandbox: dict = field(default_factory=dict, compare=False, repr=False)    # {"pid": bwrap's pid} once started
+
+    def fail(self, reason: str) -> None:
+        """Stop this caller's phase: its sandbox is killed and the loop raises KernelFault(reason)."""
+        with self.fault._lock:
+            if self.fault.event.is_set():
+                return
+            self.fault.reason = reason
+            self.fault.event.set()
+        if self.fault.recorder is not None:
+            self.fault.recorder.event("phase.fault", node=self.node, phase=self.phase, attempt=self.attempt,
+                                      component="kernel", payload={"reason": reason})
 
 
 class TokenRegistry:
@@ -40,6 +60,8 @@ class TokenRegistry:
         self._recorder, self._scrub_names, self._host_roots = recorder, tuple(scrub_names), tuple(host_roots)
         self._by_token: dict[str, Caller] = {}
         self._lock = threading.Lock()
+        self._idle = threading.Condition(self._lock)
+        self._busy: dict[str, int] = {}         # token -> tool calls in flight
         self._on_revoke: list[Callable[[str], None]] = []
 
     def issue(self, *, node: str, phase: str, attempt: int, workspace_host: Path,
@@ -49,7 +71,7 @@ class TokenRegistry:
         self._recorder.add_redaction(token)
         caller = Caller(token, node, phase, attempt, Path(workspace_host), Path(staging_host),
                         mock_script, self._scrub_names, self._host_roots,
-                        Path(agent_host) if agent_host is not None else None, base_commit)
+                        Path(agent_host) if agent_host is not None else None, base_commit, Fault(self._recorder))
         with self._lock:
             self._by_token[token] = caller
         return caller
@@ -57,6 +79,27 @@ class TokenRegistry:
     def lookup(self, token: str | None) -> Caller | None:
         with self._lock:
             return self._by_token.get(token or "")
+
+    def begin(self, token: str | None) -> Caller | None:
+        """lookup() for a tool call, which counts as in flight until end()."""
+        with self._lock:
+            caller = self._by_token.get(token or "")
+            if caller is not None:
+                self._busy[caller.token] = self._busy.get(caller.token, 0) + 1
+            return caller
+
+    def end(self, token: str) -> None:
+        with self._lock:
+            self._busy[token] -= 1
+            if not self._busy[token]:
+                del self._busy[token]
+                self._idle.notify_all()
+
+    def wait_idle(self, token: str) -> None:
+        """After revoke(): until the token's tool calls in flight have returned."""
+        with self._lock:
+            while self._busy.get(token):
+                self._idle.wait()
 
     def revoke(self, token: str) -> None:
         with self._lock:

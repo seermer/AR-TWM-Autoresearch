@@ -11,13 +11,11 @@ from ar_kernel.agent_phase import PhaseOutcome
 from ar_kernel.archive.db import open_db
 from ar_kernel.budget import Budget
 from ar_kernel.config import KernelConfig
-from ar_kernel.contract.verify import ContractReport
 from ar_kernel.control import Control, drive
 from ar_kernel.loop import Loop, Phases
 from ar_kernel.run import RunContext
 from ar_kernel.telemetry.recorder import Recorder
-from ar_kernel.train.gate import GateResult
-from ar_kernel.train.runner import TrainOutcome
+from ar_kernel.faults import KernelFault, NodeFault
 from ar_kernel.vcs.agents_repo import AgentsRepo
 
 
@@ -28,16 +26,16 @@ def outcome(ok, attempt_dir, result=None, error=None, commit=None):
 class Script:
     """Scripted phases: each list is consumed per call; default is success.
     slow: None, a phase name (that phase sleeps up to 600 s) or "pace" (every phase sleeps 1.2 s)."""
-    def __init__(self, tmp, edit=(), contract=(), recipe=(), gate=(), train=(), score=(), slow=None):
-        self.tmp, self.q = tmp, {k: list(v) for k, v in dict(edit=edit, contract=contract, recipe=recipe,
-                                                               gate=gate, train=train, score=score).items()}
+    def __init__(self, tmp, edit=(), recipe=(), train=(), score=(), slow=None):
+        self.tmp, self.q = tmp, {k: list(v) for k, v in dict(edit=edit, recipe=recipe, train=train,
+                                                               score=score).items()}
         self.calls, self.slow = [], slow
 
     def _next(self, key, default):
         return self.q[key].pop(0) if self.q[key] else default
 
     def _wait(self, phase):
-        if self.slow == "pace":            # 6 phases: ~7 s per node, well over the 2 s stop-file poll
+        if self.slow == "pace":            # 4 phases: ~5 s per node, well over the 2 s stop-file poll
             time.sleep(1.2)
         elif self.slow == phase:
             for _ in range(1200):                    # short steps: a signal is handled within 0.5 s
@@ -53,10 +51,6 @@ class Script:
         return outcome(ok, d, {"snapshot_id": agent_commit, "summary": "s"} if ok else None,
                        None if ok else "agent failed", commit=agent_commit if ok else "f" * 40)   # the failed tree
 
-    def contract(self, *, node, attempt, **kw):
-        self._wait("contract")
-        return ContractReport(ok=self._next("contract", True))
-
     def improve_recipe(self, env, *, node, attempt, **kw):
         assert "retry" not in kw and "previous_workspace" not in kw
         self.calls.append(("improve_recipe", node, attempt))
@@ -68,28 +62,22 @@ class Script:
                                "recipe": {"optimizer.max_steps": 2}, "rationale": "why",
                                "summary": "tested"} if ok else None, None if ok else "no commit")
 
-    def gate(self, loop, recipe, data_commit, parent_commit, node, attempt_dir):
-        self._wait("gate")
-        if not self._next("gate", True):
-            return GateResult(ok=False, failures=["dataset d has 1 clips, fewer than 4 GPUs"])
+    def resolve(self, loop, recipe, data_commit, node, attempt_dir):
         resolved = attempt_dir / "train_config.yaml"
         resolved.write_text("lora: {rank: 16, alpha: 16}\n")
-        return GateResult(ok=True, resolved_path=resolved)
+        return resolved
 
     def train(self, loop, resolved, node, attempt_dir):
-        log = attempt_dir / "train" / "train.log"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text("CUDA out of memory\n")
+        """True: a checkpoint; "infra": a known machine error; False: a crash the log does not explain."""
         self._wait("train")
         result = self._next("train", True)
-        if result in ("infra", "crash"):         # a known machine error, or a crash the log does not explain
-            log.write_text("NCCL error\n" if result == "infra" else "Traceback\n")
-            return TrainOutcome(None, "infra", log)
+        if result == "infra":
+            raise KernelFault("training hit a machine error (NCCL error)")
         if not result:
-            return TrainOutcome(None, "recipe", log, detail="CUDA OOM")
+            raise NodeFault("training crashed (exit code 1)")
         ck = attempt_dir / "train" / "outputs" / "checkpoint-2"
-        ck.mkdir(parents=True)
-        return TrainOutcome(ck, "none", log)
+        ck.mkdir(parents=True, exist_ok=True)
+        return ck
 
     def score(self, loop, node, checkpoint, resolved):
         self._wait("score")
@@ -99,14 +87,14 @@ class Script:
         return s, {"metrics": {"m": s}, "aggregates": {"metrics": {"m": s}}, "counts": {"m": 1}}
 
     def phases(self):
-        return Phases(edit_self=self.edit_self, contract=self.contract, improve_recipe=self.improve_recipe,
-                      gate=self.gate, train=self.train, score=self.score)
+        return Phases(edit_self=self.edit_self, improve_recipe=self.improve_recipe, resolve=self.resolve,
+                      train=self.train, score=self.score)
 
 
-SCENARIO = dict(gate=[False, True],                                   # node0001: no edit_self, a gate retry, then scored
-                edit=[True, False, False, False], contract=[False],   # node0002: a contract retry, then invalid_code
-                train=[True, False, False, False],                    # node0003: train_failed
-                score=[0.78, 0.80] + [RuntimeError("wbench gpu failed")] * 2)  # root, node0001, node0004 fails twice -> the run stops
+SCENARIO = dict(recipe=[False, True],                                 # node0001: no edit_self, a failed attempt, then scored
+                edit=[False, False, False],                           # node0002: invalid_code
+                train=[True, False, False],                           # node0003: train_failed
+                score=[0.78, 0.80] + [KernelFault("wbench gpu failed")] * 2)  # root, node0001, node0004 fails twice -> the run stops
 
 
 def build(run: Path, max_nodes: int, script):
@@ -116,8 +104,7 @@ def build(run: Path, max_nodes: int, script):
     rec = Recorder(run)
     ctx = RunContext(run_dir=run, conn=open_db(run), recorder=rec, gpus=[0, 1, 2, 3],
                      metric_set=["m"], case_ids=["1"], versions={})
-    kit = SimpleNamespace(registry=None, queue=None, gpu_lock=threading.Lock(), budget=Budget(),
-                          harness=None, socket_dir=run / "sock", default_model="mock-model",
+    kit = SimpleNamespace(env=None, gpu_lock=threading.Lock(), budget=Budget(), harness=None,
                           start=lambda: None, stop=lambda: None)
     return Loop(KernelConfig.load(), ctx, kit, AgentsRepo(run / "agents.git"), max_nodes=max_nodes,
                 phases=script.phases()), kit

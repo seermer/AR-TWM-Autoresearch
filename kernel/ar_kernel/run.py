@@ -230,8 +230,8 @@ def score_node(cfg: KernelConfig, ctx: RunContext, node_id: str, checkpoint: Pat
                            payload={"score": score, "metrics": per_metric, "aggregates": agg})
     except Exception:
         # A BaseException that is not an Exception (KeyboardInterrupt, SystemExit, the
-        # loop's force-stop signal) skips this: an interrupted node's files are never
-        # deleted, only a real eval/scoring failure's transient dirs are.
+        # loop's force-stop signal) skips this: a stopped run's eval files stay until
+        # resume clears them.
         cleanup()
         raise
     cleanup()

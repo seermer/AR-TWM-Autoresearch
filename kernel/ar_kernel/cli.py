@@ -1,9 +1,8 @@
 from __future__ import annotations
-import argparse, json, os, shutil, signal, sys, time, traceback
+import argparse, json, os, signal, sys, time, traceback
 
-from .archive.nodes import NodeStore
 from .config import KernelConfig, load_dotenv
-from .control import Control, drive, exit_process, kill_recorded_groups, mark_interrupted
+from .control import Control, drive, exit_process, kill_recorded_groups
 from .doctor import report, run_checks
 from .guards import alert, check_tools_fit, choose_gpus
 from .loop import Loop
@@ -12,6 +11,7 @@ from .run import PreflightError, RunNotFound, attach_run, bootstrap_run, code_ch
 from .run_kit import build_run_kit
 from .status import format_status, run_status
 from .subproc import cache_env, proc_running, proc_start_time
+from .tools.hf_tools import clear_hf_tmp
 from .vcs.agents_repo import AgentsRepo
 
 FORCE_STOP_WAIT_S = 300.0     # the kernel's force-stop cleanup kills sandboxes and GPU job groups
@@ -131,15 +131,6 @@ def _run(cfg, args) -> int:
     except PreflightError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    if args.resume:
-        try:
-            status = NodeStore(ctx.conn).get("root")["status"]
-        except KeyError:
-            status = "missing"
-        if status != "scored":                              # the run holds no information; files are kept
-            print(f"error: run {args.run_id!r} cannot be resumed: its root was never scored (root: {status}). "
-                  "Start a new run; this one is kept as is.", file=sys.stderr)
-            return 2
     control = Control(ctx.run_dir)
     remote = args.git_remote or control.args().get("git_remote")
     if args.resume and remote and (error := AgentsRepo.check_remote(remote)):
@@ -173,13 +164,9 @@ def _run(cfg, args) -> int:
     if args.resume:
         repo.push()                                     # catch up pushes a stopped kernel missed
     killed = kill_recorded_groups(control)              # GPU jobs a killed kernel left running
-    hf_tmp = ctx.run_dir / "hf_tmp"                     # kernel-private partial downloads of a stopped kernel
-    partial = sorted(p.name for p in hf_tmp.iterdir()) if hf_tmp.is_dir() else []
-    for name in partial:
-        shutil.rmtree(hf_tmp / name, ignore_errors=True)
+    partial = clear_hf_tmp(ctx.run_dir)
     if killed or partial:
         ctx.recorder.event("run.resume_cleanup", payload={"killed_groups": killed, "hf_tmp": partial})
-    mark_interrupted(ctx, "unfinished when the loop stopped (forced stop, kernel death or spent budget)")
     kit = build_run_kit(run_cfg, ctx.run_dir, ctx.gpus, ctx.recorder, os.environ, repo)
     loop = Loop(run_cfg, ctx, kit, repo, max_nodes=max_nodes, root_cache=run_cfg.root_cache)
     monitor = Monitor(run_cfg, ctx.run_dir, ctx.recorder, ctx.gpus, kit.budget)

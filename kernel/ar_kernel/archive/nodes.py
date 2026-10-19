@@ -2,12 +2,11 @@ from __future__ import annotations
 import json, re, sqlite3, time
 from pathlib import Path
 
-# interrupted: unfinished when the loop stopped (forced stop, kernel death, spent budget); kept
-# untouched, never resumed, never a parent, not counted toward max_nodes.
+# running: being built, or left by a stopped run (resume restarts the phase it stopped in).
 # quarantined: an agent phase reached for the evaluation set; terminal, and hidden from every agent.
 STATUSES = {"running", "scored", "invalid_code", "invalid_recipe", "train_failed", "eval_failed",
-            "crashed", "interrupted", "quarantined"}
-NOT_SHOWN = ("running", "interrupted", "quarantined")       # nodes agents never see: no context entry, no /nodes mount
+            "quarantined"}
+NOT_SHOWN = ("running", "quarantined")       # nodes agents never see: no context entry, no /nodes mount
 # node_id becomes a directory name and a telemetry file name.
 NODE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 

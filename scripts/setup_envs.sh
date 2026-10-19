@@ -10,9 +10,14 @@
 # Needs: conda, git, and a CUDA toolkit (nvcc) for wbench-main. Run from anywhere; run one copy at a time.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-export CONDA_PKGS_DIRS=$PWD/.cache/conda/pkgs PIP_CACHE_DIR=$PWD/.cache/pip TMPDIR=$PWD/.cache/tmp CONDA_REGISTER_ENVS=false
-ROOT=$PWD
 mkdir -p .cache/tmp third_party
+# TMPDIR: the same short symlink to .cache/tmp as ar_kernel.subproc.tmp_link (Unix socket paths are capped at 107 bytes)
+TMP_TARGET=$(cd .cache/tmp && pwd -P)
+TMPDIR=/tmp/ar-$(id -un)-$(printf %s "$TMP_TARGET" | sha1sum | cut -c1-8)
+[ -L "$TMPDIR" ] || ln -s "$TMP_TARGET" "$TMPDIR"
+[ "$(readlink -f "$TMPDIR")" = "$TMP_TARGET" ] || { echo "$TMPDIR is not a symlink to $TMP_TARGET: remove it" >&2; exit 1; }
+export CONDA_PKGS_DIRS=$PWD/.cache/conda/pkgs PIP_CACHE_DIR=$PWD/.cache/pip TMPDIR CONDA_REGISTER_ENVS=false
+ROOT=$PWD
 
 ALL="autoresearcher agent vllm alayaworld wbench-main wbench-vp gen-zimage gen-wan22 gen-ltx25 gen-lightx2v"
 run() { conda run --no-capture-output -p ".envs/$1" "${@:2}"; }

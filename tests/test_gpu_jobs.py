@@ -1,5 +1,5 @@
 """GpuJob plumbing with a fake worker (no GPU)."""
-from conftest import job_result
+from conftest import job_result, job_folder
 import asyncio
 import json
 import os
@@ -90,7 +90,7 @@ def test_items_fan_out_one_worker_per_gpu_and_publish_candidates(env):
     assert c["derived_from"] == {"kind": "model", "name": "fake-gen"}
     assert set(c) == {"video", "annotation", "derived_from"}
     assert got[0]["worker"]["gpus"] == "0" and got[1]["worker"]["gpus"] == "1" and got[4]["worker"]["gpus"] == "0"
-    assert not (run / "jobs" / job / "in").exists() and not (run / "jobs" / job / "out").exists()
+    assert not (job_folder(run, job) / "in").exists() and not (job_folder(run, job) / "out").exists()
     assert job_result(out)["gpu_memory_released"] is True
 
 
@@ -103,7 +103,7 @@ def test_a_worker_that_finds_the_machine_too_small_stops_the_run(env):
     assert Control(run).stop_requested()
     [alert] = [e for e in rec.read_events() if e["type"] == "alert"]
     assert alert["kind"] == "tool_does_not_fit"
-    log = run / "jobs" / out["id"] / "worker0.log"
+    log = job_folder(run, out["id"]) / "worker0.log"
     assert alert["message"] == f"rollout_fake does not fit this machine; the run is stopping (see {log})"
     assert "the cards are too small" in log.read_text()
 
@@ -162,11 +162,10 @@ def test_a_planted_link_in_staging_fails_the_item_not_the_host(env, tmp_path):
 def test_cancel_kills_every_worker(env):
     q, caller, rec, ws, staging, run = env
     job_id = submit(q, caller, [{"src": "a.mp4", "sleep": 300} for _ in range(4)])["job_id"]
-    out_dir = run / "jobs" / job_id / "out"
     deadline = time.monotonic() + 30
-    while len(list(out_dir.glob("worker*.pid"))) < 4 and time.monotonic() < deadline:
+    while len(list((job_folder(run, job_id) / "out").glob("worker*.pid"))) < 4 and time.monotonic() < deadline:
         time.sleep(0.2)
-    pids = [int(p.read_text()) for p in out_dir.glob("worker*.pid")]
+    pids = [int(p.read_text()) for p in (job_folder(run, job_id) / "out").glob("worker*.pid")]
     assert len(pids) == 4
     q.cancel(caller, job_id)
     out = q.wait(caller, job_id, 120)
@@ -465,7 +464,7 @@ def test_keyframe_images_are_staged_in_clip_order(keyed):
     got = job_result(out)["items"]
     staged = got[0]["worker"]["keyframes"]
     assert [k["frame"] for k in staged] == [0, -1]             # in clip order whatever order was given
-    assert all(f"/jobs/{out['id']}/in/0_keyframe" in k["image"] for k in staged)
+    assert all(f"/jobs/n1/improve_recipe-1/{out['id']}/in/0_keyframe" in k["image"] for k in staged)
     assert got[2]["worker"]["keyframes"] == []
 
 

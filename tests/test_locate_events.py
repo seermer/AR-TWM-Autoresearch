@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from conftest import job_result, make_mp4
+from conftest import job_result, make_mp4, job_folder
 from ar_kernel.config import KernelConfig
 from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools import locate_events as le
@@ -131,9 +131,9 @@ def test_a_job_asks_about_every_event_in_every_piece_and_returns_spans_only(env)
     assert sorted((p["video"], p["event"], p["piece"]) for p in pieces) == [      # each event on its own
         ("/workspace/a.mp4", n, k) for n in (0, 1) for k in (0, 1, 2)] + [("/workspace/b.mp4", 0, 0)]
     assert all(p["reasoning"] == "looked at 16 frames" for p in pieces)          # recorded, not returned
-    argv = json.loads((run / "jobs" / out["id"] / "fake_vllm.argv.json").read_text())
+    argv = json.loads((job_folder(run, out["id"]) / "fake_vllm.argv.json").read_text())
     assert json.loads(argv[argv.index("--limit-mm-per-prompt") + 1]) == {"image": 1, "video": 0}
-    assert not (run / "jobs" / out["id"] / "media").exists()
+    assert not (job_folder(run, out["id"]) / "media").exists()
 
 
 def test_an_answer_off_the_asked_shape_is_that_clips_error(env):
@@ -159,7 +159,7 @@ def test_bad_items_are_refused_before_a_job_is_queued(env, items, message):
 
 
 def _server_gone(run, job_id):
-    pid = int((run / "jobs" / job_id / "fake_vllm.pid").read_text())
+    pid = int((job_folder(run, job_id) / "fake_vllm.pid").read_text())
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -183,11 +183,18 @@ def test_the_server_loads_while_the_sheets_are_drawn(env, monkeypatch):
     assert out["state"] == "done" and seen == [True]
 
 
-def test_a_job_whose_clips_all_fail_prep_still_stops_the_server(env, tmp_path):
+def test_a_file_that_is_not_a_video_is_refused_at_submit(env, tmp_path):
     q, caller, rec, run = env
     (tmp_path / "ws" / "c.mp4").write_text("not a video")
-    out = q.wait(caller, le.submit(q, caller, [{"video": "c.mp4", "events": ["Rain."]}])["job_id"], 120)
-    assert out["state"] == "done" and "error" in job_result(out)["clips"]["/workspace/c.mp4"]
+    with pytest.raises(ToolError, match="not a readable video"):
+        le.submit(q, caller, [{"video": "c.mp4", "events": ["Rain."]}])
+
+
+def test_a_job_whose_clips_all_fail_prep_still_stops_the_server(env, tmp_path, monkeypatch):
+    q, caller, rec, run = env
+    monkeypatch.setattr(le, "decode", lambda path, width: (_ for _ in ()).throw(ValueError("cannot decode")))
+    out = q.wait(caller, le.submit(q, caller, [{"video": "a.mp4", "events": ["Rain."]}])["job_id"], 120)
+    assert out["state"] == "done" and "cannot decode" in job_result(out)["clips"]["/workspace/a.mp4"]["error"]
     assert [e for e in rec.read_events("n1") if e["type"] == "locate.server_stopped"]
     assert not [e for e in rec.read_events("n1") if e["type"] == "locate.piece"]
     assert _server_gone(run, out["id"])

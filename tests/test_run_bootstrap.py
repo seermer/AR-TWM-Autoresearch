@@ -186,10 +186,10 @@ def test_score_node_cleans_up_the_eval_lora_even_when_wbench_fails(tmp_path, mon
 
 
 def test_score_node_skips_cleanup_on_a_base_exception(tmp_path, monkeypatch):
-    """An interrupted node's files are never deleted (memory: no-pause / interrupted
-    nodes). A KeyboardInterrupt (or the loop's force-stop signal) during scoring is not
-    an Exception, so it must leave the eval dirs in place and propagate,
-    unlike an ordinary Exception failure (the test above), which does clean up."""
+    """A stopped run's eval files stay until resume clears them. A KeyboardInterrupt (or
+    the loop's force-stop signal) during scoring is not an Exception, so it must leave the
+    eval dirs in place and propagate, unlike an ordinary Exception failure (the test above),
+    which does clean up."""
     import pytest
     import ar_kernel.run as run_mod
     _runs(tmp_path, monkeypatch)

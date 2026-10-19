@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS clips (
   clip_id TEXT PRIMARY KEY,
   video_digest TEXT NOT NULL, caption_digest TEXT NOT NULL, annotation_digest TEXT NOT NULL,
   pose_digest TEXT NOT NULL, metadata TEXT NOT NULL, warnings TEXT NOT NULL,
-  derived_from TEXT NOT NULL, ingested_by TEXT NOT NULL, created_at REAL NOT NULL
+  derived_from TEXT NOT NULL, ingested_by TEXT NOT NULL, created_at REAL NOT NULL,
+  moved_from TEXT
 );
 CREATE TABLE IF NOT EXISTS data_commits (
   commit_id TEXT PRIMARY KEY, parent_commit TEXT, node_id TEXT, attempt INTEGER,

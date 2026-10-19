@@ -20,11 +20,12 @@ from mcp.server.mcpserver import Context
 from PIL import Image, ImageDraw, ImageFont
 from pydantic import create_model
 
-from ..data.probe import probe_video
+from ..data.probe import probe_video, readable_video
 from ..subproc import free_port
-from .captioner import clip_host_path, container_path, stage_clip
+from .captioner import clip_host_path, container_path, input_error, stage_clip
 from .context import PathError
 from .gpu_jobs import items_schema
+from .jobs import job_dir
 from .server import ToolError, listed, refuse
 from .vllm_server import VllmServer, gpu_memory_mib, local_client, serve_command, wait_gpu_release
 
@@ -172,7 +173,7 @@ class LocateEventsBackend:
         caller = self.registry.lookup(job.token)
         if caller is None:
             raise RuntimeError("the phase that submitted this job has ended")
-        work = self.run_dir / "jobs" / job.id
+        work = job_dir(self.run_dir, job)
         media = work / "media"
         media.mkdir(parents=True)
         results: dict[str, dict] = {}
@@ -193,6 +194,10 @@ class LocateEventsBackend:
                 dst = media / f"{i}{Path(video).suffix}"
                 try:
                     stage_clip(caller, video, dst)
+                except (PathError, OSError) as exc:
+                    results[video] = {"error": input_error(exc)[:500]}
+                    continue
+                try:
                     info = probe_video(dst)
                     frames = decode(dst, int(self.block["frame_width"]))
                     cuts[video] = pieces(len(frames), info.fps)
@@ -269,9 +274,11 @@ def submit(q, caller, items) -> dict:
             bad[n] = "this video is listed twice: give all its events in one item"
         else:
             try:
-                clip_host_path(caller, item["video"])
+                readable_video(clip_host_path(caller, item["video"]))
             except PathError as exc:
                 bad[n] = str(exc)
+            except ValueError as exc:
+                bad[n] = f"not a readable video: {exc}"[:300]
         seen.add(container_path(item["video"]))
     refuse(caller, TOOL, items, bad)
     return {"job_id": q.submit(caller, TOOL, {"items": [

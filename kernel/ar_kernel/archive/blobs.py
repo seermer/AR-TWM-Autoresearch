@@ -54,6 +54,17 @@ class BlobStore:
         )
         return hexdigest
 
+    def remove_unreferenced(self) -> int:
+        """Delete the blobs no clip names (those of clips removed with a cleaned-up attempt)."""
+        rows = self.conn.execute(
+            "SELECT digest, kind FROM blobs WHERE digest NOT IN (SELECT video_digest FROM clips UNION "
+            "SELECT caption_digest FROM clips UNION SELECT annotation_digest FROM clips UNION "
+            "SELECT pose_digest FROM clips)").fetchall()
+        for digest, kind in rows:
+            self.path(digest, kind).unlink(missing_ok=True)
+            self.conn.execute("DELETE FROM blobs WHERE digest=?", (digest,))
+        return len(rows)
+
     def _install(self, path: Path, target: Path) -> None:
         tmp = target.with_name(f"{target.name}.tmp.{uuid.uuid4().hex}")     # two calls may store the same bytes
         # shutil.move renames on one filesystem and copies across (EXDEV); either

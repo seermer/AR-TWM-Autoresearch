@@ -6,6 +6,7 @@ import json
 import re
 import time
 from collections.abc import Mapping
+from typing import NamedTuple
 
 import httpx
 from fastapi import FastAPI, Request
@@ -18,7 +19,9 @@ from ..tools.context import bearer
 from .mock import MockBook
 from .store import CallStore
 
-RETRYABLE = {401, 402, 403, 408, 409, 429, 500, 502, 503, 504}    # 401-403: providers return them in short outages too
+MAX_SLEEP_S = 60                    # the longest single backoff sleep
+PROBE_TTL_S = 60                    # a probe's verdict is reused this long
+PROBE_PROMPT = "Reply with OK."
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 # Chat content parts and Responses input items that carry video. "file"/"input_file" is only
 # a video part when its mime type or a data: URL inside it says so (an uploaded file_id has
@@ -89,24 +92,42 @@ def upstream_error(payload) -> dict | None:
     return error
 
 
+def waited_out(status: int) -> bool:
+    """A status the provider recovers from by itself: a timeout, a rate limit, a server or connection error."""
+    return status in (408, 429) or status >= 500
+
+
+class Reply(NamedTuple):
+    status: int
+    payload: dict
+    attempts: int
+    gave_up: bool               # the provider kept failing for the whole wait: not the agent's doing
+
+
 class Upstream:
-    def __init__(self, base_url: str | None, api_key: str, *, timeout_s: float, retries: int,
+    """Forwards a request. A timeout, rate limit, server or connection error is retried with backoff for up
+    to `wait_s`. Any other 4xx is the agent's when a tiny probe request with the same model succeeds;
+    otherwise the provider (or the kernel's own settings) is failing, and it is waited out the same way."""
+
+    def __init__(self, base_url: str | None, api_key: str, *, timeout_s: float, wait_s: float,
                  effort: str | None = None, transport: httpx.AsyncBaseTransport | None = None,
-                 sleep=asyncio.sleep) -> None:
+                 sleep=asyncio.sleep, recorder=None) -> None:
         # Used as given; the endpoint path ("/chat/completions", "/responses") is appended.
         # Providers differ: OpenAI's base includes "/v1", others have no version segment.
         self._base = (base_url or DEFAULT_BASE_URL).rstrip("/")
         self.effort = effort          # reasoning effort forced on every forwarded request
         self._headers = {"Authorization": f"Bearer {api_key}"}
         self._timeout = timeout_s
-        self._retries = retries
+        self._wait_s = float(wait_s)
         self._transport = transport
         self._sleep = sleep
+        self._recorder = recorder
+        self._probes: dict[tuple, tuple[float, bool]] = {}     # (path, model) -> (when, the provider answered)
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str], **kwargs) -> "Upstream":
         """OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_EFFORT (empty -> not enforced); `kwargs`
-        go to the constructor (timeout_s, retries, ...)."""
+        go to the constructor (timeout_s, wait_s, ...)."""
         return cls(environ.get("OPENAI_BASE_URL"), environ.get("OPENAI_API_KEY", ""),
                    effort=environ.get("OPENAI_EFFORT") or None, **kwargs)
 
@@ -119,33 +140,53 @@ class Upstream:
         reasoning = body.get("reasoning") if isinstance(body.get("reasoning"), dict) else {}
         return {**body, "reasoning": {**reasoning, "effort": self.effort}}
 
-    async def post(self, path: str, body: dict) -> tuple[int, dict, int]:
-        attempts, status, payload = 0, 599, {"error": "no attempt made"}
+    async def _send(self, client: httpx.AsyncClient, path: str, body: dict) -> tuple[int, dict]:
+        try:
+            r = await client.post(self._base + path, json=body, headers=self._headers)
+        except httpx.HTTPError as exc:
+            return 599, {"error": f"{type(exc).__name__}: {exc}"}
+        status = r.status_code
+        try:
+            payload = r.json() if r.content else {}
+        except ValueError:        # e.g. an HTML error page from a proxy in front of the API
+            # No truncation of telemetry: the full body is recorded,
+            # even though it never reaches the agent JSON-encoded verbatim either way.
+            payload = {"error": {"message": f"upstream returned HTTP {status} with a "
+                                            f"non-JSON body", "body": r.text}}
+            status = status if status >= 400 else 502   # never pass garbage on as success
+        error = upstream_error(payload)
+        if status < 400 and error:                      # a router's 200 around the provider's error
+            code = error.get("code")
+            status = code if isinstance(code, int) and 400 <= code <= 599 else 502
+        return status, payload
+
+    async def _provider_answers(self, client: httpx.AsyncClient, path: str, model) -> bool:
+        """Whether a tiny request with the same model and the enforced fields succeeds (cached)."""
+        key, now = (path, model), time.monotonic()
+        if key in self._probes and now - self._probes[key][0] < PROBE_TTL_S:
+            return self._probes[key][1]
+        body = {"model": model, **({"messages": [{"role": "user", "content": PROBE_PROMPT}]}
+                                   if path == "/chat/completions" else {"input": PROBE_PROMPT})}
+        status, payload = await self._send(client, path, self.enforce(path, body))
+        self._probes[key] = (now, status < 400)
+        if self._recorder is not None:
+            self._recorder.event("gateway.probe", component="gateway", status=status,
+                                 payload={"path": path, "model": model, "status": status, "body": payload})
+        return status < 400
+
+    async def post(self, path: str, body: dict) -> Reply:
+        started, slept, delay, attempts = time.monotonic(), 0.0, 1.0, 0
         async with httpx.AsyncClient(transport=self._transport, timeout=self._timeout) as client:
-            for attempt in range(self._retries + 1):
-                attempts = attempt + 1
-                try:
-                    r = await client.post(self._base + path, json=body, headers=self._headers)
-                    status = r.status_code
-                    try:
-                        payload = r.json() if r.content else {}
-                    except ValueError:        # e.g. an HTML error page from a proxy in front of the API
-                        # No truncation of telemetry: the full body is recorded,
-                        # even though it never reaches the agent JSON-encoded verbatim either way.
-                        payload = {"error": {"message": f"upstream returned HTTP {status} with a "
-                                                        f"non-JSON body", "body": r.text}}
-                        status = status if status >= 400 else 502   # never pass garbage on as success
-                    error = upstream_error(payload)
-                    if status < 400 and error:                      # a router's 200 around the provider's error
-                        code = error.get("code")
-                        status = code if isinstance(code, int) and 400 <= code <= 599 else 502
-                except httpx.HTTPError as exc:
-                    status, payload = 599, {"error": f"{type(exc).__name__}: {exc}"}
-                if status not in RETRYABLE and status != 599:
-                    break
-                if attempt < self._retries:
-                    await self._sleep(2 ** attempt)
-        return status, payload, attempts
+            while True:
+                attempts += 1
+                status, payload = await self._send(client, path, body)
+                if status < 400 or (not waited_out(status)
+                                    and await self._provider_answers(client, path, body.get("model"))):
+                    return Reply(status, payload, attempts, False)
+                if max(slept, time.monotonic() - started) + delay > self._wait_s:
+                    return Reply(status, payload, attempts, True)
+                await self._sleep(delay)
+                slept, delay = slept + delay, min(delay * 2, MAX_SLEEP_S)
 
 
 def create_gateway_app(*, registry, store: CallStore, allowed_models: set[str],
@@ -192,18 +233,20 @@ def create_gateway_app(*, registry, store: CallStore, allowed_models: set[str],
             meta = store.begin(caller, endpoint, body, role=role_label(request.headers.get("x-ar-role")))
         except TelemetryError as exc:
             return JSONResponse({"error": {"message": f"telemetry unavailable: {exc}"}}, status_code=500)
-        started = time.monotonic()
+        started, gave_up = time.monotonic(), False
         try:
             if mock:
                 render = MockBook.chat_response if upstream_path == "/chat/completions" else MockBook.response
                 status, payload, attempts = 200, render(
                     body.get("model", ""), mocks.next(caller.mock_script or "smoke", caller.token)), 1
             else:
-                status, payload, attempts = await upstream.post(upstream_path, body)
+                status, payload, attempts, gave_up = await upstream.post(upstream_path, body)
         except Exception as exc:  # noqa: BLE001 -- the request is recorded; its failure must be too
             status, payload, attempts = 502, {"error": {"message": f"gateway: {type(exc).__name__}: {exc}"}}, 1
         cost = budget.record(status, payload.get("usage") if isinstance(payload, dict) else None) \
             if (budget is not None and not mock) else None
+        if gave_up:
+            caller.fail(f"the LLM provider kept failing (last: HTTP {status}) for the whole wait")
         try:
             store.end(meta, caller, status=status, body=payload,
                       latency_s=time.monotonic() - started, attempts=attempts,

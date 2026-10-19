@@ -9,8 +9,6 @@ import pytest
 
 from ar_kernel.archive.db import open_db
 from ar_kernel.archive.nodes import NodeStore
-from ar_kernel.control import mark_interrupted
-from ar_kernel.run import RunContext
 from ar_kernel.telemetry.recorder import Recorder
 
 FIX = Path(__file__).parent / "fixtures"
@@ -41,13 +39,6 @@ def wait_phase(run, phase, timeout=60, key="phase"):
     raise AssertionError(f"never reached {phase}")
 
 
-def resume_mark(run):
-    ctx = RunContext(run_dir=run, conn=open_db(run), recorder=Recorder(run), gpus=[0, 1, 2, 3],
-                     metric_set=["m"], case_ids=["1"], versions={})
-    mark_interrupted(ctx, "resume")
-    return ctx
-
-
 def test_multi_node_run_telemetry_is_complete(tmp_path, spawn):
     run = tmp_path / "run"
     proc = spawn(run, 4, "none")
@@ -65,7 +56,11 @@ def test_multi_node_run_telemetry_is_complete(tmp_path, spawn):
     assert failed == ["node0002", "node0003"]
 
 
-def test_sigterm_mid_phase_stops_within_seconds_and_resume_marks_interrupted(tmp_path, spawn):
+def _resumed(run) -> list[str]:
+    return [e["message"] for e in Recorder(run).read_events() if e["type"] == "alert" and e["kind"] == "node_resumed"]
+
+
+def test_sigterm_mid_phase_stops_within_seconds_and_resume_restarts_that_phase(tmp_path, spawn):
     run = tmp_path / "run"
     proc = spawn(run, 3, "improve_recipe")
     wait_phase(run, "improve_recipe")
@@ -74,22 +69,25 @@ def test_sigterm_mid_phase_stops_within_seconds_and_resume_marks_interrupted(tmp
     assert proc.wait(timeout=30) == 0 and time.monotonic() - t0 < 10
     stopped = [e for e in Recorder(run).read_events() if e["type"] == "run.stopped"]
     assert "force stop" in Recorder(run).load_payload(stopped[-1]["payload"])["reason"]
-    ctx = resume_mark(run)
-    assert {n["node_id"]: n["status"] for n in NodeStore(ctx.conn).all()} == {"root": "scored", "node0001": "interrupted"}
-    assert (run / "nodes" / "node0001" / "attempts" / "improve_recipe-1" / "workspace").exists()   # files kept
+    assert NodeStore(open_db(run)).get("node0001")["status"] == "running"
+    proc = spawn(run, 1, "pace")                           # max_nodes 1: node0001 is the one node
+    assert proc.wait(timeout=120) == 0
+    assert {n["node_id"]: n["status"] for n in NodeStore(open_db(run)).all()} == {"root": "scored", "node0001": "scored"}
+    assert _resumed(run) == ["node0001 starts again at improve_recipe attempt 1"]
 
 
-def test_kill_9_then_resume_starts_a_fresh_cycle_with_a_new_id(tmp_path, spawn):
+def test_kill_9_in_training_then_resume_trains_the_same_attempt_again(tmp_path, spawn):
     run = tmp_path / "run"
     proc = spawn(run, 3, "train")
     wait_phase(run, "train")
     proc.send_signal(signal.SIGKILL)
     proc.wait(timeout=30)
-    resume_mark(run)
-    proc = spawn(run, 1, "none")                           # max_nodes 1: exactly one more node
+    proc = spawn(run, 1, "pace")
     assert proc.wait(timeout=120) == 0
-    ids = {n["node_id"]: n["status"] for n in NodeStore(open_db(run)).all()}
-    assert ids == {"root": "scored", "node0001": "interrupted", "node0002": "scored"}   # node0001 kept; ids not reused
+    nodes = NodeStore(open_db(run))
+    assert {n["node_id"]: n["status"] for n in nodes.all()} == {"root": "scored", "node0001": "scored"}
+    assert _resumed(run) == ["node0001 starts again at train attempt 1"]
+    assert [a["idx"] for a in nodes.attempts("node0001", "improve_recipe")] == [1]     # the attempt was not charged
 
 
 def test_graceful_stop_file_finishes_the_current_node(tmp_path, spawn):

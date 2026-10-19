@@ -15,6 +15,8 @@ from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools.ask import Ask
 from ar_kernel.tools.context import TokenRegistry
 from ar_kernel.tools.server import ToolError
+from ar_kernel.faults import KernelFault
+from ar_kernel.gateway.app import PROBE_PROMPT
 from tests.test_gateway_app import _upstream_that
 
 REAL = KernelConfig.load()
@@ -84,8 +86,8 @@ def test_an_empty_question_is_refused(make):
 
 
 def test_a_failed_call_costs_no_images(make):
-    ask, caller, _, _ = make(handler=lambda r: httpx.Response(400, json={"error": {"message": "no vision"}}),
-                             max_images_per_phase=1)
+    ask, caller, _, _ = make(handler=lambda r: _answer(r) if PROBE_PROMPT in r.content.decode() else
+                             httpx.Response(400, json={"error": {"message": "no vision"}}), max_images_per_phase=1)
     with pytest.raises(ToolError, match="HTTP 400.*no vision"):
         ask.ask(caller, "q", ["big.png"])
     ask.upstream = _upstream_that(_answer, [])
@@ -138,7 +140,7 @@ def test_live_ask_over_the_tool_socket(tmp_path):
     caller = reg.issue(node="n1", phase="edit_self", attempt=1, workspace_host=tmp_path,
                        staging_host=tmp_path / "staging")
     mcp = new_mcp()
-    register_ask_tool(mcp, ToolKit(reg, rec), Ask(REAL, Upstream.from_env(env, timeout_s=600, retries=2),
+    register_ask_tool(mcp, ToolKit(reg, rec), Ask(REAL, Upstream.from_env(env, timeout_s=600, wait_s=3),
                                                   CallStore(rec), Budget(), env["OPENAI_MODEL"]))
     im = Image.new("RGB", (2000, 2000), "white")
     draw = ImageDraw.Draw(im)
@@ -183,6 +185,12 @@ def test_a_provider_error_inside_the_choice_is_retried_and_then_named_briefly(ma
     lost = {"choices": [{"finish_reason": "error", "message": {"content": None, "reasoning": "SECRET"},
                          "error": {"code": 502, "message": "Network connection lost."}}]}
     ask, caller, seen, _ = make(handler=lambda request: httpx.Response(200, json=lost))
-    with pytest.raises(ToolError) as failed:
+    with pytest.raises(KernelFault) as failed:              # waited out: not the agent's doing
         ask.ask(caller, "q", [])
     assert len(seen) == 4 and "Network connection lost." in str(failed.value) and "SECRET" not in str(failed.value)
+
+
+def test_a_malformed_reply_is_a_counted_model_error(make):
+    ask, caller, _, _ = make(handler=lambda request: httpx.Response(200, json={"choices": []}))
+    with pytest.raises(RuntimeError, match="an empty reply"):
+        ask.ask(caller, "q", [])

@@ -25,10 +25,10 @@ from ..data.probe import TARGET_ASPECT
 from ..guards import alert
 from ..isolation import EXCLUDED_PROMPT, copies_held_out, strings
 from ..subproc import file_tail
-from .captioner import clip_host_path, container_path, stage_clip
+from .captioner import clip_host_path, container_path, input_error, stage_clip
 from .context import STAGING, PathError
 from .hf_tools import move_into
-from .jobs import run_cancellable
+from .jobs import job_dir, run_cancellable
 from .server import FROM_FILE, ToolError, listed, refuse
 from .vllm_server import gpu_memory_mib, wait_gpu_release
 
@@ -269,7 +269,7 @@ class GpuJob:
         caller = self.registry.lookup(job.token)
         if caller is None:
             raise RuntimeError("the phase that submitted this job has ended")
-        work = self.run_dir / "jobs" / job.id
+        work = job_dir(self.run_dir, job)
         inp, out = work / "in", work / "out"
         inp.mkdir(parents=True)
         out.mkdir()
@@ -282,7 +282,7 @@ class GpuJob:
                 try:
                     staged.append(self._stage(caller, index, item, inp, job.args))
                 except (PathError, OSError, ToolError) as exc:
-                    results[index] = {"index": index, "error": f"input: {exc}"}
+                    results[index] = {"index": index, "error": input_error(exc)}
             (work / "items.json").write_text(json.dumps(staged), encoding="utf-8")
             if staged and not cancel.is_set():
                 produced = self.produce(job, staged, work, out, cancel, report)

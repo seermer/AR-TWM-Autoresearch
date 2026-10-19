@@ -70,3 +70,15 @@ def test_put_leaves_no_temp_files_behind(tmp_path):
     store = BlobStore(tmp_path, open_db(tmp_path))
     store.put(_clip(tmp_path, "a.mp4", b"payload"), "video")
     assert [p.name for p in (store.root / "video").iterdir() if ".tmp" in p.name] == []
+
+def test_remove_unreferenced_keeps_what_a_clip_names(tmp_path):
+    from ar_kernel.archive.clips import ClipStore
+    conn = open_db(tmp_path)
+    store = BlobStore(tmp_path, conn)
+    kept = store.put(_clip(tmp_path, "a.mp4", b"kept"), "video")
+    gone = store.put(_clip(tmp_path, "b.mp4", b"gone"), "video")
+    ClipStore(conn).add({"clip_id": "c1", "video_digest": kept, "caption_digest": "c", "annotation_digest": "a",
+                         "pose_digest": "p", "metadata": {}, "warnings": [], "derived_from": {}, "ingested_by": "n1"})
+    assert store.remove_unreferenced() == 1
+    assert store.path(kept, "video").exists() and not store.path(gone, "video").exists()
+    assert [r[0] for r in conn.execute("SELECT digest FROM blobs")] == [kept]

@@ -242,7 +242,7 @@ ar stop --run-id $RUN --force           # stops now, waits until the loop has ex
 nohup ar run --run-id $RUN --resume >> runs/$RUN.console.log 2>&1 &
 ```
 
-Resume keeps every finished node; a node that was still in progress is dropped and a new one is started.
+Resume keeps every finished node; a node that was still in progress starts again at the phase it stopped in (that phase from scratch, with the same attempt number).
 If WorldModel, WBench or AutoResearcher changed since the run started, resume prints a warning and records a `code_changed` alert: later nodes are then not built and scored like the earlier ones.
 Do not delete files under `runs/$RUN` by hand.
 
@@ -261,7 +261,8 @@ Do not delete files under `runs/$RUN` by hand.
 | `run ... exists; use --resume` | Use a new `--run-id`, or add `--resume` to continue it. |
 | `need 4 free GPUs` / GPU out of memory at start | Fewer idle cards than `gpus.num_gpus`. Check `nvidia-smi` for other processes. |
 | `unset CUDA_VISIBLE_DEVICES` | The run picks its own cards: `unset CUDA_VISIBLE_DEVICES` in that shell. |
-| `eval_failed` alert in `ar status`, and the run stopped | A node's evaluation failed twice in a row, so the run stopped instead of training more nodes. The alert carries the error. Fix it, then `--resume`: that node is dropped and a new one is started. |
+| `phase_failed` alert in `ar status`, and the run stopped | A phase failed twice for a reason that is not the agents' (machine, kernel or LLM provider); the alert carries the error. Fix it, then `--resume`: the phase starts again. |
+| `node_faults` alert in `ar status`, and the run stopped | Two nodes in a row ended because their training or evaluation failed twice (`train_failed` / `eval_failed`); the alert carries the last error. Fix it, then `--resume`. |
 | `enabled tools do not fit GPUs` | A tool needs more GPU memory in total than the run's cards have (`min_total_gpu_gib` in `configs/kernel.yaml`). Give the run more or larger GPUs, or switch that generator off before starting a new run. |
 | `tool_does_not_fit` alert in `ar status`, and the run stopped | A GPU tool found the machine too small while running; the alert names the worker log. Give the run more or larger GPUs, then `--resume`. |
 | `permission denied (publickey)` for the git remote | `ssh-add` your key in the shell that runs `ar`; check with `ssh -T git@github.com`. It shows up as a warning in `ar status`. |

@@ -15,10 +15,10 @@ def test_kit_uses_the_run_config_and_registers_enabled_tools(tmp_path, monkeypat
     monkeypatch.setattr("ar_kernel.run_kit.build_gpu_backends", lambda *a, **k: [])
     kit = build_run_kit(cfg, tmp_path, [0, 1, 2, 3], Recorder(tmp_path), ENV, AgentsRepo(tmp_path / "agents.git"))
     try:
-        assert kit.default_model == "model-x" and kit.budget.max_usd == 7
-        assert kit.queue.gpu_lock is kit.gpu_lock and kit.queue.wait_cap_s == float(cfg.get("tools.job_wait_max_s"))
+        assert kit.env.default_model == "model-x" and kit.budget.max_usd == 7
+        assert kit.env.queue.gpu_lock is kit.gpu_lock and kit.env.queue.wait_cap_s == float(cfg.get("tools.job_wait_max_s"))
     finally:
-        kit.queue.shutdown()
+        kit.env.queue.shutdown()
 
 
 def test_stop_survives_a_stuck_job_worker(tmp_path, monkeypatch):
@@ -26,7 +26,7 @@ def test_stop_survives_a_stuck_job_worker(tmp_path, monkeypatch):
     rec = Recorder(tmp_path)
     kit = build_run_kit(KernelConfig.load(), tmp_path, [0, 1, 2, 3], rec, ENV, AgentsRepo(tmp_path / "agents.git"))
     stopped = []
-    monkeypatch.setattr(kit.queue, "shutdown", lambda: (_ for _ in ()).throw(RuntimeError("stuck")))
+    monkeypatch.setattr(kit.env.queue, "shutdown", lambda: (_ for _ in ()).throw(RuntimeError("stuck")))
     def services_stop():
         stopped.append("services")
         raise RuntimeError("service thread did not join")

@@ -3,17 +3,19 @@ agents can read them under /nodes/<node>/transcripts. Built from the gateway's t
 from __future__ import annotations
 
 import json
+import traceback
 from pathlib import Path
 
+from .guards import alert
 from .process_digest import _payload, conversations
 from .telemetry.recorder import Recorder
 
 
-def write_transcripts(run_dir: Path, node_id: str) -> None:
+def write_transcripts(run_dir: Path, node_id: str, recorder) -> None:
     """One file per conversation, in start order, under nodes/<node>/transcripts/<phase>-<attempt>/: JSON
     Lines, one message per line (role, content, reasoning, tool_calls, tool_call_id), so a script counts
     turns and calls exactly and grep still works. A compacted conversation continues in the next file.
-    Never raises: transcripts are a convenience."""
+    Never raises: transcripts are a convenience, so a failure is a warning alert on `recorder`."""
     try:
         rec = Recorder(run_dir)
         out = Path(run_dir) / "nodes" / node_id
@@ -26,5 +28,6 @@ def write_transcripts(run_dir: Path, node_id: str) -> None:
             path = out / conv["transcript"]
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("".join(json.dumps(m, ensure_ascii=False) + "\n" for m in messages), encoding="utf-8")
-    except Exception:                                   # noqa: BLE001 -- never fail a node over transcripts
-        pass
+    except Exception as exc:                            # noqa: BLE001 -- never fail a node over transcripts
+        alert(recorder, "transcripts_failed", f"{node_id}: transcripts not written: {type(exc).__name__}: {exc}",
+              level="warning", node_id=node_id, traceback=traceback.format_exc())

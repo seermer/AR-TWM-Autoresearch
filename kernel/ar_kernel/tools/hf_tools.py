@@ -14,6 +14,7 @@ from huggingface_hub.utils import filter_repo_objects
 from mcp.server.mcpserver import Context
 from pydantic import Field
 
+from ..faults import disk_fault
 from ..isolation import blocked
 from .context import STAGING
 from .server import FROM_FILE, ToolError, listed
@@ -24,9 +25,28 @@ KINDS = ("dataset", "model")
 _KIND = "which kind of repo: 'dataset' (default) or 'model'"
 
 
+def hf_tmp(run_dir: Path) -> Path:
+    """Kernel-private partial downloads."""
+    return Path(run_dir) / "hf_tmp"
+
+
+def clear_hf_tmp(run_dir: Path) -> list[str]:
+    """Delete the partial downloads a stopped phase left; their names."""
+    partial = sorted(p.name for p in hf_tmp(run_dir).iterdir()) if hf_tmp(run_dir).is_dir() else []
+    for name in partial:
+        shutil.rmtree(hf_tmp(run_dir) / name)
+    return partial
+
+
 def _check_kind(kind: str) -> None:
     if kind not in KINDS:
         raise ToolError(f"kind must be 'dataset' or 'model': got {kind!r}")
+
+
+def _hub(exc: HfHubHTTPError) -> Exception:
+    """A 4xx answers the request (ToolError); anything else is the Hub's or the network's (a counted error)."""
+    status = getattr(exc.response, "status_code", None)
+    return ToolError(str(exc)) if status is not None and 400 <= status < 500 else exc
 
 
 def _layout(names: list[str]) -> str:
@@ -74,7 +94,10 @@ class HfTools:
             raise ToolError("query is empty")
         # The Hub matches one substring, so ask for the longest word and keep the hits holding every word.
         find = self.api.list_datasets if kind == "dataset" else self.api.list_models
-        hits = find(search=max(words, key=len), limit=min(int(limit), 100) * 5, full=True)
+        try:
+            hits = list(find(search=max(words, key=len), limit=min(int(limit), 100) * 5, full=True))
+        except HfHubHTTPError as exc:
+            raise _hub(exc) from None
         rows = [{"id": d.id, "tags": list(d.tags or [])[:40],
                  "gated": getattr(d, "gated", False),
                  "downloads": getattr(d, "downloads", None),
@@ -98,7 +121,7 @@ class HfTools:
         except RepositoryNotFoundError:
             raise missing from None
         except HfHubHTTPError as exc:
-            raise ToolError(str(exc)) from None
+            raise _hub(exc) from None
 
     def list_files(self, caller, repo: str, revision: str, pattern: str = "*",
                    limit: int = LIST_PAGE, offset: int = 0, kind: str = "dataset") -> dict:
@@ -112,6 +135,8 @@ class HfTools:
             accessible = True
         except (GatedRepoError, RepositoryNotFoundError):     # gated without access, or private
             accessible = False
+        except HfHubHTTPError as exc:
+            raise _hub(exc) from None
         return {"repo": repo, "revision": info.sha,
                 "gated": getattr(info, "gated", False), "accessible": accessible,
                 "repo_files": len(info.siblings), "matching_files": len(files),
@@ -151,11 +176,13 @@ class HfTools:
                 self.snapshot(repo_id=repo, repo_type=kind, revision=info.sha,
                               allow_patterns=files, local_dir=str(tmp))
             except HfHubHTTPError as exc:
-                raise ToolError(str(exc)) from None
+                raise _hub(exc) from None
             for f in files:
                 try:
                     move_into(tmp / f, staging, f"{rel}/{f}")
                 except OSError as exc:
+                    if disk_fault(exc):
+                        raise
                     raise ToolError(f"cannot place {f} in staging (a link or non-directory in the way?): "
                                     f"{exc}") from None
         finally:

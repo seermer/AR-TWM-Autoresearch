@@ -8,8 +8,6 @@ import sys
 import threading
 from pathlib import Path
 
-from .archive.clips import hide_clips
-from .archive.nodes import NodeStore
 from .guards import alert
 from .subproc import kill_group, proc_start_time
 
@@ -90,31 +88,6 @@ def kill_recorded_groups(control: Control) -> list[int]:
             killed.append(pgid)
         marker.unlink(missing_ok=True)
     return killed
-
-
-def mark_interrupted(ctx, reason: str) -> list[str]:
-    """On resume: every non-root node still `running` was cut off (forced stop, kernel death or a
-    spent budget). It is never resumed and never cleaned up: its status
-    becomes `interrupted`, and its files and archive rows stay. A fresh cycle then starts. The root is never marked: a run whose root
-    was never scored is refused before this (cli)."""
-    nodes = NodeStore(ctx.conn)
-    state_file = Path(ctx.run_dir) / "control" / "state.json"
-    state = json.loads(state_file.read_text()) if state_file.exists() else {}
-    marked = []
-    for node in nodes.all():
-        if node["status"] != "running" or node["parent_id"] is None:
-            continue
-        nid = node["node_id"]
-        phase = state.get("phase") if state.get("node") == nid else None
-        nodes.set_status(nid, "interrupted")
-        hide_clips(ctx.conn, ctx.recorder, nid, "interrupted")
-        nodes.set_fields(nid, error=f"{reason} (phase {phase})")
-        ctx.recorder.event("node.interrupted", child=nid, payload={
-            "node": nid, "reason": reason, "phase_reached": phase})
-        alert(ctx.recorder, "node_interrupted", f"{nid} was interrupted in phase {phase}; kept as is",
-              level="warning", node_id=nid)
-        marked.append(nid)
-    return marked
 
 
 def drive(loop, kit, control: Control, recorder, monitor=None) -> str:

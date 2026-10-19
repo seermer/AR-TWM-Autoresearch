@@ -9,11 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ar_kernel.archive.clips import ClipStore
-from ar_kernel.archive.db import open_db
-from ar_kernel.archive.nodes import NodeStore
-from ar_kernel.control import Control, drive, kill_recorded_groups, mark_interrupted
-from ar_kernel.run import RunContext
+from ar_kernel.control import Control, drive, kill_recorded_groups
 from ar_kernel.subproc import proc_start_time
 from ar_kernel.telemetry.recorder import Recorder
 
@@ -66,33 +62,6 @@ def test_recorded_orphan_groups_are_killed_and_recycled_pids_are_not(tmp_path):
         assert not any((c.dir / "pgids").iterdir())
     finally:
         orphan.kill(), bystander.kill()
-
-
-def test_resume_marks_unfinished_nodes_interrupted_and_keeps_their_files(tmp_path):
-    conn, rec = open_db(tmp_path), Recorder(tmp_path)
-    nodes = NodeStore(conn)
-    nodes.create("root", None, 0), nodes.record_score("root", 0.7, ["m"], {"m": 0.7})
-    nodes.create("n1", "root", 1)                                   # left running by a forced stop
-    ClipStore(conn).add({"clip_id": "a" * 64, "video_digest": "v", "caption_digest": "c", "annotation_digest": "a",
-                         "pose_digest": "p", "metadata": {}, "warnings": [],
-                         "derived_from": {"kind": "model", "name": "x"}, "ingested_by": "n1"})
-    work = tmp_path / "nodes" / "n1" / "attempts" / "improve_recipe-1" / "workspace"
-    work.mkdir(parents=True), (work / "notes.txt").write_text("keep me")
-    (tmp_path / "staging" / "n1").mkdir(parents=True)
-    (tmp_path / "control").mkdir()
-    (tmp_path / "control" / "state.json").write_text('{"node": "n1", "phase": "train", "attempt": 1}')
-    ctx = RunContext(run_dir=tmp_path, conn=conn, recorder=rec, gpus=[0, 1, 2, 3], metric_set=["m"],
-                     case_ids=["1"], versions={})
-
-    assert mark_interrupted(ctx, "resume after forced stop") == ["n1"]
-
-    n1 = nodes.get("n1")
-    assert n1["status"] == "interrupted" and "phase train" in n1["error"]
-    assert (work / "notes.txt").read_text() == "keep me" and (tmp_path / "staging" / "n1").exists()
-    assert nodes.get("root")["status"] == "scored"
-    (event,) = [e for e in rec.read_events() if e["type"] == "node.interrupted"]
-    assert rec.load_payload(event["payload"])["phase_reached"] == "train"
-    assert [c["ingested_by"] for c in ClipStore(conn).all()] == ["n1interrupted"]      # out of the pool
 
 
 def test_workers_of_a_dead_leader_are_still_killed(tmp_path):

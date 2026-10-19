@@ -20,7 +20,9 @@ from mcp.server.mcpserver import Context
 from pydantic import Field
 
 from .context import WORKSPACE, PathError, to_container, to_host
+from ..faults import disk_fault
 from ..subproc import free_port
+from .jobs import job_dir
 from .server import FROM_FILE, ToolError, listed, refuse
 from .vllm_server import VllmServer, gpu_memory_mib, local_client, serve_command, wait_gpu_release
 
@@ -41,6 +43,13 @@ def clip_host_path(caller, path: str) -> Path:
     if not host.is_file():
         raise PathError(f"{path} is not a file")
     return host
+
+
+def input_error(exc: Exception) -> str:
+    """An item's staging error for its result; a disk fault raises."""
+    if disk_fault(exc):
+        raise exc
+    return f"input: {exc}"
 
 
 def stage_clip(caller, path: str, dst: Path) -> None:
@@ -91,7 +100,7 @@ class CaptionBackend:
         caller = self.registry.lookup(job.token)
         if caller is None:
             raise RuntimeError("the phase that submitted this job has ended")
-        work = self.run_dir / "jobs" / job.id
+        work = job_dir(self.run_dir, job)
         media = work / "media"                    # the only directory the server may read
         media.mkdir(parents=True)
         clips: dict[str, Path] = {}
@@ -102,7 +111,7 @@ class CaptionBackend:
                 stage_clip(caller, path, dst)
                 clips[path] = dst
             except (PathError, OSError) as exc:
-                results[path] = {"error": str(exc)}
+                results[path] = {"error": input_error(exc)}
 
         if not clips:
             return {"clips": results, "load_s": None, "gpu_memory_mib": None, "gpu_memory_released": None}

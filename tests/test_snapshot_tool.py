@@ -101,3 +101,69 @@ def test_clear_removes_an_attempts_snapshots_and_refs(live):
     snapshot.clear(run, repo, "n1", "improve_recipe", 1)
     assert snapshot.edit_snapshot(repo, "n1", "edit_self", 2, sha) is None
     assert snapshot.recipe_snapshot(run, "n1", "improve_recipe", 1, sid) is None
+
+
+def _direct(tmp_path, **checks):
+    """A store with checks, called in-process as the tool thread calls it."""
+    run = tmp_path / "run"
+    seed = tmp_path / "seed" / "agent"
+    seed.mkdir(parents=True)
+    (seed / "entry.py").write_text("v1\n")
+    repo = AgentsRepo(run / "agents.git")
+    root = repo.init(tmp_path / "seed")
+    reg = TokenRegistry(Recorder(run))
+    agent = tmp_path / "agent"
+    repo.checkout(root, agent)
+    edit = reg.issue(node="n1", phase="edit_self", attempt=1, workspace_host=tmp_path, staging_host=tmp_path,
+                     agent_host=agent, base_commit=root)
+    recipe = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=tmp_path, staging_host=tmp_path)
+    return SnapshotStore(run, repo, lambda c: c == KNOWN, **checks), repo, edit, recipe
+
+
+def test_a_recipe_snapshot_the_gate_refuses_is_not_stored(tmp_path):
+    from ar_kernel.tools.server import ToolError
+    seen = []
+    store, _, _, recipe = _direct(tmp_path, gate=lambda c, r, d: seen.append((r, d)) or ["dataset d has 1 clip"])
+    with pytest.raises(ToolError, match="dataset d has 1 clip"):
+        store.take(recipe, KNOWN, {"optimizer.max_steps": 2}, "why")
+    assert seen == [({"optimizer.max_steps": 2}, KNOWN)]
+    assert not snapshot.folder(tmp_path / "run", "n1", "improve_recipe", 1).exists()
+    assert store.take(recipe, None, None, None)["snapshot_id"]                 # no result: no gate
+
+
+def test_a_rationale_that_is_not_utf8_is_refused(tmp_path):
+    from ar_kernel.tools.server import ToolError
+    store, _, _, recipe = _direct(tmp_path, gate=lambda *a: [])
+    with pytest.raises(ToolError, match="UTF-8"):
+        store.take(recipe, KNOWN, {"optimizer.max_steps": 2}, "why \ud800")
+
+
+def test_an_edit_snapshot_the_contract_refuses_gets_no_ref(tmp_path):
+    from ar_kernel.contract.verify import ContractReport, ContractStep
+    from ar_kernel.tools.server import ToolError
+    report = ContractReport(ok=False, steps=[ContractStep("build", True), ContractStep("import", False, "No module x")])
+    store, repo, edit, _ = _direct(tmp_path, verify=lambda c, sha: report)
+    with pytest.raises(ToolError, match=r"at step import:\nNo module x"):
+        store.take(edit, None, None, None)
+    assert not repo._git("for-each-ref", snapshot.ref_prefix("n1", "edit_self", 1)).stdout.strip()
+
+
+def test_edit_snapshot_contract_checks_run_one_at_a_time(tmp_path):
+    import threading
+    import time
+    from ar_kernel.contract.verify import ContractReport
+    running, most = [0], [0]
+
+    def verify(caller, sha):
+        running[0] += 1
+        most[0] = max(most[0], running[0])
+        time.sleep(0.3)
+        running[0] -= 1
+        return ContractReport(ok=True)
+    store, repo, edit, _ = _direct(tmp_path, verify=verify)
+    threads = [threading.Thread(target=store.take, args=(edit, None, None, None)) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert most[0] == 1

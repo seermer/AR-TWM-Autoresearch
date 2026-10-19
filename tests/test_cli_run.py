@@ -144,17 +144,6 @@ def test_stop_without_a_running_loop_says_so(tmp_path, monkeypatch, capsys):
     assert "no loop is running" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("root", ["running", "eval_failed", None])
-def test_resume_refuses_a_run_whose_root_was_never_scored(tmp_path, monkeypatch, capsys, root):
-    run = _existing_run(tmp_path, monkeypatch, root=root)
-    (run / "nodes" / "root").mkdir(parents=True)
-    (run / "nodes" / "root" / "debug.txt").write_text("kept")
-    assert cli.main(["run", "--run-id", "r1", "--resume"]) == 2
-    assert "cannot be resumed" in capsys.readouterr().err
-    assert Control(run).alive_pid() is None                        # refused before claiming the run
-    assert (run / "nodes" / "root" / "debug.txt").read_text() == "kept"   # nothing cleaned up
-
-
 def test_a_new_run_with_an_unreachable_git_remote_creates_nothing(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli.KernelConfig, "runs_dir", property(lambda self: tmp_path))
     monkeypatch.setattr(cli, "load_dotenv", lambda path, env: [])

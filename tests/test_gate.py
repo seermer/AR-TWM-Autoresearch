@@ -39,57 +39,57 @@ def gate_env(_gate_store, tmp_path):
 @pytest.mark.gpu
 def test_valid_recipe_passes_every_check(gate_env):
     gate, commit, tmp_path = gate_env
-    result = gate.check({"optimizer.max_steps": 2, "optimizer.grad_accum_steps": 1,
+    failures = gate.check({"optimizer.max_steps": 2, "optimizer.grad_accum_steps": 1,
                          "optimizer.epochs": 50},
                         commit, None, "n1", tmp_path / "n1", tmp_path, [0, 1, 2, 3])
-    assert result.ok, result.failures
-    assert result.resolved_path.exists()
+    assert not failures, failures
+    assert (tmp_path / "n1" / "train_config.yaml").exists()
 
 def test_non_tunable_key_is_rejected(gate_env):
     gate, commit, tmp_path = gate_env
-    result = gate.check({"spatial_memory.enabled": False}, commit, None, "n1",
+    failures = gate.check({"spatial_memory.enabled": False}, commit, None, "n1",
                         tmp_path / "n1", tmp_path, [0, 1, 2, 3])
-    assert not result.ok and any("not tunable" in f for f in result.failures)
+    assert failures and any("not tunable" in f for f in failures)
 
 @pytest.mark.parametrize("key", ["sample.height", "sample.width", "data.overall_caption_prob"])
 def test_resolution_and_caption_probability_are_not_tunable(gate_env, key):
     gate, commit, tmp_path = gate_env
-    result = gate.check({key: 1}, commit, None, "n1", tmp_path / "n1", tmp_path, [0, 1, 2, 3])
-    assert not result.ok and any(f"{key} is not tunable" in f for f in result.failures)
+    failures = gate.check({key: 1}, commit, None, "n1", tmp_path / "n1", tmp_path, [0, 1, 2, 3])
+    assert failures and any(f"{key} is not tunable" in f for f in failures)
 
 def test_lora_pair_outside_the_allowlist_is_rejected(gate_env):
     gate, commit, tmp_path = gate_env
-    result = gate.check({"lora.rank": 8, "lora.alpha": 8}, commit, None, "n1",
+    failures = gate.check({"lora.rank": 8, "lora.alpha": 8}, commit, None, "n1",
                         tmp_path / "n1", tmp_path, [0, 1, 2, 3])
-    assert not result.ok and any("lora" in f for f in result.failures)
+    assert failures and any("lora" in f for f in failures)
 
 def test_unchanged_data_commit_is_rejected(gate_env):
     gate, commit, tmp_path = gate_env
-    result = gate.check({}, commit, commit, "n1", tmp_path / "n1", tmp_path, [0, 1, 2, 3])
-    assert not result.ok and any("data commit" in f for f in result.failures)
+    failures = gate.check({}, commit, commit, "n1", tmp_path / "n1", tmp_path, [0, 1, 2, 3])
+    assert failures and any("data commit" in f for f in failures)
 
 def test_recommitted_identical_data_is_rejected(gate_env):
     gate, commit, tmp_path = gate_env
     manifest = gate.commits.manifest(commit)["datasets"]
     twin = gate.commits.commit(None, manifest, "same data, new message", node_id="n2")
     assert twin != commit
-    result = gate.check({}, twin, commit, "n2", tmp_path / "n2", tmp_path, [0, 1, 2, 3])
-    assert not result.ok and any("identical to the parent" in f for f in result.failures)
+    failures = gate.check({}, twin, commit, "n2", tmp_path / "n2", tmp_path, [0, 1, 2, 3])
+    assert failures and any("identical to the parent" in f for f in failures)
 
 def test_zero_steps_per_epoch_is_rejected(gate_env):
     gate, commit, tmp_path = gate_env
-    result = gate.check({"optimizer.grad_accum_steps": 4, "optimizer.max_steps": 10},
+    failures = gate.check({"optimizer.grad_accum_steps": 4, "optimizer.max_steps": 10},
                         commit, None, "n1", tmp_path / "n1", tmp_path, [0, 1, 2, 3])
-    assert not result.ok and any(f.startswith("too few clips for one optimizer step") for f in result.failures)
-    assert not any("window" in f for f in result.failures)
+    assert failures and any(f.startswith("too few clips for one optimizer step") for f in failures)
+    assert not any("window" in f for f in failures)
 
 def test_epoch_budget_below_max_steps_is_rejected(gate_env):
     gate, commit, tmp_path = gate_env
-    result = gate.check({"optimizer.grad_accum_steps": 1, "optimizer.max_steps": 100,
+    failures = gate.check({"optimizer.grad_accum_steps": 1, "optimizer.max_steps": 100,
                          "optimizer.epochs": 2},
                         commit, None, "n1", tmp_path / "n1", tmp_path, [0, 1, 2, 3])
-    assert not result.ok and any(f.startswith("too few clips for the step count") for f in result.failures)
-    assert not any("window" in f for f in result.failures)
+    assert failures and any(f.startswith("too few clips for the step count") for f in failures)
+    assert not any("window" in f for f in failures)
 
 def test_fewer_clips_than_gpus_is_rejected(tmp_path):
     conn = open_db(tmp_path)
@@ -100,9 +100,9 @@ def test_fewer_clips_than_gpus_is_rejected(tmp_path):
                          node_id="n1")[0].clip_id
     commits = CommitStore(conn, ing.blobs, ing.clips)
     commit = commits.commit(None, {"cam": {"weight": 1.0, "clips": [clip_id]}}, "v", node_id="n1")
-    result = Gate(CFG, commits, rec).check({}, commit, None, "n1", tmp_path / "n1",
+    failures = Gate(CFG, commits, rec).check({}, commit, None, "n1", tmp_path / "n1",
                                            tmp_path, [0, 1, 2, 3])
-    assert not result.ok and any("clips" in f for f in result.failures)
+    assert failures and any("clips" in f for f in failures)
 
 
 @pytest.mark.parametrize("key,value,fragment", [
@@ -120,6 +120,17 @@ def test_invalid_recipe_values_fail_the_gate_instead_of_crashing(gate_env, key, 
     """Agent-supplied values must not raise out of the gate: that crashes the node instead of
     costing an attempt."""
     gate, commit, tmp_path = gate_env
-    result = gate.check({key: value}, commit, None, "n1", tmp_path / "n1", tmp_path, [0, 1, 2, 3])
-    assert not result.ok
-    assert any(fragment in f for f in result.failures), result.failures
+    failures = gate.check({key: value}, commit, None, "n1", tmp_path / "n1", tmp_path, [0, 1, 2, 3])
+    assert failures
+    assert any(fragment in f for f in failures), failures
+
+
+def test_a_check_scripts_findings_are_failures_and_a_crash_raises():
+    import subprocess
+    from ar_kernel.train.gate import FINDINGS, findings
+    done = lambda rc, out: subprocess.CompletedProcess([], rc, out, "")
+    assert findings("check_dataset", done(0, "all fine")) == []
+    assert findings("check_dataset", done(1, f"[FAIL] d\n{FINDINGS}[\"d: too short\"]\n")) == \
+        ["check_dataset: d: too short"]
+    with pytest.raises(RuntimeError, match="check_dataset crashed"):
+        findings("check_dataset", done(1, "Traceback (most recent call last): ..."))

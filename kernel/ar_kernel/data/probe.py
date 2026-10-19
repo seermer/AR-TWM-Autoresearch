@@ -63,5 +63,15 @@ def probe_video(path: Path) -> VideoInfo:
                      rotation=_rotation(stream), sar=_ratio(stream.get("sample_aspect_ratio")))
 
 
+def readable_video(path: Path) -> VideoInfo:
+    """probe_video, with any way the file is not a readable video raised as ValueError."""
+    try:
+        return probe_video(path)
+    except subprocess.CalledProcessError as exc:
+        raise ValueError("ffprobe cannot read it as a video") from exc
+    except (KeyError, IndexError) as exc:                      # no video stream
+        raise ValueError(f"no video stream: {exc}") from exc
+
+
 def aspect_ok(info: VideoInfo, tolerance: float) -> bool:
     return abs(info.display_aspect - TARGET_ASPECT) <= TARGET_ASPECT * tolerance

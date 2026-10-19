@@ -97,6 +97,11 @@ def job_result(view: dict) -> dict:
     return json.loads(RESULT_FILES[view["result_file"]].read_text(encoding="utf-8"))
 
 
+def job_folder(run, job_id: str) -> Path:
+    """A job's work folder (jobs/<node>/<phase>-<attempt>/<id>); a path that does not exist when it has none."""
+    return next((Path(run) / "jobs").glob(f"*/*/{job_id}"), Path(run) / "jobs" / "none" / job_id)
+
+
 def client_dir(services) -> Path:
     """A short host path to a RunServices' sockets (AF_UNIX paths are capped at 107 bytes)."""
     return Path(f"/proc/{os.getpid()}/fd/{services._fd}")
