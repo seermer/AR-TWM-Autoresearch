@@ -423,8 +423,8 @@ class Ltx25Backend(GpuJob):
         super().__init__(*args, **kwargs)
         (h, w), (default, maximum) = self.block["resolutions"][0], self.block["frames"]
         self.description = (
-            "Use this tool when a clip has to be shorter than the other rollout tools allow, or has to show a given "
-            "image at a frame other than its first, which the other rollout tools cannot. "
+            "Use this tool when a clip has to show a given image at a frame other than its first, which the other "
+            "rollout tools cannot. "
             "Render training clips with LTX-2.5 from a text prompt, optionally pinned to one image at a chosen "
             "frame. A GPU job: returns {job_id} at once; collect with job_wait. Params (one value per "
             "job): `frames` (8k+1, "
