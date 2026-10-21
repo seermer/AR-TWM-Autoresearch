@@ -28,10 +28,10 @@ item -- an image item has no "video"/"src" for the other modes' argparse-driven 
 off, and only this bridge's argv carries --frames): it writes a 1280x704, 24 fps mp4 of --frames
 frames and echoes --repo/--ckpt-dir/--offload-model/--t5-cpu.
 
-With --variant set it stands in for ltx25_generate.py instead (ltx mode, see ltx(): checked
+With --quantization set it stands in for ltx25_generate.py instead (ltx mode, see ltx(): checked
 before the image and wan modes, whose --weights/--frames that bridge's argv also carries): it
 writes a --width x --height, 24 fps mp4 of --frames frames WITH an audio track (as LTX-2.5's own
-output has one) and echoes --weights/--variant/--quantization/--offload.
+output has one) and echoes --weights/--quantization/--offload.
 
 With --requests set it stands in for h3_generate.py instead (h3 mode, see h3(): checked first,
 since that bridge's argv also carries --weights): it writes a --width x --height, 24 fps mp4 of the
@@ -130,8 +130,7 @@ parser.add_argument("--offload-model", dest="offload_model", action="store_true"
 parser.add_argument("--no-offload-model", dest="offload_model", action="store_false")
 parser.add_argument("--t5-cpu", dest="t5_cpu", action="store_true", default=True)
 parser.add_argument("--no-t5-cpu", dest="t5_cpu", action="store_false")
-parser.add_argument("--variant")                     # set: ltx mode (stands in for ltx25_generate.py)
-parser.add_argument("--quantization")
+parser.add_argument("--quantization")                # set: ltx mode (stands in for ltx25_generate.py)
 parser.add_argument("--requests")                    # set: h3 mode (stands in for h3_generate.py)
 parser.add_argument("--config")
 args, _ = parser.parse_known_args()
@@ -180,7 +179,7 @@ def ltx(item, status_path):
                    check=True)
     status_path.write_text(json.dumps({"ok": True, "seconds": 0.01, "rank": args.rank,
                                        "gpus": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
-                                       "weights": args.weights, "variant": args.variant, "frames": args.frames,
+                                       "weights": args.weights, "frames": args.frames,
                                        "height": args.height, "width": args.width,
                                        "quantization": args.quantization, "offload": args.offload,
                                        "keyframes": item.get("keyframes")}))
@@ -240,7 +239,7 @@ for item in mine:
     if args.max_frames is not None:
         annotate(item, status_path)
         continue
-    if args.variant is not None:
+    if args.quantization is not None:
         ltx(item, status_path)
         continue
     if args.weights is not None:

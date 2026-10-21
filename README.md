@@ -139,7 +139,7 @@ hf download Tongyi-MAI/Z-Image-Turbo --revision f332072aa78be7aecdf3ee76d5c24708
   --exclude "assets/*" --local-dir weights/z-image-turbo
 hf download Wan-AI/Wan2.2-TI2V-5B --local-dir weights/wan2.2-ti2v-5b
 hf download Lightricks/LTX-2.5 --local-dir weights/ltx-2.5 \
-  --include "diffusion_models/ltx-2.5-22b-distilled-transformer-bf16.safetensors" \
+  --include "diffusion_models/ltx-2.5-22b-dev-transformer-bf16.safetensors" \
             "text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors" \
             "vae/ltx-2.5-video-vae-bf16.safetensors" \
             "vae/ltx-2.5-audio-vae-bf16.safetensors" \

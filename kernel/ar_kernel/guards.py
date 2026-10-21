@@ -84,7 +84,7 @@ def check_tools_fit(cfg, gpus: list[int], totals=gpu_total_gib) -> None:
     blocks = {"captioner": cfg.get("captioner") or {},
               **{k: b for k in ("annotate", "images") if (b := cfg.get(k) or {}).get("enabled")},
               **{f"generators.{k}": b for k, b in (cfg.get("generators") or {}).items()
-                 if b.get("enabled") or b.get("variants")}}
+                 if b.get("enabled")}}
     whole = sum(cards.values())
     problems = [f"{name} needs {block['min_total_gpu_gib']} GiB" for name, block in blocks.items()
                 if block.get("min_total_gpu_gib", 0) > whole]

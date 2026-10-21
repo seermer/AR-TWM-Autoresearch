@@ -1,9 +1,8 @@
 """rollout_alayaworld: case/config writers, submit checks, finish (CPU), the real produce with a
 fake worker, plus one real AlayaWorld gpu smoke. Also rollout_wan22 (Wan2.2 TI2V-5B):
 submit checks, finish (crop/probe, CPU), the real produce with a fake worker, plus one real Wan
-gpu smoke. And rollout_ltx25 (LTX-2.5 distilled/dev): submit checks, the host-RAM worker rule,
-finish (audio strip/probe, CPU), the real produce with a fake worker, plus one real gpu smoke
-per enabled variant."""
+gpu smoke. And rollout_ltx25 (LTX-2.5 dev): submit checks, the host-RAM worker rule,
+finish (audio strip/probe, CPU), the real produce with a fake worker, plus one real gpu smoke."""
 from conftest import job_result, job_folder
 import copy
 import json
@@ -984,14 +983,14 @@ def _head():
                           text=True, check=True).stdout.strip()
 
 
-def small_ltx_cfg(env="autoresearcher", enabled=("distilled", "dev"), **over):
-    """The real ltx25 block with the given variants enabled, pinned to
+def small_ltx_cfg(env="autoresearcher", enabled=True, **over):
+    """The real ltx25 block, enabled or not, pinned to
     repo_root's own HEAD (a real git repo, so the CPU tests need no LTX-2 clone), with the RAM
     tests' host_reserve_gib of 60."""
     raw = copy.deepcopy(REAL.raw)
     b = raw["generators"]["ltx25"]
     b.update(env=env, repo=".", commit=_head(), host_reserve_gib=60)
-    b["variants"] = list(enabled)
+    b["enabled"] = enabled
     b.update(over)
     return KernelConfig(raw=raw, repo_root=REAL.repo_root)
 
@@ -1032,7 +1031,7 @@ def run_ltx(q, caller, items, **params):
     ({"frames": 120}, r"8k\+1"), ({"frames": 1}, "1 < frames"), ({"frames": 125}, r"8k\+1"),
     ({"frames": 100001}, "1 < frames"), ({"frames": "x"}, "1 < frames"),
     ({"height": 720, "width": 1280}, "resolutions"), ({"width": 960}, "16:9"), ({"height": 768}, "16:9"),
-    ({"height": 576.0}, "ints"), ({"width": True}, "ints"), ({"variant": "pro"}, "variant")])
+    ({"height": 576.0}, "ints"), ({"width": True}, "ints")])
 def test_ltx_bad_params_are_refused_at_submit(ltx_env, params, match):
     make, caller, _ = ltx_env
     q = make()
@@ -1054,13 +1053,6 @@ def test_ltx_bad_items_are_refused_at_submit(ltx_env, item, match):
         q.backends["rollout_ltx25"].submit(q, caller, {"items": [item]})
 
 
-def test_ltx_a_disabled_variant_is_refused(ltx_env):
-    make, caller, _ = ltx_env
-    q = make(enabled=("distilled",))
-    with pytest.raises(ToolError, match="variant"):
-        q.backends["rollout_ltx25"].submit(q, caller, {"items": [{"prompt": "p", "seed": 1}], "variant": "dev"})
-
-
 def test_ltx_produces_and_publishes_a_silent_24fps_candidate_with_its_prompt(ltx_env):
     make, caller, staging = ltx_env
     q = make()
@@ -1072,7 +1064,7 @@ def test_ltx_produces_and_publishes_a_silent_24fps_candidate_with_its_prompt(ltx
         c = item["candidate"]
         assert c["video"] == f"/workspace/staging/rollouts/{job}/{i}.mp4"
         assert set(c) == {"video", "prompt", "frames", "derived_from"}          # no annotation and no pose
-        assert c["prompt"] == prompts[i] and c["derived_from"] == {"kind": "model", "name": "ltx-2.5-distilled"}
+        assert c["prompt"] == prompts[i] and c["derived_from"] == {"kind": "model", "name": "ltx-2.5-dev"}
         path = staging / "rollouts" / job / f"{i}.mp4"
         info = probe_video(path)
         assert (info.width, info.height, info.frames) == (w, h, default) and round(info.fps) == 24
@@ -1083,7 +1075,7 @@ def test_ltx_produces_and_publishes_a_silent_24fps_candidate_with_its_prompt(ltx
         assert not list((staging / "rollouts" / job).glob("*.json"))
         wk = item["worker"]
         assert wk["weights"] == str(REAL.repo_root / REAL.get("generators.ltx25.weights"))
-        assert (wk["variant"], wk["quantization"], wk["offload"]) == ("distilled", "fp8-cast", "cpu")
+        assert (wk["quantization"], wk["offload"]) == ("fp8-cast", "cpu")
     frames1 = by[1]["worker"]["keyframes"]
     assert [k["frame"] for k in frames1] == [0, -1]
     assert all("_keyframe" in k["image"] for k in frames1) and by[0]["worker"]["keyframes"] == []
@@ -1108,20 +1100,6 @@ def test_ltx_last_frame_given_twice_is_a_repeat(ltx_env):
     with pytest.raises(ToolError, match="repeat"):
         q.backends["rollout_ltx25"].submit(q, caller, {"items": [{"prompt": "p", "seed": 1, "keyframes": frames}],
                                                        "frames": 49})
-
-
-def test_ltx_an_unknown_variant_in_config_is_refused_at_startup(tmp_path):
-    rec = Recorder(tmp_path / "run")
-    with pytest.raises(ValueError, match="distiled"):
-        Ltx25Backend(small_ltx_cfg(enabled=("distiled",)), tmp_path / "run", [0], TokenRegistry(rec), rec)
-
-
-def test_ltx_dev_job_is_named_after_its_variant(ltx_env):
-    make, caller, _ = ltx_env
-    q = make()
-    _, by = run_ltx(q, caller, [{"prompt": "p", "seed": 1}], variant="dev", frames=9)
-    assert by[0]["candidate"]["derived_from"]["name"] == "ltx-2.5-dev"
-    assert by[0]["worker"]["variant"] == "dev" and by[0]["worker"]["frames"] == 9
 
 
 @pytest.mark.parametrize("gpus, rss, cap, workers", [
@@ -1191,10 +1169,10 @@ def test_ltx_refuses_to_run_off_the_pinned_commit(ltx_env):
     assert out["state"] == "failed" and "generators.ltx25.commit" in out["error"] and "0" * 40 in out["error"]
 
 
-def test_ltx_build_gpu_backends_includes_it_only_when_a_variant_is_enabled(tmp_path):
+def test_ltx_build_gpu_backends_includes_it_only_when_enabled(tmp_path):
     from ar_kernel.tools.gpu_jobs import build_gpu_backends
     rec = Recorder(tmp_path / "run")
-    for enabled, present in ((("dev",), True), ((), False)):
+    for enabled, present in ((True, True), (False, False)):
         names = [b.name for b in build_gpu_backends(small_ltx_cfg(enabled=enabled), tmp_path / "run",
                                                      [0, 1, 2, 3], TokenRegistry(rec), rec)]
         assert ("rollout_ltx25" in names) is present
@@ -1207,7 +1185,7 @@ def _ltx_backend(tmp_path, **over):
 
 def _ltx_job(**args):
     from types import SimpleNamespace
-    return SimpleNamespace(args={"variant": "distilled", "frames": 49, "height": 576, "width": 1024, **args})
+    return SimpleNamespace(args={"frames": 49, "height": 576, "width": 1024, **args})
 
 
 def test_ltx_finish_refuses_a_non_24fps_render(tmp_path):
@@ -1246,11 +1224,10 @@ def test_ltx_finish_passes_the_prompt_on(tmp_path):
 # ---- real LTX-2.5 gpu smoke ----
 
 @pytest.mark.gpu
-@pytest.mark.parametrize("variant", ["distilled", "dev"])
-def test_real_ltx25_rollout(tmp_path, variant):
+def test_real_ltx25_rollout(tmp_path):
     """AR_TEST_GPUS=0,1,2,3 pytest tests/test_rollouts.py -m gpu -k ltx25 -s --basetemp=.cache/pytest/gpu
 
-    Per enabled variant: 2 T2V items, one with a first keyframe and one with first and last
+    2 T2V items, one with a first keyframe and one with first and last
     keyframes (default frames and size; four, so four workers run at once when the host-RAM rule
     allows), workers per that rule over AR_TEST_GPUS. The keyframes are generate_images (Z-Image)
     frames -- the tools chain. One candidate then goes the agent's route into the pool
@@ -1263,8 +1240,8 @@ def test_real_ltx25_rollout(tmp_path, variant):
     from ar_kernel.tools.annotate import AnnotateBackend
     from ar_kernel.tools.images import ImageBackend
 
-    if variant not in REAL.get("generators.ltx25.variants"):
-        pytest.skip(f"ltx25 {variant} is disabled in configs/kernel.yaml")
+    if not REAL.get("generators.ltx25.enabled"):
+        pytest.skip("ltx25 is disabled in configs/kernel.yaml")
     gpus = [int(g) for g in os.environ.get("AR_TEST_GPUS", "0,1,2,3").split(",")]
     run_dir, ws = tmp_path / "run", tmp_path / "ws"
     staging = run_dir / "staging"
@@ -1292,7 +1269,7 @@ def test_real_ltx25_rollout(tmp_path, variant):
                             "table fills the frame.",
                   "keyframes": [{"image": frames[0], "frame": 0}, {"image": frames[1], "frame": -1}], "seed": 5}]
         t0 = time.monotonic()
-        out = _wait(q, caller, q.backends["rollout_ltx25"].submit(q, caller, {"items": items, "variant": variant})["job_id"])
+        out = _wait(q, caller, q.backends["rollout_ltx25"].submit(q, caller, {"items": items})["job_id"])
         wall = time.monotonic() - t0
         assert out["state"] == "done", out.get("error")
         by = {i["index"]: i for i in job_result(out)["items"]}
@@ -1302,7 +1279,7 @@ def test_real_ltx25_rollout(tmp_path, variant):
         failures = [] if res.accepted else [f"ingest: {res.reasons}"]
         rows = [{"item": i, "video": by[i]["candidate"]["video"], "frames": by[i]["candidate"]["frames"],
                  "worker": by[i]["worker"]} for i in range(4)]
-        print(json.dumps({"variant": variant, "gpus": gpus, "wall_s": round(wall, 1), "peak_mib": peak,
+        print(json.dumps({"gpus": gpus, "wall_s": round(wall, 1), "peak_mib": peak,
                           "gpu_memory_mib": job_result(out)["gpu_memory_mib"], "rows": rows}, indent=1))
     finally:
         stop.set()

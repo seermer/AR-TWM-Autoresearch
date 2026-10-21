@@ -407,8 +407,8 @@ class Wan22Backend(GpuJob):
 
 class Ltx25Backend(GpuJob):
     """rollout_ltx25: training clips from LTX-2.5 (Lightricks'
-    ltx-pipelines in its own env): `distilled` (DistilledPipeline) or `dev`
-    (TI2VidTwoStagesPipeline + the distilled LoRA). On 24 GB cards each worker runs one GPU with
+    ltx-pipelines in its own env): the dev model (TI2VidTwoStagesPipeline + the distilled LoRA
+    for stage 2). On 24 GB cards each worker runs one GPU with
     fp8-cast weights and CPU offload, so each worker also holds the model in host RAM: the worker
     count shrinks to what MemAvailable holds (`worker_groups`), and a job that cannot fit one
     worker fails before any starts rather than meeting the host OOM killer. The clip carries no
@@ -416,20 +416,18 @@ class Ltx25Backend(GpuJob):
     name = tool = "rollout_ltx25"
     kind = "rollout"
     config_key = "generators.ltx25"
+    generator = "ltx-2.5-dev"
     takes_keyframes = True
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         (h, w), (default, maximum) = self.block["resolutions"][0], self.block["frames"]
-        unknown = set(self.block.get("variants") or []) - {"distilled", "dev"}
-        if unknown:
-            raise ValueError(f"generators.ltx25.variants: unknown variant(s) {sorted(unknown)}; known: distilled, dev")
         self.description = (
             "Use this tool when a clip needs a keyframe between its first and last frame, or has to be shorter "
             "than the other rollout tools allow. "
             "Render training clips with LTX-2.5 from a text prompt, optionally pinned to images at chosen "
             "frames. A GPU job: returns {job_id} at once; collect with job_wait. Params (one value per "
-            f"job): `variant` ({' or '.join(self.enabled_variants())}; default the first), `frames` (8k+1, "
+            "job): `frames` (8k+1, "
             f"1 < frames <= {maximum}, default {default}), `width`/`height` (one of "
             f"{sizes_text(self.block['resolutions'])}; default {w}x{h}). Item: {{'prompt': str, "
             "'keyframes'?: [{'image': file under /workspace, 'frame': int}], 'seed': int}. A keyframe at "
@@ -440,17 +438,7 @@ class Ltx25Backend(GpuJob):
             "data_formats). LTX often ignores camera instructions like 'camera steady'. Batch many prompts "
             "per call.")
 
-    def enabled_variants(self) -> list[str]:
-        return list(self.block.get("variants") or [])          # __init__ refused unknown names
-
-    def generator_name(self, job) -> str:
-        return f"ltx-2.5-{job.args['variant']}"
-
     def check_args(self, args):
-        enabled = self.enabled_variants()
-        args.setdefault("variant", enabled[0] if enabled else None)
-        if args["variant"] not in enabled:
-            raise ToolError(f"variant must be one of the enabled variants {enabled}: got {args['variant']!r}")
         default, maximum = self.block["frames"]
         frames = args.setdefault("frames", default)
         if not (is_int(frames) and 1 < frames <= maximum):
@@ -473,7 +461,7 @@ class Ltx25Backend(GpuJob):
         if len(set(seen)) != len(seen):
             raise ToolError(f"keyframes repeat a frame: {seen}")
 
-    def worker_groups(self, variant: str, n_items: int) -> list[list[int]]:
+    def worker_groups(self, n_items: int) -> list[list[int]]:
         """One GPU per worker; workers = min(GPUs (capped by the config's `workers`), items,
         floor((MemAvailable - host_reserve_gib) / peak_rss_gib)): the job shrinks to what free
         host RAM holds (with the reserve kept for the kernel and OS) and refuses only below one."""
@@ -484,7 +472,7 @@ class Ltx25Backend(GpuJob):
         groups = split_gpus(self.gpus, 1, self.block.get("workers"))
         n = min(len(groups), n_items, by_ram)
         if n < 1:
-            raise RuntimeError(f"not enough free host RAM for one ltx-2.5-{variant} worker: MemAvailable "
+            raise RuntimeError(f"not enough free host RAM for one ltx-2.5 worker: MemAvailable "
                                f"{avail:.0f} GiB - host_reserve_gib {reserve:g} < peak_rss_gib {rss:g}; "
                                f"free host memory and retry")
         return groups[:n]
@@ -492,11 +480,11 @@ class Ltx25Backend(GpuJob):
     def produce(self, job, items, work, out, cancel, report):
         repo = checked_repo(self.cfg, self.config_key, "LTX-2")
         a = job.args
-        groups = self.worker_groups(a["variant"], len(items))
+        groups = self.worker_groups(len(items))
         return self.run_workers(self.block["env"], lambda r, w: [
             "python", str(LTX25_BRIDGE), "--items", str(work / "items.json"), "--out", str(out),
             "--rank", str(r), "--world", str(w), "--weights", str(self.cfg.repo_root / self.block["weights"]),
-            "--variant", a["variant"], "--frames", str(a["frames"]), "--height", str(a["height"]),
+            "--frames", str(a["frames"]), "--height", str(a["height"]),
             "--width", str(a["width"]), "--quantization", self.block.get("quantization", "fp8-cast"),
             "--offload", self.block.get("offload", "cpu")], groups,
             job=job, work=work, out=out, total=len(items), cancel=cancel, report=report, cwd=repo,

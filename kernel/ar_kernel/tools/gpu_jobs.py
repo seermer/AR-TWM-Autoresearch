@@ -447,8 +447,7 @@ def job_description(backend) -> str:
 
 
 def register_gpu_tools(mcp, kit, q) -> None:
-    """Registers each GPU data tool whose backend is on the queue. Disabled tools/variants are
-    simply absent (disabled variants are omitted from tool schemas)."""
+    """Registers each GPU data tool whose backend is on the queue. Disabled tools are simply absent."""
     b = q.backends
 
     def submit(ctx: Context, name: str, **args):
@@ -493,12 +492,11 @@ def register_gpu_tools(mcp, kit, q) -> None:
         @mcp.tool(name="rollout_ltx25", description=job_description(b["rollout_ltx25"]))
         async def rollout_ltx25(
                 items: LtxItems, ctx: Context,
-                variant: Annotated[str | None, Field(description="default the first one listed above")] = None,
                 frames: Annotated[int | None, Field(description="8k+1 frames at 24 fps; one value for the job")] = None,
                 height: Annotated[int | None, Field(description="with width, one of the listed resolutions")] = None,
                 width: Annotated[int | None, Field(description="with height, one of the listed resolutions")] = None,
         ) -> dict[str, Any]:
-            return await submit(ctx, "rollout_ltx25", items=items, variant=variant, frames=frames,
+            return await submit(ctx, "rollout_ltx25", items=items, frames=frames,
                                 height=height, width=width)
 
     if "rollout_h3" in b:
@@ -509,8 +507,7 @@ def register_gpu_tools(mcp, kit, q) -> None:
 
 def build_gpu_backends(cfg, run_dir: Path, gpus: list[int], registry, recorder) -> list:
     """Every GPU data backend a run gets: the captioner and locate_events always, the others only when
-    their `annotate`/`images`/`generators` config enables them (a generator needs `enabled` or a listed
-    variant). The caller registers each on the run's JobQueue, then calls `register_gpu_tools`
+    their `annotate`/`images`/`generators` config enables them. The caller registers each on the run's JobQueue, then calls `register_gpu_tools`
     `register_caption_tool` and `register_locate_tool`."""
     from .annotate import AnnotateBackend          # imports this module
     from .captioner import CaptionBackend
@@ -521,7 +518,7 @@ def build_gpu_backends(cfg, run_dir: Path, gpus: list[int], registry, recorder) 
 
     def generator_on(name: str) -> bool:
         block = cfg.get(f"generators.{name}") or {}
-        return bool(block.get("enabled") or block.get("variants"))
+        return bool(block.get("enabled"))
 
     enabled = [(True, CaptionBackend), (True, LocateEventsBackend), (cfg.get("annotate.enabled"), AnnotateBackend),
                (cfg.get("images.enabled"), ImageBackend), (generator_on("alayaworld"), AlayaWorldBackend),

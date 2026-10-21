@@ -156,13 +156,11 @@ generators:                       # rollout_* GPU jobs; switched on only after a
     repo: third_party/LTX-2       # relative to the AutoResearcher repo; gitignored
     commit: a95ab856bf29407b6b066ede0abe1846050db56c   # pinned; the backend refuses to run off this commit
     weights: weights/ltx-2.5
-    # peak_rss_gib: one worker's private host RAM (1024x576x121): peak RSS is ~72 GiB,
-    # but half of it is the mmapped weight files (page cache, shared by every worker); the private
-    # (RssAnon) peak is 35.4 GiB distilled / 36.8 GiB dev, and 4 concurrent distilled workers took
-    # 147 GiB of MemAvailable (36.7 each). distilled: 59 s/clip alone, 4 workers ~100 s/clip each
-    # (26 s/clip throughput); smoke on GPUs 0-3 passed. dev: 342 s/clip warm = 5.8x distilled
-    # (> 4x), so it is left out; it fits (same 10 GiB GPU peak).
-    variants: [distilled]         # the enabled ones, first = default; dev fits but is 5.8x slower
+    # The dev model (the distilled one dissolved between scenes; live-animal-10-19). peak_rss_gib: one
+    # worker's private host RAM (1024x576x121): peak RSS is ~72 GiB, but half of it is the mmapped
+    # weight files (page cache, shared by every worker); the private (RssAnon) peak is 36.8 GiB.
+    # 1024x576x145-169 with 2-3 workers: 150-190 s/clip each, 12-14 GiB GPU peak.
+    enabled: true
     peak_rss_gib: 40
     quantization: fp8-cast        # 24 GB cards: fp8-cast + CPU offload, one GPU per worker
     offload: cpu

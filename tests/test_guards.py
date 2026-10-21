@@ -29,7 +29,7 @@ def _fit_cfg(**generators):
 def test_enabled_tools_must_fit_the_runs_cards():
     from ar_kernel.guards import check_tools_fit
     h3 = {"enabled": True, "min_total_gpu_gib": 96}
-    ltx = {"variants": ["distilled"], "min_total_gpu_gib": 48}
+    ltx = {"enabled": True, "min_total_gpu_gib": 48}
     check_tools_fit(_fit_cfg(h3=h3, ltx25=ltx), [0, 1, 2, 3], totals=lambda g: {i: 24 for i in g})
     with pytest.raises(GpuPolicyError) as exc:                       # two 24 GiB cards
         check_tools_fit(_fit_cfg(h3=h3, ltx25=ltx, wan22={"enabled": False, "min_total_gpu_gib": 999}),
