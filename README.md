@@ -8,9 +8,8 @@ Every step ends with a check; do not continue if it fails.
 | | |
 |---|---|
 | OS | Linux x86_64 |
-| GPUs | 4 NVIDIA 24 GB cards of one model (tested: RTX 4090), all idle. A run takes the first `gpus.num_gpus` idle cards (`configs/kernel.yaml`: 4, a multiple of 4) |
+| GPUs | 4 NVIDIA cards of one model, at least 24 GB each: RTX 4090, A100 or H100 (tested: RTX 4090), all idle. A run takes the first `gpus.num_gpus` idle cards (`configs/kernel.yaml`: 4, a multiple of 4) |
 | Driver | `nvidia-smi` shows `CUDA Version: 13.2` or higher |
-| CUDA toolkit | `nvcc --version` works and says 12.x (usually `/usr/local/cuda-12.8`) |
 | RAM | 128 GB minimum, 256 GB recommended |
 | Disk | 850 GB free on one disk (downloads about 600 GB) |
 | Software | `conda` (Miniforge), `git`, `ffmpeg`, `bwrap` (bubblewrap, with unprivileged user namespaces allowed: agents run in bwrap sandboxes), and `curl`, `wget`, `unzip`, `gcc` (the sandboxes use them from the host) |
@@ -20,14 +19,11 @@ Check:
 
 ```bash
 nvidia-smi
-nvcc --version
 conda --version && git --version && ffmpeg -version | head -1 && which curl wget unzip gcc
 bwrap --unshare-user --ro-bind / / true && echo bwrap ok
 ssh -T git@github.com          # must say "Hi <your-user>!"
 df -h .
 ```
-
-If `nvcc` is not found: `export PATH=/usr/local/cuda-12.8/bin:$PATH` (add it to `~/.bashrc`).
 
 ## 1. Get the code
 
@@ -179,12 +175,12 @@ Check: the last line says `[Precache] done` and `ls ../WorldModel/cache/text_emb
 ## 6. Pre-flight checks
 
 ```bash
-ar doctor                       # must end with "0 failed"
+ar doctor --gpu                 # must end with "0 failed"
 nvidia-smi --query-gpu=index,memory.used --format=csv     # every GPU near 0 MiB
 pytest tests -q                 # optional: unit tests, no GPU needed, about 12 minutes
 ```
 
-`ar doctor` names anything missing (weights, environments, broken links). Fix what it names and run it again.
+`ar doctor` names anything missing (weights, environments, broken links); `--gpu` also runs a small GPU op in every environment (cards, driver, compiled packages). Fix what it names and run it again.
 
 ## 7. Start the experiment
 
@@ -281,5 +277,7 @@ Do not delete files under `runs/$RUN` by hand.
 | Hugging Face `401` / `403` | Re-run `hf auth login` and accept the licences in step 3. |
 | `ar doctor` reports missing weights or a broken link | Re-run the download command for that folder (step 4). |
 | Evaluation fails with a missing text embedding | Redo step 5. |
-| Env build fails at MegaSAM (`nvcc not found`) | Fix `PATH` (step 0), delete `.envs/wbench-main`, run `scripts/setup_envs.sh wbench-main`. |
+| Env build stops with `unsupported or mixed GPUs` | Only one kind of RTX 4090, A100 or H100 per machine is supported. |
+| `ar doctor --gpu` says torch is built for a newer CUDA than the driver supports | Update the NVIDIA driver (step 0). |
+| `ar doctor --gpu` reports `no kernel image` for an env | It was built on another kind of card: delete `.envs/<name>` and run `scripts/setup_envs.sh <name>`. |
 | Disk fills up | Alerts start below 50 GB free. Free space, then `--resume`. |

@@ -2,17 +2,20 @@
 place (e.g. WBench weight links left dangling by a moved checkout silently dropped five metrics)."""
 from __future__ import annotations
 
+import ctypes
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
 from .config import GpuPolicyError, KernelConfig
-from .guards import check_tools_fit, choose_gpus, device_minors
+from .guards import check_tools_fit, choose_gpus, device_minors, smi
 from .sandbox.runner import Mounts, bwrap_args
-from .subproc import cache_env, project_env
+from .subproc import cache_env, conda_command, project_env
 
 ENVS = ("alayaworld", "wbench-main", "wbench-vp", "autoresearcher")
 
@@ -230,6 +233,99 @@ def _prefix_envs(cfg: KernelConfig) -> list[Finding]:
                    else Finding("fail", f"env.{name.split('.')[-1]}",
                                 f"prefix env missing at {path}"))
     return out
+
+
+SUPPORTED_GPUS = {"8.0": "A100", "8.9": "RTX 4090", "9.0": "H100"}
+_ATTN = "q = torch.randn(1, 128, 8, 64, device='cuda', dtype=torch.half)"
+_FLASH = f"from flash_attn import flash_attn_func; {_ATTN}; flash_attn_func(q, q, q)"
+_XFORMERS = f"import xformers.ops as xo; {_ATTN}; xo.memory_efficient_attention(q, q, q)"
+# `ar doctor --gpu`: per env, one small GPU op for each package that depends on the driver or the card
+GPU_PROBES = {
+    "agent": [],
+    "alayaworld": [_FLASH],
+    "gen-wan22": [_FLASH],
+    "gen-zimage": [],
+    "wbench-main": [
+        _XFORMERS,
+        "from lietorch import SE3; SE3.Identity(2, device='cuda').log()",
+        "import droid_backends; droid_backends.iproj(torch.tensor([[0, 0, 0, 0, 0, 0, 1.]] * 2, device='cuda'), "
+        "torch.ones(2, 8, 8, device='cuda'), torch.tensor([8., 8, 4, 4], device='cuda'), 0)",
+        "from torch_scatter import scatter_add; scatter_add(torch.ones(4, device='cuda'), torch.tensor([0, 0, 1, 1], device='cuda'))",
+        "import bitsandbytes as bnb; bnb.functional.quantize_4bit(torch.randn(64, 64, device='cuda', dtype=torch.half))",
+    ],
+    "wbench-vp": [_XFORMERS, "import cupy; int(cupy.arange(4).sum())", "import vllm"],
+    "vllm": ["import vllm, flashinfer"],
+    "gen-ltx25": ["import natten; q = torch.randn(1, 8, 8, 2, 32, device='cuda', dtype=torch.half); natten.na2d(q, q, q, 3)"],
+    "gen-lightx2v": ["from sageattention import sageattn; q = torch.randn(1, 8, 128, 64, device='cuda', dtype=torch.half); "
+                     "sageattn(q, q, q)", "import flashinfer"],
+    "gen-sglang": ["import sglang, flashinfer"],
+    "gen-vllm-omni": ["import vllm_omni, flashinfer"],
+}
+
+
+def driver_cuda() -> tuple[int, int] | None:
+    """The newest CUDA version the installed driver supports."""
+    try:
+        lib = ctypes.CDLL("libcuda.so.1")
+    except OSError:
+        return None
+    v = ctypes.c_int()
+    if lib.cuDriverGetVersion(ctypes.byref(v)) != 0:
+        return None
+    return v.value // 1000, v.value % 1000 // 10
+
+
+def torch_cuda(env: Path) -> tuple[int, int] | None:
+    """The CUDA version an env's torch was built for."""
+    for f in env.glob("lib/python*/site-packages/torch/version.py"):
+        found = re.search(r"^cuda\b[^=]*=\s*'(\d+)\.(\d+)", f.read_text(), re.M)
+        if found:
+            return int(found.group(1)), int(found.group(2))
+    return None
+
+
+def _probe(env: Path, gpu: int, snippets: list[str]) -> subprocess.CompletedProcess:
+    code = "\n".join(["import torch", "x = torch.randn(64, 64, device='cuda'); (x @ x).sum().item()", *snippets])
+    env_vars = {**os.environ, **cache_env(), "CUDA_VISIBLE_DEVICES": str(gpu), "CUDA_DEVICE_ORDER": "PCI_BUS_ID"}
+    try:
+        return subprocess.run(conda_command(str(env), ["python", "-c", code]), env=env_vars,
+                              capture_output=True, text=True, timeout=900)
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(exc.cmd, 1, "", "timed out after 900 s")
+
+
+def gpu_checks(cfg: KernelConfig) -> list[Finding]:
+    """The cards, the driver, and every built env's GPU packages, each running a small op on one card."""
+    out = smi(["--query-gpu=name,compute_cap", "--format=csv,noheader"])
+    if out is None:
+        return [Finding("fail", "gpu.host", "nvidia-smi fails or is missing")]
+    kinds = sorted({line.strip() for line in out.splitlines() if line.strip()})
+    if len(kinds) != 1 or kinds[0].rsplit(",", 1)[-1].strip() not in SUPPORTED_GPUS:
+        return [Finding("fail", "gpu.host", f"need one kind of supported card ({', '.join(SUPPORTED_GPUS.values())}), "
+                                            f"found: {'; '.join(kinds)}")]
+    found = [Finding("ok", "gpu.host", kinds[0])]
+    driver = driver_cuda()
+    if driver is None:
+        return found + [Finding("fail", "gpu.driver", "cannot load libcuda.so.1 or read the driver version")]
+    found.append(Finding("ok", "gpu.driver", "supports CUDA %d.%d" % driver))
+    try:
+        gpu = choose_gpus(cfg, os.environ)[0]
+    except GpuPolicyError as exc:
+        return found + [Finding("fail", "gpu.probe", str(exc))]
+    envs = {name: path for name in GPU_PROBES if (path := project_env(name, cfg.repo_root))}
+
+    def check(name: str) -> Finding:
+        built = torch_cuda(envs[name])
+        if built is None:
+            return Finding("fail", f"gpu.{name}", "no CUDA build of torch in the env")
+        if built > driver:
+            return Finding("fail", f"gpu.{name}", "torch is built for CUDA %d.%d, newer than the driver supports "
+                                                  "(%d.%d): update the driver" % (*built, *driver))
+        r = _probe(envs[name], gpu, GPU_PROBES[name])
+        return Finding("ok", f"gpu.{name}", f"CUDA {built[0]}.{built[1]} packages run on GPU {gpu}") if r.returncode == 0 \
+            else Finding("fail", f"gpu.{name}", f"a GPU op fails: {(r.stderr or r.stdout).strip()[-2000:]}")
+    with ThreadPoolExecutor(4) as pool:
+        return found + list(pool.map(check, envs))
 
 
 def run_checks(cfg: KernelConfig | None = None) -> list[Finding]:

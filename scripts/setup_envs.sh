@@ -7,7 +7,9 @@
 #   CUDA_HOME=<env> CPATH=<env>/targets/x86_64-linux/include SGLANG_CACHE_DIR=.cache/sglang
 #   LIBRARY_PATH=<env>/targets/x86_64-linux/lib:<env>/targets/x86_64-linux/lib/stubs
 # An env that already exists is skipped; delete .envs/<name> to rebuild it.
-# Needs: conda, git, and a CUDA toolkit (nvcc) for wbench-main. Run from anywhere; run one copy at a time.
+# Needs: conda, git and an NVIDIA driver; no CUDA toolkit (the envs that compile bring their own nvcc).
+# CUDA code is compiled for the detected card only: RTX 4090 (8.9), A100 (8.0) or H100 (9.0), one kind per machine.
+# Run from anywhere; run one copy at a time.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p .cache/tmp third_party
@@ -23,6 +25,23 @@ ALL="autoresearcher agent vllm alayaworld wbench-main wbench-vp gen-zimage gen-w
 run() { conda run --no-capture-output -p ".envs/$1" "${@:2}"; }
 # `configs/kernel.yaml` pins the Wan2.2, LTX-2 and LightX2V revisions; read them with the autoresearcher env's yaml
 pin() { .envs/autoresearcher/bin/python -c "import yaml; print(yaml.safe_load(open('configs/kernel.yaml'))['generators']['$1']['commit'])"; }
+
+cuda_arch() {   # the cards' compute capability, for TORCH_CUDA_ARCH_LIST
+  local a
+  a=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | sort -u)
+  case $a in
+    8.0|8.9|9.0) echo "$a" ;;
+    *) echo "unsupported or mixed GPUs (compute capability: $(echo $a)); supported: 8.0, 8.9, 9.0" >&2; return 1 ;;
+  esac
+}
+
+cuda_run() {   # env command...: runs command in env, compiling CUDA with the env's own nvcc and g++ for this card
+  local e=$ROOT/.envs/$1 arch
+  arch=$(cuda_arch) || return 1
+  PATH=$e/bin:$PATH CC=$e/bin/x86_64-conda-linux-gnu-gcc CXX=$e/bin/x86_64-conda-linux-gnu-g++ CUDA_HOME=$e \
+    CPATH=$e/targets/x86_64-linux/include LIBRARY_PATH=$e/targets/x86_64-linux/lib TORCH_CUDA_ARCH_LIST=$arch \
+    conda run --no-capture-output -p "$e" "${@:2}"
+}
 
 clone_pinned() {   # url dir commit
   [ -d "$2/.git" ] || git clone "$1" "$2"
@@ -46,13 +65,13 @@ build() {
       run "$n" pip install -q --no-deps -e third_party/LightX2V
       clone_pinned https://github.com/thu-ml/SageAttention.git third_party/SageAttention d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5
       sed -i 's/-std=c++17/-std=c++20/g' third_party/SageAttention/setup.py   # torch 2.14 headers need C++20
-      local e=$ROOT/.envs/$n
-      PATH=$e/bin:$PATH CC=$e/bin/x86_64-conda-linux-gnu-gcc CXX=$e/bin/x86_64-conda-linux-gnu-g++ CUDA_HOME=$e \
-        CPATH=$e/targets/x86_64-linux/include LIBRARY_PATH=$e/targets/x86_64-linux/lib CUDA_ARCHITECTURES=8.9 \
-        run "$n" pip install -q --no-deps --no-build-isolation third_party/SageAttention ;;
-    wbench-main)   # MegaSAM's CUDA extensions (lietorch, droid_backends)
-      (cd ../WBench/third_party/mega-sam/base && LD_LIBRARY_PATH="$ROOT/.envs/$n/lib:${LD_LIBRARY_PATH:-}" \
-        conda run --no-capture-output -p "$ROOT/.envs/$n" python setup.py install) ;;
+      cuda_run "$n" pip install -q --no-deps --no-build-isolation third_party/SageAttention ;;
+    wbench-main)   # MegaSAM's CUDA extensions (lietorch, droid_backends), from a copy whose fixed arch list is removed
+      rm -rf .cache/tmp/mega-sam
+      cp -r ../WBench/third_party/mega-sam/base .cache/tmp/mega-sam
+      sed -i "/-gencode=arch=/d" .cache/tmp/mega-sam/setup.py
+      (cd .cache/tmp/mega-sam && cuda_run "$n" python setup.py install)
+      rm -rf .cache/tmp/mega-sam ;;
   esac
 }
 

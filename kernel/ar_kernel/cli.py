@@ -3,7 +3,7 @@ import argparse, json, os, signal, sys, time, traceback
 
 from .config import KernelConfig, load_dotenv
 from .control import Control, drive, exit_process, kill_recorded_groups
-from .doctor import report, run_checks
+from .doctor import gpu_checks, report, run_checks
 from .guards import alert, check_tools_fit, choose_gpus
 from .hf_upload import HfUpload, fetch
 from .loop import Loop
@@ -46,6 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     fetchp.add_argument("--repo", default=None, help="the dataset repo; default <HFK's user>/<run id>")
     doctor = sub.add_parser("doctor", help="check this tree is runnable here (paths, envs, symlinks)")
     doctor.add_argument("--strict", action="store_true", help="exit non-zero on warnings too")
+    doctor.add_argument("--gpu", action="store_true", help="also check the cards, the driver and each env's GPU packages")
     args = parser.parse_args(argv)
 
     overlay = getattr(args, "config", None)
@@ -57,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv(cfg.repo_root / ".env", os.environ)
     # Before bootstrap_run: diagnostics must not create a run dir or rewrite versions.json.
     if args.command == "doctor":
-        return report(run_checks(cfg), strict=args.strict)
+        return report(run_checks(cfg) + (gpu_checks(cfg) if args.gpu else []), strict=args.strict)
     if args.command == "fetch":
         if not os.environ.get("HFK", "").strip():
             raise ValueError("HFK is empty; set it in AutoResearcher/.env before `ar fetch`")

@@ -85,8 +85,14 @@ The script then does what a pin file cannot:
   `pip check` reports one conflict by design: torch 2.13.0+cu132 asks for `nvidia-cudnn-cu13==9.20.0.48`, the env has
   9.24.0.43 (LTX-2's own cuDNN override; 9.20 lacks `libcudnn_engines_tensor_ir`). `ltx-kernels` is not installed: it only
   serves multi-GPU sequence parallelism and NVFP4 (Blackwell).
-- `wbench-main`: builds MegaSAM's CUDA extensions (`lietorch`, `droid_backends`) from `../WBench/third_party/mega-sam/base`
-  with `setup.py install`; needs `nvcc` on PATH (CUDA 12.x). `import torch` must come before `import droid_backends`.
+- `wbench-main`: builds MegaSAM's CUDA extensions (`lietorch`, `droid_backends`) from a copy of `../WBench/third_party/mega-sam/base`
+  with `setup.py install`, using the env's own `nvcc` 12.4 and g++ 12. `import torch` must come before `import droid_backends`.
+
+No system CUDA toolkit is needed: `wbench-main` and `gen-lightx2v` compile with the toolkit in their own env. Both compile for
+the detected card only (`TORCH_CUDA_ARCH_LIST` from `nvidia-smi`): RTX 4090 (8.9), A100 (8.0) or H100 (9.0), one kind per machine;
+the script stops on anything else. MegaSAM's fixed arch list is deleted from the copy so that setting applies. An env built
+on one kind of card does not run on another: rebuild it. `ar doctor --gpu` checks the card, the driver against each env's torch
+CUDA version, and runs a small op of every compiled or driver-dependent package in each built env.
 
 **Verified 2026-09-28:** all nine rebuilt in a fresh clone of the three repos with an empty package cache; each env's
 `pip freeze` is identical to the working env's (`gen-wan22` differs only in how flash-attn and eva-decord are spelled).
@@ -108,7 +114,7 @@ of Wan and LTX set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (the 24 GB
 
 1. **Create the conda environments in `.envs/`** with `scripts/setup_envs.sh` (see
    "Environments" above). Never use `base` or the system Python. `ar doctor` lists any env that is missing or lives outside `.envs/`.
-2. **System tools on PATH:** `ffmpeg`, `ffprobe`, `conda`, `git`.
+2. **System tools on PATH:** `ffmpeg`, `ffprobe`, `conda`, `git`. An NVIDIA driver supporting CUDA 13.2; no CUDA toolkit.
 3. **Weights are not in git.** Re-download or copy:
    `WorldModel/weights/` (LTX-2.3 transformer, `alaya-world-ar`, VAE, Gemma),
    `WBench/weights/` (SAM2, DA3, MegaSAM, HPSv3, DINOv2 torch hub).
@@ -123,7 +129,7 @@ of Wan and LTX set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (the 24 GB
    created; `ar status` and `ar doctor` do not. A new run also refuses to start while
    any of the three repos has uncommitted changes. With `--git-remote URL`, the shell that runs `ar run` needs git access to
    URL without a prompt (e.g. an SSH key loaded in `ssh-agent`); pushes never prompt.
-5. **Run `ar doctor`,** then the unit suites.
+5. **Run `ar doctor --gpu`,** then the unit suites.
 
 ## The failure that motivated this
 

@@ -230,3 +230,41 @@ def test_a_tool_that_does_not_fit_the_gpus_is_a_failure(monkeypatch):
         GpuPolicyError("enabled tools do not fit GPUs 0,1: generators.h3 needs 70 GiB")))
     [found] = doctor._fit(cfg)
     assert (found.level, found.check) == ("fail", "gpus.fit") and "generators.h3 needs 70 GiB" in found.detail
+
+
+def _torch_env(root, name, cuda):
+    v = root / ".envs" / name / "lib" / "python3.10" / "site-packages" / "torch"
+    v.mkdir(parents=True)
+    (root / ".envs" / name / "conda-meta").mkdir()
+    (v / "version.py").write_text(f"__version__ = '2.4.0'\ncuda: Optional[str] = '{cuda}'\n")
+
+
+def test_gpu_checks_fail_on_mixed_or_unsupported_cards(monkeypatch):
+    from ar_kernel import doctor
+    cfg = KernelConfig.load()
+    for smi_out in ("NVIDIA A100, 8.0\nNVIDIA H100, 9.0\n", "Tesla V100, 7.0\n"):
+        monkeypatch.setattr(doctor, "smi", lambda args, out=smi_out: out)
+        [found] = doctor.gpu_checks(cfg)
+        assert (found.level, found.check) == ("fail", "gpu.host")
+
+
+def test_gpu_checks_fail_an_env_built_for_a_newer_cuda_than_the_driver(tmp_path, monkeypatch):
+    from ar_kernel import doctor
+    cfg = KernelConfig.load(_tree(tmp_path) / "configs" / "kernel.yaml")
+    _torch_env(cfg.repo_root, "vllm", "13.2")
+    _torch_env(cfg.repo_root, "alayaworld", "12.8")
+    _torch_env(cfg.repo_root, "agent", "12.4")
+    monkeypatch.setattr(doctor, "smi", lambda args: "NVIDIA H100 80GB HBM3, 9.0\n" * 4)
+    monkeypatch.setattr(doctor, "driver_cuda", lambda: (12, 8))
+    monkeypatch.setattr(doctor, "choose_gpus", lambda cfg, env: [2, 3, 4, 5])
+    probed = []
+
+    def probe(env, gpu, snippets):
+        probed.append((env.name, gpu))
+        return subprocess.CompletedProcess([], 1 if env.name == "agent" else 0, "", "no kernel image")
+    monkeypatch.setattr(doctor, "_probe", probe)
+    found = {f.check: f for f in doctor.gpu_checks(cfg)}
+    assert {k: f.level for k, f in found.items()} == {
+        "gpu.host": "ok", "gpu.driver": "ok", "gpu.agent": "fail", "gpu.alayaworld": "ok", "gpu.vllm": "fail"}
+    assert "CUDA 13.2" in found["gpu.vllm"].detail and "no kernel image" in found["gpu.agent"].detail
+    assert sorted(probed) == [("agent", 2), ("alayaworld", 2)]
