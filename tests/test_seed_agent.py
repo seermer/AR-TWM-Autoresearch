@@ -466,6 +466,21 @@ def test_a_planners_delegate_tool_names_its_builders_tools(orch):
     assert tool.description == "Brief the coder. Its tools: self_test, write_file, edit_file, run_command"
 
 
+def test_the_recipe_planner_sees_the_engineer_tools_it_cannot_call(orch):
+    o = orch[0]
+    from langchain_core.tools import StructuredTool
+
+    async def noop() -> str:
+        return ""
+    ktools = [StructuredTool.from_function(coroutine=noop, name=n, description=f"{n} does this.")
+              for n in ("data_query", "data_ingest", "read_skill", "rollout_h3")]
+    planner, engineer, _ = o.recipe_roles(None, None, ktools)
+    tool = next(t for t in planner.tools if t.name == "data_engineer")
+    assert tool.description.split("\n\n")[1] == ("The data_engineer tools you cannot call yourself:\n"
+                                                 "- data_ingest: data_ingest does this.\n"
+                                                 "- rollout_h3: rollout_h3 does this.")
+
+
 # ---- pure helpers ----
 
 def test_kernel_results_prefer_structured_content():

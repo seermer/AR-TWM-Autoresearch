@@ -265,7 +265,8 @@ def test_descriptions_make_h3_the_default_rollout_tool(tmp_path):
                                                            TokenRegistry(rec), rec) if b.name.startswith("rollout_")}
     assert d["rollout_h3"].startswith("MiniMax H3 is the most powerful video generation model of the rollout tools: "
                                       "use this tool for a new training clip unless")
-    assert d["rollout_ltx25"].startswith("Use this tool when a clip needs a keyframe between its first and last")
+    assert d["rollout_ltx25"].startswith("Use this tool when a clip has to be shorter than the other rollout tools "
+                                         "allow, or has to show a given image at a frame other than its first")
     assert d["rollout_alayaworld"].startswith("Use this tool when a clip's camera has to follow commanded moves")
 
 

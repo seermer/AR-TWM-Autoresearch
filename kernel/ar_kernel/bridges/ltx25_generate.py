@@ -1,6 +1,6 @@
 """rollout_ltx25 worker (runs in the gen-ltx25 conda-prefix env): Lightricks' ltx-pipelines, one
 pipeline built once, renders each item's shard (text-to-video, or pinned to the item's
-keyframes: each image at its frame, -1 = the last, strength 1.0).
+keyframe: its image at its frame, -1 = the last, strength 1.0).
 
 python ltx25_generate.py --items items.json --out DIR --rank R --world W \
     --weights <weights/ltx-2.5> --frames N --height H --width W \

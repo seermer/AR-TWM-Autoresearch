@@ -1045,6 +1045,8 @@ def test_ltx_bad_params_are_refused_at_submit(ltx_env, params, match):
     ({"prompt": "p", "seed": 1, "keyframes": [{"image": 3, "frame": 0}]}, "each keyframe"),
     ({"prompt": "p", "seed": 1, "keyframes": [{"image": "small.png", "frame": 0}]},
      "the keyframe at frame 0 is 960x544, but the job renders 1024x576"),
+    ({"prompt": "p", "seed": 1, "keyframes": [{"image": "frame.png", "frame": 0}, {"image": "frame.png", "frame": -1}]},
+     "at most one keyframe"),
     ({"prompt": "p", "seed": 1, "image": "frame.png"}, "image")])
 def test_ltx_bad_items_are_refused_at_submit(ltx_env, item, match):
     make, caller, _ = ltx_env
@@ -1058,7 +1060,7 @@ def test_ltx_produces_and_publishes_a_silent_24fps_candidate_with_its_prompt(ltx
     q = make()
     prompts = ["a walk in the woods", "a hiker on a ridge"]
     job, by = run_ltx(q, caller, [{"prompt": prompts[0], "seed": 1}, {"prompt": prompts[1], "seed": 2, "keyframes": [
-        {"image": "frame.png", "frame": 0}, {"image": "frame.png", "frame": -1}]}])
+        {"image": "frame.png", "frame": -1}]}])
     (h, w), default = REAL.get("generators.ltx25.resolutions")[0], REAL.get("generators.ltx25.frames")[0]
     for i, item in by.items():
         c = item["candidate"]
@@ -1077,7 +1079,7 @@ def test_ltx_produces_and_publishes_a_silent_24fps_candidate_with_its_prompt(ltx
         assert wk["weights"] == str(REAL.repo_root / REAL.get("generators.ltx25.weights"))
         assert (wk["quantization"], wk["offload"]) == ("fp8-cast", "cpu")
     frames1 = by[1]["worker"]["keyframes"]
-    assert [k["frame"] for k in frames1] == [0, -1]
+    assert [k["frame"] for k in frames1] == [-1]
     assert all("_keyframe" in k["image"] for k in frames1) and by[0]["worker"]["keyframes"] == []
 
 
@@ -1091,15 +1093,6 @@ def test_ltx_keyframe_frames_must_be_inside_the_clip(ltx_env, frame, ok):
     else:
         with pytest.raises(ToolError, match="outside the clip"):
             q.backends["rollout_ltx25"].submit(q, caller, args)
-
-
-def test_ltx_last_frame_given_twice_is_a_repeat(ltx_env):
-    make, caller, _ = ltx_env
-    q = make()
-    frames = [{"image": "frame.png", "frame": -1}, {"image": "frame.png", "frame": 48}]
-    with pytest.raises(ToolError, match="repeat"):
-        q.backends["rollout_ltx25"].submit(q, caller, {"items": [{"prompt": "p", "seed": 1, "keyframes": frames}],
-                                                       "frames": 49})
 
 
 @pytest.mark.parametrize("gpus, rss, cap, workers", [
@@ -1227,8 +1220,8 @@ def test_ltx_finish_passes_the_prompt_on(tmp_path):
 def test_real_ltx25_rollout(tmp_path):
     """AR_TEST_GPUS=0,1,2,3 pytest tests/test_rollouts.py -m gpu -k ltx25 -s --basetemp=.cache/pytest/gpu
 
-    2 T2V items, one with a first keyframe and one with first and last
-    keyframes (default frames and size; four, so four workers run at once when the host-RAM rule
+    2 T2V items, one with a first keyframe and one with a keyframe mid-clip
+    (default frames and size; four, so four workers run at once when the host-RAM rule
     allows), workers per that rule over AR_TEST_GPUS. The keyframes are generate_images (Z-Image)
     frames -- the tools chain. One candidate then goes the agent's route into the pool
     (_ingest_as_an_agent)."""
@@ -1257,17 +1250,15 @@ def test_real_ltx25_rollout(tmp_path):
     try:
         img = _wait(q, caller, q.backends["generate_images"].submit(
             q, caller, {"width": 1024, "height": 576, "items": [
-                {"prompt": "a red barn in an open field, photorealistic", "seed": 9},
-                {"prompt": "a cup of coffee on a wooden table, photorealistic", "seed": 10}]})["job_id"])
+                {"prompt": "a red barn in an open field, photorealistic", "seed": 9}]})["job_id"])
         assert img["state"] == "done", img.get("error")
         frames = [i["image"] for i in job_result(img)["items"]]
         items = [{"prompt": "Ocean waves gently rolling onto a quiet beach at sunset, camera steady.", "seed": 2},
                  {"prompt": "The red barn under slowly moving clouds, grass swaying, camera steady.",
                   "keyframes": [{"image": frames[0], "frame": 0}], "seed": 3},
                  {"prompt": "A slow walk through a sunlit forest path, camera steady.", "seed": 4},
-                 {"prompt": "The camera pulls back from a red barn in a field until a cup of coffee on a wooden "
-                            "table fills the frame.",
-                  "keyframes": [{"image": frames[0], "frame": 0}, {"image": frames[1], "frame": -1}], "seed": 5}]
+                 {"prompt": "The camera slowly approaches a red barn in an open field, grass swaying.",
+                  "keyframes": [{"image": frames[0], "frame": 64}], "seed": 5}]
         t0 = time.monotonic()
         out = _wait(q, caller, q.backends["rollout_ltx25"].submit(q, caller, {"items": items})["job_id"])
         wall = time.monotonic() - t0

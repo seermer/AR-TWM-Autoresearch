@@ -127,8 +127,10 @@ class Review(BaseModel):
                                                     "which ones decide the verdict; what you checked")
 
 
-def delegate(builder: Role, reviewer, schema: type[BaseModel], handbacks: list, describe) -> StructuredTool:
-    """The planner's tool for `builder`: build, review, hand back."""
+def delegate(builder: Role, reviewer, schema: type[BaseModel], handbacks: list, describe,
+             described: list = ()) -> StructuredTool:
+    """The planner's tool for `builder`: build, review, hand back. `described`: builder tools listed with their
+    descriptions."""
     calls = 0
 
     async def call(**kwargs) -> str:
@@ -152,7 +154,11 @@ def delegate(builder: Role, reviewer, schema: type[BaseModel], handbacks: list, 
         return json.dumps(handback, indent=1, ensure_ascii=False)
 
     tools = ", ".join(t.name for t in builder.tools if t.name != builder.submit)
-    return StructuredTool(name=builder.name, description=f"{schema.__doc__} Its tools: {tools}", args_schema=schema,
+    description = f"{schema.__doc__} Its tools: {tools}"
+    if described:
+        description += (f"\n\nThe {builder.name} tools you cannot call yourself:\n"
+                        + "\n".join(f"- {t.name}: {t.description}" for t in described))
+    return StructuredTool(name=builder.name, description=description, args_schema=schema,
                           coroutine=call, metadata={"ends_batch": True, "delegates": True})
 
 
@@ -228,13 +234,14 @@ def recipe_roles(ctx: RecipeContext | None, session, ktools: list) -> tuple:
                 f"<snapshot>\n{json.dumps(shown, indent=1, ensure_ascii=False)}\n</snapshot>")
 
     read_only = [t for t in ktools if t.name in READ_ONLY_KERNEL_TOOLS]
+    others = [t for t in ktools if t.name not in READ_ONLY_KERNEL_TOOLS]
     handbacks: list = []
     engineer = Role("data_engineer", lambda s: data_engineer_context(ctx, s), ktools, "submit_data_engineer",
                     DataHandback, built, owns=WORKSPACE, papers=True, compact_on_delegation=True)
     reviewer = lambda: Role("recipe_reviewer", lambda s: recipe_reviewer_context(ctx, s), read_only, "submit_review",
                             Review)
     planner = Role("recipe_planner", lambda s: recipe_planner_context(ctx, s),
-                   [delegate(engineer, reviewer, DataPlan, handbacks, describe), *read_only], "submit_result",
+                   [delegate(engineer, reviewer, DataPlan, handbacks, describe, others), *read_only], "submit_result",
                    RecipeSubmit, result_check(handbacks, needs_result=True), papers=True)
     return planner, engineer, reviewer
 

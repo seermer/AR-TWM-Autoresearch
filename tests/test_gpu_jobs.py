@@ -299,6 +299,7 @@ def test_listed_item_schemas_type_every_field(tmp_path):
     assert tools["rollout_wan22"].input_schema["properties"]["items"]["anyOf"][0]["items"]["properties"]["image"]["type"] == "string"
     key = tools["rollout_ltx25"].input_schema["properties"]["items"]["anyOf"][0]["items"]["properties"]["keyframes"]
     assert key["items"]["properties"]["frame"]["type"] == "integer" and key["items"]["required"] == ["image", "frame"]
+    assert key["maxItems"] == 1
     from ar_kernel.data.annotation import ACTIONS, PERSPECTIVES
     h3 = tools["rollout_h3"].input_schema["properties"]["items"]["anyOf"][0]["items"]
     assert set(h3["properties"]) == {"scene_prompt", "character_prompt", "seed", "image", "seconds", "turns"}
@@ -441,7 +442,7 @@ def keyed(env):
     ([{"image": 3, "frame": 0}], "each keyframe must be"),
     ([{"image": "a.png", "frame": True}], "each keyframe must be"),
     ([{"image": "a.png", "frame": -2}], "frame must be -1"),
-    ([{"image": "a.png", "frame": 0}, {"image": "b.png", "frame": 0}], "repeat"),
+    ([{"image": "a.png", "frame": 0}, {"image": "b.png", "frame": 5}], "at most one keyframe"),
     ([{"image": "a.mp4", "frame": 0}], "must be an image"),
     ([{"image": "../outside.png", "frame": 0}], "keyframes"),
     ([{"image": "missing.png", "frame": 0}], "keyframes"),      # as a missing top-level file is refused today
@@ -452,16 +453,16 @@ def test_bad_keyframes_are_refused_at_submit(keyed, keyframes, match):
         backend.submit(q, caller, {"items": [{"keyframes": keyframes, "seed": 1}]})
 
 
-def test_keyframe_images_are_staged_in_clip_order(keyed):
+def test_a_keyframe_image_is_staged(keyed):
     q, caller, backend, run = keyed
-    items = [{"keyframes": [{"image": "a.png", "frame": 0}, {"image": "b.png", "frame": -1}], "seed": 1},
-             {"keyframes": [{"image": "a.png", "frame": 0}, {"image": "b.png", "frame": 5}], "seed": 1},
+    items = [{"keyframes": [{"image": "b.png", "frame": -1}], "seed": 1},
+             {"keyframes": [{"image": "a.png", "frame": 5}], "seed": 1},
              {"seed": 1}]
     out = q.wait(caller, backend.submit(q, caller, {"items": items})["job_id"], 120)
     assert out["state"] == "done", out["error"]
     got = job_result(out)["items"]
     staged = got[0]["worker"]["keyframes"]
-    assert [k["frame"] for k in staged] == [0, -1]             # in clip order whatever order was given
+    assert [k["frame"] for k in staged] == [-1]
     assert all(f"/jobs/n1/improve_recipe-1/{out['id']}/in/0_keyframe" in k["image"] for k in staged)
     assert got[2]["worker"]["keyframes"] == []
 

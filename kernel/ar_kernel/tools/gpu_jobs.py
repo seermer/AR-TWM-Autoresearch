@@ -55,7 +55,8 @@ ImageItems = Annotated[list[dict[str, Any]] | str, items_schema(
 ClipItems = Annotated[list[dict[str, Any]] | str, items_schema(
     "the clips to render, one item each",
     {"prompt": _str("what the clip shows"), "image": _FRAME, "seed": _SEED}, ["prompt", "seed"])]
-KEYFRAMES_SCHEMA = {"type": "array", "description": "images the clip must show at given frames", "items": {
+KEYFRAMES_SCHEMA = {"type": "array", "description": "an image the clip must show at a given frame (at most one)",
+                    "maxItems": 1, "items": {
     "type": "object", "additionalProperties": False, "required": ["image", "frame"], "properties": {
         "image": _str("an image file under /workspace, exactly the clip's width x height (it is used as it is)"),
         "frame": {"type": "integer", "description": "0-based frame index; 0 is the first frame, -1 the last"}}}}
@@ -110,12 +111,14 @@ def check_item_seed(item: dict) -> None:
 
 
 def check_keyframes(item: dict) -> None:
-    """An item's optional `keyframes`: [{'image': path, 'frame': int}], frame >= -1 (-1 = the last), none repeated."""
+    """An item's optional `keyframes`: at most one {'image': path, 'frame': int}, frame >= -1 (-1 = the last)."""
     frames = item.get("keyframes")
     if frames is None:
         return
     if not isinstance(frames, list):
         raise ToolError("keyframes must be a list of {'image': path, 'frame': int}")
+    if len(frames) > 1:
+        raise ToolError(f"at most one keyframe per item: got {len(frames)}")
     for k in frames:
         if not (isinstance(k, dict) and set(k) == {"image", "frame"} and isinstance(k["image"], str)
                 and is_int(k["frame"])):
@@ -124,9 +127,6 @@ def check_keyframes(item: dict) -> None:
             raise ToolError(f"a keyframe's image must be an image file ({', '.join(IMAGE_EXTS)}): got {k['image']!r}")
         if k["frame"] < -1:
             raise ToolError(f"frame must be -1 (the last frame) or a frame index from 0: got {k['frame']}")
-    seen = [k["frame"] for k in frames]
-    if len(set(seen)) != len(seen):
-        raise ToolError(f"keyframes repeat a frame: {seen}")
 
 
 def _near_16_9(cfg, width: int, height: int) -> bool:
@@ -246,7 +246,7 @@ class GpuJob:
                     except ToolError as exc:
                         bad.setdefault(n, str(exc))
                     frames.append({**k, "image": container_path(k["image"])})
-                item = {**item, "keyframes": sorted(frames, key=lambda k: (k["frame"] < 0, k["frame"]))}   # clip order
+                item = {**item, "keyframes": frames}
             items[n] = item
         refuse(caller, self.name, items, bad)
         return {"job_id": q.submit(caller, self.name, args)}

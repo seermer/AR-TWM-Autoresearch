@@ -423,16 +423,17 @@ class Ltx25Backend(GpuJob):
         super().__init__(*args, **kwargs)
         (h, w), (default, maximum) = self.block["resolutions"][0], self.block["frames"]
         self.description = (
-            "Use this tool when a clip needs a keyframe between its first and last frame, or has to be shorter "
-            "than the other rollout tools allow. "
-            "Render training clips with LTX-2.5 from a text prompt, optionally pinned to images at chosen "
-            "frames. A GPU job: returns {job_id} at once; collect with job_wait. Params (one value per "
+            "Use this tool when a clip has to be shorter than the other rollout tools allow, or has to show a given "
+            "image at a frame other than its first, which the other rollout tools cannot. "
+            "Render training clips with LTX-2.5 from a text prompt, optionally pinned to one image at a chosen "
+            "frame. A GPU job: returns {job_id} at once; collect with job_wait. Params (one value per "
             "job): `frames` (8k+1, "
             f"1 < frames <= {maximum}, default {default}), `width`/`height` (one of "
             f"{sizes_text(self.block['resolutions'])}; default {w}x{h}). Item: {{'prompt': str, "
-            "'keyframes'?: [{'image': file under /workspace, 'frame': int}], 'seed': int}. A keyframe at "
-            "frame 0 is the first frame and one at -1 the last; any frame in between also works. A keyframe "
-            "image must be exactly the job's width x height: it is used as it is. Each result item gives a `candidate`: "
+            "'keyframes'?: [{'image': file under /workspace, 'frame': int}] (at most one), 'seed': int}. A "
+            "keyframe at frame 0 is the first frame and one at -1 the last; any frame in between also works. A "
+            "keyframe image must be exactly the job's width x height: it is used as it is. "
+            "Each result item gives a `candidate`: "
             "`video` (a 24 fps, 16:9, silent mp4), the `prompt` used and `derived_from`. To ingest it, bring "
             "the clip to 960x544, run annotate_camera on the result and write its annotation (skill "
             "data_formats). LTX often ignores camera instructions like 'camera steady'. Batch many prompts "
@@ -458,8 +459,6 @@ class Ltx25Backend(GpuJob):
         seen = [frames - 1 if k["frame"] == -1 else k["frame"] for k in item.get("keyframes") or []]
         if any(f >= frames for f in seen):
             raise ToolError(f"a keyframe frame is outside the clip: frames are 0..{frames - 1}, or -1 for the last")
-        if len(set(seen)) != len(seen):
-            raise ToolError(f"keyframes repeat a frame: {seen}")
 
     def worker_groups(self, n_items: int) -> list[list[int]]:
         """One GPU per worker; workers = min(GPUs (capped by the config's `workers`), items,
