@@ -12,5 +12,7 @@ description: Use when writing a clip's annotation: what text the model is traine
 - Write the scene and the subject as prose: what is there. Write an event as one sentence: what happens during that turn.
 - Do not describe the camera or how it moves: the camera is learned from the clip's poses.
 - An event belongs to the turn in which it happens on screen. Set that turn's `start_s` to when the event starts in the clip (locate_events finds it). A turn runs until the next turn starts; the last runs to the end of the clip.
+- A turn's text holds for the whole turn. Start the turn when what its text describes first shows on screen, not before, and start the next turn only after it is complete.
+- If what a turn describes first shows less than 2.4 s into the clip, the first turn's text would claim it before it shows: trim the clip's start to that moment, or leave the clip out.
 - A turn has at most one event. When two events overlap in time, decide which turn each belongs to.
 - The first turn lasts at least 2.4 s and every later turn at least 1.4 s.
