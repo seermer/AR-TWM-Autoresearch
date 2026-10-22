@@ -333,7 +333,7 @@ _STAGED = "absolute container path under /workspace/staging/"
 Candidates = Annotated[list[dict[str, Any]] | str, items_schema("the clips to ingest, one candidate each", {
     "video": {"type": "string", "description": f"the mp4, 960x544: {_STAGED}"},
     "annotation": {"type": "string", "description": f"the annotation JSON file (not the text): {_STAGED}. Its "
-                                                    "shape is in skill data_formats"},
+                                                    "shape is in knowledge file data_formats"},
     "pose": {"type": "string", "description": f"the pose npz with cam_c2w, as annotate_camera writes it: {_STAGED}"},
     "derived_from": {"type": "object", "description": "what the clip was made from, for a person to read",
                      "properties": {"kind": {"type": "string", "enum": list(DERIVED_KINDS)},
@@ -352,7 +352,7 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
         return await kit.call(ctx, "video_probe", {"path": path}, lambda c: tools.probe(c, path))
 
     @mcp.tool(name="data_ingest", description="Ingest staged candidates into the run's clip pool. What "
-              "a clip must meet is in skill data_formats. Ingest copies each staged file into the archive and "
+              "a clip must meet is in knowledge file data_formats. Ingest copies each staged file into the archive and "
               "leaves yours where it is. Send every candidate in one call. Returns how many were accepted "
               "and rejected, the rejection reasons and warnings with counts, and `result_file`: a JSON array "
               "under /workspace/staging/results/ with, per candidate, index, video, accepted, clip_id, "

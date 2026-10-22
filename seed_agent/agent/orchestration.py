@@ -30,8 +30,8 @@ PLAN_FIELD_CHARS = 4000                       # chars per plan field
 REMIND = ("Your last message made no tool call, which ends your turn. Keep working with the tools; when the "
           "work is done, call {tool}. Nothing is recorded unless you call {tool}.")
 REMINDERS = 4
-READ_ONLY_KERNEL_TOOLS = {"hf_search", "hf_list_files", "data_query", "data_fetch", "ask", "read_skill"}
-EDIT_KERNEL_TOOLS = {"ask", "read_skill"}
+READ_ONLY_KERNEL_TOOLS = {"hf_search", "hf_list_files", "data_query", "data_fetch", "ask", "read_knowledge"}
+EDIT_KERNEL_TOOLS = {"ask", "read_knowledge"}
 
 COMPONENTS = {
     "tools": "agent/tools.py -- the agent's own tools and the adapter for kernel tools",

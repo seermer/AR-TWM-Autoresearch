@@ -360,7 +360,7 @@ class Wan22Backend(GpuJob):
             "size; center-cropped and resized to 1280x704), 'seed': "
             "int}. Each result item gives a `candidate`: `video` (a 1248x704 (~16:9), 24 fps mp4 "
             "center-cropped from Wan's 1280x704), the `prompt` used and `derived_from`. To ingest it, bring "
-            "the clip to 960x544, run annotate_camera on the result and write its annotation (skill "
+            "the clip to 960x544, run annotate_camera on the result and write its annotation (knowledge file "
             "data_formats). Wan often ignores camera instructions like 'camera steady'. Batch many prompts "
             "per call.")
 
@@ -435,7 +435,7 @@ class Ltx25Backend(GpuJob):
             "keyframe image must be exactly the job's width x height: it is used as it is. "
             "Each result item gives a `candidate`: "
             "`video` (a 24 fps, 16:9, silent mp4), the `prompt` used and `derived_from`. To ingest it, bring "
-            "the clip to 960x544, run annotate_camera on the result and write its annotation (skill "
+            "the clip to 960x544, run annotate_camera on the result and write its annotation (knowledge file "
             "data_formats). LTX often ignores camera instructions like 'camera steady'. Batch many prompts "
             "per call.")
 

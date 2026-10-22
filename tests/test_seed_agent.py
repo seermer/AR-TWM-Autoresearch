@@ -439,19 +439,19 @@ def test_the_planner_tools_follow_the_roles_missions(orch):
     async def noop() -> str:
         return ""
     ktools = [StructuredTool.from_function(coroutine=noop, name=n, description=n)
-              for n in ("data_query", "data_ingest", "hf_download", "ask", "read_skill", "caption_videos")]
+              for n in ("data_query", "data_ingest", "hf_download", "ask", "read_knowledge", "caption_videos")]
     names = lambda role: {t.name for t in role.tools}
     planner, engineer, reviewer = o.recipe_roles(None, None, ktools)
-    assert names(planner) == {"data_engineer", "data_query", "ask", "read_skill", "write_file", "edit_file",
+    assert names(planner) == {"data_engineer", "data_query", "ask", "read_knowledge", "write_file", "edit_file",
                               "run_command", "arxiv_search", "arxiv_read", "submit_result"}
     assert {"data_ingest", "hf_download", "caption_videos", "submit_data_engineer"} <= names(engineer)
-    assert names(reviewer()) == {"data_query", "ask", "read_skill", "write_file", "edit_file", "run_command",
+    assert names(reviewer()) == {"data_query", "ask", "read_knowledge", "write_file", "edit_file", "run_command",
                                  "submit_review"}
     planner, coder, reviewer = o.edit_roles(None, None, ktools, None)
-    assert names(planner) == {"coder", "ask", "read_skill", "write_file", "edit_file", "run_command", "arxiv_search",
+    assert names(planner) == {"coder", "ask", "read_knowledge", "write_file", "edit_file", "run_command", "arxiv_search",
                               "arxiv_read", "submit_result"}
-    assert names(coder) == {"ask", "read_skill", "self_test", "write_file", "edit_file", "run_command", "submit_coder"}
-    assert names(reviewer()) == {"ask", "read_skill", "self_test", "write_file", "edit_file", "run_command",
+    assert names(coder) == {"ask", "read_knowledge", "self_test", "write_file", "edit_file", "run_command", "submit_coder"}
+    assert names(reviewer()) == {"ask", "read_knowledge", "self_test", "write_file", "edit_file", "run_command",
                                  "submit_review"}
     run_command = lambda role: next(t for t in role.tools if t.name == "run_command").description
     assert f"in {o.AGENT_ROOT} " in run_command(coder) and f"in {planner.scratch} " in run_command(planner)
@@ -473,7 +473,7 @@ def test_the_recipe_planner_sees_the_engineer_tools_it_cannot_call(orch):
     async def noop() -> str:
         return ""
     ktools = [StructuredTool.from_function(coroutine=noop, name=n, description=f"{n} does this.")
-              for n in ("data_query", "data_ingest", "read_skill", "rollout_h3")]
+              for n in ("data_query", "data_ingest", "read_knowledge", "rollout_h3")]
     planner, engineer, _ = o.recipe_roles(None, None, ktools)
     tool = next(t for t in planner.tools if t.name == "data_engineer")
     assert tool.description.split("\n\n")[1] == ("The data_engineer tools you cannot call yourself:\n"
@@ -663,7 +663,7 @@ def kernel(tmp_path_factory):
     from ar_kernel.tools.hf_tools import register_hf_tools
     from ar_kernel.tools.jobs import JobQueue, register_job_tools
     from ar_kernel.tools.server import ToolKit, build_tool_app, new_mcp
-    from ar_kernel.tools.skills import register_skill_tool
+    from ar_kernel.tools.knowledge import register_knowledge_tool
     from ar_kernel.tools.snapshot import SnapshotStore, register_snapshot_tool
     from ar_kernel.vcs.agents_repo import AgentsRepo
     run = tmp_path_factory.mktemp("run")
@@ -696,7 +696,7 @@ def kernel(tmp_path_factory):
     queue.register(_MockCaption())
     register_caption_tool(mcp, kit, queue)
     register_ask_tool(mcp, kit, MockAsk())
-    register_skill_tool(mcp, kit)
+    register_knowledge_tool(mcp, kit)
     services = RunServices(socket_dir_for(run))
     services.start(create_gateway_app(registry=registry, store=CallStore(rec), allowed_models={"mock-model"},
                                       upstream=None, mocks=book), build_tool_app(mcp))
@@ -811,10 +811,10 @@ def test_improve_recipe_full_flow(kernel, tmp_path):
     roles = _by_role(rec, "n-recipe")
     assert set(roles) == {"recipe_planner", "data_engineer", "recipe_reviewer"}
     planner_tools = _tools_of(roles["recipe_planner"])
-    assert {"data_engineer", "hf_search", "data_query", "data_fetch", "ask", "read_skill", "run_command",
+    assert {"data_engineer", "hf_search", "data_query", "data_fetch", "ask", "read_knowledge", "run_command",
             "arxiv_search", "submit_result"} <= planner_tools
     assert not {"hf_download", "data_ingest", "data_commit", "caption_videos", "snapshot"} & planner_tools
-    assert {"submit_data_engineer", "read_skill", "data_ingest", "arxiv_search"} <= _tools_of(roles["data_engineer"])
+    assert {"submit_data_engineer", "read_knowledge", "data_ingest", "arxiv_search"} <= _tools_of(roles["data_engineer"])
     assert "snapshot" not in _tools_of(roles["data_engineer"])
     assert {"submit_review", "data_query", "ask"} <= _tools_of(roles["recipe_reviewer"])
     engineer = _users(roles["data_engineer"])
@@ -855,9 +855,9 @@ def test_edit_self_plans_builds_reviews_and_accepts_a_snapshot(kernel, tmp_path)
     assert planner_scratch.split("\n")[1].startswith(str(tmp_path / "ws" / "scratch" / "edit_planner-"))
     roles = _by_role(rec, "n-edit")
     assert set(roles) == {"edit_planner", "coder", "edit_reviewer"}
-    assert {"coder", "run_command", "ask", "read_skill", "arxiv_search", "submit_result"} <= _tools_of(roles["edit_planner"])
+    assert {"coder", "run_command", "ask", "read_knowledge", "arxiv_search", "submit_result"} <= _tools_of(roles["edit_planner"])
     assert not {"data_ingest", "hf_download", "caption_videos", "snapshot", "self_test"} & _tools_of(roles["edit_planner"])
-    assert {"self_test", "ask", "read_skill", "submit_coder"} <= _tools_of(roles["coder"])
+    assert {"self_test", "ask", "read_knowledge", "submit_coder"} <= _tools_of(roles["coder"])
     assert not {"arxiv_search", "data_ingest"} & _tools_of(roles["coder"])
     assert {"self_test", "submit_review"} <= _tools_of(roles["edit_reviewer"])
     coder_first = _users(roles["coder"])[0]

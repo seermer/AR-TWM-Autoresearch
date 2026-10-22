@@ -8,5 +8,5 @@ eval:
     event_edit_adherence: 16     # the skill: half the score, the 16 other metrics the cases list the rest
   target_skill:
     name: an animal appearing
-    sentence: an animal comes into view
-    description: the video starts with no animal in view, and when a turn's text says an animal appears, that animal comes into view during that turn. This can happen at any turn, including the first and the last, and at one or several turns of a video, each time with whichever land animal the text names
+    sentence: an animal appears where the text says
+    description: no animal is in view when the video starts. When a turn's text says an animal appears, that animal comes into view during that turn, at the place the text names. It can be any land animal. This can happen in any turn, including the first and the last, and in one or several turns of a video

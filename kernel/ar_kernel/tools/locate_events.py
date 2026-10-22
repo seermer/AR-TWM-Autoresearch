@@ -302,7 +302,7 @@ def register_locate_tool(mcp, kit, q) -> None:
               "{error}. Each event has `start_s` and `end_s`, the seconds of the clip between which the event is "
               "happening or its result is visible, both null when the event was not found, and "
               "`disagreeing_s`: how many seconds of the clip the model's answers contradict that span. "
-              "The spans are for you to set the turns' starts in the annotation: skill locate_events."
+              "The spans are for you to set the turns' starts in the annotation: knowledge file locate_events."
               + (f" At most {cap} clips per job." if cap else ""))
     async def locate_events(items: Items, ctx: Context) -> dict[str, Any]:
         return await kit.call(ctx, TOOL, {"items": items}, lambda c: submit(q, c, items))

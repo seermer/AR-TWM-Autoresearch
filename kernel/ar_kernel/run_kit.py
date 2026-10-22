@@ -25,7 +25,7 @@ from .tools.gpu_jobs import build_gpu_backends, register_gpu_tools
 from .tools.hf_tools import HfTools, hf_tmp, register_hf_tools
 from .tools.jobs import JobQueue, register_job_tools
 from .tools.server import ToolHealth, ToolKit, build_tool_app, new_mcp
-from .tools.skills import register_skill_tool
+from .tools.knowledge import register_knowledge_tool
 from .tools.snapshot import SnapshotStore, register_snapshot_tool
 from .tools.vllm_server import FREE_WAITS_S, process_tree, require_free_gpus
 
@@ -98,7 +98,7 @@ def build_run_kit(cfg, run_dir: Path, gpus: list[int], recorder, environ, repo) 
     register_gpu_tools(mcp, kit, queue)
     register_caption_tool(mcp, kit, queue)
     register_locate_tool(mcp, kit, queue)
-    register_skill_tool(mcp, kit)
+    register_knowledge_tool(mcp, kit)
     store = CallStore(recorder)
     upstream = Upstream.from_env(environ, timeout_s=float(cfg.get("gateway.upstream_timeout_s")),
                                  wait_s=float(cfg.get("gateway.upstream_wait_s")), recorder=recorder)

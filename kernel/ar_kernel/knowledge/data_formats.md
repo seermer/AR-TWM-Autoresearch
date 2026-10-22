@@ -24,7 +24,7 @@ A candidate is a video, an annotation, a pose file and `derived_from`.
   - `event`: one sentence, or left out. At most one per turn.
   - `perspective`: `first_person` or `third_person`. Required on every turn.
   - The first turn lasts at least 2.4 s, every later turn at least 1.4 s.
-  - Skill `training_text` says what text the model is trained with.
+  - Knowledge file `training_text` says what text the model is trained with.
 - Poses: an npz with cam_c2w [N,4,4] with N = the mp4's frame count, camera-to-world, OpenCV convention, finite, bottom row [0,0,0,1], orthonormal rotation with det +1. Optional intrinsics [3,3] or [N,3,3] in pixels. annotate_camera writes this file. Every clip needs one.
 - `derived_from`: `{"kind": ..., "name": ...}`, what the clip was made from, for a person to read. `kind` is `model`, `dataset` or `synthetic_method`; `name` is the model, the dataset or the method. A rollout tool's result carries it filled in; change it when you made something else of the clip.
 - Each dataset of a commit needs at least as many clips as training GPUs.

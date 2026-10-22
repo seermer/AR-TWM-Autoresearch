@@ -164,7 +164,7 @@ def test_an_edit_self_caller_gets_only_the_tools_of_its_phase(tmp_path):
         return type("C", (), {"request_context": type("RC", (), {"request": request})()})()
     edit, data = ctx_for("edit_self"), ctx_for("improve_recipe")
     assert asyncio.run(kit.call(data, "data_query", {}, lambda c: "clips")) == "clips"
-    assert asyncio.run(kit.call(edit, "read_skill", {}, lambda c: "text")) == "text"
+    assert asyncio.run(kit.call(edit, "read_knowledge", {}, lambda c: "text")) == "text"
     assert asyncio.run(kit.call(edit, "ask", {}, lambda c: "answer")) == "answer"
     with pytest.raises(ToolError, match="not available in edit_self"):
         asyncio.run(kit.call(edit, "data_query", {}, lambda c: "clips"))

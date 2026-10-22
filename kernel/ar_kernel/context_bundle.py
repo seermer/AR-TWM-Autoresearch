@@ -27,7 +27,7 @@ KERNEL_FAILURES = {"eval_failed": "the evaluation of this node's model failed"}
 # What each folder of the container is for, per phase: a role is told this first, so it need not find out.
 _SHARED = {
     "/context/context.json": "the exact data this message was built from",
-    "/nodes/<node>/": "read-only: what each finished node left behind (layout: skill node_files). Kernel tools "
+    "/nodes/<node>/": "read-only: what each finished node left behind (layout: knowledge file node_files). Kernel tools "
                       "cannot read it; copy a file into /workspace to pass it to one",
     "/tmp": "scratch in memory, gone when the phase ends"}
 FOLDERS = {

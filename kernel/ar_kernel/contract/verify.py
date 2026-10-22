@@ -24,7 +24,7 @@ from ..tools.data_tools import register_data_tools
 from ..tools.hf_tools import register_hf_tools
 from ..tools.jobs import JobQueue, register_job_tools
 from ..tools.server import ToolError, ToolKit, build_tool_app, new_mcp
-from ..tools.skills import register_skill_tool
+from ..tools.knowledge import register_knowledge_tool
 from ..tools import snapshot
 from ..tools.snapshot import SnapshotStore, register_snapshot_tool
 from ..vcs.agents_repo import CheckoutError
@@ -130,7 +130,7 @@ class ContractHarness:
         register_caption_tool(mcp, kit, self.queue)
         register_locate_tool(mcp, kit, self.queue)
         register_ask_tool(mcp, kit, MockAsk())
-        register_skill_tool(mcp, kit)
+        register_knowledge_tool(mcp, kit)
         gateway = create_gateway_app(registry=self.registry, store=CallStore(self.recorder),
                                      allowed_models={MOCK_MODEL}, upstream=None,
                                      mocks=MockBook.default())

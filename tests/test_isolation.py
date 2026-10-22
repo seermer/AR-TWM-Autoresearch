@@ -156,7 +156,7 @@ FORBIDDEN = re.compile(r"wbench|benchmark|meituan|2605\.25874|\b(test|eval\w*|pr
 
 def _agent_visible_texts(tmp_path):
     """Everything an agent can read that the kernel or the seed ships: the seed agent, the contract
-    package, the skills, and every kernel tool's description and schema."""
+    package, the knowledge files, and every kernel tool's description and schema."""
     from ar_kernel.contract.verify import _MockData, _MockHf
     from ar_kernel.telemetry.recorder import Recorder
     from ar_kernel.tools.ask import MockAsk, register_ask_tool
@@ -167,9 +167,9 @@ def _agent_visible_texts(tmp_path):
     from ar_kernel.tools.hf_tools import register_hf_tools
     from ar_kernel.tools.jobs import JobQueue, register_job_tools
     from ar_kernel.tools.server import ToolKit, new_mcp
-    from ar_kernel.tools.skills import register_skill_tool
+    from ar_kernel.tools.knowledge import register_knowledge_tool
     texts = {}
-    for root in (REPO / "seed_agent", REPO / "contract", REPO / "kernel" / "ar_kernel" / "skills"):
+    for root in (REPO / "seed_agent", REPO / "contract", REPO / "kernel" / "ar_kernel" / "knowledge"):
         for path in root.rglob("*"):
             if path.is_file() and path.suffix in (".py", ".md", ".txt"):
                 texts[str(path.relative_to(REPO))] = path.read_text(encoding="utf-8")
@@ -186,7 +186,7 @@ def _agent_visible_texts(tmp_path):
         register_gpu_tools(mcp, kit, queue)
         register_caption_tool(mcp, kit, queue)
         register_ask_tool(mcp, kit, MockAsk())
-        register_skill_tool(mcp, kit)
+        register_knowledge_tool(mcp, kit)
         for tool in asyncio.run(mcp.list_tools()):
             texts[f"tool {tool.name}"] = f"{tool.description}\n{json.dumps(tool.input_schema)}"
     finally:
@@ -196,7 +196,7 @@ def _agent_visible_texts(tmp_path):
 
 def test_nothing_an_agent_sees_names_the_evaluation(tmp_path):
     texts = _agent_visible_texts(tmp_path)
-    assert {"tool rollout_alayaworld", "tool read_skill", "tool data_ingest"} <= set(texts)
+    assert {"tool rollout_alayaworld", "tool read_knowledge", "tool data_ingest"} <= set(texts)
     found = {name: sorted(set(m.group(0) for m in FORBIDDEN.finditer(text))) for name, text in texts.items()}
     assert {name: hits for name, hits in found.items() if hits} == {}
 

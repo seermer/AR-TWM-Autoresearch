@@ -19,7 +19,7 @@ Your job is to find the one place where the system made its roles waste effort, 
 ## Choosing the mechanism
 - Read the code that produces the behavior before you choose, so the mechanism names a real component.
 - Look outside the run for ideas: how other agent systems handle the same problem, in papers, on the web and in the design of open-source agent implementations. Take the general idea and fit it to this system.
-- The kernel's tools and skills are fixed. Only the agent's own code changes.
+- The kernel's tools and knowledge files are fixed. Only the agent's own code changes.
 - `agent/entry.py` must keep `edit_self(ctx)` and `improve_recipe(ctx)`, each with exactly one parameter.
 
 ## Briefing the coder

@@ -226,7 +226,7 @@ def register_caption_tool(mcp, kit, q) -> None:
               "sampled across the whole clip. A GPU job: returns {job_id} at once; collect it with job_wait. "
               "Every job loads the model again, so send every clip of one prompt in one call. The finished "
               "job's result file (job_wait gives its path) holds `clips`: each path mapped to {caption} or "
-              "{error}. What it can be used for: skill caption_videos."
+              "{error}. What it can be used for: knowledge file caption_videos."
               + (f" At most {cap} clips per job." if cap else ""))
     async def caption_videos(
             paths: Annotated[list[str] | str, Field(description="video files under /workspace (relative paths "

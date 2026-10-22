@@ -102,7 +102,7 @@ def build_tool_app(mcp: MCPServer):
     )
 
 
-EDIT_SELF_TOOLS = {"ask", "read_skill", "snapshot"}
+EDIT_SELF_TOOLS = {"ask", "read_knowledge", "snapshot"}
 
 
 class ToolHealth:
