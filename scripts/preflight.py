@@ -24,6 +24,8 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import yaml
+
 import download_weights
 from ar_kernel.archive.commits import CommitStore
 from ar_kernel.config import KernelConfig, load_dotenv
@@ -33,6 +35,7 @@ from ar_kernel.eval.lora import concat_eval_lora
 from ar_kernel.eval.render import build_render_config, render_proxy
 from ar_kernel.run import bootstrap_run
 from ar_kernel.subproc import cache_env, free_port, meminfo_gib
+from ar_kernel.telemetry import files
 from ar_kernel.tools.annotate import AnnotateBackend
 from ar_kernel.tools.captioner import CaptionBackend
 from ar_kernel.tools.context import TokenRegistry
@@ -204,10 +207,11 @@ class Preflight:
 
     def train(self):
         """A few optimizer steps of the config's base recipe on the WorldModel example clips (and re-encoded
-        copies of them, so that every GPU gets a clip)."""
+        copies of them, enough for one optimizer step)."""
         ing = Ingestor(self.cfg, self.run_dir, self.ctx.conn, self.rec)
+        accum = yaml.safe_load(self.cfg.base_recipe.read_text())["optimizer"]["grad_accum_steps"]
         clip_ids = []
-        for copy in range(-(-len(self.gpus) // len(self.clips))):
+        for copy in range(-(-len(self.gpus) * accum // len(self.clips))):
             for video in self.clips:
                 d = self.staging / "train" / f"{video.stem}-{copy}"
                 d.mkdir(parents=True)
@@ -220,10 +224,11 @@ class Preflight:
                 shutil.copy2(self.examples / "poses" / f"{video.stem}.npz", d / "pose.npz")
                 named = {k: f"/workspace/staging/train/{d.name}/{f}"
                          for k, f in (("video", "video.mp4"), ("annotation", "annotation.json"), ("pose", "pose.npz"))}
-                res = ing.ingest([Candidate(video=d / "video.mp4", annotation=d / "annotation.json",
-                                            pose=d / "pose.npz", named=named,
-                                            derived_from={"kind": "dataset", "name": "WorldModel example clips"})],
-                                 node_id="preflight")[0]
+                with files.scope(self.rec, node="preflight", phase="improve_recipe", attempt=1, tool="data_ingest"):
+                    res = ing.ingest([Candidate(video=d / "video.mp4", annotation=d / "annotation.json",
+                                                pose=d / "pose.npz", named=named,
+                                                derived_from={"kind": "dataset", "name": "WorldModel example clips"})],
+                                     node_id="preflight")[0]
                 if not res.accepted:
                     raise Failed(f"ingest refused {d.name}: {res.reasons}")
                 clip_ids.append(res.clip_id)
