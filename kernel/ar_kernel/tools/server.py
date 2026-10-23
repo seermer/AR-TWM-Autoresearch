@@ -3,6 +3,7 @@ every kernel tool."""
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import tempfile
 import threading
@@ -19,7 +20,8 @@ from mcp.server.transport_security import TransportSecuritySettings
 from ..faults import KernelFault, disk_fault
 from ..guards import alert
 from ..isolation import scrub
-from .context import STAGING, WORKSPACE, PathError, bearer, to_host
+from ..telemetry import files
+from .context import STAGING, WORKSPACE, PathError, bearer, open_file, to_host
 
 
 class ToolError(_MCPToolError):
@@ -43,12 +45,15 @@ def listed(caller, value, what: str) -> list:
         return list(value or [])
     if not value.endswith(".json"):
         raise ToolError(f"{what}: {value} is not a .json file: a list comes from a .json file holding a JSON array")
+    named = value if value.startswith("/") else str(WORKSPACE / value)
     try:
-        host = to_host(caller, value if value.startswith("/") else str(WORKSPACE / value))
-        text = host.read_text(encoding="utf-8")
+        with open(open_file(caller, to_host(caller, named)), "rb") as handle:
+            data = handle.read()
+        text = data.decode("utf-8")
     except (PathError, OSError, UnicodeDecodeError) as exc:
         reason = exc.strerror if isinstance(exc, OSError) else exc      # an OSError's text names the host path
         raise ToolError(f"{what}: cannot read the list file {value}: {reason}") from exc
+    files.record(data, direction="in", path=named)
     try:
         items = json.loads(text)
     except ValueError as exc:
@@ -74,10 +79,11 @@ def publish(caller, name: str, result) -> str:
     """Write a tool's full result to /workspace/staging/results/<name>.json; returns that path. Results
     go to a file, never into the conversation: a role reads them with a script, it does not retype them."""
     from .hf_tools import move_into            # imports this module
-    with tempfile.NamedTemporaryFile("w", dir=caller.staging_host, suffix=".tmp", delete=False,
-                                     encoding="utf-8") as handle:
-        json.dump(scrub(result, caller.scrub_names, caller.host_roots), handle, ensure_ascii=False, indent=1)
+    data = json.dumps(scrub(result, caller.scrub_names, caller.host_roots), ensure_ascii=False, indent=1).encode()
     rel = f"results/{name}.json"
+    files.record(data, direction="out", path=str(STAGING / rel))
+    with tempfile.NamedTemporaryFile(dir=caller.staging_host, suffix=".tmp", delete=False) as handle:
+        handle.write(data)
     try:
         move_into(Path(handle.name), caller.staging_host, rel)
     finally:
@@ -154,7 +160,7 @@ class ToolKit:
 
         def start():
             nonlocal work
-            work = asyncio.get_running_loop().run_in_executor(executor, fn, caller)
+            work = asyncio.get_running_loop().run_in_executor(executor, contextvars.copy_context().run, fn, caller)
             work.add_done_callback(lambda _: self.registry.end(caller.token))
             return asyncio.shield(work)
         try:
@@ -170,7 +176,8 @@ class ToolKit:
         span = self.recorder.event("tool.call", payload={"tool": name, "args": args}, tool=name, **base)
         started = time.monotonic()
         try:
-            result = await start()
+            with files.scope(self.recorder, tool=name, parent_span_id=span, **base):
+                result = await start()
         except ToolError as exc:
             self.recorder.event("tool.error", parent_span_id=span, tool=name,
                                  duration_s=time.monotonic() - started,

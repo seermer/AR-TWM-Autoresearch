@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from conftest import job_result
+from conftest import NAMED, job_result
 from ar_kernel.config import KernelConfig
 from ar_kernel.data.probe import probe_video
 from ar_kernel.telemetry.recorder import Recorder
@@ -251,7 +251,7 @@ def test_h3_finished_candidate_passes_the_real_ingestor(tmp_path):
     pose = write_poses(out / "vigeo.npz", n_frames=res["frames"], width=960, height=544)
     ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
     [r] = ing.ingest([Candidate(video=Path(res["video"]), annotation=Path(res["annotation"]), pose=pose,
-                                derived_from={"kind": "model", "name": "minimax-h3"})], node_id="n1")
+                                derived_from={"kind": "model", "name": "minimax-h3"}, named=NAMED)], node_id="n1")
     assert r.accepted, r.reasons                    # the planned turns are long enough to be trained on
     caption = json.loads(ing.blobs.path(ing.clips.get(r.clip_id)["caption_digest"], "caption").read_text())
     assert [s["time_range_s"] for s in caption["segments"]] == [[0.0, 81 / 24], [81 / 24, 162 / 24], [162 / 24, 243 / 24]]
@@ -335,5 +335,5 @@ def test_real_h3_rollout(tmp_path):
         a = job_result(ann)["items"][i]
         assert "error" not in a, a
         [res] = ing.ingest([Candidate(video=host(c["video"]), annotation=host(c["annotation"]), pose=host(a["pose"]),
-                                      derived_from=c["derived_from"])], node_id="gpu")
+                                      derived_from=c["derived_from"], named=NAMED)], node_id="gpu")
         assert res.accepted, res.reasons

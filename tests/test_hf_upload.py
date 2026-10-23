@@ -113,3 +113,13 @@ def test_a_large_upload_is_split_into_parts_of_one_commit(tmp_path, monkeypatch)
     there = tmp_path / "elsewhere" / "myrun"
     fetch(there, None, "tok", api=hub, download=hub.download)
     assert (there / "staging/n1/improve_recipe-1/pool/c.mp4").read_text() == "staging/n1/improve_recipe-1/pool/c.mp4"
+
+
+def test_recorded_files_go_up_except_those_of_hf_download(tmp_path):
+    run, hub = _run(tmp_path), FakeHub()
+    for rel in ("telemetry/files/aaa", "telemetry/files_hf/bbb"):
+        (run / rel).parent.mkdir(parents=True, exist_ok=True)
+        (run / rel).write_text(rel)
+    HfUpload(run, Recorder(run), "tok", api=hub)("root", "eval", 0)
+    members = _members(hub.files["uploads/00001/0000.tar"])
+    assert "telemetry/files/aaa" in members and "telemetry/files_hf/bbb" not in members

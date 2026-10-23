@@ -18,7 +18,7 @@ from .guards import alert
 from .subproc import cache_dir
 
 # Not needed to view the run: caches, partial downloads, raw downloads, the agents' own installs.
-SKIP_DIRS = ("cache", "tmp", "hf_tmp", "sockets", "control/pgids", "staging/*/*/hf",
+SKIP_DIRS = ("cache", "tmp", "hf_tmp", "sockets", "control/pgids", "staging/*/*/hf", "telemetry/files_hf",
              "nodes/*/attempts/*/workspace/.home", "nodes/*/attempts/*/dataset_cache")
 # archive.db goes up as a consistent copy, never the live file and its WAL.
 SKIP_FILES = ("archive.db", "archive.db-wal", "archive.db-shm", "control/loop.pid", "control/hf_upload.json",

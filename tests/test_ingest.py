@@ -4,7 +4,8 @@ from ar_kernel.config import KernelConfig
 from ar_kernel.data.annotation import THIRD_PERSON_VIEW, caption_file
 from ar_kernel.data.ingest import Candidate, Ingestor
 from ar_kernel.telemetry.recorder import Recorder
-from conftest import DERIVED, make_mp4, staged_clip, write_poses
+from conftest import DERIVED, NAMED, make_mp4, recorded, staged_clip, write_poses
+from ar_kernel.telemetry import files
 
 CFG = KernelConfig.load()
 FP, TP = "first_person", "third_person"
@@ -14,7 +15,7 @@ def _ingestor(tmp_path):
 
 def _candidate(tmp_path, name="c1", seconds=4.0, fps=30, width=960, height=544, turns=None):
     video, annotation, pose = staged_clip(tmp_path / "staging" / name, seconds, fps, width, height, turns)
-    return Candidate(video=video, annotation=annotation, pose=pose, derived_from=dict(DERIVED))
+    return Candidate(video=video, annotation=annotation, pose=pose, derived_from=dict(DERIVED), named=NAMED)
 
 def test_accepted_clip_is_recorded_and_stores_its_own_copy(tmp_path):
     ing = _ingestor(tmp_path)
@@ -86,7 +87,7 @@ def test_candidate_outside_run_dir_is_rejected(tmp_path, tmp_path_factory):
     ing = _ingestor(tmp_path)
     outside = tmp_path_factory.mktemp("outside")
     video, annotation, pose = staged_clip(outside)
-    candidate = Candidate(video=video, annotation=annotation, pose=pose, derived_from=DERIVED)
+    candidate = Candidate(video=video, annotation=annotation, pose=pose, derived_from=DERIVED, named=NAMED)
     [result] = ing.ingest([candidate], node_id="n1")
     assert result.accepted is False
     assert any("outside the staging directory" in r for r in result.reasons)
@@ -98,7 +99,7 @@ def test_candidate_inside_run_dir_but_outside_staging_is_rejected(tmp_path):
     ing = _ingestor(tmp_path)
     elsewhere = tmp_path / "nodes" / "n7" / "view" / "cam"
     video, annotation, pose = staged_clip(elsewhere)
-    result = ing.ingest([Candidate(video=video, annotation=annotation, pose=pose, derived_from=DERIVED)],
+    result = ing.ingest([Candidate(video=video, annotation=annotation, pose=pose, derived_from=DERIVED, named=NAMED)],
                         node_id="n1")[0]
     assert not result.accepted
     assert any("staging" in r for r in result.reasons)
@@ -456,3 +457,13 @@ def test_reasons_and_warnings_name_the_candidates_files_not_the_kernels_paths(tm
     assert accepted.accepted and accepted.warnings and not rejected.accepted
     assert not any(str(tmp_path) in t or "probe_" in t for t in texts), texts
     assert rejected.reasons[0].startswith("the pose file: 100 poses for 120 video frames")
+
+
+def test_the_bytes_ingest_checks_are_recorded(tmp_path):
+    ing = _ingestor(tmp_path)
+    cand = _candidate(tmp_path)
+    with files.scope(ing.recorder, node="n1", tool="data_ingest"):
+        [result] = ing.ingest([cand], node_id="n1")
+    assert result.accepted, result.reasons
+    staged = {"video": cand.video, "annotation": cand.annotation, "pose": cand.pose}
+    assert recorded(ing.recorder) == {("in", NAMED[k]): p.read_bytes() for k, p in staged.items()}   # as the agent named them

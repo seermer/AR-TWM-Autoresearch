@@ -3,7 +3,7 @@ fake worker, plus one real AlayaWorld gpu smoke. Also rollout_wan22 (Wan2.2 TI2V
 submit checks, finish (crop/probe, CPU), the real produce with a fake worker, plus one real Wan
 gpu smoke. And rollout_ltx25 (LTX-2.5 dev): submit checks, the host-RAM worker rule,
 finish (audio strip/probe, CPU), the real produce with a fake worker, plus one real gpu smoke."""
-from conftest import job_result, job_folder
+from conftest import NAMED, job_result, job_folder
 import copy
 import json
 import threading
@@ -307,7 +307,7 @@ def test_finished_candidate_passes_the_real_ingestor(tmp_path):
     pose = write_poses(out / "vigeo.npz", n_frames=res["frames"], width=960, height=544)
     ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
     [r] = ing.ingest([Candidate(video=Path(res["video"]), annotation=Path(res["annotation"]), pose=pose,
-                                derived_from={"kind": "model", "name": "alayaworld-ar30"})], node_id="n1")
+                                derived_from={"kind": "model", "name": "alayaworld-ar30"}, named=NAMED)], node_id="n1")
     assert r.accepted, r.reasons
     caption = json.loads(ing.blobs.path(ing.clips.get(r.clip_id)["caption_digest"], "caption").read_text())
     base = "A wet city street at night with neon signs."
@@ -509,7 +509,7 @@ def _ingest_as_an_agent(q, caller, ing, staging, candidate, name):
     assert "error" not in pose, pose
     (stage / "a.json").write_text(json.dumps({"scene_prompt": candidate["prompt"], "turns": [{"start_s": 0.0, "perspective": "first_person"}]}))
     [res] = ing.ingest([Candidate(video=stage / "v.mp4", annotation=stage / "a.json", pose=host(pose["pose"]),
-                                  derived_from=candidate["derived_from"])], node_id="gpu")
+                                  derived_from=candidate["derived_from"], named=NAMED)], node_id="gpu")
     return res
 
 
@@ -627,7 +627,7 @@ def test_real_alayaworld_rollout(tmp_path):
         heading = lambda m: round(float(np.degrees(np.arctan2(m[-1, 0, 2], m[-1, 2, 2]))), 1)
         # the agent's route: the published annotation with ViGeo's pose
         [res] = ing.ingest([Candidate(video=host(c["video"]), annotation=host(c["annotation"]), pose=host(a["pose"]),
-                                      derived_from=c["derived_from"])], node_id="gpu")
+                                      derived_from=c["derived_from"], named=NAMED)], node_id="gpu")
         annotation = json.loads(host(c["annotation"]).read_text())
         rows.append({"item": i, "frames": c["frames"], "cut": a["cut"],
                      "diag_vs_commanded": {"rot_err_deg": round(rot, 4), "ate_frac": ate and round(ate, 4),

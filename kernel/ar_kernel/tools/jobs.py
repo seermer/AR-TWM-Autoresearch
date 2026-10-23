@@ -2,6 +2,7 @@
 file in the caller's staging directory; the caller is told the path and a summary."""
 from __future__ import annotations
 
+import functools
 import math
 import queue
 import threading
@@ -18,6 +19,7 @@ from mcp.server.mcpserver import Context
 
 from ..faults import disk_fault
 from ..subproc import KILL_FORCE_GRACE_SECONDS, KILL_GRACE_SECONDS, run_in_env
+from ..telemetry import files
 from .server import SHOWN, ToolError, ToolHealth, fault_or_count, publish
 
 _DEFAULT_POLL_S = 1.0
@@ -212,6 +214,8 @@ class JobQueue:
                     self._cond.notify_all()
 
             result, error, tb, failure = None, None, None, None
+            here = functools.partial(files.scope, self.recorder, node=job.node, phase=job.phase, attempt=job.attempt,
+                                     component="tools", tool=self._backends[job.backend].tool, job_id=job.id)
             with self.gpu_lock:
                 # Running starts once the GPUs are held, so gpu_seconds excludes the lock
                 # wait; a job cancelled before or during that wait is already final.
@@ -222,7 +226,8 @@ class JobQueue:
                     self._cond.notify_all()
                 try:
                     self.require_free(job.caller)
-                    result = self._backends[job.backend].run(job, cancel, report)
+                    with here():
+                        result = self._backends[job.backend].run(job, cancel, report)
                     final = "done"
                 except Exception as exc:                  # noqa: BLE001 -- a job failure, not a crash
                     final, error, tb, failure = "failed", f"{type(exc).__name__}: {exc}", traceback.format_exc(), exc
@@ -230,7 +235,8 @@ class JobQueue:
             if result is not None:
                 summary = summarize(result)
                 try:
-                    result_file = publish(job.caller, f"{job.backend}-{job.id}", result)
+                    with here():
+                        result_file = publish(job.caller, f"{job.backend}-{job.id}", result)
                 except OSError as exc:                    # the phase ended and took its staging with it
                     final, error = "failed", f"the result could not be written: {type(exc).__name__}: {exc}"
                     failure = exc if disk_fault(exc) else None

@@ -1,5 +1,5 @@
 """ask: one stateless question to the agent's model, with capped, downscaled images."""
-from conftest import client_dir
+from conftest import client_dir, recorded
 import base64
 import io
 import json
@@ -9,6 +9,7 @@ import pytest
 from PIL import Image
 
 from ar_kernel.budget import Budget
+from ar_kernel.telemetry import files
 from ar_kernel.config import KernelConfig
 from ar_kernel.gateway.store import CallStore
 from ar_kernel.telemetry.recorder import Recorder
@@ -194,3 +195,10 @@ def test_a_malformed_reply_is_a_counted_model_error(make):
     ask, caller, _, _ = make(handler=lambda request: httpx.Response(200, json={"choices": []}))
     with pytest.raises(RuntimeError, match="an empty reply"):
         ask.ask(caller, "q", [])
+
+
+def test_each_image_is_recorded_as_read(make, tmp_path):
+    ask, caller, _, rec = make()
+    with files.scope(rec, node="n1", tool="ask"):
+        ask.ask(caller, "what is this?", ["big.png"])
+    assert recorded(rec) == {("in", "/workspace/big.png"): (tmp_path / "big.png").read_bytes()}

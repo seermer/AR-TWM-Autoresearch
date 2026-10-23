@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import stat
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -19,8 +18,9 @@ import openai
 from mcp.server.mcpserver import Context
 from pydantic import Field
 
-from .context import WORKSPACE, PathError, to_container, to_host
+from .context import WORKSPACE, PathError, open_file, to_host
 from ..faults import disk_fault
+from ..telemetry import files
 from ..subproc import free_port
 from .jobs import job_dir
 from .server import FROM_FILE, ToolError, listed, refuse
@@ -58,25 +58,25 @@ def stage_clip(caller, path: str, dst: Path) -> None:
     The agent keeps running while the job runs, so any directory on the path can be swapped for
     a link to a host directory after `clip_host_path` checked it. The file is opened with
     O_NOFOLLOW, the open file's real path must still be inside the caller's mounts, and what
-    lands at `dst` must be that same inode (or a copy read from that open file)."""
-    src = clip_host_path(caller, path)
-    fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)   # NONBLOCK: a swapped-in FIFO
+    lands at `dst` must be that same inode (or a copy read from that open file). The bytes are recorded
+    from that open file once staged."""
+    fd = open_file(caller, clip_host_path(caller, path))
     try:
         info = os.fstat(fd)
         real = os.readlink(f"/proc/self/fd/{fd}")
-        to_container(caller, Path(real))               # PathError if it now lies outside the mounts
-        if not stat.S_ISREG(info.st_mode):
-            raise PathError(f"{path} is not a file")
         try:
             os.link(real, dst, follow_symlinks=False)
         except OSError:                                # e.g. another filesystem: copy the open file
             with open(os.dup(fd), "rb") as fin, open(dst, "wb") as fout:
                 shutil.copyfileobj(fin, fout)
-            return
-        linked = os.stat(dst, follow_symlinks=False)
-        if (linked.st_dev, linked.st_ino) != (info.st_dev, info.st_ino):
-            dst.unlink()
-            raise PathError(f"{path} changed while it was being staged")
+        else:
+            linked = os.stat(dst, follow_symlinks=False)
+            if (linked.st_dev, linked.st_ino) != (info.st_dev, info.st_ino):
+                dst.unlink()
+                raise PathError(f"{path} changed while it was being staged")
+        os.lseek(fd, 0, os.SEEK_SET)                   # a copy's dup moved the shared offset
+        with open(os.dup(fd), "rb") as fin:
+            files.record(fin, direction="in", path=container_path(path))
     finally:
         os.close(fd)
 

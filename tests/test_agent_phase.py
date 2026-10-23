@@ -497,7 +497,7 @@ def test_container_commits_data_through_the_real_tool_server(tmp_path):
     from ar_kernel.tools.jobs import register_job_tools
     from ar_kernel.tools.server import ToolKit, build_tool_app, new_mcp
     from ar_kernel.tools.context import TokenRegistry
-    from conftest import DERIVED, staged_clip
+    from conftest import DERIVED, NAMED, staged_clip
     from ar_kernel.data.ingest import Candidate, Ingestor
 
     run = tmp_path / "run"
@@ -506,7 +506,7 @@ def test_container_commits_data_through_the_real_tool_server(tmp_path):
         d = run / "staging" / "seed" / f"c{i}"
         video, annotation, pose = staged_clip(d, 4.0 + 0.5 * i)
         Ingestor(CFG, run, conn, rec).ingest([Candidate(video=video, annotation=annotation, pose=pose,
-                                                       derived_from=DERIVED)], node_id="root")
+                                                       derived_from=DERIVED, named=NAMED)], node_id="root")
     repo = AgentsRepo(run / "agents.git")
     commit = repo.init(Path(__file__).parent / "fixtures" / "agents" / "tool_user")
     nodes = NodeStore(conn)

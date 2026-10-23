@@ -1,5 +1,7 @@
 import subprocess
 import json
+import contextvars
+import os
 import threading
 from pathlib import Path
 
@@ -12,7 +14,8 @@ from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools.context import TokenRegistry
 from ar_kernel.tools.data_tools import DataTools
 from ar_kernel.tools.server import ToolError
-from conftest import DERIVED, make_mp4, staged_clip
+from conftest import DERIVED, make_mp4, recorded, staged_clip
+from ar_kernel.telemetry import files
 
 CFG = KernelConfig.load()
 
@@ -111,6 +114,10 @@ def test_probe_reports_display_geometry(env):
     info = tools.probe(caller, "/workspace/staging/probe_me.mp4")
     assert info["width"] == 736 and info["rotation"] == 0 and abs(info["display_aspect"] - 736 / 414) < 1e-6
     assert tools.probe(caller, "staging/probe_me.mp4") == info      # relative to /workspace, like caption_videos
+    rec = Recorder(run)
+    with files.scope(rec, node="n1", tool="video_probe"):
+        tools.probe(caller, "staging/probe_me.mp4")
+    assert recorded(rec)[("in", "/workspace/staging/probe_me.mp4")] == (caller.staging_host / "probe_me.mp4").read_bytes()
 
 
 def test_probe_of_a_missing_non_video_or_damaged_file_is_a_tool_error(env):
@@ -122,6 +129,13 @@ def test_probe_of_a_missing_non_video_or_damaged_file_is_a_tool_error(env):
     for name in ("missing.mp4", "notes.mp4", "cut.mp4"):
         with pytest.raises(ToolError, match=name):
             tools.probe(caller, f"staging/{name}")
+
+
+def test_a_fifo_in_place_of_a_probed_file_is_refused_not_waited_on(env):
+    tools, caller, _, _ = env
+    os.mkfifo(caller.staging_host / "pipe.mp4")
+    with pytest.raises(ToolError, match="is not a file"):
+        tools.probe(caller, "staging/pipe.mp4")
 
 
 def test_query_returns_the_archive_wide_pool_with_what_each_clip_was_derived_from(env):
@@ -187,7 +201,9 @@ def test_query_writes_every_match_to_a_file(env):
 def test_fetch_copies_pool_clips_into_staging(env):
     tools, caller, results, run = env
     wanted = results[0]["clip_id"]
-    out = tools.fetch(caller, [wanted, "nope"])
+    rec = Recorder(run)
+    with files.scope(rec, node="n1", tool="data_fetch"):
+        out = tools.fetch(caller, [wanted, "nope"])
     assert out == {"folder": "/workspace/staging/pool_clips", "copied": 1, "not_in_pool": ["nope"]}
     video = caller.staging_host / "pool_clips" / "videos" / f"{wanted}.mp4"
     assert video.stat().st_size > 0 and video.stat().st_nlink == 1          # a copy, not a link into the archive
@@ -195,6 +211,10 @@ def test_fetch_copies_pool_clips_into_staging(env):
     annotation = json.loads((caller.staging_host / "pool_clips" / "annotations" / f"{wanted}.json").read_text())
     assert annotation == {"scene_prompt": caption["caption"], "turns": [{"start_s": 0.0, "perspective": "first_person"}]}
     assert (caller.staging_host / "pool_clips" / "poses" / f"{wanted}.npz").is_file()
+    stored = {e["path"]: e["digest"] for e in rec.read_events("n1") if e["type"] == "file" and "pool_clips" in e["path"]}
+    assert len(stored) == 4
+    digest = stored[f"/workspace/staging/pool_clips/videos/{wanted}.mp4"]
+    assert (run / "telemetry" / "files" / digest).stat().st_ino == next((run / "store" / "blobs" / "video").glob(f"{digest}.*")).stat().st_ino
 
 
 def test_commit_validation_errors_become_tool_errors(env):
@@ -319,7 +339,8 @@ def test_leakage_checker_is_built_once_across_concurrent_ingests(tmp_path, monke
                 "pose": "/workspace/staging/p.npz", "derived_from": {"kind": kind, "name": "x"}}
         results.extend(_rows(caller, tools.ingest(caller, [cand])))
     results = []
-    threads = [threading.Thread(target=ingest, args=(m,)) for m in ("sideways", "upways")]
+    threads = [threading.Thread(target=contextvars.copy_context().run, args=(ingest, m))    # in the tests' file scope
+               for m in ("sideways", "upways")]
     for t in threads:
         t.start()
     for t in threads:

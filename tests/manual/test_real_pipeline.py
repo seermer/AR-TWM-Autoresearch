@@ -11,6 +11,7 @@ from ar_kernel.run import bootstrap_run, score_node
 from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.train.gate import Gate, resolve_config
 from ar_kernel.train.runner import TrainRunner
+from conftest import NAMED
 
 pytestmark = pytest.mark.manual
 CFG = KernelConfig.load()
@@ -36,7 +37,7 @@ def _ingest_examples(ing, node_id="m1"):
         result = ing.ingest([Candidate(
             video=Path(shutil.copy2(video, clip_dir / "video.mp4")), annotation=clip_dir / "annotation.json",
             pose=Path(shutil.copy2(EXAMPLES / "poses" / f"{stem}.npz", clip_dir / "pose.npz")),
-            derived_from={"kind": "dataset", "name": "WorldModel example clips"})], node_id=node_id)[0]
+            derived_from={"kind": "dataset", "name": "WorldModel example clips"}, named=NAMED)], node_id=node_id)[0]
         assert result.accepted, result.reasons
         clip_ids.append(result.clip_id)
     return clip_ids

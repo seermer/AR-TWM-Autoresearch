@@ -1,6 +1,6 @@
 """Exercise the tool server the way a container does: over a Unix socket, with
 the ar_contract client configuration."""
-from conftest import client_dir
+from conftest import client_dir, recorded
 import asyncio
 import json
 import os
@@ -257,3 +257,34 @@ def test_a_cancelled_call_stays_in_flight_until_its_thread_returns(tmp_path):
     kit.registry.wait_idle(caller.token)
     assert finished.is_set()
     loop.call_soon_threadsafe(loop.stop)
+
+
+def test_a_file_recorded_in_a_tool_call_names_that_call(tmp_path):
+    from ar_kernel.telemetry import files
+    rec, kit, caller, call = _direct(tmp_path)
+    call("video_probe", lambda c: files.record(b"x", direction="in", path="/workspace/a.mp4"))
+    span = next(e for e in rec.read_events("n1") if e["type"] == "tool.call")["span_id"]
+    event = next(e for e in rec.read_events("n1") if e["type"] == "file")
+    assert (event["parent_span_id"], event["tool"], event["phase"]) == (span, "video_probe", "improve_recipe")
+
+
+def test_a_list_given_as_a_file_is_recorded(tmp_path):
+    from ar_kernel.tools.server import listed
+    rec, kit, caller, call = _direct(tmp_path)
+    (tmp_path / "ids.json").write_text('["a", "b"]')
+    assert call("data_query", lambda c: listed(c, "ids.json", "clip_ids")) == ["a", "b"]
+    assert recorded(rec) == {("in", "/workspace/ids.json"): b'["a", "b"]'}
+
+
+def test_a_file_swapped_for_a_fifo_or_a_link_after_the_check_is_refused_without_waiting(tmp_path):
+    from ar_kernel.tools.context import PathError, TokenRegistry, open_file
+    caller = TokenRegistry(Recorder(tmp_path / "run")).issue(node="n1", phase="improve_recipe", attempt=1,
+                                                             workspace_host=tmp_path / "ws", staging_host=tmp_path / "st")
+    (tmp_path / "ws").mkdir()
+    os.mkfifo(tmp_path / "ws" / "pipe.mp4")
+    (tmp_path / "secret").write_text("host file")
+    (tmp_path / "ws" / "link.mp4").symlink_to(tmp_path / "secret")
+    with pytest.raises(PathError, match="is not a file"):    # a FIFO that took the checked file's place
+        open_file(caller, tmp_path / "ws" / "pipe.mp4")
+    with pytest.raises(OSError):                                 # a link that took its place
+        open_file(caller, tmp_path / "ws" / "link.mp4")

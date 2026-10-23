@@ -22,11 +22,13 @@ from ..data.annotation import DERIVED_KINDS
 from ..data.ingest import Candidate, Ingestor
 from ..data.leakage import LeakageChecker
 from ..data.probe import readable_video
+from ..faults import disk_fault
 from ..train.gate import Gate
-from .context import STAGING, WORKSPACE, PathError, to_host
+from .context import STAGING, WORKSPACE, PathError, open_file, to_host
 from .gpu_jobs import items_schema
 from .hf_tools import move_into
 from ..process_digest import _shape
+from ..telemetry import files
 from .server import FROM_FILE, SHOWN, ToolError, listed, publish, refuse
 
 
@@ -62,7 +64,18 @@ class DataTools:
             raise ToolError(str(exc)) from exc
 
     def probe(self, caller, path: str) -> dict:
-        host = self._host(caller, path if path.startswith("/") else str(WORKSPACE / path))
+        named = path if path.startswith("/") else str(WORKSPACE / path)
+        host = self._host(caller, named)
+        try:
+            fd = open_file(caller, host)
+        except PathError as exc:
+            raise ToolError(str(exc)) from exc
+        except OSError as exc:
+            if disk_fault(exc):
+                raise
+            raise ToolError(f"{path} cannot be read: {exc.strerror}") from exc
+        with open(fd, "rb") as handle:
+            files.record(handle, direction="in", path=named)
         try:
             info = readable_video(host)
         except ValueError as exc:
@@ -99,7 +112,7 @@ class DataTools:
             if bad:
                 continue
             built.append(Candidate(video=host["video"], annotation=host["annotation"], pose=host["pose"],
-                                   derived_from=c["derived_from"]))
+                                   derived_from=c["derived_from"], named={k: c[k] for k in host}))
         refuse(caller, "data_ingest", candidates, bad)
         conn = open_db(self.run_dir)
         try:
@@ -154,9 +167,11 @@ class DataTools:
             pool = {clip["clip_id"]: clip for clip in pool_clips(conn)}
             blobs = BlobStore(self.run_dir, conn)
             for clip in (pool[i] for i in wanted if i in pool):
-                files = [(blobs.path(clip[f"{kind}_digest"], kind), f"{kind}s/{clip['clip_id']}{suffix}")
-                         for kind, suffix in KINDS.items()]
-                for blob, rel in files:             # a copy: a hard link would let the agent change the archive's file
+                copies = [(blobs.path(clip[f"{kind}_digest"], kind), f"{kind}s/{clip['clip_id']}{suffix}")
+                          for kind, suffix in KINDS.items()]
+                for blob, rel in copies:            # a copy: a hard link would let the agent change the archive's file
+                    with open(blob, "rb") as source:
+                        files.record(source, direction="out", path=str(STAGING / "pool_clips" / rel))
                     # written through the open handle: the agent owns staging and could swap the name for a link
                     with tempfile.NamedTemporaryFile(dir=caller.staging_host, suffix=".tmp", delete=False) as handle, \
                             open(blob, "rb") as source:

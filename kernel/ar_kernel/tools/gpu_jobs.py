@@ -22,12 +22,13 @@ from pydantic import Field, WithJsonSchema
 from ..control import Control
 from ..data.annotation import ACTIONS, PERSPECTIVES
 from ..data.probe import TARGET_ASPECT
+from ..faults import disk_fault
 from ..guards import alert
 from ..isolation import EXCLUDED_PROMPT, copies_held_out, strings
 from ..subproc import file_tail
 from .captioner import clip_host_path, container_path, input_error, stage_clip
 from .context import STAGING, PathError
-from .hf_tools import move_into
+from .hf_tools import publish_file
 from .jobs import job_dir, run_cancellable
 from .server import FROM_FILE, ToolError, listed, refuse
 from .vllm_server import gpu_memory_mib, wait_gpu_release
@@ -351,10 +352,12 @@ class GpuJob:
                     # metadata files get their role in the name, so they never pass for a pose
                     name = "" if role in ("video", "pose", "image") else f".{role}"
                     rel = f"{self.kind}s/{job.id}/{index}{name}{src.suffix}"
-                    move_into(src, caller.staging_host, rel)
+                    publish_file(src, caller.staging_host, rel)
                     published[role] = str(STAGING / rel)
         except Exception as exc:            # noqa: BLE001 -- a bad/truncated status or a finish()
             # bug must be this item's error, not a job failure that orphans the others.
+            if disk_fault(exc):                 # the machine's: the phase stops
+                raise
             return {"index": index, "error": f"{type(exc).__name__}: {exc}"}
         extra = {k: v for k, v in files.items() if k not in ("video", "annotation", "pose", "commanded_camera")}
         worker = {k: v for k, v in status.items() if k != "ok"}

@@ -352,3 +352,18 @@ def test_download_has_no_cap_of_its_own_and_takes_patterns_from_a_file(env):
     (caller.workspace_host / "want.json").write_text('["videos/a.mp4", "videos/b.mp4"]')
     out = tools.download(caller, "org/walks", "main", "want.json")
     assert out["bytes"] == 4000 and len(out["files"]) == 2
+
+
+def test_a_download_is_recorded_apart_from_other_files(tmp_path):
+    from ar_kernel.telemetry import files
+    rec = Recorder(tmp_path / "run")
+    caller = TokenRegistry(rec).issue(node="n1", phase="improve_recipe", attempt=1,
+                                      workspace_host=tmp_path / "ws", staging_host=tmp_path / "staging")
+    (tmp_path / "staging").mkdir()
+    tools = HfTools(CFG, tmp_path / "hf_tmp", api=FakeApi(), snapshot=fake_snapshot)
+    with files.scope(rec, node="n1", tool="hf_download"):
+        out = tools.download(caller, "org/walks", "main", ["videos/a.mp4"])
+    [event] = [e for e in rec.read_events("n1") if e["type"] == "file"]
+    assert (event["direction"], event["path"]) == ("out", out["files"][0])
+    assert (tmp_path / "run" / "telemetry" / "files_hf" / event["digest"]).is_file()
+    assert not (tmp_path / "run" / "telemetry" / "files").exists()

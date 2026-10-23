@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib, json, os, shutil, stat, subprocess, uuid
+import contextvars, hashlib, json, os, shutil, stat, subprocess, uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,6 +11,7 @@ from ..archive.clips import ClipStore
 from ..config import KernelConfig, run_config_path
 from ..faults import disk_fault
 from ..isolation import EXCLUDED_CLIP, copies_held_out
+from ..telemetry import files
 from . import annotation as ann
 from .checker import CheckerError, check_clip
 from .leakage import LeakageChecker
@@ -55,6 +56,7 @@ class Candidate:
     annotation: Path
     pose: Path
     derived_from: dict
+    named: dict             # role -> the container path the agent gave
 
 @dataclass
 class IngestResult:
@@ -81,7 +83,7 @@ class Ingestor:
         is then written one clip at a time, in order. The kernel works on its own copy of each staged
         file and never writes or deletes in staging, which the agent owns and can relink meanwhile."""
         with ThreadPoolExecutor(self.workers) as pool:
-            checks = [pool.submit(self._check, c, node_id) for c in candidates]
+            checks = [pool.submit(contextvars.copy_context().run, self._check, c, node_id) for c in candidates]
         results = []
         try:
             for candidate, check in zip(candidates, checks):
@@ -146,6 +148,8 @@ class Ingestor:
         try:
             for key, qpath in held.items():
                 self._take(staged[key], qpath)
+                with qpath.open("rb") as held_file:
+                    files.record(held_file, direction="in", path=candidate.named[key])
             checked = self._check_files(candidate, held, node_id)
         except (subprocess.SubprocessError, OSError, ValueError, IndexError, KeyError, CheckerError) as exc:
             # A file ffprobe, decoding or the checker bridge cannot handle: record a rejection

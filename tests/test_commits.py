@@ -4,7 +4,7 @@ from ar_kernel.archive.db import open_db
 from ar_kernel.config import KernelConfig
 from ar_kernel.data.ingest import Candidate, Ingestor
 from ar_kernel.telemetry.recorder import Recorder
-from conftest import DERIVED, staged_clip
+from conftest import DERIVED, NAMED, staged_clip
 
 CFG = KernelConfig.load()
 
@@ -15,7 +15,8 @@ def store(tmp_path):
     ids = []
     for name, seconds in (("a", 4.0), ("b", 5.0)):
         video, annotation, pose = staged_clip(tmp_path / "staging" / name, seconds)
-        ids.append(ing.ingest([Candidate(video=video, annotation=annotation, pose=pose, derived_from=DERIVED)],
+        ids.append(ing.ingest([Candidate(video=video, annotation=annotation, pose=pose, derived_from=DERIVED,
+                                         named=NAMED)],
                               node_id="n1")[0].clip_id)
     return CommitStore(conn, ing.blobs, ing.clips), ids, tmp_path
 

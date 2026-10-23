@@ -17,6 +17,7 @@ from pydantic import Field
 
 from ..faults import disk_fault
 from ..isolation import blocked
+from ..telemetry import files
 from .context import STAGING
 from .server import FROM_FILE, ToolError, listed
 
@@ -76,6 +77,13 @@ def move_into(src: Path, base: Path, rel: str) -> None:
         os.replace(src, name, dst_dir_fd=fd)
     finally:
         os.close(fd)
+
+
+def publish_file(src: Path, staging: Path, rel: str, folder: str = "files") -> None:
+    """move_into staging, after recording `src` as a kernel output."""
+    with open(src, "rb") as handle:
+        files.record(handle, direction="out", path=str(STAGING / rel), folder=folder)
+    move_into(src, staging, rel)
 
 
 class HfTools:
@@ -181,7 +189,7 @@ class HfTools:
                 raise _hub(exc) from None
             for f in files:
                 try:
-                    move_into(tmp / f, staging, f"{rel}/{f}")
+                    publish_file(tmp / f, staging, f"{rel}/{f}", folder="files_hf")
                 except OSError as exc:
                     if disk_fault(exc):
                         raise

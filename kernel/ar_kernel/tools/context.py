@@ -6,7 +6,9 @@ path argument to that container's workspace. Anything else is refused.
 """
 from __future__ import annotations
 
+import os
 import secrets
+import stat
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -144,6 +146,22 @@ def to_host(caller: Caller, container_path: str) -> Path:
         raise PathError(f"{container_path} escapes its mount: kernel tools do not follow a symbolic link (or '..') "
                         "out of /workspace or /workspace/staging, so copy the file instead")
     return host
+
+
+def open_file(caller: Caller, host: Path) -> int:
+    """A read-only fd on `host` (a path `to_host` gave), without trusting the path between check and use: the
+    agent keeps running, so any directory on it can be swapped for a link meanwhile. The file is opened with
+    O_NOFOLLOW (and O_NONBLOCK, against a swapped-in FIFO), and the open file must be a regular file still
+    inside the caller's mounts."""
+    fd = os.open(host, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        to_container(caller, Path(os.readlink(f"/proc/self/fd/{fd}")))   # PathError if it now lies outside the mounts
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise PathError(f"{to_container(caller, host)} is not a file")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 def to_container(caller: Caller, host_path: Path) -> str:

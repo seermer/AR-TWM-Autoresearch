@@ -1,6 +1,6 @@
 """caption_videos: the vLLM caption job. Unit tests run a fake vLLM server
 (tests/fixtures/fake_vllm.py, no GPU); the `gpu` test runs the real model."""
-from conftest import client_dir, job_result, job_folder
+from conftest import client_dir, job_result, job_folder, recorded
 import json
 import os
 import shutil
@@ -94,6 +94,8 @@ def test_batch_success_captions_every_clip_then_stops_the_server(make, tmp_path)
         [("done", -15)]
     assert [e["ok"] for e in events if e["type"] == "caption.clip"] == [True, True]
     assert all(e["latency_s"] >= 0 for e in events if e["type"] == "caption.clip")
+    files = recorded(rec)
+    assert files[("in", "/workspace/clips/a.mp4")] == b"x" * 10 and files[("in", "/workspace/staging/b.mp4")] == b"y" * 20
     assert any(e["type"] == "caption.server_ready" for e in events)
 
 

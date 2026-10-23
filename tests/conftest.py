@@ -3,6 +3,24 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from ar_kernel.telemetry import files
+from ar_kernel.telemetry.recorder import Recorder
+
+
+@pytest.fixture(scope="session", autouse=True)
+def file_scope(tmp_path_factory):
+    """Kernel tools record their files only inside a tool call or job: a test that calls one directly
+    runs inside this one, which records into a run folder of its own."""
+    with files.scope(Recorder(tmp_path_factory.mktemp("file_scope")), node="test", tool="test"):
+        yield
+
+def recorded(rec, node="n1") -> dict[tuple[str, str], bytes]:
+    """(direction, path) -> the stored bytes of each file the kernel recorded for `node`."""
+    tel = rec.run_dir / "telemetry"
+    return {(e["direction"], e["path"]): next(p for p in (tel / "files" / e["digest"], tel / "files_hf" / e["digest"])
+                                              if p.exists()).read_bytes()
+            for e in rec.read_events(node) if e["type"] == "file"}
+
 def make_mp4(path, seconds=4.0, fps=30, width=736, height=414):
     path.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
@@ -45,6 +63,7 @@ def staged_clip(stage, seconds=4.0, fps=30, width=960, height=544, turns=None):
             write_poses(stage / "p.npz", n_frames=int(seconds * fps), width=width, height=height))
 
 DERIVED = {"kind": "synthetic_method", "name": "unit test fixture"}
+NAMED = {"video": "/workspace/staging/v.mp4", "annotation": "/workspace/staging/a.json", "pose": "/workspace/staging/p.npz"}
 
 @pytest.fixture
 def clip_dir(tmp_path):

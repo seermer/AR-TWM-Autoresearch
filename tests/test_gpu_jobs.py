@@ -1,5 +1,5 @@
 """GpuJob plumbing with a fake worker (no GPU)."""
-from conftest import job_result, job_folder
+from conftest import job_result, job_folder, recorded
 import asyncio
 import json
 import os
@@ -92,6 +92,11 @@ def test_items_fan_out_one_worker_per_gpu_and_publish_candidates(env):
     assert got[0]["worker"]["gpus"] == "0" and got[1]["worker"]["gpus"] == "1" and got[4]["worker"]["gpus"] == "0"
     assert not (job_folder(run, job) / "in").exists() and not (job_folder(run, job) / "out").exists()
     assert job_result(out)["gpu_memory_released"] is True
+    files = recorded(rec)
+    assert {(e["tool"], e["job_id"]) for e in rec.read_events("n1") if e["type"] == "file"} == {("rollout_fake", job)}
+    assert files[("in", "/workspace/a.mp4")] == (ws / "a.mp4").read_bytes()
+    assert files[("out", c["video"])] == (staging / "rollouts" / job / "0.mp4").read_bytes()
+    assert json.loads(files[("out", out["result_file"])]) == job_result(out)
 
 
 def test_a_worker_that_finds_the_machine_too_small_stops_the_run(env):
@@ -106,6 +111,19 @@ def test_a_worker_that_finds_the_machine_too_small_stops_the_run(env):
     log = job_folder(run, out["id"]) / "worker0.log"
     assert alert["message"] == f"rollout_fake does not fit this machine; the run is stopping (see {log})"
     assert "the cards are too small" in log.read_text()
+
+
+def test_a_disk_error_placing_an_output_stops_the_phase(env, monkeypatch):
+    q, caller, rec, ws, staging, run = env
+    import errno
+    from ar_kernel.tools import gpu_jobs
+
+    def full(*args, **kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+    monkeypatch.setattr(gpu_jobs, "publish_file", full)
+    out = q.wait(caller, submit(q, caller, [{"src": "a.mp4"}])["job_id"], 120)
+    assert out["state"] == "failed" and "No space left" in out["error"]
+    assert caller.fault.event.is_set()
 
 
 def test_per_item_failure_and_worker_crash_are_item_errors(env):

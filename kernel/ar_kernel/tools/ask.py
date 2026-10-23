@@ -19,8 +19,9 @@ from pydantic import Field
 
 from ..faults import KernelFault
 from ..gateway.app import upstream_error
-from .captioner import clip_host_path
-from .context import PathError
+from ..telemetry import files
+from .captioner import clip_host_path, container_path
+from .context import PathError, open_file
 from .server import ToolError
 
 ENDPOINT = "/v1/chat/completions"
@@ -47,9 +48,12 @@ class Ask:
                 "a cut, from frames picked out of it. "
                 "Returns {answer, images_left}.")
 
-    def _image(self, caller, path: str) -> dict:
+    def _image(self, caller, path: str) -> tuple[dict, bytes]:
+        """(the image part of the request, the file's bytes)."""
         try:
-            with Image.open(clip_host_path(caller, path)) as im:
+            with open(open_file(caller, clip_host_path(caller, path)), "rb") as handle:
+                data = handle.read()
+            with Image.open(io.BytesIO(data)) as im:
                 im = im.convert("RGB")
                 im.thumbnail((self.max_side, self.max_side))
                 buffer = io.BytesIO()
@@ -58,15 +62,16 @@ class Ask:
             raise ToolError(f"{path}: {exc}") from exc
         except Exception as exc:                    # noqa: BLE001 -- PIL raises many types on a bad file
             raise ToolError(f"{path} cannot be read as an image: {type(exc).__name__}: {exc}") from exc
-        data = base64.b64encode(buffer.getvalue()).decode()
-        return {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{data}"}}
+        url = "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode()
+        return {"type": "image_url", "image_url": {"url": url}}, data
 
     def ask(self, caller, question: str, images: list[str]) -> dict:
         if not question.strip():
             raise ToolError("question is empty")
         if len(images) > self.per_call:
             raise ToolError(f"at most {self.per_call} images per call: got {len(images)}")
-        parts = [{"type": "text", "text": question}, *[self._image(caller, p) for p in images]]
+        read = [self._image(caller, p) for p in images]
+        parts = [{"type": "text", "text": question}, *[part for part, _ in read]]
         why = self.budget.exhausted()
         if why:
             raise ToolError(why)
@@ -76,6 +81,8 @@ class Ask:
                 raise ToolError(f"{self.per_phase - used} of the {self.per_phase} images of this phase are left: "
                                 f"got {len(images)}")
             self._used[caller.token] = used + len(images)
+        for path, (_, data) in zip(images, read):
+            files.record(data, direction="in", path=container_path(path))
         body = self.upstream.enforce("/chat/completions", {
             "model": self.model, "messages": [{"role": "user", "content": parts}]})
         meta = self.store.begin(caller, ENDPOINT, body, tool="ask")

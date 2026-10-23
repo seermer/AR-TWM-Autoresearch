@@ -5,7 +5,7 @@ from ar_kernel.config import KernelConfig
 from ar_kernel.data.ingest import Candidate, Ingestor
 from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.train.gate import Gate
-from conftest import DERIVED, staged_clip
+from conftest import DERIVED, NAMED, staged_clip
 
 CFG = KernelConfig.load()
 
@@ -23,7 +23,8 @@ def _gate_store(tmp_path_factory):
         # clip, and the gate would see a single clip listed eight times.
         seconds = 4.0 + 0.5 * i
         video, annotation, pose = staged_clip(tmp_path / "staging" / f"c{i}", seconds)
-        clip_ids.append(ing.ingest([Candidate(video=video, annotation=annotation, pose=pose, derived_from=DERIVED)],
+        clip_ids.append(ing.ingest([Candidate(video=video, annotation=annotation, pose=pose, derived_from=DERIVED,
+                                              named=NAMED)],
                                    node_id="n1")[0].clip_id)
     assert len(set(clip_ids)) == 8, "fixture must produce 8 distinct clips"
     commits = CommitStore(conn, ing.blobs, ing.clips)
@@ -96,7 +97,8 @@ def test_fewer_clips_than_gpus_is_rejected(tmp_path):
     rec = Recorder(tmp_path)
     ing = Ingestor(CFG, tmp_path, conn, rec)
     video, annotation, pose = staged_clip(tmp_path / "staging" / "solo")
-    clip_id = ing.ingest([Candidate(video=video, annotation=annotation, pose=pose, derived_from=DERIVED)],
+    clip_id = ing.ingest([Candidate(video=video, annotation=annotation, pose=pose, derived_from=DERIVED,
+                                    named=NAMED)],
                          node_id="n1")[0].clip_id
     commits = CommitStore(conn, ing.blobs, ing.clips)
     commit = commits.commit(None, {"cam": {"weight": 1.0, "clips": [clip_id]}}, "v", node_id="n1")
