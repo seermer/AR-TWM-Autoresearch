@@ -53,10 +53,10 @@ farm on a bigger disk, say) without touching any of the variable names above.
 outside the project): Unix socket paths (vLLM, DataLoader workers) are capped at 107 bytes.
 
 On a new machine, `AutoResearcher/.cache/` starts empty, so the captioner's model
-(`Qwen/Qwen3.8-27B-FP8`, ~29 GB) needs to be copied from an existing `~/.cache/huggingface/hub/`
-or downloaded fresh into `AutoResearcher/.cache/huggingface/hub/` before the captioner can
-start; the first captioner start after that also rebuilds the vLLM compile cache under
-`.cache/vllm` and is slower than subsequent ones.
+(`Qwen/Qwen3.8-27B-FP8`, ~29 GB; with `configs/h100.yaml`, `Qwen/Qwen3.8-Flash-Next` in bf16, ~360 GB)
+needs to be downloaded into `AutoResearcher/.cache/huggingface/hub/` (`scripts/download_weights.py`)
+before the captioner can start; the first captioner start after that also rebuilds the vLLM compile
+cache under `.cache/vllm` and is slower than subsequent ones.
 
 ## Environments (all in `AutoResearcher/.envs/`)
 
@@ -115,7 +115,7 @@ of Wan and LTX set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (the 24 GB
 1. **Create the conda environments in `.envs/`** with `scripts/setup_envs.sh` (see
    "Environments" above). Never use `base` or the system Python. `ar doctor` lists any env that is missing or lives outside `.envs/`.
 2. **System tools on PATH:** `ffmpeg`, `ffprobe`, `conda`, `git`. An NVIDIA driver supporting CUDA 13.2; no CUDA toolkit.
-3. **Weights are not in git.** Re-download or copy:
+3. **Weights are not in git.** `scripts/download_weights.py [--config ...]` downloads them; or copy:
    `WorldModel/weights/` (LTX-2.3 transformer, `alaya-world-ar`, VAE, Gemma),
    `WBench/weights/` (SAM2, DA3, MegaSAM, HPSv3, DINOv2 torch hub).
 4. **Fill `AutoResearcher/.env`.** The `ar`

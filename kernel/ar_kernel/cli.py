@@ -32,9 +32,9 @@ def main(argv: list[str] | None = None) -> int:
     runp.add_argument("--run-id", default=None)
     runp.add_argument("--max-nodes", type=int, default=None)
     runp.add_argument("--resume", action="store_true")
-    runp.add_argument("--config", default=None, metavar="FILE",
-                      help="a YAML file of the kernel.yaml keys this run changes, e.g. configs/rain_start.yaml "
-                           "(new runs only; a resumed run keeps its own)")
+    runp.add_argument("--config", nargs="+", default=[], metavar="FILE",
+                      help="YAML files of the kernel.yaml keys this run changes, applied in order, e.g. "
+                           "configs/h100.yaml configs/rain_start.yaml (new runs only; a resumed run keeps its own)")
     runp.add_argument("--git-remote", default=None, metavar="URL",
                       help="push every agent branch of the run to this git repo (kept for --resume); "
                            "without it the branches stay local in runs/<run>/agents.git")
@@ -47,12 +47,13 @@ def main(argv: list[str] | None = None) -> int:
     doctor = sub.add_parser("doctor", help="check this tree is runnable here (paths, envs, symlinks)")
     doctor.add_argument("--strict", action="store_true", help="exit non-zero on warnings too")
     doctor.add_argument("--gpu", action="store_true", help="also check the cards, the driver and each env's GPU packages")
+    doctor.add_argument("--config", nargs="+", default=[], metavar="FILE", help="check under these kernel.yaml overlays")
     args = parser.parse_args(argv)
 
-    overlay = getattr(args, "config", None)
-    if overlay and args.resume:
+    overlays = getattr(args, "config", [])
+    if overlays and getattr(args, "resume", False):
         raise ValueError("--config applies to a new run only; a resumed run keeps the config it started with")
-    cfg = KernelConfig.load(overlay=overlay)
+    cfg = KernelConfig.load(overlays=overlays)
     # Into os.environ itself, so every subprocess (e.g. WBench's VLM phase) sees
     # the keys too -- not just the kernel's own metric decisions.
     load_dotenv(cfg.repo_root / ".env", os.environ)

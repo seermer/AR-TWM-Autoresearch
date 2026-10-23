@@ -5,12 +5,13 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Mapping
+import yaml
 
 from .archive.db import open_db, open_db_readonly
 from .archive.nodes import NodeStore
 from .control import Control
 from .doctor import wbench_weight_problems
-from .config import OVERLAY_SNAPSHOT, SNAPSHOT_FILES, KernelConfig
+from .config import OVERLAY_SNAPSHOT, SNAPSHOT_FILES, KernelConfig, live_config_path
 from .eval.judge import Judge, resolve_judge
 from .eval.lora import concat_eval_lora
 from .eval.render import build_render_config, render_proxy
@@ -94,10 +95,10 @@ def bootstrap_run(cfg: KernelConfig, run_id: str | None, env: Mapping[str, str])
     (run_dir / "cache" / "text_embed").mkdir(parents=True, exist_ok=True)
     recorder = _recorder(run_dir, env)
     for name in SNAPSHOT_FILES:
-        shutil.copy2(cfg.repo_root / "configs" / name, run_dir / "config" / name)
+        shutil.copy2(live_config_path(cfg, name), run_dir / "config" / name)
     shutil.copy2(cfg.eval_cases, run_dir / "config" / "proxy_cases.txt")
     if cfg.overlay is not None:
-        shutil.copy2(cfg.overlay, run_dir / "config" / OVERLAY_SNAPSHOT)
+        (run_dir / "config" / OVERLAY_SNAPSHOT).write_text(yaml.safe_dump(cfg.overlay, sort_keys=False), encoding="utf-8")
     versions = {f"{name}_sha": _head(path) for name, path in repos.items()}
     (run_dir / "config" / "versions.json").write_text(json.dumps(versions, indent=2))
     judge = resolve_judge(cfg, env)
@@ -151,8 +152,9 @@ def root_key(ctx: RunContext, cfg: KernelConfig) -> str:
               "judge_settings": cfg.get("eval.judge"), "vp_weights": cfg.get("eval.vp_weights"),
               # a local judge is the captioner's server: how it is served decides what it sees
               "local_judge": {k: v for k, v in cfg.get("captioner").items()
-                              if not k.endswith("timeout_s")} if local else None,
+                              if not k.endswith("timeout_s") and k != "concurrent_requests"} if local else None,
               "eval_code": eval_code,
+              "render_overrides": cfg.get("eval.render_overrides"),
               "versions": {k: ctx.versions.get(k) for k in ("worldmodel_sha", "wbench_sha")}}
     return hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()[:16]
 

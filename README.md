@@ -8,10 +8,10 @@ Every step ends with a check; do not continue if it fails.
 | | |
 |---|---|
 | OS | Linux x86_64 |
-| GPUs | 4 NVIDIA cards of one model, at least 24 GB each: RTX 4090, A100 or H100 (tested: RTX 4090), all idle. A run takes the first `gpus.num_gpus` idle cards (`configs/kernel.yaml`: 4, a multiple of 4) |
+| GPUs | 4 NVIDIA cards of one model, at least 24 GB each: RTX 4090, A100 or H100 (tested: RTX 4090), all idle. A run takes the first `gpus.num_gpus` idle cards (`configs/kernel.yaml`: 4, a multiple of 4). Or 8 H100 80 GB cards with `configs/h100.yaml` (every step below names it where it applies) |
 | Driver | `nvidia-smi` shows `CUDA Version: 13.2` or higher |
-| RAM | 128 GB minimum, 256 GB recommended |
-| Disk | 850 GB free on one disk (downloads about 600 GB) |
+| RAM | 128 GB minimum, 256 GB recommended; 8 x H100: 768 GB, and 128 GB of `/dev/shm` |
+| Disk | 850 GB free on one disk (downloads about 600 GB); 8 x H100: 1.5 TB (downloads about 900 GB) |
 | Software | `conda` (Miniforge), `git`, `ffmpeg`, `bwrap` (bubblewrap, with unprivileged user namespaces allowed: agents run in bwrap sandboxes), and `curl`, `wget`, `unzip`, `gcc` (the sandboxes use them from the host) |
 | Accounts | GitHub (SSH key), Hugging Face, an LLM API key (see step 3) |
 
@@ -91,7 +91,7 @@ OPENAI_MODEL=<model name as the provider spells it>
 OPENAI_EFFORT=<reasoning effort the provider accepts, e.g. high; empty = not set>
 
 # Optional. With a key, the six VLM metrics are answered by that API (VLM_API_URL, VLM_MODEL_NAME).
-# Empty: a local Qwen3.8-27B-FP8 server answers them instead (the model of step 4). Both work, but
+# Empty: a local server of the captioner's model answers them instead (step 4). Both work, but
 # scores from the two judges are not comparable, and a run refuses to resume with the other one.
 VLM_API_KEY=
 
@@ -112,47 +112,25 @@ Check: `ls -l ../WorldModel/.env ../WBench/.env` both show `-> ../AutoResearcher
 
 Optional model context size: `agents.context_window_tokens` in `configs/kernel.yaml` is set to 1000000 tokens, and the agent compacts its conversation at `agents.compact_at` (0.6) of it. Lower it if your model's context window is smaller.
 
-## 4. Download weights and data (about 600 GB)
+## 4. Download weights and data (about 600 GB; 8 x H100: about 900 GB)
 
-Run all of it, from `AutoResearcher`. Each command can be re-run; it skips finished files.
+The script downloads what the config needs: the AlayaWorld weights, WBench's data and metric weights,
+the tools' models (generators switched off in the config are skipped) and the captioner's model
+(Qwen3.8-27B-FP8; with `configs/h100.yaml`, Qwen3.8-Flash-Next in bf16, into `.cache/huggingface`).
+It can be re-run: what it finished is skipped, and an interrupted download resumes.
 
 ```bash
-# AlayaWorld (the model being improved) and its base model
-hf download AlayaLab/AlayaWorld-v1.1-stage2b --local-dir ../WorldModel/weights/alaya-world-ar
-hf download AlayaLab/AlayaWorld-v1.1-stage3 --local-dir ../WorldModel/weights/alaya-world-dmd
-hf download Lightricks/LTX-2.3 --include "ltx-2.3-22b-dev.safetensors" --local-dir ../WorldModel/weights/ltx-2.3
-hf download google/gemma-3-12b-it-qat-q4_0-unquantized \
-  --local-dir ../WorldModel/weights/ltx-2.3/google/gemma-3-12b-it-qat-q4_0-unquantized
-hf download pkqbajng/ViGeo1.1 --local-dir ../WorldModel/third_party/ViGeo/checkpoints/ViGeo1.1
+python scripts/download_weights.py                              # 4 x 24 GB
+python scripts/download_weights.py --config configs/h100.yaml   # 8 x H100
+python scripts/download_weights.py --check [--config ...]       # lists anything missing
+```
 
-# WBench (the benchmark): data and metric weights.
-# Includes the visual-plausibility weights (58 GB): every run scores all 22 metrics.
-hf download meituan-longcat/WBench --repo-type dataset --exclude "splits/*" --local-dir ../WBench/data
-hf download meituan-longcat/WBench-weights --local-dir ../WBench/weights
+Then, once on one GPU, build rollout_h3's AdaLN cache (again after changing infer_steps in configs/h3_lightx2v.json):
 
-# Tools the agents can use
-hf download Tongyi-MAI/Z-Image-Turbo --revision f332072aa78be7aecdf3ee76d5c247082da564a6 \
-  --exclude "assets/*" --local-dir weights/z-image-turbo
-hf download Wan-AI/Wan2.2-TI2V-5B --local-dir weights/wan2.2-ti2v-5b
-hf download Lightricks/LTX-2.5 --local-dir weights/ltx-2.5 \
-  --include "diffusion_models/ltx-2.5-22b-dev-transformer-bf16.safetensors" \
-            "text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors" \
-            "vae/ltx-2.5-video-vae-bf16.safetensors" \
-            "vae/ltx-2.5-audio-vae-bf16.safetensors" \
-            "latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors" \
-            "loras/ltx-2.5-22b-distilled-lora-450-bf16.safetensors"
-hf download MiniMaxAI/MiniMax-H3 --revision 42ed227ee7df40d41602854ae760620d6eb651fe \
-  --include "model_index.json" --include "modular_model_index.json" --include "transformer/*" \
-  --include "text_encoder/*" --include "vae/*" --include "audio_vae/*" --include "tokenizer/*" \
-  --include "processor/*" --include "scheduler/*" --include "audio_scheduler/*" \
-  --local-dir weights/minimax-h3        # 137 GB; one --include per pattern
-# rollout_h3's AdaLN cache (one GPU, once; again after changing infer_steps in configs/h3_lightx2v.json)
+```bash
 CUDA_VISIBLE_DEVICES=0 DTYPE=BF16 conda run -p .envs/gen-lightx2v python \
   third_party/LightX2V/tools/cache_minimax_h3_adaln/cache_minimax_h3_adaln.py --model_path weights/minimax-h3 \
   --config_json configs/h3_lightx2v.json --model-variant fl2av       # writes weights/minimax-h3-adaln
-
-# Video captioning model (lands in .cache/huggingface)
-hf download Qwen/Qwen3.8-27B-FP8
 ```
 
 `401` or `403` errors mean the token is wrong or a licence in step 3 was not accepted.
@@ -182,6 +160,17 @@ pytest tests -q                 # optional: unit tests, no GPU needed, about 12 
 
 `ar doctor` names anything missing (weights, environments, broken links); `--gpu` also runs a small GPU op in every environment (cards, driver, compiled packages). Fix what it names and run it again.
 
+On a machine the setup has not run on before (the first 8 x H100 run, say), also run the riskiest GPU paths
+once before starting a real run: one captioner server answering caption, locate_events and judge requests, a
+few training steps, the render of the longest proxy cases, and LTX-2.5 at its longest clip. It needs the three
+repos committed; `--steps` also runs the other tools (images, annotate, alayaworld, h3).
+
+```bash
+python scripts/preflight.py --config configs/h100.yaml     # must end with "all 6 steps passed"
+```
+
+Each step prints its peak GPU memory per card and the lowest free host memory (`runs/preflight-<time>/preflight.json`).
+
 ## 7. Start the experiment
 
 1. Choose a run name you have not used before (`ar` refuses to overwrite one), and the number of new nodes to try. Commit any changes in the three repos first: a new run refuses to start with uncommitted changes, so that its recorded commits fully name the code it ran.
@@ -195,6 +184,9 @@ nohup ar run --run-id $RUN --max-nodes 6 --git-remote $REMOTE \
 ```
 
 The run takes the first `gpus.num_gpus` cards (`configs/kernel.yaml`, 4) that have no memory in use, and refuses to start while `CUDA_VISIBLE_DEVICES` is set.
+On 8 x H100 add `--config configs/h100.yaml` (eight cards, the captioner and local judge on Qwen3.8-Flash-Next, the
+80 GB training recipe `configs/base_recipe_h100.yaml` and render settings); a skill config goes after it,
+e.g. `--config configs/h100.yaml configs/rain_start.yaml`. The files apply in that order.
 
 The loop first measures the starting model (the "root", about 2 hours), then improves it node by node
 (about 9-14 hours per node measured on 4 GPUs). The root is measured once: it is kept in `root_cache/`

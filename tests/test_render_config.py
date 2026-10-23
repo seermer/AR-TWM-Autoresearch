@@ -44,3 +44,19 @@ def test_the_cases_prompts_are_encoded_before_the_render(tmp_path, monkeypatch):
     (precache, env), (rollout, _) = calls
     assert precache[1:3] == ["-m", "scripts.tools.precache_wbench_text_embeds"] and str(path) in precache
     assert env["CUDA_VISIBLE_DEVICES"] == "0,1" and "scripts/tools/run_wbench.py" in rollout
+
+
+def test_render_overrides_replace_only_their_keys_in_the_eval_and_rollout_renders(tmp_path):
+    from ar_kernel.tools.rollouts import render_config
+    h100 = KernelConfig.load(overlays=[CFG.repo_root / "configs" / "h100.yaml"])
+    base = yaml.safe_load((CFG.worldmodel / "configs" / "wbench_full.yaml").read_text())
+    eval_config = yaml.safe_load(build_render_config(h100, None, 0, tmp_path / "h.pt", tmp_path / "videos", ["1"],
+                                                     tmp_path / "node").read_text())
+    rollout = render_config(h100, indices=[1], work=tmp_path, text_cache=tmp_path / "cache")
+    for config in (eval_config, rollout):
+        assert config["spatial_memory"]["vigeo_cache_budget"] == 262144
+        assert config["runtime"]["vae_decode_chunk_latents"] == 161
+        assert config["runtime"]["vae_decode_overlap_latents"] == 0
+        assert config["runtime"]["vae_chunk_size"] == base["runtime"]["vae_chunk_size"]
+        assert config["spatial_memory"]["vigeo_checkpoint"].endswith(base["spatial_memory"]["vigeo_checkpoint"])
+    assert _config(tmp_path, None, 0)["spatial_memory"]["vigeo_cache_budget"] == base["spatial_memory"]["vigeo_cache_budget"]

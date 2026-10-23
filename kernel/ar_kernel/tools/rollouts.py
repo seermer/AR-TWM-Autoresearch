@@ -117,12 +117,12 @@ def case_json(index: int, item: dict, image_rel: str, mask_rel: str | None) -> d
 def render_config(cfg, *, indices: list[int], work: Path,
                   text_cache: Path, node_lora: Path | None = None, node_rank: int = 0,
                   history_encoder: Path | None = None) -> dict:
-    """configs/wbench_full.yaml as eval/render.py:build_render_config adapts it, pointed at this
-    job's cases and sampled with the AR teacher (AR30). The prompt cache is the run's (the eval's
+    """The eval's render config (KernelConfig.render_config) as eval/render.py:build_render_config adapts
+    it, pointed at this job's cases and sampled with the AR teacher (AR30). The prompt cache is the run's (the eval's
     own holds only WBench's prompts). `node_lora`: a node's checkpoint (LoRA rank `node_rank`) with
     its `history_encoder`."""
     wm = cfg.worldmodel
-    c = yaml.safe_load((wm / "configs" / "wbench_full.yaml").read_text(encoding="utf-8"))
+    c = cfg.render_config()
     for key, value in c["paths"].items():
         if isinstance(value, str) and value:
             c["paths"][key] = str(wm / value)

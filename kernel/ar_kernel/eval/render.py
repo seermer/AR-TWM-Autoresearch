@@ -9,7 +9,7 @@ def build_render_config(cfg: KernelConfig, eval_lora: Path | None, node_rank: in
                         videos_dir: Path, case_ids: list[str], node_dir: Path) -> Path:
     """`eval_lora`: the directory holding the student LoRA concatenated with the node's (rank
     `node_rank`); None renders the released model."""
-    config = yaml.safe_load((cfg.worldmodel / "configs" / "wbench_full.yaml").read_text())
+    config = cfg.render_config()
     config["paths"]["resume_checkpoint"] = str(cfg.worldmodel / "weights/alaya-world-ar")
     config["paths"]["history_encoder"] = str(history_encoder)
     config["paths"]["dmd_resume"] = str(eval_lora or (cfg.worldmodel / "weights/alaya-world-dmd"))

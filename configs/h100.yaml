@@ -1,0 +1,30 @@
+# `ar run --config configs/h100.yaml [skill config]`: an 8 x H100 80GB machine. Only the keys that differ from kernel.yaml.
+# Run scripts/preflight.py --config configs/h100.yaml on a new machine before the first run.
+gpus:
+  num_gpus: 8
+train:
+  base_recipe: configs/base_recipe_h100.yaml
+eval:
+  # The stage2b ViGeo cache and a whole-video VAE decode (wbench_full.yaml cuts both to fit 24 GB cards).
+  render_overrides:
+    spatial_memory: {vigeo_cache_budget: 262144}
+    runtime: {vae_decode_chunk_latents: 161, vae_decode_overlap_latents: 0}
+  local_judge_workers: 32
+captioner:
+  min_total_gpu_gib: 560
+  model: Qwen/Qwen3.8-Flash-Next  # bf16; its 51B n-gram embedding table sits in host RAM (vLLM's default on 80 GB cards)
+  tensor_parallel: 8
+  gpu_memory_utilization: 0.9
+  max_num_seqs: 256              # vLLM's recipe value; fewer can fail the hybrid-attention cache check at startup
+  concurrent_requests: 64
+  max_num_batched_tokens: 32768  # as kernel.yaml: the same video processor as Qwen3.8-27B
+  extra_args: [--enable-expert-parallel, --moe-backend, triton, --enable-ep-weight-filter, --enable-prefix-caching,
+               --kv-cache-dtype, fp8, --attention-config.indexer_kv_dtype, fp8]
+images:
+  offload: none
+generators:
+  h3:
+    max_items: 200
+  ltx25:
+    quantization: none            # bf16 weights; CPU offload kept, so a worker holds the bf16 model in host RAM
+    peak_rss_gib: 80

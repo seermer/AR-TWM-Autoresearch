@@ -42,6 +42,7 @@ isolation:                       # keeps the evaluation set out of agents' reach
   audit_patterns: [wbench, meituan-longcat, "2605.25874"]   # the model writing one quarantines the node;
                                  #   the gateway drops the sentence around one in anything else it reads
 train:
+  base_recipe: configs/base_recipe.yaml   # the WorldModel training config every node's recipe edits
   lora_allowlist: [[16, 16], [32, 32], [64, 64]]
 eval:
   data: ../WBench/data           # the scored benchmark: cases/, images/, masks/
@@ -59,6 +60,8 @@ eval:
   # (a short clause) and `description` (the full statement). Empty: the run aims at no single skill.
   target_skill: {}
   vp_weights: weights/qwen3vl-a3b-visual-plausibility
+  render_overrides: {}           # keys replaced in WorldModel's configs/wbench_full.yaml, for the eval and rollout_alayaworld
+  local_judge_workers: 8         # VLM requests WBench keeps in flight to a local judge
   judge:                         # local judge (used when VLM_API_KEY is empty): the captioner's model
     # WBench asks for a 10-token yes/no answer, so the model must not think first.
     extra_body: {chat_template_kwargs: {enable_thinking: false}}
@@ -75,7 +78,7 @@ ask:                             # the ask tool: one stateless question to the a
   max_images_per_call: 8
   max_image_side: 1024           # px; larger images are downscaled before they are sent
 captioner:                       # caption_videos GPU job: a local vLLM server, never the paid agent model
-  env: vllm             # conda env with vLLM (0.29.0), lives in .envs/vllm
+  env: vllm             # conda env with vLLM (0.32.0), lives in .envs/vllm
   min_total_gpu_gib: 96          # the launch below was tuned on 4 x 24 GB
   model: Qwen/Qwen3.8-27B-FP8    # resolved by id through the HF cache (HF_HUB_OFFLINE=1: never downloads)
   tensor_parallel: null          # null = the largest power of two <= the number of node GPUs
@@ -83,7 +86,8 @@ captioner:                       # caption_videos GPU job: a local vLLM server, 
   # max-size videos.
   max_model_len: 81920
   gpu_memory_utilization: 0.90
-  max_num_seqs: 20               # clips are sent concurrently, up to this many at a time
+  max_num_seqs: 20
+  concurrent_requests: 20        # clips (locate_events: frames) sent at once; the server batches them
   # vLLM sizes the encoder cache as max(max_num_batched_tokens, its estimate of one video's tokens); the
   # estimate (12288) is exceeded by clips with an odd sampled frame count (1080p, 13 frames: 14280 tokens),
   # which vLLM rejects with HTTP 400.

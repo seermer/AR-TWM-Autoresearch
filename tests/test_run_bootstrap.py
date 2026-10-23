@@ -28,7 +28,7 @@ def test_a_skill_benchmark_scores_the_metrics_its_cases_list(tmp_path, monkeypat
     monkeypatch.setattr(KernelConfig, "runs_dir", property(lambda self: tmp_path / "runs"))
     monkeypatch.setattr("ar_kernel.run.wbench_weight_problems", lambda cfg: [])
     monkeypatch.setattr("ar_kernel.run._uncommitted", lambda repo: False)
-    cfg = KernelConfig.load(overlay=CFG.repo_root / "configs" / "rain_start.yaml")
+    cfg = KernelConfig.load(overlays=[CFG.repo_root / "configs" / "rain_start.yaml"])
     ctx = bootstrap_run(cfg, run_id="rain", env={})
     assert ctx.case_ids == [str(i) for i in range(1001, 1061)]
     assert len(ctx.metric_set) == 17 and "event_edit_adherence" in ctx.metric_set

@@ -61,7 +61,7 @@ def test_recipe_context_carries_rules_and_allowlists(world):
     assert not hasattr(ctx, "format_rules")
     assert ctx.metric_guide["cause_and_effect"]["weight"] == 4.5 and len(ctx.metric_guide) == len(METRIC_SET)
     assert ctx.target_skill == {}
-    rain = KernelConfig.load(overlay=CFG.repo_root / "configs" / "rain_start.yaml")
+    rain = KernelConfig.load(overlays=[CFG.repo_root / "configs" / "rain_start.yaml"])
     skilled = build_recipe_context(cfg=rain, conn=conn, run_dir=run, repo=repo, node_id="n1",
                                parent_id="root", n_gpus=4, tools=[])
     assert sorted(skilled.target_skill) == ["description", "name", "sentence"] and skilled.target_skill["name"] == "rain starting"

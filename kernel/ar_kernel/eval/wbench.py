@@ -21,15 +21,17 @@ def run_wbench_phases(cfg: KernelConfig, work_dir: Path, model: str, gpus: list[
         if proc.returncode != 0:
             raise RuntimeError(f"wbench {name} failed (rc={proc.returncode}): {output_tail(proc)}")
 
-    def main_phase(phase: str, extra_env: dict | None = None) -> None:
+    def main_phase(phase: str, extra_env: dict | None = None, args: list[str] = ()) -> None:
         wbench("wbench-main", ["python", "main.py", "--model", model, "--work_dir", str(work_dir),
-                               "--data", str(cfg.eval_data), "--phase", phase, "--gpus", gpu_arg], phase, extra_env)
+                               "--data", str(cfg.eval_data), "--phase", phase, "--gpus", gpu_arg, *args],
+               phase, extra_env)
 
     def vlm(extra_env: dict | None = None) -> None:
-        main_phase("vlm", extra_env)
+        args = ["--vlm_workers", str(cfg.get("eval.local_judge_workers"))] if extra_env else []
+        main_phase("vlm", extra_env, args)
         # A failed judge call leaves its case unscored; the second pass asks again for those only.
         # A case still unscored after it fails the eval on its case count (score_from_report).
-        main_phase("vlm", extra_env)
+        main_phase("vlm", extra_env, args)
 
     main_phase("precompute")
     main_phase("gpu")

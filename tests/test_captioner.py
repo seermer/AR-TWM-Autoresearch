@@ -229,9 +229,9 @@ def test_each_clips_reasoning_is_recorded_but_not_returned_to_the_agent(make):
     assert rec.load_payload(clip["payload"])["reasoning"] == "thinking about 10 bytes"
 
 
-def test_clips_are_captioned_concurrently_up_to_max_num_seqs(make):
+def test_clips_are_captioned_concurrently_up_to_concurrent_requests(make):
     """Sequential requests left the server's batching unused (n1: 53 clips x 3.5 s)."""
-    q, caller, rec, ws, _ = make(fake_cfg(max_num_seqs=6, extra_args=["--fake-mode", "second"]))
+    q, caller, rec, ws, _ = make(fake_cfg(concurrent_requests=6, extra_args=["--fake-mode", "second"]))
     names = [f"c{i}.mp4" for i in range(6)]
     for i, n in enumerate(names):
         (ws / n).write_bytes(b"v" * (i + 1))

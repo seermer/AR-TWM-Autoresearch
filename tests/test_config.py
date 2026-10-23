@@ -68,3 +68,23 @@ def test_for_run_reads_the_frozen_snapshot_with_this_checkout_as_root(tmp_path):
     cfg = KernelConfig.for_run(tmp_path)
     assert cfg.get("budget.max_usd") == 5
     assert cfg.repo_root == REPO_ROOT                       # not runs/<id>: sibling paths still resolve
+
+
+def test_overlays_apply_in_order_and_keep_keys_they_leave_out(tmp_path):
+    first, second = tmp_path / "a.yaml", tmp_path / "b.yaml"
+    first.write_text("gpus: {num_gpus: 8}\ncaptioner: {model: m1, max_num_seqs: 64}\n")
+    second.write_text("captioner: {model: m2}\n")
+    cfg = KernelConfig.load(overlays=[first, second])
+    assert cfg.get("gpus.num_gpus") == 8 and cfg.get("gpus.min_count") == 4
+    assert cfg.get("captioner.model") == "m2" and cfg.get("captioner.max_num_seqs") == 64
+    assert cfg.overlay == {"gpus": {"num_gpus": 8}, "captioner": {"model": "m2", "max_num_seqs": 64}}
+    assert KernelConfig.load().overlay is None
+
+
+def test_base_recipe_is_the_file_the_config_names(tmp_path):
+    from ar_kernel.config import run_config_path
+    overlay = tmp_path / "o.yaml"
+    overlay.write_text("train: {base_recipe: configs/base_recipe_h100.yaml}\n")
+    assert run_config_path(KernelConfig.load(), tmp_path, "base_recipe.yaml") == REPO_ROOT / "configs" / "base_recipe.yaml"
+    assert run_config_path(KernelConfig.load(overlays=[overlay]), tmp_path, "base_recipe.yaml") \
+        == REPO_ROOT / "configs" / "base_recipe_h100.yaml"

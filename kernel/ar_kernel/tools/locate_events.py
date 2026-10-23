@@ -185,7 +185,7 @@ class LocateEventsBackend:
                             done[0] += 1
                             report({"asked": done[0], "total": len(calls)})
 
-                    with ThreadPoolExecutor(max_workers=max(1, min(int(c["max_num_seqs"]), len(calls)))) as pool:
+                    with ThreadPoolExecutor(max_workers=max(1, min(int(c["concurrent_requests"]), len(calls)))) as pool:
                         for f in [pool.submit(one, *call) for call in calls]:
                             f.result()
         finally:

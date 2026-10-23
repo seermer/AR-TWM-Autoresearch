@@ -135,7 +135,7 @@ class CaptionBackend:
                     self.recorder.event("caption.server_ready", node=job.node, component="tools",
                                         job_id=job.id, load_s=load_s,
                                         payload={"gpus": self.gpus, "model": c["model"]})
-                # Up to max_num_seqs requests at once, so the server batches them; each clip
+                # Up to concurrent_requests requests at once, so the server batches them; each clip
                 # still gets its own event, and results keep the submitted order.
                 done_lock, captioned = threading.Lock(), [0]
 
@@ -155,7 +155,7 @@ class CaptionBackend:
                                             payload={"path": path, **recorded})
                         report({"captioned": captioned[0], "total": len(clips)})
 
-                with ThreadPoolExecutor(max_workers=max(1, min(int(c["max_num_seqs"]), len(clips)))) as pool:
+                with ThreadPoolExecutor(max_workers=max(1, min(int(c["concurrent_requests"]), len(clips)))) as pool:
                     for f in [pool.submit(one, path, file) for path, file in clips.items()]:
                         f.result()
             outcome = "done"
