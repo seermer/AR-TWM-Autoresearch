@@ -7,9 +7,9 @@ and its argv to fake_vllm.argv.json in its working directory; refuses to start w
 HF_HUB_OFFLINE=1 or VLLM_API_KEY; captions name the CUDA_VISIBLE_DEVICES it was given. A request
 without the key gets a 401, as from vLLM.
 
-A request with a `response_format` is a locate_events sheet: the reply is JSON in the asked shape.
-An event whose sentence holds NEVER is not there; any other is happening, and starts at the sheet's
-third caption. A request whose event holds BROKEN gets text that is not JSON.
+A request with a `response_format` is a locate_events frame: the reply is JSON in the asked shape.
+An event whose sentence holds NEVER is not there; any other is happening. A request whose event holds
+BROKEN gets text that is not JSON.
 """
 import argparse
 import json
@@ -90,15 +90,14 @@ class Handler(BaseHTTPRequestHandler):
         assert system["role"] == "system" and "frame reader" in system["content"]
         image, text = user["content"]
         assert body["reasoning_effort"] == "low" and "temperature" not in body and image["image_url"]["url"].startswith("data:image/jpeg;base64,")
-        captions = body["response_format"]["json_schema"]["schema"]["properties"]["start"]["anyOf"][0]["enum"]
+        assert set(body["response_format"]["json_schema"]["schema"]["properties"]) == {"happening_now", "already_happened"}
         event = text["text"].removeprefix("Event: ")
-        answer = {"happening_now": "NEVER" not in event, "already_happened": False,
-                  "start": None if "NEVER" in event else captions[min(2, len(captions) - 1)]}
+        answer = {"happening_now": "NEVER" not in event, "already_happened": False}
         content = "I cannot tell." if "BROKEN" in event else json.dumps(answer)
         self.reply(200, {"id": "x", "object": "chat.completion", "created": 0, "model": body["model"],
                          "choices": [{"index": 0, "finish_reason": "stop",
                                       "message": {"role": "assistant", "content": content,
-                                                  "reasoning_content": f"looked at {len(captions)} frames"}}]})
+                                                  "reasoning_content": "looked at one frame"}}]})
 
 
 ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()

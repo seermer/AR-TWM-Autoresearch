@@ -41,6 +41,7 @@ A candidate is a video, an annotation, a pose file and `derived_from`.
 - Re-encoding applies any display rotation. Encode to 8-bit 4:2:0 so that 10-bit or 4:4:4 sources stay decodable.
 - Keep the source frame rate if it is at least 24 fps. Never raise it by duplicating frames.
 - Trimming changes the frame count, so slice the pose array to the same frames, and move the turns' starts.
+- Padding the start with copies of the first frame adds frames: repeat the first pose (and per-frame intrinsics) as many times, and move the turns' starts by the same time.
 
 ## Camera poses
 

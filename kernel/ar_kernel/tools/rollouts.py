@@ -196,9 +196,9 @@ class AlayaWorldBackend(GpuJob):
         "early, late, weakly or not at all. Each result item gives a `candidate`: `video` ({size}, 24 fps), "
         "`annotation` (a file: your scene and subject text and the turns, each with the time it starts in the "
         "clip) and `derived_from`. It has no pose: run annotate_camera on candidate.video, then data_ingest the "
-        "video, the annotation and that pose. You may change a turn's start in the annotation to where its "
-        "event really happens (locate_events). Metadata, not labels: `commanded_camera` (npz of the camera path "
-        "the actions commanded, one pose per frame; not what the video shows) and `actions`. "
+        "video, the annotation and that pose. Use locate_events to find each event's span in the clip. Metadata, "
+        "not labels: `commanded_camera` (npz of the camera path the actions commanded, one pose per frame; not "
+        "what the video shows) and `actions`. "
         "At most {max_turns} turns per item.")
 
     def __init__(self, *args, **kwargs) -> None:

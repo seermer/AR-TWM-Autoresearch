@@ -365,7 +365,7 @@ def test_every_result_is_saved_and_a_long_one_is_shown_as_head_and_tail(workspac
     out = spill("planner", "data_query", {}, text)
     [long] = (workspace / "tool_output").glob("planner-data_query-*.txt")
     assert long.read_text() == f"$ data_query {{}}\n{text}" and str(long) in out.split("\n", 1)[0]
-    assert out.split("\n")[1] == "0" and out.endswith(text[-SHOWN:]) and len(out) < 2 * SHOWN + 300
+    assert out.split("\n")[1] == "0" and out.endswith(text[-SHOWN:]) and len(out) - len(str(long)) < 2 * SHOWN + 300
     assert spill("r", "x", {}, "y" * SHOW_WHOLE) == "y" * SHOW_WHOLE
 
 

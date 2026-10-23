@@ -7,7 +7,7 @@ description: Use when checking clips for defects before ingesting them: frozen, 
 
 Install what helps with `pip install --user` (for example `scenedetect`, or a small CLIP or aesthetic model).
 
-- Frozen video: `ffmpeg -i in.mp4 -vf freezedetect=n=-60dB:d=1 -f null -` lists frozen spans. Or compare the mean absolute difference of consecutive downscaled frames with clips you already trust.
+- Frozen video: `ffmpeg -i in.mp4 -vf freezedetect=n=-60dB:d=1 -f null -` lists frozen spans. Or compare the mean absolute difference of consecutive downscaled frames with clips you already trust. Copies of the first frame added to pad a clip's start are not frozen video.
 - Black or flat frames: `ffmpeg -i in.mp4 -vf blackdetect=d=0.2 -f null -`
 - Blur: the variance of the Laplacian per frame (`cv2.Laplacian(gray, cv2.CV_64F).var()`), compared across the batch. Drop the lowest tail rather than using one absolute threshold.
 - Cuts and transitions inside a clip: a clip must be one continuous shot. A cut is a jump between two neighboring frames; a transition (a dissolve, fade or morph from one picture into another) spreads the change over many frames. Neither can be judged from a sheet of sampled frames or from frames a second apart. annotate_camera reports a hard cut in its result (`cut`), where the picture and the measured camera both jump, and data_ingest rejects a clip that has one; it does not see transitions. Poses measured across a cut or a transition are not valid.
