@@ -11,6 +11,7 @@ charset-normalizer==3.5.1
 click==8.5.0
 cryptography==50.0.1
 distro==1.9.0
+execnet==2.1.2
 fastapi==0.141.1
 filelock==4.0.1
 fsspec==2026.9.0
@@ -68,6 +69,7 @@ pydub==0.25.1
 pygments==2.21.0
 pyjwt==2.14.0
 pytest==9.1.1
+pytest-xdist==3.8.0
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.4
 python-multipart==0.0.32

@@ -1,4 +1,4 @@
 # Extra runtime packages for this agent version. The agent environment already provides
 # langgraph, langchain-core, langchain-openai, mcp, httpx, httpx2, pydantic, numpy, arxiv,
-# opencv-python-headless, Pillow, pandas, pyarrow, torch, torchvision and torchaudio; ffmpeg comes from the host. Anything listed here is installed
+# opencv-python-headless, Pillow, pandas, pyarrow, torch, torchvision and torchaudio; ffmpeg comes with the environment. Anything listed here is installed
 # before every phase; a `pip install --user` at run time lasts only for one phase.

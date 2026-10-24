@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -51,12 +52,11 @@ def test_mounts_keep_todays_layout_and_modes(tmp_path):
     assert _binds(ro)["/agent"] == ("--ro-bind", str(m.agent))
 
 
-def test_bwrap_is_found_on_the_kernels_path(tmp_path, monkeypatch):
-    """Popen would search the sandbox's PATH, which has no /usr/local/bin."""
-    monkeypatch.setattr(runner.shutil, "which", lambda name: "/opt/bin/" + name)
-    assert bwrap_args(_mounts(tmp_path), ["true"], {}, ENV_DIR, 64)[0][0] == "/opt/bin/bwrap"
-    monkeypatch.setattr(runner.shutil, "which", lambda name: None)
-    with pytest.raises(FileNotFoundError, match="install bubblewrap"):
+def test_bwrap_comes_from_the_project_env(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "project_env", lambda name: Path("/p/.envs") / name)
+    assert bwrap_args(_mounts(tmp_path), ["true"], {}, ENV_DIR, 64)[0][0] == "/p/.envs/bwrap/bin/bwrap"
+    monkeypatch.setattr(runner, "project_env", lambda name: None)
+    with pytest.raises(FileNotFoundError, match="setup_envs.sh bwrap"):
         bwrap_args(_mounts(tmp_path), ["true"], {}, ENV_DIR, 64)
 
 

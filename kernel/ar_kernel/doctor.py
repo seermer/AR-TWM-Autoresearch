@@ -165,8 +165,8 @@ def _in_sandbox(cfg: KernelConfig, command: list[str], gpus=()) -> subprocess.Co
 
 def _sandbox(cfg: KernelConfig) -> list[Finding]:
     """Agents run in bwrap with .envs/agent, on the run's cards: the first gpus.num_gpus free ones."""
-    if not shutil.which("bwrap"):
-        return [Finding("fail", "bwrap", "not on PATH: install bubblewrap")]
+    if project_env("bwrap", cfg.repo_root) is None:
+        return [Finding("fail", "bwrap", "no .envs/bwrap: run scripts/setup_envs.sh bwrap")]
     if project_env("agent", cfg.repo_root) is None:
         return [Finding("fail", "env.agent", "no .envs/agent: run scripts/setup_envs.sh agent")]
     out = []

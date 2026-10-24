@@ -114,7 +114,8 @@ of Wan and LTX set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (the 24 GB
 
 1. **Create the conda environments in `.envs/`** with `scripts/setup_envs.sh` (see
    "Environments" above). Never use `base` or the system Python. `ar doctor` lists any env that is missing or lives outside `.envs/`.
-2. **System tools on PATH:** `ffmpeg`, `ffprobe`, `conda`, `git`. An NVIDIA driver supporting CUDA 13.0; no CUDA toolkit.
+2. **System tools on PATH:** `conda`, `git`. An NVIDIA driver supporting CUDA 13.0; no CUDA toolkit. `ffmpeg` and `ffprobe` come with
+   the `autoresearcher` and `agent` envs, `bwrap` with `.envs/bwrap`.
 3. **Weights are not in git.** `scripts/download_weights.py [--config ...]` downloads them; or copy:
    `WorldModel/weights/` (LTX-2.3 transformer, `alaya-world-ar`, VAE, Gemma),
    `WBench/weights/` (SAM2, DA3, MegaSAM, HPSv3, DINOv2 torch hub).

@@ -12,15 +12,15 @@ Every step ends with a check; do not continue if it fails.
 | Driver | `nvidia-smi` shows `CUDA Version: 13.0` or higher |
 | RAM | 128 GB minimum, 256 GB recommended; 8 x H100: 768 GB, and 128 GB of `/dev/shm` |
 | Disk | 850 GB free on one disk (downloads about 600 GB); 8 x H100: 1.5 TB (downloads about 900 GB) |
-| Software | `conda` (Miniforge), `git`, `ffmpeg`, `bwrap` (bubblewrap, with unprivileged user namespaces allowed: agents run in bwrap sandboxes), and `curl`, `wget`, `unzip`, `gcc` (the sandboxes use them from the host) |
+| Software | `conda` (Miniforge), `git`, unprivileged user namespaces allowed (agents run in bwrap sandboxes; `ffmpeg` and `bwrap` come with the envs), and `curl`, `wget`, `unzip`, `gcc` (the sandboxes use them from the host) |
 | Accounts | GitHub (SSH key), Hugging Face, an LLM API key (see step 3) |
 
 Check:
 
 ```bash
 nvidia-smi
-conda --version && git --version && ffmpeg -version | head -1 && which curl wget unzip gcc
-bwrap --unshare-user --ro-bind / / true && echo bwrap ok
+conda --version && git --version && which curl wget unzip gcc
+unshare --user true && echo user namespaces ok
 ssh -T git@github.com          # must say "Hi <your-user>!"
 df -h .
 ```
@@ -265,7 +265,7 @@ Do not delete files under `runs/$RUN` by hand.
 | `enabled tools do not fit GPUs` | A tool needs more GPU memory in total than the run's cards have (`min_total_gpu_gib` in `configs/kernel.yaml`). Give the run more or larger GPUs, or switch that generator off before starting a new run. |
 | `tool_does_not_fit` alert in `ar status`, and the run stopped | A GPU tool found the machine too small while running; the alert names the worker log. Give the run more or larger GPUs, then `--resume`. |
 | `permission denied (publickey)` for the git remote | `ssh-add` your key in the shell that runs `ar`; check with `ssh -T git@github.com`. It shows up as a warning in `ar status`. |
-| `ar doctor` fails at `bwrap` | Install bubblewrap; if a sandbox does not start, an administrator must allow unprivileged user namespaces. |
+| `ar doctor` fails at `bwrap` | Run `scripts/setup_envs.sh bwrap`; if a sandbox does not start, an administrator must allow unprivileged user namespaces. |
 | Hugging Face `401` / `403` | Re-run `hf auth login` and accept the licences in step 3. |
 | `ar doctor` reports missing weights or a broken link | Re-run the download command for that folder (step 4). |
 | Evaluation fails with a missing text embedding | Redo step 5. |

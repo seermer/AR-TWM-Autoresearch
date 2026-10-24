@@ -5,7 +5,6 @@ import hashlib
 import os
 import re
 import secrets
-import shutil
 import subprocess
 import threading
 import time
@@ -14,6 +13,7 @@ from pathlib import Path
 
 from ..faults import KernelFault
 from ..guards import device_minors
+from ..subproc import project_env
 
 # Env var names whose value must never reach telemetry, no matter which Recorder
 # is used (defense in depth: a Recorder that was never told about this run's
@@ -112,10 +112,10 @@ def bwrap_args(mounts: Mounts, command, env, env_dir: Path, shm_gb: float,
                    "PYTHONPATH": "/ar_contract", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1",
                    "AR_SOCKET_DIR": "/run/ar", "AR_AGENT_DIR": "/agent", "AR_CONTEXT_DIR": "/context",
                    "AR_WORKSPACE": "/workspace"}
-    bwrap = shutil.which("bwrap")       # the kernel's PATH: Popen would search the sandbox's
+    bwrap = project_env("bwrap")
     if bwrap is None:
-        raise FileNotFoundError("bwrap is not on PATH: install bubblewrap")
-    argv = [bwrap, "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup",
+        raise FileNotFoundError("no .envs/bwrap: run scripts/setup_envs.sh bwrap")
+    argv = [str(bwrap / "bin" / "bwrap"), "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup",
             "--disable-userns", "--die-with-parent", "--new-session", "--ro-bind", "/usr", "/usr"]
     for d in ("/bin", "/sbin", "/lib", "/lib64"):
         if os.path.islink(d):

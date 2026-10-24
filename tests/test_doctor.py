@@ -183,10 +183,9 @@ def test_links_an_agent_left_in_a_run_are_not_tree_problems(tmp_path):
 def test_sandbox_checks_name_what_is_missing(monkeypatch):
     from ar_kernel import doctor
     cfg = KernelConfig.load()
-    monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
-    assert [(f.level, f.check) for f in doctor._sandbox(cfg)] == [("fail", "bwrap")]
-    monkeypatch.setattr(doctor.shutil, "which", lambda name: "/usr/bin/" + name)
     monkeypatch.setattr(doctor, "project_env", lambda name, root: None)
+    assert [(f.level, f.check) for f in doctor._sandbox(cfg)] == [("fail", "bwrap")]
+    monkeypatch.setattr(doctor, "project_env", lambda name, root: root / ".envs/bwrap" if name == "bwrap" else None)
     assert [(f.level, f.check) for f in doctor._sandbox(cfg)] == [("fail", "env.agent")]
 
 

@@ -1,0 +1,12 @@
+name: bwrap
+channels:
+  - conda-forge
+dependencies:
+  - _openmp_mutex=4.5
+  - attr=2.5.2
+  - bubblewrap=0.9.0
+  - libattr=2.5.2
+  - libcap=2.69
+  - libgcc=16.2.0
+  - libgcc-ng=16.2.0
+  - libgomp=16.2.0

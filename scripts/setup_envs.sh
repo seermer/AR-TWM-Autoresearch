@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the project's conda envs into AutoResearcher/.envs/<name>.
-#   scripts/setup_envs.sh              # all ten, in order
+#   scripts/setup_envs.sh              # all eleven, in order
 #   scripts/setup_envs.sh vllm alayaworld   # only these
 # Candidate generator backends, built only when named: gen-vllm-omni gen-sglang
 # gen-sglang compiles kernels on first use; launch it with `conda run -p .envs/gen-sglang` and
@@ -21,7 +21,7 @@ TMPDIR=/tmp/ar-$(id -un)-$(printf %s "$TMP_TARGET" | sha1sum | cut -c1-8)
 export CONDA_PKGS_DIRS=$PWD/.cache/conda/pkgs PIP_CACHE_DIR=$PWD/.cache/pip TMPDIR CONDA_REGISTER_ENVS=false
 ROOT=$PWD
 
-ALL="autoresearcher agent vllm alayaworld wbench-main wbench-vp gen-zimage gen-wan22 gen-ltx25 gen-lightx2v"
+ALL="autoresearcher bwrap agent vllm alayaworld wbench-main wbench-vp gen-zimage gen-wan22 gen-ltx25 gen-lightx2v"
 run() { conda run --no-capture-output -p ".envs/$1" "${@:2}"; }
 # `configs/kernel.yaml` pins the Wan2.2, LTX-2 and LightX2V revisions; read them with the autoresearcher env's yaml
 pin() { .envs/autoresearcher/bin/python -c "import yaml; print(yaml.safe_load(open('configs/kernel.yaml'))['generators']['$1']['commit'])"; }
@@ -53,7 +53,7 @@ build() {
   if [ -d ".envs/$n" ]; then echo "== $n: exists, skipped"; return; fi
   echo "== $n"
   conda env create -y -q -p ".envs/$n" -f "envs/$n.yml"
-  run "$n" pip install -q --no-deps -r "envs/$n.pip.txt"   # exact pins; --no-deps because the pins already contain every dependency
+  [ ! -f "envs/$n.pip.txt" ] || run "$n" pip install -q --no-deps -r "envs/$n.pip.txt"   # exact pins; --no-deps because the pins already contain every dependency
   case $n in
     autoresearcher) run "$n" pip install -q --no-deps -e . ;;
     gen-wan22) clone_pinned https://github.com/Wan-Video/Wan2.2.git third_party/Wan2.2 "$(pin wan22)" ;;
