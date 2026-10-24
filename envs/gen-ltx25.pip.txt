@@ -1,5 +1,4 @@
---extra-index-url https://download.pytorch.org/whl/cu132
---extra-index-url https://download.pytorch.org/whl/test/cu132/
+--extra-index-url https://download.pytorch.org/whl/cu130
 --find-links https://whl.natten.org
 accelerate==1.15.0
 annotated-doc==0.0.5
@@ -8,9 +7,9 @@ av==18.1.0
 certifi==2026.7.22
 click==8.5.0
 cloudpickle==3.1.2
-cuda-bindings==13.4.3
-cuda-pathfinder==1.8.2
-cuda-toolkit==13.2.1
+cuda-bindings==13.4.4
+cuda-pathfinder==1.8.4
+cuda-toolkit==13.0.3.0
 einops==0.8.2
 filelock==4.0.4
 fsspec==2026.9.0
@@ -25,24 +24,24 @@ markdown-it-py==4.2.0
 markupsafe==3.0.3
 mdurl==0.1.2
 mpmath==1.3.0
-natten==0.21.7+torch2130cu132
+natten==0.21.7+torch2130cu130
 networkx==3.7
 numpy==2.5.3
-nvidia-cublas==13.4.0.1
-nvidia-cuda-cupti==13.2.75
-nvidia-cuda-nvrtc==13.2.78
-nvidia-cuda-runtime==13.2.75
+nvidia-cublas==13.1.1.3
+nvidia-cuda-cupti==13.0.85
+nvidia-cuda-nvrtc==13.0.88
+nvidia-cuda-runtime==13.0.96
 nvidia-cudnn-cu13==9.24.0.43
-nvidia-cufft==12.2.0.46
-nvidia-cufile==1.17.1.22
-nvidia-curand==10.4.2.55
-nvidia-cusolver==12.2.0.1
-nvidia-cusparse==12.7.10.1
+nvidia-cufft==12.0.0.61
+nvidia-cufile==1.15.1.6
+nvidia-curand==10.4.0.35
+nvidia-cusolver==12.0.4.66
+nvidia-cusparse==12.6.3.3
 nvidia-cusparselt-cu13==0.8.1
 nvidia-nccl-cu13==2.29.7
 nvidia-nvjitlink==13.4.92
 nvidia-nvshmem-cu13==3.4.5
-nvidia-nvtx==13.2.75
+nvidia-nvtx==13.0.85
 openimageio==3.1.17.0
 pillow==12.3.0
 psutil==7.2.2
@@ -55,9 +54,9 @@ scipy==1.18.1
 shellingham==1.5.4
 sympy==1.14.0
 tokenizers==0.22.2
-torch==2.13.0+cu132
-torchaudio==2.11.0+cu132
-torchvision==0.28.0+cu132
+torch==2.13.0+cu130
+torchaudio==2.11.0+cu130
+torchvision==0.28.0+cu130
 tqdm==4.70.1
 transformers==5.14.1
 triton==3.7.1

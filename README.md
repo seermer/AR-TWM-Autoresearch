@@ -9,7 +9,7 @@ Every step ends with a check; do not continue if it fails.
 |---|---|
 | OS | Linux x86_64 |
 | GPUs | 4 NVIDIA cards of one model, at least 24 GB each: RTX 4090, A100 or H100 (tested: RTX 4090), all idle. A run takes the first `gpus.num_gpus` idle cards (`configs/kernel.yaml`: 4, a multiple of 4). Or 8 H100 80 GB cards with `configs/h100.yaml` (every step below names it where it applies) |
-| Driver | `nvidia-smi` shows `CUDA Version: 13.2` or higher |
+| Driver | `nvidia-smi` shows `CUDA Version: 13.0` or higher |
 | RAM | 128 GB minimum, 256 GB recommended; 8 x H100: 768 GB, and 128 GB of `/dev/shm` |
 | Disk | 850 GB free on one disk (downloads about 600 GB); 8 x H100: 1.5 TB (downloads about 900 GB) |
 | Software | `conda` (Miniforge), `git`, `ffmpeg`, `bwrap` (bubblewrap, with unprivileged user namespaces allowed: agents run in bwrap sandboxes), and `curl`, `wget`, `unzip`, `gcc` (the sandboxes use them from the host) |

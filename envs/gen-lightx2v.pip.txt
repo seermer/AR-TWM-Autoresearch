@@ -1,4 +1,4 @@
---extra-index-url https://download.pytorch.org/whl/cu132
+--extra-index-url https://download.pytorch.org/whl/cu130
 --extra-index-url https://download.pytorch.org/whl/cpu
 accelerate==1.15.0
 aio-pika==10.1.0
@@ -37,12 +37,12 @@ click==8.5.0
 comfy-kitchen==0.2.37
 crcmod==1.7
 cryptography==50.0.2
-cuda-bindings==13.4.3
+cuda-bindings==13.4.4
 cuda-core==1.2.1
-cuda-pathfinder==1.8.3
+cuda-pathfinder==1.8.4
 cuda-python==13.4.1
 cuda-tile==1.6.0
-cuda-toolkit==13.2.2
+cuda-toolkit==13.0.3.0
 darabonba-core==1.0.9
 decord==0.6.0
 Deprecated==1.3.1
@@ -76,17 +76,17 @@ nccl4py==0.6.0
 networkx==3.7
 ninja==1.13.2
 numpy==2.5.3
-nvidia-cublas==13.4.1.3
-nvidia-cuda-cupti==13.2.86
-nvidia-cuda-nvrtc==13.2.86
-nvidia-cuda-runtime==13.2.86
+nvidia-cublas==13.1.1.3
+nvidia-cuda-cupti==13.0.85
+nvidia-cuda-nvrtc==13.0.88
+nvidia-cuda-runtime==13.0.96
 nvidia-cudnn-cu13==9.24.0.43
 nvidia-cudnn-frontend==1.30.0
-nvidia-cufft==12.2.0.57
-nvidia-cufile==1.17.1.22
-nvidia-curand==10.4.2.66
-nvidia-cusolver==12.2.0.11
-nvidia-cusparse==12.7.10.12
+nvidia-cufft==12.0.0.61
+nvidia-cufile==1.15.1.6
+nvidia-curand==10.4.0.35
+nvidia-cusolver==12.0.4.66
+nvidia-cusparse==12.6.3.3
 nvidia-cusparselt-cu13==0.8.1
 nvidia-cutlass-dsl==4.8.0
 nvidia-cutlass-dsl-libs-base==4.8.0
@@ -97,7 +97,7 @@ nvidia-ml-py==13.615.71
 nvidia-nccl-cu13==2.30.7
 nvidia-nvjitlink==13.4.92
 nvidia-nvshmem-cu13==3.4.5
-nvidia-nvtx==13.2.86
+nvidia-nvtx==13.0.85
 omegaconf==2.3.1
 opencv-python==5.0.0.93
 opentelemetry-api==1.45.1
@@ -143,11 +143,11 @@ swanlab==0.10.1
 sympy==1.14.0
 tabulate==0.10.0
 tokenizers==0.23.2
-torch==2.14.1+cu132
+torch==2.14.1+cu130
 torchada==0.1.94
-torchao==0.18.0+cu132
+torchao==0.18.0+cu130
 torchaudio==2.11.0+cpu
-torchvision==0.29.1+cu132
+torchvision==0.29.1+cu130
 tos==2.8.7
 tqdm==4.70.1
 transformers==5.19.0

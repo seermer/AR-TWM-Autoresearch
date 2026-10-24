@@ -82,7 +82,7 @@ The script then does what a pin file cannot:
 - `autoresearcher`: `pip install --no-deps -e .` (the kernel itself).
 - `gen-wan22`: clones `third_party/Wan2.2` at `generators.wan22.commit`. `Wan22Backend` refuses another commit.
 - `gen-ltx25`: clones `third_party/LTX-2` at `generators.ltx25.commit` and installs `ltx-core` and `ltx-pipelines` editable.
-  `pip check` reports one conflict by design: torch 2.13.0+cu132 asks for `nvidia-cudnn-cu13==9.20.0.48`, the env has
+  `pip check` reports one conflict by design: torch 2.13.0+cu130 asks for `nvidia-cudnn-cu13==9.20.0.48`, the env has
   9.24.0.43 (LTX-2's own cuDNN override; 9.20 lacks `libcudnn_engines_tensor_ir`). `ltx-kernels` is not installed: it only
   serves multi-GPU sequence parallelism and NVFP4 (Blackwell).
 - `wbench-main`: builds MegaSAM's CUDA extensions (`lietorch`, `droid_backends`) from a copy of `../WBench/third_party/mega-sam/base`
@@ -114,7 +114,7 @@ of Wan and LTX set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (the 24 GB
 
 1. **Create the conda environments in `.envs/`** with `scripts/setup_envs.sh` (see
    "Environments" above). Never use `base` or the system Python. `ar doctor` lists any env that is missing or lives outside `.envs/`.
-2. **System tools on PATH:** `ffmpeg`, `ffprobe`, `conda`, `git`. An NVIDIA driver supporting CUDA 13.2; no CUDA toolkit.
+2. **System tools on PATH:** `ffmpeg`, `ffprobe`, `conda`, `git`. An NVIDIA driver supporting CUDA 13.0; no CUDA toolkit.
 3. **Weights are not in git.** `scripts/download_weights.py [--config ...]` downloads them; or copy:
    `WorldModel/weights/` (LTX-2.3 transformer, `alaya-world-ar`, VAE, Gemma),
    `WBench/weights/` (SAM2, DA3, MegaSAM, HPSv3, DINOv2 torch hub).
