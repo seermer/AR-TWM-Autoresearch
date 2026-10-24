@@ -10,16 +10,15 @@
 #SBATCH --gres=gpu:h200:8
 #SBATCH --time=72:00:00
 #SBATCH --signal=B:TERM@900
-#SBATCH --requeue
-#SBATCH --open-mode=append
+#SBATCH --no-requeue
 #SBATCH --output=runs/slurm-%j.log
-# Slurm job for one `ar run`; starts it, or resumes it when runs/$RUN exists (also after a preemption requeue).
+# Slurm job for one `ar run`; starts it, or resumes it when runs/$RUN exists.
 # Submit from AutoResearcher/; options on the command line override the lines above:
 #   RUN=exp1 MAX_NODES=6 sbatch -J exp1 scripts/sbatch_run.sh
 # CONDA_EXE=<conda install>/bin/conda when conda is only a shell function in the submitting shell.
 # Optional: CONFIG="configs/h100.yaml configs/rain_start.yaml" (new runs only; files applied in order).
-# SIGTERM stops the run: on preemption the job is requeued and resumes it; 15 min before the time limit,
-# resubmit the same RUN to resume it.
+# SIGTERM (preemption, or 15 min before the time limit) stops the run; it is never requeued: resubmit
+# the same RUN to resume it.
 # Host for 8 GPUs: >= 128 GB /dev/shm, an NVIDIA driver supporting CUDA >= 13.0, and 1.5 TB disk for the
 # whole tree (weights, envs, caches, runs).
 set -euo pipefail
