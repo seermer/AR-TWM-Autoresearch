@@ -2,6 +2,7 @@
 # Only the keys that differ from kernel.yaml.
 eval:
   data: ../WBench/data_animal_appears
+  data_repo: seermer/SkillWBench-AnimalAppear     # HF dataset scripts/download_weights.py fetches `data` from
   cases: configs/animal_appears_cases.txt
   proxy_size: 60
   score_weights:

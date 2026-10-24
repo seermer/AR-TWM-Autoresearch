@@ -123,6 +123,7 @@ It can be re-run: what it finished is skipped, and an interrupted download resum
 python scripts/download_weights.py                              # 4 x 24 GB
 python scripts/download_weights.py --config configs/h100.yaml   # 8 x H100
 python scripts/download_weights.py --check [--config ...]       # lists anything missing
+python scripts/download_weights.py --config configs/h100.yaml configs/rain_start.yaml   # also a skill benchmark's data
 ```
 
 Then, once on one GPU, build rollout_h3's AdaLN cache (again after changing infer_steps in configs/h3_lightx2v.json):
@@ -196,7 +197,8 @@ mean of the metrics those cases list, all 22 here (`eval.score_weights` in `conf
 
 To score another benchmark, add `--config <file>` to `ar run`. The file holds only the `kernel.yaml`
 keys that differ, and the run keeps it, so `--resume` takes no `--config`. Two are provided, one per
-skill benchmark (built by `../SkillWBench`, kept in `../WBench/data_<benchmark>`):
+skill benchmark (built by `../SkillWBench`, kept in `../WBench/data_<benchmark>`; `download_weights.py` with the
+same `--config` fetches it from the HF dataset in `eval.data_repo`):
 
 | Config | Scores | Cases | Skill metric |
 |---|---|---|---|

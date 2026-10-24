@@ -44,6 +44,8 @@ def entries(cfg: KernelConfig) -> list[dict]:
         dict(name="wbench-weights", repo="meituan-longcat/WBench-weights", dest=wb / "weights"),
         dict(name="captioner", repo=cfg.get("captioner.model"), dest=None),
     ]
+    if cfg.get("eval.data_repo"):
+        out.append(dict(name="eval-data", repo=cfg.get("eval.data_repo"), repo_type="dataset", dest=cfg.eval_data))
     if (cfg.get("images") or {}).get("enabled"):
         out.append(dict(name="z-image-turbo", repo="Tongyi-MAI/Z-Image-Turbo", dest=ar / cfg.get("images.weights"),
                         revision=cfg.get("images.revision"), ignore_patterns=["assets/*"]))

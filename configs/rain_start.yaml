@@ -2,6 +2,7 @@
 # Only the keys that differ from kernel.yaml.
 eval:
   data: ../WBench/data_rain_start
+  data_repo: seermer/SkillWBench-Rain     # HF dataset scripts/download_weights.py fetches `data` from
   cases: configs/rain_start_cases.txt
   proxy_size: 60
   score_weights:
