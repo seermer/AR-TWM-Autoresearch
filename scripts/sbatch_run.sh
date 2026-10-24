@@ -35,6 +35,7 @@ conda activate "$PWD/.envs/autoresearcher"
 set -u
 export HF_HOME=$PWD/.cache/huggingface
 unset CUDA_VISIBLE_DEVICES
+ulimit -u "$(ulimit -Hu)"     # the soft process/thread limit can be as low as 512; 8 GPU workers need thousands
 
 ar doctor --gpu ${CONFIG:+--config $CONFIG}
 
