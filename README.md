@@ -21,6 +21,7 @@ Check:
 nvidia-smi
 conda --version && git --version && which curl wget unzip gcc
 unshare --user true && echo user namespaces ok
+ulimit -u                      # processes+threads per user: thousands needed; if low, ulimit -u "$(ulimit -Hu)" in the shell that runs ar
 ssh -T git@github.com          # must say "Hi <your-user>!"
 df -h .
 ```
@@ -267,6 +268,7 @@ Do not delete files under `runs/$RUN` by hand.
 | `enabled tools do not fit GPUs` | A tool needs more GPU memory in total than the run's cards have (`min_total_gpu_gib` in `configs/kernel.yaml`). Give the run more or larger GPUs, or switch that generator off before starting a new run. |
 | `tool_does_not_fit` alert in `ar status`, and the run stopped | A GPU tool found the machine too small while running; the alert names the worker log. Give the run more or larger GPUs, then `--resume`. |
 | `permission denied (publickey)` for the git remote | `ssh-add` your key in the shell that runs `ar`; check with `ssh -T git@github.com`. It shows up as a warning in `ar status`. |
+| `Resource temporarily unavailable` from ffmpeg/decord, `pthread_create failed` from OpenBLAS, or a `KeyboardInterrupt` nobody sent | The per-user process limit is too low (`ulimit -u`, some clusters set 512): run `ulimit -u "$(ulimit -Hu)"` in that shell first. `scripts/sbatch_run.sh` does it. |
 | `ar doctor` fails at `bwrap` | Run `scripts/setup_envs.sh bwrap`; if a sandbox does not start, an administrator must allow unprivileged user namespaces. |
 | Hugging Face `401` / `403` | Re-run `hf auth login` and accept the licences in step 3. |
 | `ar doctor` reports missing weights or a broken link | Re-run the download command for that folder (step 4). |
