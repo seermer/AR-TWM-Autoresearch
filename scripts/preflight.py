@@ -126,7 +126,7 @@ class Preflight:
             clips.append(media / f"{i}.mp4")
         frames = self.run_dir / "vllm_frames"
         frames.mkdir()
-        ffmpeg("-i", self.clips[0], "-vf", "select=not(mod(n\\,2))", "-vsync", "vfr",
+        ffmpeg("-i", self.clips[0], "-vf", "select=not(mod(n\\,2))", "-fps_mode", "vfr",
                "-frames:v", self.cfg.get("eval.judge.max_images"), frames / "%03d.jpg")
         urls = ["data:image/jpeg;base64," + base64.b64encode(f.read_bytes()).decode() for f in sorted(frames.glob("*.jpg"))]
         video = "data:video/mp4;base64," + base64.b64encode(self.clips[0].read_bytes()).decode()
