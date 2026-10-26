@@ -212,6 +212,7 @@ def test_h3_produces_a_silent_clip_with_its_annotation(h3_env):
     assert w["gpus"] == "0,1,4,5" and w["rank"] == 0             # one worker with every GPU
     assert w["weights"] == str(REAL.repo_root / REAL.get("generators.h3.weights"))
     assert w["config"]["parallel"] == {"seq_p_size": 4}          # a rank per GPU
+    assert w["config"]["attn_type"] == REAL.get("generators.h3.attn_type")
 
 
 def test_h3_job_fails_while_host_ram_is_short(h3_env, monkeypatch):

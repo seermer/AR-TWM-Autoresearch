@@ -155,7 +155,7 @@ Check: the last line says `[Precache] done` and `ls ../WorldModel/cache/text_emb
 ## 6. Pre-flight checks
 
 ```bash
-ar doctor --gpu                 # must end with "0 failed"
+ar doctor --gpu                 # must end with "0 failed"; on 8 x H100 add --config configs/h100.yaml
 nvidia-smi --query-gpu=index,memory.used --format=csv     # every GPU near 0 MiB
 pytest tests -q                 # optional: unit tests, no GPU needed, about 12 minutes
 ```
@@ -276,4 +276,5 @@ Do not delete files under `runs/$RUN` by hand.
 | Env build stops with `unsupported or mixed GPUs` | Only one kind of RTX 4090, A100 or H100 per machine is supported. |
 | `ar doctor --gpu` says torch is built for a newer CUDA than the driver supports | Update the NVIDIA driver (step 0). |
 | `ar doctor --gpu` reports `no kernel image` for an env | It was built on another kind of card: delete `.envs/<name>` and run `scripts/setup_envs.sh <name>`. |
+| `ar doctor --gpu --config configs/h100.yaml` fails `gpu.gen-lightx2v` with `'NoneType' object is not callable` | The env has no FlashAttention 3 (built before it was added): delete `.envs/gen-lightx2v` and run `scripts/setup_envs.sh gen-lightx2v`. |
 | Disk fills up | Alerts start below 50 GB free. Free space, then `--resume`. |

@@ -267,3 +267,23 @@ def test_gpu_checks_fail_an_env_built_for_a_newer_cuda_than_the_driver(tmp_path,
         "gpu.host": "ok", "gpu.driver": "ok", "gpu.agent": "fail", "gpu.alayaworld": "ok", "gpu.vllm": "fail"}
     assert "CUDA 13.2" in found["gpu.vllm"].detail and "no kernel image" in found["gpu.agent"].detail
     assert sorted(probed) == [("agent", 2), ("alayaworld", 2)]
+
+
+def test_gpu_checks_run_rollout_h3s_configured_attention(tmp_path, monkeypatch):
+    from ar_kernel import doctor
+    root = _tree(tmp_path)
+    raw = yaml.safe_load((root / "configs" / "kernel.yaml").read_text())
+    (root / "configs" / "kernel.yaml").write_text(yaml.safe_dump({**raw, "generators": {"h3": {"attn_type": "flash_attn3"}}}))
+    cfg = KernelConfig.load(root / "configs" / "kernel.yaml")
+    _torch_env(cfg.repo_root, "gen-lightx2v", "13.0")
+    monkeypatch.setattr(doctor, "smi", lambda args: "NVIDIA H100 80GB HBM3, 9.0\n")
+    monkeypatch.setattr(doctor, "driver_cuda", lambda: (13, 0))
+    monkeypatch.setattr(doctor, "choose_gpus", lambda cfg, env: [0])
+    probed = {}
+
+    def probe(env, gpu, snippets):
+        probed[env.name] = snippets
+        return subprocess.CompletedProcess([], 0, "", "")
+    monkeypatch.setattr(doctor, "_probe", probe)
+    doctor.gpu_checks(cfg)
+    assert any("ATTN_WEIGHT_REGISTER['flash_attn3']" in s for s in probed["gen-lightx2v"])

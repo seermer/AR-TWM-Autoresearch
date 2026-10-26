@@ -176,11 +176,12 @@ generators:                       # rollout_* GPU jobs; switched on only after a
     resolutions: [[576, 1024]]    # [height, width], first = default; each divisible by 64 (two-stage) and
                                   # within ingest.aspect_tolerance of 16:9
   h3:
-    env: .envs/gen-lightx2v         # a conda-prefix env inside the repo (LightX2V, SageAttention)
+    env: .envs/gen-lightx2v         # a conda-prefix env inside the repo (LightX2V, SageAttention; FlashAttention 3 on H100)
     repo: third_party/LightX2V      # relative to the AutoResearcher repo; gitignored
     commit: 97853b1b12e5d29ef3e2b63b781a67b23c191d4c   # pinned; the backend refuses to run off this commit
     config: configs/h3_lightx2v.json   # LightX2V's shared block offload recipe: bf16 weights in one host copy
                                     # for all ranks, sequence parallel, SageAttention, parallel VAE decode
+    attn_type: sage_attn2           # the DiT's attention; replaces attn_type in config
     min_total_gpu_gib: 96           # measured on 4 x 24 GB only
     weights: weights/minimax-h3     # MiniMaxAI/MiniMax-H3, diffusers layout, fl2va/t2va partition
     revision: 42ed227ee7df40d41602854ae760620d6eb651fe

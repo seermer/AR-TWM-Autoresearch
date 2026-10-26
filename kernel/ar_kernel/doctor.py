@@ -256,11 +256,21 @@ GPU_PROBES = {
     "wbench-vp": [_XFORMERS, "import cupy; int(cupy.arange(4).sum())", "import vllm"],
     "vllm": ["import vllm, flashinfer"],
     "gen-ltx25": ["import natten; q = torch.randn(1, 8, 8, 2, 32, device='cuda', dtype=torch.half); natten.na2d(q, q, q, 3)"],
-    "gen-lightx2v": ["from sageattention import sageattn; q = torch.randn(1, 8, 128, 64, device='cuda', dtype=torch.half); "
-                     "sageattn(q, q, q)", "import flashinfer"],
+    "gen-lightx2v": ["import flashinfer"],   # plus h3_attn_probe
     "gen-sglang": ["import sglang, flashinfer"],
     "gen-vllm-omni": ["import vllm_omni, flashinfer"],
 }
+
+
+def h3_attn_probe(cfg: KernelConfig) -> str:
+    """rollout_h3's configured attention, through LightX2V, against torch's."""
+    attn = cfg.get("generators.h3.attn_type")
+    return ("import torch.nn.functional as F, lightx2v.common.ops.attn\n"
+            "from lightx2v.utils.registry_factory import ATTN_WEIGHT_REGISTER\n"
+            "q, k, v = (torch.randn(512, 8, 128, device='cuda', dtype=torch.bfloat16) for _ in range(3))\n"
+            f"o = ATTN_WEIGHT_REGISTER['{attn}']().apply(q, k, v).view(512, 8, 128).float()\n"
+            "r = F.scaled_dot_product_attention(*(t.transpose(0, 1) for t in (q, k, v))).transpose(0, 1).float()\n"
+            f"err = (o - r).abs().max().item(); assert err < 0.05, f'{attn} differs from torch attention by {{err}}'")
 
 
 def driver_cuda() -> tuple[int, int] | None:
@@ -321,7 +331,7 @@ def gpu_checks(cfg: KernelConfig) -> list[Finding]:
         if built > driver:
             return Finding("fail", f"gpu.{name}", "torch is built for CUDA %d.%d, newer than the driver supports "
                                                   "(%d.%d): update the driver" % (*built, *driver))
-        r = _probe(envs[name], gpu, GPU_PROBES[name])
+        r = _probe(envs[name], gpu, GPU_PROBES[name] + ([h3_attn_probe(cfg)] if name == "gen-lightx2v" else []))
         return Finding("ok", f"gpu.{name}", f"CUDA {built[0]}.{built[1]} packages run on GPU {gpu}") if r.returncode == 0 \
             else Finding("fail", f"gpu.{name}", f"a GPU op fails: {(r.stderr or r.stdout).strip()[-2000:]}")
     with ThreadPoolExecutor(4) as pool:

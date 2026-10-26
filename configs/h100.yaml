@@ -24,6 +24,7 @@ images:
   offload: none
 generators:
   h3:
+    attn_type: flash_attn3        # FlashAttention 3; SageAttention picks an fp8 kernel on H100 that renders H3 as noise
     max_items: 200
   ltx25:
     quantization: none            # bf16 weights; CPU offload kept, so a worker holds the bf16 model in host RAM

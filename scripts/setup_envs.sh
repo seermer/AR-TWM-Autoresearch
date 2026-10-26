@@ -60,13 +60,23 @@ build() {
     gen-ltx25)
       clone_pinned https://github.com/Lightricks/LTX-2.git third_party/LTX-2 "$(pin ltx25)"
       run "$n" pip install -q --no-deps -e third_party/LTX-2/packages/ltx-core -e third_party/LTX-2/packages/ltx-pipelines ;;
-    gen-lightx2v)   # LightX2V plus SageAttention, which is compiled with the env's own g++ 13 and CUDA 13.0
+    gen-lightx2v)   # LightX2V plus SageAttention (and FlashAttention 3 on H100), compiled with the env's own g++ 13 and CUDA 13.0
       clone_pinned https://github.com/ModelTC/LightX2V.git third_party/LightX2V "$(pin h3)"
       run "$n" pip install -q --no-deps -e third_party/LightX2V
       clone_pinned https://github.com/thu-ml/SageAttention.git third_party/SageAttention d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5
       sed -i 's/-std=c++17/-std=c++20/g' third_party/SageAttention/setup.py   # torch 2.14 headers need C++20
       rm -rf third_party/SageAttention/build   # objects from an earlier build would be linked unchanged
-      cuda_run "$n" pip install -q --no-deps --no-build-isolation third_party/SageAttention ;;
+      cuda_run "$n" pip install -q --no-deps --no-build-isolation third_party/SageAttention
+      if [ "$(cuda_arch)" = 9.0 ]; then   # FlashAttention 3: rollout_h3's attention on H100 (configs/h100.yaml)
+        clone_pinned https://github.com/Dao-AILab/flash-attention.git third_party/flash-attention bb25ba3ce4b1c8df5d4ef6a94807f0d3910599ca
+        git -C third_party/flash-attention submodule update --init csrc/cutlass
+        rm -rf third_party/flash-attention/hopper/build
+        # only H3's case (forward, bf16/fp16, head dim 128); MAX_JOBS bounds nvcc's host RAM
+        MAX_JOBS=16 FLASH_ATTENTION_FORCE_BUILD=TRUE FLASH_ATTENTION_DISABLE_BACKWARD=TRUE FLASH_ATTENTION_DISABLE_FP8=TRUE \
+          FLASH_ATTENTION_DISABLE_SM80=TRUE FLASH_ATTENTION_DISABLE_HDIM64=TRUE FLASH_ATTENTION_DISABLE_HDIM96=TRUE \
+          FLASH_ATTENTION_DISABLE_HDIM192=TRUE FLASH_ATTENTION_DISABLE_HDIM256=TRUE FLASH_ATTENTION_DISABLE_HDIMDIFF64=TRUE \
+          FLASH_ATTENTION_DISABLE_HDIMDIFF192=TRUE cuda_run "$n" pip install -q --no-deps --no-build-isolation third_party/flash-attention/hopper
+      fi ;;
     wbench-main)   # MegaSAM's CUDA extensions (lietorch, droid_backends), from a copy whose fixed arch list is removed
       rm -rf .cache/tmp/mega-sam
       cp -r ../WBench/third_party/mega-sam/base .cache/tmp/mega-sam

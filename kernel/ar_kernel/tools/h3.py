@@ -187,6 +187,7 @@ class H3Backend(GpuJob):
         if not cache.is_dir():
             raise KernelFault(f"no AdaLN cache at {cache}: build it once (README, model weights)")
         config["adaln_cache_dir"] = str(cache)
+        config["attn_type"] = self.block["attn_type"]
         config["parallel"]["seq_p_size"] = len(self.gpus)
         (work / "lightx2v.json").write_text(json.dumps(config), encoding="utf-8")
         return self.run_workers(self.block["env"], lambda r, world: [
