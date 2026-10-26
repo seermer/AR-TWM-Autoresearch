@@ -1,12 +1,10 @@
-"""python -m panel --run-id <run>: the run panel behind Gradio's login, on a public share link."""
+"""python -m panel --run-id <run>: the run panel on every interface, port 7860 unless --port."""
 from __future__ import annotations
 
 import argparse
 import os
 import sys
 from pathlib import Path
-
-from dotenv import dotenv_values
 
 from ar_kernel.subproc import tmp_link
 
@@ -17,29 +15,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m panel", description=__doc__)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--port", type=int, default=7860)
-    parser.add_argument("--no-share", action="store_true", help="serve locally only, no public link")
-    parser.add_argument("--host", default="127.0.0.1", help="address to bind (0.0.0.0: every interface)")
     args = parser.parse_args(argv)
-    env = {**dotenv_values(REPO / ".env", interpolate=False), **{k: v for k, v in os.environ.items() if k.startswith("PANEL_")}}
-    user, password = env.get("PANEL_USER", ""), env.get("PANEL_PASSWORD", "")
-    if not user or not password:
-        print("error: set PANEL_USER and PANEL_PASSWORD in AutoResearcher/.env; the panel never runs "
-              "without a login", file=sys.stderr)
-        return 2
     run_dir = REPO / "runs" / args.run_id
     if not (run_dir / "config" / "run.json").is_file():
         print(f"error: no run {args.run_id!r} under {REPO / 'runs'}", file=sys.stderr)
         return 2
-    # Gradio's file cache stays out of runs/ (the panel never writes there).
-    os.environ.setdefault("GRADIO_TEMP_DIR", str(REPO / ".cache" / "panel"))
-    os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
-    os.environ["TMPDIR"] = str(tmp_link())
-    from .ui import CSS, build_app
-    app = build_app(run_dir)
-    app.queue(default_concurrency_limit=4)
-    app.launch(share=not args.no_share, server_name=args.host, server_port=args.port,
-               auth=(user, password), allowed_paths=[str(run_dir)], footer_links=["gradio", "settings"], css=CSS,
-               inbrowser=False)
+    os.environ["TMPDIR"] = str(tmp_link())     # a stopped run's db copy stays inside the project
+    from .server import DIST, create_app
+    if not (DIST / "index.html").is_file():
+        print(f"error: the panel's web app is not built ({DIST}); run scripts/setup_envs.sh panel", file=sys.stderr)
+        return 2
+    import uvicorn
+    # an open live stream would otherwise hold Ctrl+C until every browser tab closes
+    uvicorn.run(create_app(run_dir), host="0.0.0.0", port=args.port, log_level="warning", timeout_graceful_shutdown=1)
     return 0
 
 

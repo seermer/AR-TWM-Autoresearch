@@ -1,0 +1,5 @@
+# Node for building the run panel's web app (panel/web); the panel itself runs in the autoresearcher env.
+channels:
+  - conda-forge
+dependencies:
+  - nodejs=26.8.2

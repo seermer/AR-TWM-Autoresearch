@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Builds the project's conda envs into AutoResearcher/.envs/<name>.
-#   scripts/setup_envs.sh              # all eleven, in order
+#   scripts/setup_envs.sh              # all eleven, in order, then the panel (optional: a failure only warns)
 #   scripts/setup_envs.sh vllm alayaworld   # only these
 # Candidate generator backends, built only when named: gen-vllm-omni gen-sglang
 # gen-sglang compiles kernels on first use; launch it with `conda run -p .envs/gen-sglang` and
 #   CUDA_HOME=<env> CPATH=<env>/targets/x86_64-linux/include SGLANG_CACHE_DIR=.cache/sglang
 #   LIBRARY_PATH=<env>/targets/x86_64-linux/lib:<env>/targets/x86_64-linux/lib/stubs
-# An env that already exists is skipped; delete .envs/<name> to rebuild it.
+# An env that already exists is skipped; delete .envs/<name> to rebuild it. The panel's web app is rebuilt when its source changed.
 # Needs: conda, git and an NVIDIA driver; no CUDA toolkit (the envs that compile bring their own nvcc).
 # CUDA code is compiled for the detected card only: RTX 4090 (8.9), A100 (8.0) or H100 (9.0), one kind per machine.
 # Run from anywhere; run one copy at a time.
@@ -86,5 +86,25 @@ build() {
   esac
 }
 
-for n in ${@:-$ALL}; do build "$n"; done
+build_panel() {   # Node (.envs/panel) and the panel's web app (panel/web/dist); returns non-zero on any failure
+  local web=panel/web
+  if [ ! -d .envs/panel ]; then
+    echo "== panel"
+    conda env create -y -q -p .envs/panel -f envs/panel.yml || { rm -rf .envs/panel; return 1; }
+  fi
+  if [ -f $web/dist/index.html ] && [ -z "$(find $web/src $web/index.html $web/package-lock.json $web/vite.config.ts -newer $web/dist/index.html | head -1)" ]; then
+    echo "== panel: built, skipped"; return 0
+  fi
+  echo "== panel: building the web app"
+  (cd $web && export PATH=$ROOT/.envs/panel/bin:$PATH npm_config_cache=$ROOT/.cache/npm npm_config_update_notifier=false \
+    && npm ci --no-audit --no-fund && npm run build)
+}
+
+for n in ${@:-$ALL panel}; do
+  if [ "$n" = panel ]; then
+    build_panel || echo "warning: the run panel was not built (see above); runs are not affected. View this machine's runs with the panel on another machine (ar fetch)." >&2
+  else
+    build "$n"
+  fi
+done
 echo "envs done: $(ls .envs | tr '\n' ' ')"

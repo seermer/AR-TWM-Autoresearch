@@ -35,6 +35,7 @@ class Call:
     cost_usd: float | None = None
     latency_s: float | None = None
     role: str | None = None
+    done_ts: float | None = None
 
 
 @dataclass
@@ -51,8 +52,8 @@ class Segment:
         return self.calls[-1].ts
 
 
-def item(kind: str, title: str | None, text: str) -> dict:
-    return {"kind": kind, "title": title, "text": text}
+def item(kind: str, title: str | None, text: str, **extra) -> dict:
+    return {"kind": kind, "title": title, "text": text, **extra}
 
 
 def text_of(content) -> str:
@@ -123,17 +124,15 @@ def segments(events: list[dict], node: str, phase: str, attempt: int) -> list[Se
         elif e.get("type") == "llm.response" and e.get("call_id") in calls:
             c = calls[e["call_id"]]
             c.response, c.status, c.usage = e.get("payload"), e.get("status"), e.get("usage") or {}
-            c.cost_usd, c.latency_s = e.get("cost_usd"), e.get("latency_s")
+            c.cost_usd, c.latency_s, c.done_ts = e.get("cost_usd"), e.get("latency_s"), e.get("ts_wall")
     grouped: dict[str, list[Call]] = {}
     for c in sorted(calls.values(), key=lambda c: c.ts):
         grouped.setdefault(c.conversation_id, []).append(c)
     return sorted((Segment(k, v) for k, v in grouped.items()), key=lambda s: s.first_ts)
 
 
-def chains(segs: list[Segment], load: Load) -> list[list[Segment]]:
-    """B continues A when B starts after A's last call and B's first user message contains
-    A's last reply (whitespace-stripped; the harness pastes `reply.text.strip()`). The
-    wording of the compaction prompt is never relied on."""
+def carries(segs: list[Segment], load: Load) -> tuple[dict[str, str], dict[str, str]]:
+    """Per segment: its last reply (whitespace-stripped) and its first user message."""
     last_reply, first_user = {}, {}
     for s in segs:
         last = s.calls[-1]
@@ -142,10 +141,20 @@ def chains(segs: list[Segment], load: Load) -> list[list[Segment]]:
         messages = request_messages(load(s.calls[0].request))
         first_user[s.conversation_id] = next((text_of(m.get("content")) for m in messages
                                               if m.get("role") == "user"), "")
+    return last_reply, first_user
+
+
+def chains(segs: list[Segment], load: Load) -> list[list[Segment]]:
+    """B continues A when both have the same role label, B starts after A's last call and B's
+    first user message contains A's last reply (whitespace-stripped; the harness pastes
+    `reply.text.strip()`). The wording of the compaction prompt is never relied on. The same
+    carry between different roles is not a compaction."""
+    last_reply, first_user = carries(segs, load)
     prev: dict[str, Segment] = {}
     taken: set[str] = set()
     for b in segs:
         options = [a for a in segs if a is not b and a.last_ts < b.first_ts
+                   and a.calls[0].role == b.calls[0].role
                    and a.conversation_id not in taken and last_reply[a.conversation_id]
                    and last_reply[a.conversation_id] in first_user[b.conversation_id]]
         if options:
@@ -185,9 +194,10 @@ def message_items(m: dict, names: dict[str, str]) -> list[dict]:
         return [item("user", None, text_of(m.get("content")))]
     if role == "tool":
         name, text = names.get(m.get("tool_call_id"), "tool"), text_of(m.get("content"))
+        ref = {"ref": m.get("tool_call_id"), "tool": name}
         if is_tool_error(text):
-            return [item("tool_error", f"⚠ Tool error: {name}", text)]
-        return [item("tool_output", f"Tool output: {name}", text)]
+            return [item("tool_error", f"⚠ Tool error: {name}", text, **ref)]
+        return [item("tool_output", f"Tool output: {name}", text, **ref)]
     out = []
     reasoning = m.get("reasoning") or m.get("reasoning_content")     # reasoning_content: fallback only
     if reasoning:
@@ -197,7 +207,8 @@ def message_items(m: dict, names: dict[str, str]) -> list[dict]:
     for call in m.get("tool_calls") or []:
         fn = call.get("function") or {}
         names[call.get("id")] = fn.get("name", "?")
-        out.append(item("tool_call", f"Tool call: {fn.get('name', '?')}", _pretty(fn.get("arguments"))))
+        out.append(item("tool_call", f"Tool call: {fn.get('name', '?')}", _pretty(fn.get("arguments")),
+                        ref=call.get("id"), tool=fn.get("name", "?")))
     return out
 
 
@@ -210,7 +221,9 @@ def _usage(call: Call, turn: int) -> dict:
         parts.append(f"{call.latency_s:.1f} s")
     if call.status not in (None, 200):
         parts.append(f"status {call.status}")
-    return item("usage", None, " · ".join(parts))
+    return item("usage", None, " · ".join(parts), turn=turn, ts=call.ts, done_ts=call.done_ts,
+                prompt_tokens=u.get("prompt_tokens"), completion_tokens=u.get("completion_tokens"),
+                cost_usd=call.cost_usd, latency_s=call.latency_s, status=call.status, call_id=call.call_id)
 
 
 def chat_items(chain: list[Segment], load: Load, awaiting: bool) -> list[dict]:
@@ -269,3 +282,19 @@ def chat_items(chain: list[Segment], load: Load, awaiting: bool) -> list[dict]:
             title = f"Compaction #{k + 1} summary" + (", retry without tools" if r else "")
             items.append(item("compaction_summary", title, text))
     return items
+
+
+def call_turns(chain: list[Segment], load: Load) -> dict[str, int]:
+    """Call id -> its turn number in the stitched chat (compaction calls have none), as chat_items numbers them."""
+    out, turn = {}, 0
+    for k, seg in enumerate(chain):
+        comp = [] if k == len(chain) - 1 else compaction_calls(seg, load)
+        for c in seg.calls[:len(seg.calls) - len(comp)]:
+            turn += 1
+            out[c.call_id] = turn
+    return out
+
+
+def tool_names(call: Call, load: Load) -> list[str]:
+    reply = response_message(load(call.response)) if call.response else None
+    return [(t.get("function") or {}).get("name", "?") for t in (reply or {}).get("tool_calls") or []]

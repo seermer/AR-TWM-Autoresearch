@@ -51,9 +51,10 @@ Ten conda environments, all created inside `AutoResearcher/.envs/`. Takes 30 to 
 scripts/setup_envs.sh
 ```
 
-Check: `ls .envs` lists `agent alayaworld autoresearcher gen-lightx2v gen-ltx25 gen-wan22 gen-zimage vllm wbench-main wbench-vp`.
+Check: `ls .envs` lists `agent alayaworld autoresearcher gen-lightx2v gen-ltx25 gen-wan22 gen-zimage panel vllm wbench-main wbench-vp`.
 If it stops on an error, fix the cause and run it again: environments that already exist are skipped.
 To rebuild one, delete `.envs/<name>` and run `scripts/setup_envs.sh <name>`.
+Last, it builds the run panel (step 8): Node in `.envs/panel` and the web app in `panel/web/dist`. If that fails, it prints a warning and carries on; runs do not need the panel. `scripts/setup_envs.sh panel` retries it.
 
 From here on, every terminal starts with:
 
@@ -95,10 +96,6 @@ OPENAI_EFFORT=<reasoning effort the provider accepts, e.g. high; empty = not set
 # Empty: a local server of the captioner's model answers them instead (step 4). Both work, but
 # scores from the two judges are not comparable, and a run refuses to resume with the other one.
 VLM_API_KEY=
-
-# Login for the monitoring panel (step 8)
-PANEL_USER=<choose a user name>
-PANEL_PASSWORD=<choose a password>
 
 # Optional. A Hugging Face token with write access: after every phase the run uploads itself to a private
 # dataset repo <token's user>/<run id> (step 8), and agents use it for gated repos. Empty: no upload.
@@ -223,13 +220,13 @@ nvidia-smi                              # GPU use
 Web panel (every conversation, tool call, code edit, training curve, video and score), on a second terminal:
 
 ```bash
-.envs/autoresearcher/bin/python -m panel --run-id $RUN --no-share --port 7860
+.envs/autoresearcher/bin/python -m panel --run-id $RUN --port 7860
 ```
 
-Open http://127.0.0.1:7860 and log in with `PANEL_USER` / `PANEL_PASSWORD`.
-From another computer: `ssh -L 7860:127.0.0.1:7860 <user>@<server>`, then open the same address locally.
+Open http://<server>:7860 (the panel listens on every interface, without a login), or from another computer through
+`ssh -L 7860:127.0.0.1:7860 <user>@<server>` at http://127.0.0.1:7860. It updates live while the run goes on.
 
-With `HFK` set, another machine with this setup (step 1, the `autoresearcher` env and `.env`) can download the run
+With `HFK` set, another machine with this setup (step 1, the `autoresearcher` and `panel` envs, and `.env`) can download the run
 and open the panel on it; run it again to catch up with later phases:
 
 ```bash

@@ -13,7 +13,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "langchain==1.4.2", "arxiv>=4.0"]
-panel = ["gradio==6.28.0", "plotly>=6", "pygments>=2.21"]
 
 [project.scripts]
 ar = "ar_kernel.cli:main"

@@ -266,34 +266,41 @@ def run(run_dir):
 
 def test_overview(run):
     ov = views.overview(run)
-    assert ov["loop"]["alive"] is False and ov["loop"]["state_label"] == "last recorded"
-    assert ov["loop"]["max_nodes"] == 3
     rows = {r["node"]: r for r in ov["nodes"]}
     assert rows["n1"]["vs parent"] == pytest.approx(0.05) and rows["n1"]["duration_min"] == 10.0
     assert rows["root"]["parent"] == "" and rows["n2"]["status"] == "running"
-    assert ov["spend"]["calls"] == 6 and ov["spend"]["usd"] == pytest.approx(0.006)
-    assert ov["alerts"][0]["kind"] == "stall" and [s["node"] for s in ov["scores"]] == ["root", "n1"]
-    assert len(ov["recent"]) <= 50 and ov["disk_free_gb"] > 0
+    assert ov["alerts"][0]["kind"] == "stall" and len(ov["recent"]) <= 50
 
 
-def test_gpu_series(run):
-    series = views.gpu_series(run, hours=1e6)
-    assert {s["gpu"] for s in series} == {"0", "1"} and series[0]["memory_gib"] == 2.0
+def test_gpu_full_keeps_every_sample_of_a_short_run(run):
+    g = views.gpu_full(run)
+    assert set(g["gpus"]) == {"0", "1"} and g["buckets"] == g["samples"] > 0
+    assert g["gpus"]["0"]["memory_gib"][0][1] == 2.0
+
+
+def test_gpu_full_buckets_a_long_run_and_keeps_its_peaks(run, monkeypatch):
+    samples = [{"type": "gpu.sample", "ts_wall": float(t), "_seq": t, "gpus": {"0": {"util": 100 if t == 777 else 10, "memory_mib": 1024}}}
+               for t in range(3000)]
+    monkeypatch.setattr(run.log, "events", lambda **kw: samples)
+    g = views.gpu_full(run, buckets=100)
+    util = g["gpus"]["0"]["util"]
+    assert g["samples"] == 3000 and g["buckets"] == 100 and len(util) <= 200
+    assert [777.0, 100] in [list(p) for p in util] and [p[0] for p in util] == sorted(p[0] for p in util)
 
 
 def test_trace_filters_pages_and_detail(run):
     choices = views.trace_choices(run)
     assert "llm.request" in choices["type"] and "n1" in choices["node"]
-    got = views.trace(run, node="n1", phase=None, attempt=None, types=["llm.request"], component=None,
-                      text=None, include_gpu=False, page=0, page_size=2)
-    assert got["total"] == 7 and got["pages"] == 4 and len(got["rows"]) == 2
+    got = views.trace(run, node="n1", types=["llm.request"], limit=2)
+    assert got["total"] == 7 and len(got["rows"]) == 2
+    rest = views.trace(run, node="n1", types=["llm.request"], offset=2, limit=100)
+    assert len(rest["rows"]) == 5 and rest["rows"][0]["seq"] not in {r["seq"] for r in got["rows"]}
     detail = views.trace_detail(run, got["rows"][0]["seq"])
     assert detail["event"]["type"] == "llm.request" and detail["chat"][0]["kind"] == "system"
     resp = next(e for e in run.log.events() if e["type"] == "llm.response")
     assert views.trace_detail(run, resp["_seq"])["chat"]
     assert views.trace_detail(run, 10 ** 9) is None
-    all_gpu = views.trace(run, node=None, phase=None, attempt=None, types=None, component=None,
-                          text=None, include_gpu=True, page=0)
+    all_gpu = views.trace(run, include_gpu=True, limit=10 ** 6)
     assert any(r["type"] == "gpu.sample" for r in all_gpu["rows"])
 
 
@@ -360,9 +367,8 @@ def test_views_on_an_empty_run(tmp_path):
     (tmp_path / "config").mkdir()
     (tmp_path / "config" / "run.json").write_text("{}")
     r = views.Run(tmp_path)
-    assert views.overview(r)["nodes"] == [] and views.gpu_series(r) == []
-    assert views.trace(r, node=None, phase=None, attempt=None, types=None, component=None, text=None,
-                       include_gpu=False, page=0)["rows"] == []
+    assert views.overview(r)["nodes"] == [] and views.gpu_full(r)["samples"] == 0
+    assert views.trace(r)["rows"] == []
     assert views.node_detail(r, "root") is None and views.selection(r) == []
     assert views.cost(r) == {"by_phase": [], "by_role": [], "errors": []}
     assert views.code_edits(r, "root")["attempts"] == []
@@ -470,9 +476,8 @@ def _snapshot(root):
 def test_every_view_leaves_the_run_untouched(run_dir):
     before = _snapshot(run_dir)
     r = views.Run(run_dir)
-    views.overview(r), views.gpu_series(r, hours=1e6), views.trace_choices(r)
-    got = views.trace(r, node=None, phase=None, attempt=None, types=None, component=None, text="n1",
-                      include_gpu=True, page=0)
+    views.overview(r), views.gpu_full(r), views.trace_choices(r)
+    got = views.trace(r, text="n1", include_gpu=True, limit=10 ** 6)
     for row in got["rows"]:
         views.trace_detail(r, row["seq"])
     for node in ("root", "n1", "n2"):
@@ -549,16 +554,7 @@ def test_a_missing_request_payload_does_not_break_the_chat(run_dir):
     assert any(i["kind"] == "note" and "payload missing" in i["text"] for i in items)
 
 
-# ---- GPU series and trace attempts ----
-
-def test_gpu_series_covers_the_runs_last_hours_not_the_clock(run_dir):
-    path = run_dir / "telemetry" / "events" / "gpu.jsonl"
-    events = [json.loads(line) for line in path.read_text().splitlines()]
-    for e in events:
-        e["ts_wall"] -= 2 * 86400                             # a run that stopped two days ago
-    path.write_text("".join(json.dumps(e) + "\n" for e in events))
-    assert views.gpu_series(views.Run(run_dir), hours=6)
-
+# ---- trace attempts ----
 
 def test_trace_offers_attempts_and_any(run):
     assert {"0", "1"} <= set(views.trace_choices(run)["attempt"])
