@@ -16,7 +16,8 @@ captioner:
   min_total_gpu_gib: 560
   model: Qwen/Qwen3.8-Flash-Next  # bf16; its 51B n-gram embedding table sits in host RAM (vLLM's default on 80 GB cards)
   tensor_parallel: 8
-  peak_rss_gib: 110              # unmeasured (scripts/sbatch_measure.sh): the n-gram table alone is 95 GiB in bf16
+  peak_rss_gib: 55               # measured (sbatch_measure.sh, TP 8): 45 GiB anon + 134 GiB shared memory; the
+  shared_gib: 160                # weights pass through page cache (465 GiB), which is not counted: the kernel reclaims it
   gpu_memory_utilization: 0.9
   max_num_seqs: 256              # vLLM's recipe value; fewer can fail the hybrid-attention cache check at startup
   concurrent_requests: 64
@@ -34,9 +35,10 @@ generators:
   h3:
     attn_type: flash_attn3        # FlashAttention 3; SageAttention picks an fp8 kernel on H100 that renders H3 as noise
     max_items: 200
+    peak_rss_gib: 170             # measured: 31 GiB anon + 108 GiB shared memory (shared block offload)
   ltx25:
     quantization: none            # bf16 weights on the GPU: no host copy, no per-layer streaming
     offload: none
     workers: 8
-    peak_rss_gib: 40              # unmeasured (scripts/sbatch_measure.sh): an upper bound, the measured value with CPU offload
-    shared_gib: 91                # every weight file in page cache
+    peak_rss_gib: 3               # measured with 8 workers: 15 GiB anon + 26 GiB shared memory in all; the weights
+    shared_gib: 32                # load to the GPU through page cache, not counted (the kernel reclaims it)
