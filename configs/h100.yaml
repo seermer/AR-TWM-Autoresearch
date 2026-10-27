@@ -16,8 +16,8 @@ captioner:
   min_total_gpu_gib: 560
   model: Qwen/Qwen3.8-Flash-Next  # bf16; its 51B n-gram embedding table sits in host RAM (vLLM's default on 80 GB cards)
   tensor_parallel: 8
-  peak_rss_gib: 55               # measured (sbatch_measure.sh, TP 8): 45 GiB anon + 134 GiB shared memory; the
-  shared_gib: 160                # weights pass through page cache (465 GiB), which is not counted: the kernel reclaims it
+  peak_rss_gib: 215              # the server's host RAM, measured (sbatch_measure.sh): 45 GiB anon + 134 GiB shared
+                                 # memory; page cache (465 GiB of weights) is not counted: the kernel reclaims it
   gpu_memory_utilization: 0.9
   max_num_seqs: 256              # vLLM's recipe value; fewer can fail the hybrid-attention cache check at startup
   concurrent_requests: 64
