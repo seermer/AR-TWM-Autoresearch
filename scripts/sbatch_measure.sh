@@ -8,7 +8,7 @@
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=768G
 #SBATCH --gres=gpu:h100:8
-#SBATCH --time=12:00:00
+#SBATCH --time=03:00:00
 #SBATCH --no-requeue
 #SBATCH --output=runs/slurm-measure-%j.log
 # Measures the GPU tools of configs/h100.yaml for its host-RAM and worker values, with scripts/preflight.py:
