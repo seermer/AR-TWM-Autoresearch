@@ -18,6 +18,8 @@
 #   2. ltx25 with CPU offload (4 workers): the output 1 must reproduce
 #   3. h3 with its DiT on the GPU (configs/h3_lightx2v_h100.json): the output must reproduce 1's
 # Submit from AutoResearcher/ (same environment as scripts/sbatch_run.sh):  sbatch scripts/sbatch_measure.sh
+# Only some steps (overlay ltx_cpu h3_gpu), compared against an earlier job's overlay:
+#   OVERLAY=<earlier job id> sbatch scripts/sbatch_measure.sh h3_gpu
 # Results in runs/measure-<job>/: summary.json (per step: seconds, items, GPU peak per card, the job's host memory
 # at start and peak; PSNR of each clip against its counterpart, inf = identical) and each preflight's log.
 set -euo pipefail
@@ -35,6 +37,10 @@ ulimit -u "$(ulimit -Hu)"
 
 out=runs/measure-${SLURM_JOB_ID:-$(date +%Y%m%d-%H%M%S)}
 mkdir -p "$out"
+steps="${*:-overlay ltx_cpu h3_gpu}"
+if [[ " $steps " != *" overlay "* ]]; then
+  cp "runs/measure-${OVERLAY:?set OVERLAY=<earlier job id> to compare against its overlay}/overlay.run" "$out/"
+fi
 cat > "$out/ltx_cpu.yaml" <<'EOF'
 generators:
   ltx25: {offload: cpu, workers: 4, peak_rss_gib: 80}
@@ -52,9 +58,14 @@ preflight() {   # name, preflight args; records the preflight run's name; a fail
   python scripts/preflight.py "$@" > "$out/$name.log" 2>&1 || true
   grep -m1 -o 'preflight run preflight-[0-9-]*' "$out/$name.log" | cut -d' ' -f3 > "$out/$name.run" || true
 }
-preflight overlay --config configs/h100.yaml --steps weights vllm ltx25 images annotate h3
-preflight ltx_cpu --config configs/h100.yaml "$out/ltx_cpu.yaml" --steps ltx25
-preflight h3_gpu --config configs/h100.yaml "$out/h3_gpu.yaml" --steps h3
+for step in $steps; do
+  case $step in
+    overlay) preflight overlay --config configs/h100.yaml --steps weights vllm ltx25 images annotate h3 ;;
+    ltx_cpu) preflight ltx_cpu --config configs/h100.yaml "$out/ltx_cpu.yaml" --steps ltx25 ;;
+    h3_gpu) preflight h3_gpu --config configs/h100.yaml "$out/h3_gpu.yaml" --steps h3 ;;
+    *) echo "unknown step $step (overlay, ltx_cpu, h3_gpu)" >&2; exit 1 ;;
+  esac
+done
 
 python - "$out" <<'EOF'
 import json, re, subprocess, sys
