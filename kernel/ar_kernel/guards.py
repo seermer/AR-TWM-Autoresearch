@@ -5,7 +5,10 @@ import re
 import subprocess
 from typing import Mapping
 
+import psutil
+
 from .config import GpuPolicyError
+from .subproc import memory_cgroup, memory_limit
 
 
 def alert(recorder, kind: str, message: str, *, level: str = "error", **payload) -> None:
@@ -74,20 +77,46 @@ def gpu_total_gib(gpus: list[int]) -> dict[int, int] | None:
     return {g: total[g] for g in gpus if g in total}
 
 
-def check_tools_fit(cfg, gpus: list[int], totals=gpu_total_gib) -> None:
-    """Raise when an enabled GPU tool's `min_total_gpu_gib` (its config block's estimate of the
-    memory it needs across the run's cards) exceeds what the run's cards have: the run would
-    otherwise start and the tool fail for the agent."""
-    cards = totals(gpus)
-    if not cards:
-        return
+WORKER_TOOLS = ("annotate", "images", "generators.wan22", "generators.ltx25")
+
+
+def check_tools_fit(cfg, gpus: list[int], totals=gpu_total_gib,
+                    limit=lambda: memory_limit(memory_cgroup()), host_total=lambda: psutil.virtual_memory().total) -> None:
+    """Raise when an enabled GPU tool does not fit the run: its `min_total_gpu_gib` (an estimate of the memory
+    it needs across the run's cards) exceeds the cards, its `workers` (x `gpus_per_worker`) exceed the GPU
+    count, or its host RAM (`workers` x `peak_rss_gib` + `shared_gib` + `host.kernel_reserve_gib`) exceeds
+    `host.ram_gib`; or when this job's memory limit (without one, the host's RAM) is below `host.ram_gib`."""
     blocks = {"captioner": cfg.get("captioner") or {},
               **{k: b for k in ("annotate", "images") if (b := cfg.get(k) or {}).get("enabled")},
               **{f"generators.{k}": b for k, b in (cfg.get("generators") or {}).items()
                  if b.get("enabled")}}
-    whole = sum(cards.values())
-    problems = [f"{name} needs {block['min_total_gpu_gib']} GiB" for name, block in blocks.items()
-                if block.get("min_total_gpu_gib", 0) > whole]
+    missing = [k for k in ("host.ram_gib", "host.kernel_reserve_gib", "captioner.tensor_parallel")
+               if not isinstance(cfg.get(k), int)]
+    missing += [f"{k}.workers" for k in WORKER_TOOLS if k in blocks and not isinstance(blocks[k].get("workers"), int)]
+    if missing:
+        raise GpuPolicyError(f"the config needs an int for {', '.join(missing)} (a run started before these keys "
+                             "existed cannot be resumed)")
+    problems = []
+    if (tp := blocks["captioner"]["tensor_parallel"]) > len(gpus):
+        problems.append(f"captioner.tensor_parallel {tp} > {len(gpus)} GPUs")
+    for name, block in blocks.items():
+        if "workers" in block and block["workers"] * block.get("gpus_per_worker", 1) > len(gpus):
+            problems.append(f"{name}.workers {block['workers']} x {block.get('gpus_per_worker', 1)} GPUs > {len(gpus)} GPUs")
+    ram, reserve = cfg.get("host.ram_gib"), cfg.get("host.kernel_reserve_gib")
+    for name, block in blocks.items():
+        if "peak_rss_gib" in block:
+            need = block.get("workers", 1) * block["peak_rss_gib"] + block.get("shared_gib", 0) + reserve
+            if need > ram:
+                problems.append(f"{name} needs {need:g} GiB of host RAM (workers x peak_rss_gib + shared_gib + "
+                                f"host.kernel_reserve_gib) > host.ram_gib {ram:g}")
+    found = limit()
+    if found and found[1] / 2**30 < ram:
+        problems.append(f"this job's memory limit is {found[1] / 2**30:.0f} GiB ({found[0]}) < host.ram_gib {ram:g}")
+    elif not found and host_total() / 2**30 < ram:
+        problems.append(f"this host has {host_total() / 2**30:.0f} GiB of RAM < host.ram_gib {ram:g}")
+    cards = totals(gpus)
+    whole = sum(cards.values()) if cards else 0
+    problems += [f"{name} needs {block['min_total_gpu_gib']} GiB of GPU memory, the GPUs have {whole}"
+                 for name, block in blocks.items() if cards and block.get("min_total_gpu_gib", 0) > whole]
     if problems:
-        raise GpuPolicyError(f"enabled tools do not fit GPUs {','.join(map(str, gpus))} ({whole} GiB in total): "
-                             + "; ".join(problems) + ". Give the run larger or more GPUs.")
+        raise GpuPolicyError(f"enabled tools do not fit this machine (GPUs {','.join(map(str, gpus))}): " + "; ".join(problems))

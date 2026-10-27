@@ -30,7 +30,7 @@ class FakeJob(GpuJob):
             raise ToolError("items is empty")
 
     def produce(self, job, items, work, out, cancel, report):
-        groups = split_gpus(self.gpus, 1, None)
+        groups = split_gpus(self.gpus, 1, len(self.gpus))
         return self.run_workers("autoresearcher", lambda r, w: ["python", str(FAKE), "--items",
                                 str(work / "items.json"), "--out", str(out), "--rank", str(r), "--world", str(w)],
                                 groups, job=job, work=work, out=out, total=len(items), cancel=cancel, report=report)
@@ -60,10 +60,12 @@ def submit(q, caller, items, **params):
 
 
 def test_split_gpus():
-    assert split_gpus([0, 1, 4, 5], 1, None) == [[0], [1], [4], [5]]
-    assert split_gpus([0, 1, 4, 5], 2, None) == [[0, 1], [4, 5]]
+    assert split_gpus([0, 1, 4, 5], 1, 4) == [[0], [1], [4], [5]]
+    assert split_gpus([0, 1, 4, 5], 2, 2) == [[0, 1], [4, 5]]
     assert split_gpus([0, 1, 4, 5], 1, 2) == [[0], [1]]
-    assert split_gpus([0, 1, 2], 2, None) == [[0, 1]]
+    assert split_gpus([0, 1, 2], 2, 1) == [[0, 1]]
+    with pytest.raises(ValueError, match="do not fit"):
+        split_gpus([0, 1, 2], 2, 2)
 
 
 def test_run_workers_refuses_empty_gpu_groups(env):

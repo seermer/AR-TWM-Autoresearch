@@ -7,7 +7,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=768G
-#SBATCH --gres=gpu:h200:8
+#SBATCH --gres=gpu:h100:8
 #SBATCH --time=72:00:00
 #SBATCH --signal=B:TERM@900
 #SBATCH --no-requeue
@@ -17,8 +17,8 @@
 #   RUN=exp1 MAX_NODES=6 sbatch -J exp1 scripts/sbatch_run.sh
 # CONDA_EXE=<conda install>/bin/conda when conda is only a shell function in the submitting shell.
 # Optional: CONFIG="configs/h100.yaml configs/rain_start.yaml" (new runs only; files applied in order).
-# SIGTERM (preemption, or 15 min before the time limit) stops the run; it is never requeued: resubmit
-# the same RUN to resume it.
+# SIGTERM (preemption, or 15 min before the time limit) stops the run, then the run folder is uploaded
+# (`ar upload`); it is never requeued: resubmit the same RUN to resume it.
 # Host for 8 GPUs: >= 128 GB /dev/shm, an NVIDIA driver supporting CUDA >= 13.0, and 1.5 TB disk for the
 # whole tree (weights, envs, caches, runs).
 set -euo pipefail
@@ -39,7 +39,22 @@ ulimit -u "$(ulimit -Hu)"     # the soft process/thread limit can be as low as 5
 ar doctor --gpu ${CONFIG:+--config $CONFIG}
 
 if [ -f "runs/$RUN/config/run.json" ]; then
-  exec ar run --run-id "$RUN" --resume
+  ar run --run-id "$RUN" --resume &
+else
+  : "${MAX_NODES:?set MAX_NODES}"
+  ar run --run-id "$RUN" --max-nodes "$MAX_NODES" ${CONFIG:+--config $CONFIG} &
 fi
-: "${MAX_NODES:?set MAX_NODES}"
-exec ar run --run-id "$RUN" --max-nodes "$MAX_NODES" ${CONFIG:+--config $CONFIG}
+pid=$!
+trap 'kill -TERM $pid' TERM     # Slurm signals only this shell (B:)
+status=0
+wait $pid || status=$?
+while kill -0 $pid 2>/dev/null; do   # that wait returned early, when the trap ran
+  status=0
+  wait $pid || status=$?
+done
+trap '' TERM    # a late SIGTERM must not cut the upload or change the exit status
+# The run folder to Hugging Face however the run ended (HFK in .env); after the time limit's SIGKILL nothing runs.
+if [ -n "${HFK:-}" ] || grep -qE "^HFK=[\"']?[^\"'[:space:]]" .env 2>/dev/null; then
+  ar upload --run-id "$RUN" || echo "ar upload failed; run it again: ar upload --run-id $RUN" >&2
+fi
+exit $status

@@ -18,7 +18,6 @@ from pathlib import Path
 from ..data.annotation import FIRST_TURN_FRAMES, FPS, SWITCH
 from ..data.probe import probe_video
 from ..faults import KernelFault
-from ..subproc import meminfo_gib
 from .gpu_jobs import IMAGE_EXTS, GpuJob
 from .rollouts import SIZE, check_published, check_turn_item, checked_repo, item_annotation
 from .server import ToolError
@@ -178,10 +177,6 @@ class H3Backend(GpuJob):
             requests[str(item["index"])] = {"prompt": build_prompt(item, starts), "frames": frames}
         (work / "requests.json").write_text(json.dumps(requests, ensure_ascii=False), encoding="utf-8")
         checked_repo(self.cfg, self.config_key, "LightX2V")
-        avail, rss, reserve = meminfo_gib()["MemAvailable"], self.block["peak_rss_gib"], self.block["host_reserve_gib"]
-        if avail - reserve < rss:
-            raise KernelFault(f"not enough free host RAM for rollout_h3: MemAvailable {avail:.0f} GiB - "
-                               f"host_reserve_gib {reserve:g} < peak_rss_gib {rss:g}; free host memory and retry")
         config = json.loads((self.cfg.repo_root / self.block["config"]).read_text(encoding="utf-8"))
         cache = self.cfg.repo_root / config["adaln_cache_dir"]
         if not cache.is_dir():

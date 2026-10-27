@@ -5,8 +5,8 @@
 
 Run from AutoResearcher/ in the autoresearcher env, after scripts/download_weights.py, with the three repos
 committed (it starts a run, runs/preflight-<time>, like `ar run`). Every step runs even after one fails;
-the exit code is 1 when any failed. Each step reports its peak GPU memory per card and the lowest
-MemAvailable seen, also written to runs/preflight-<time>/preflight.json.
+the exit code is 1 when any failed. Each step reports its peak GPU memory per card and the job's host memory
+(scripts/sbatch_measure.sh reads it), also written to runs/preflight-<time>/preflight.json.
 """
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ from ar_kernel.doctor import gpu_checks, run_checks
 from ar_kernel.eval.lora import concat_eval_lora
 from ar_kernel.eval.render import build_render_config, render_proxy
 from ar_kernel.run import bootstrap_run
-from ar_kernel.subproc import cache_env, free_port, meminfo_gib
+from ar_kernel.subproc import cache_env, free_port, host_memory_gib
 from ar_kernel.telemetry import files
 from ar_kernel.tools.annotate import AnnotateBackend
 from ar_kernel.tools.captioner import CaptionBackend
@@ -99,7 +99,9 @@ class Preflight:
         errors = [i for i in result[key] if "error" in i]
         if errors:
             raise Failed(f"{len(errors)} of {len(result[key])} items failed, e.g. {errors[0]}")
-        return {"items": len(result[key]), "workers": [i.get("worker") for i in result[key]][:2]}
+        return {"items": len(result[key]), "workers": [i.get("worker") for i in result[key]][:2],
+                "videos": [str(self.staging / Path(i["candidate"]["video"]).relative_to("/workspace/staging"))
+                           for i in result[key] if "candidate" in i]}
 
     # --- steps ---
     def doctor(self):
@@ -267,15 +269,25 @@ class Preflight:
 
 
 class Sampler:
-    """The peak GPU memory per card and the lowest MemAvailable while the `with` block runs."""
+    """While the `with` block runs: the peak GPU memory per card, and the job's host memory (host_memory_gib:
+    used, anon, file, shmem; /dev/shm) at the start and at its peak. Under a memory limit `used` includes page
+    cache left by earlier steps: a worker's own memory is in anon and shmem."""
     def __init__(self, gpus: list[int]) -> None:
-        self.gpus, self.peak, self.low, self.stop = gpus, {}, float("inf"), threading.Event()
+        self.gpus, self.peak, self.stop = gpus, {}, threading.Event()
+        self.start = self.memory()
+        self.host = dict(self.start)
+
+    @staticmethod
+    def memory() -> dict:
+        return {**{k: v for k, v in host_memory_gib().items() if k != "limit"},
+                "dev_shm": shutil.disk_usage("/dev/shm").used / 2**30}
 
     def loop(self) -> None:
         while not self.stop.is_set():
             for g, used in (gpu_memory_mib(self.gpus) or {}).items():
                 self.peak[g] = max(self.peak.get(g, 0), used)
-            self.low = min(self.low, meminfo_gib()["MemAvailable"])
+            for k, v in self.memory().items():
+                self.host[k] = max(self.host.get(k, 0), v)
             self.stop.wait(2)
 
     def __enter__(self):
@@ -286,7 +298,8 @@ class Sampler:
     def __exit__(self, *exc) -> None:
         self.stop.set()
         self.thread.join()
-        self.stats = {"peak_gpu_mib": self.peak, "min_mem_available_gib": round(self.low, 1)}
+        self.stats = {"peak_gpu_mib": self.peak, "host_gib_start": {k: round(v, 1) for k, v in self.start.items()},
+                      "host_gib_peak": {k: round(v, 1) for k, v in self.host.items()}}
 
 
 def main(argv: list[str] | None = None) -> int:

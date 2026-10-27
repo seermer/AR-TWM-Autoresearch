@@ -985,25 +985,20 @@ def _head():
 
 def small_ltx_cfg(env="autoresearcher", enabled=True, **over):
     """The real ltx25 block, enabled or not, pinned to
-    repo_root's own HEAD (a real git repo, so the CPU tests need no LTX-2 clone), with the RAM
-    tests' host_reserve_gib of 60."""
+    repo_root's own HEAD (a real git repo, so the CPU tests need no LTX-2 clone), one worker per GPU."""
     raw = copy.deepcopy(REAL.raw)
     b = raw["generators"]["ltx25"]
-    b.update(env=env, repo=".", commit=_head(), host_reserve_gib=60)
+    b.update(env=env, repo=".", commit=_head(), workers=4)
     b["enabled"] = enabled
     b.update(over)
     return KernelConfig(raw=raw, repo_root=REAL.repo_root)
 
 
-GIB = {"MemTotal": 251.0, "MemAvailable": 240.0}
-
-
 @pytest.fixture
 def ltx_env(tmp_path, monkeypatch):
     """The real Ltx25Backend.produce/run_workers, with ltx25_generate.py swapped for the fake
-    worker (ltx mode) and /proc/meminfo for a 251 GiB host with 240 GiB available."""
+    worker (ltx mode)."""
     monkeypatch.setattr(rollouts, "LTX25_BRIDGE", FAKE)
-    monkeypatch.setattr(rollouts, "meminfo_gib", lambda: dict(GIB))
     rec = Recorder(tmp_path / "run")
     reg = TokenRegistry(rec)
     q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
@@ -1095,53 +1090,20 @@ def test_ltx_keyframe_frames_must_be_inside_the_clip(ltx_env, frame, ok):
             q.backends["rollout_ltx25"].submit(q, caller, args)
 
 
-@pytest.mark.parametrize("gpus, rss, cap, workers", [
-    ((0, 1, 4, 5), 60, None, 3),        # floor((251 - 60) / 60) = 3 < 4 GPUs
-    ((0, 1, 4, 5), 40, None, 4),        # RAM allows 4: one per GPU
-    ((0, 1, 4, 5), 40, 2, 2),           # the config's `workers` caps it
-    ((0, 1), 10, None, 2)])
-def test_ltx_worker_count_follows_host_ram(ltx_env, gpus, rss, cap, workers):
+@pytest.mark.parametrize("gpus, workers", [((0, 1, 4, 5), 4), ((0, 1, 4, 5), 2), ((0, 1), 1)])
+def test_ltx_runs_the_configured_workers(ltx_env, gpus, workers):
     make, caller, _ = ltx_env
-    q = make(gpus=gpus, workers=cap, peak_rss_gib=rss)
+    q = make(gpus=gpus, workers=workers)
     _, by = run_ltx(q, caller, [{"prompt": "p", "seed": i} for i in range(5)])
     for i, item in by.items():
         assert item["worker"]["rank"] == i % workers and item["worker"]["gpus"] == str(gpus[i % workers])
 
 
-def test_ltx_ram_shortfall_fails_the_job_before_any_worker(ltx_env, monkeypatch):
-    """Not even one worker fits in MemAvailable - host_reserve_gib: the job fails with a clear
-    message instead of letting the host OOM killer pick a victim."""
+def test_ltx_a_one_item_job_runs_one_worker(ltx_env):
     make, caller, _ = ltx_env
-    monkeypatch.setattr(rollouts, "meminfo_gib", lambda: {"MemTotal": 251.0, "MemAvailable": 90.0})
-    q = make(peak_rss_gib=40)
-    job_id = q.backends["rollout_ltx25"].submit(q, caller, {"items": [{"prompt": "p", "seed": 1}]})["job_id"]
-    out = q.wait(caller, job_id, 60)
-    assert out["state"] == "failed"
-    assert "MemAvailable 90 GiB" in out["error"] and "peak_rss_gib 40" in out["error"]
-
-
-def test_ltx_workers_shrink_to_what_mem_available_holds(ltx_env, monkeypatch):
-    """4 GPUs, but MemAvailable - reserve fits 3 workers: the job runs on 3, not refused."""
-    make, caller, _ = ltx_env
-    monkeypatch.setattr(rollouts, "meminfo_gib", lambda: {"MemTotal": 251.0, "MemAvailable": 185.0})
-    q = make(peak_rss_gib=40)
-    _, by = run_ltx(q, caller, [{"prompt": "p", "seed": i} for i in range(6)])
-    assert {item["worker"]["gpus"] for item in by.values()} == {"0", "1", "4"}
-    assert all(item["worker"]["rank"] == i % 3 for i, item in by.items())
-
-
-def test_ltx_a_one_item_job_charges_one_worker(ltx_env, monkeypatch):
-    """RAM is charged only for workers that get an item: 1 item runs with room for just 1 worker."""
-    make, caller, _ = ltx_env
-    monkeypatch.setattr(rollouts, "meminfo_gib", lambda: {"MemTotal": 251.0, "MemAvailable": 105.0})
-    q = make(peak_rss_gib=40)
+    q = make(workers=4)
     _, by = run_ltx(q, caller, [{"prompt": "p", "seed": 1}])
     assert by[0]["worker"]["gpus"] == "0" and by[0]["worker"]["rank"] == 0
-
-
-def test_ltx_meminfo_reads_proc():
-    m = rollouts.meminfo_gib()
-    assert 0 < m["MemAvailable"] <= m["MemTotal"]
 
 
 def test_ltx_missing_clone_fails_the_job_with_a_clear_message(ltx_env, tmp_path):
@@ -1221,8 +1183,7 @@ def test_real_ltx25_rollout(tmp_path):
     """AR_TEST_GPUS=0,1,2,3 pytest tests/test_rollouts.py -m gpu -k ltx25 -s --basetemp=.cache/pytest/gpu
 
     2 T2V items, one with a first keyframe and one with a keyframe mid-clip
-    (default frames and size; four, so four workers run at once when the host-RAM rule
-    allows), workers per that rule over AR_TEST_GPUS. The keyframes are generate_images (Z-Image)
+    (default frames and size), the config's `workers` over AR_TEST_GPUS. The keyframes are generate_images (Z-Image)
     frames -- the tools chain. One candidate then goes the agent's route into the pool
     (_ingest_as_an_agent)."""
     import os

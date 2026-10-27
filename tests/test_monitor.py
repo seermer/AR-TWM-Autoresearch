@@ -19,8 +19,21 @@ def test_gpu_sample_goes_to_its_own_file(tmp_path):
     m = Monitor(CFG, tmp_path, rec, [0], Budget(),
                 usage=lambda: {0: {"util": 97, "memory_mib": 20000, "power_w": 300, "temp_c": 70, "pids": []}})
     m.tick()
-    (event,) = rec.read_events("gpu")
+    (event,) = [e for e in rec.read_events("gpu") if e["type"] == "gpu.sample"]
     assert event["gpus"]["0"]["util"] == 97 and event["payload"] is None
+
+
+def test_host_memory_is_sampled_and_alerts_once_per_crossing(tmp_path):
+    """Page cache never counts: `used` stays at the limit, anon + shmem crosses the threshold twice."""
+    rec, anon = Recorder(tmp_path), [100.0]
+    m = Monitor(CFG, tmp_path, rec, [0], Budget(), usage=lambda: None,
+                memory=lambda: {"limit": 768.0, "used": 768.0, "anon": anon[0], "file": 600.0, "shmem": 10.0})
+    high = 0.95 * CFG.get("host.ram_gib")
+    for anon[0] in (50.0, high, high, 50.0, high):
+        m.tick()
+    samples = [e for e in rec.read_events("gpu") if e["type"] == "host.sample"]
+    assert len(samples) == 5 and samples[0]["memory_gib"]["anon"] == 50.0 and "dev_shm" in samples[0]["memory_gib"]
+    assert kinds(rec).count("host_memory_high") == 2
 
 
 def test_stall_alert_once(tmp_path):

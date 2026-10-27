@@ -154,7 +154,7 @@ Check: the last line says `[Precache] done` and `ls ../WorldModel/cache/text_emb
 ```bash
 ar doctor --gpu                 # must end with "0 failed"; on 8 x H100 add --config configs/h100.yaml
 nvidia-smi --query-gpu=index,memory.used --format=csv     # every GPU near 0 MiB
-pytest tests -q                 # optional: unit tests, no GPU needed, about 12 minutes
+pytest -n 16                    # optional: unit tests in 16 processes (pytest-xdist), no GPU needed, about 12 minutes
 ```
 
 `ar doctor` names anything missing (weights, environments, broken links); `--gpu` also runs a small GPU op in every environment (cards, driver, compiled packages). Fix what it names and run it again.
@@ -168,7 +168,14 @@ repos committed; `--steps` also runs the other tools (images, annotate, alayawor
 python scripts/preflight.py --config configs/h100.yaml     # must end with "all 6 steps passed"
 ```
 
-Each step prints its peak GPU memory per card and the lowest free host memory (`runs/preflight-<time>/preflight.json`).
+Each step prints its peak GPU memory per card and the job's host memory at its start and peak (`runs/preflight-<time>/preflight.json`).
+
+Host RAM and GPU counts are set in the config, never guessed at run time: each GPU tool's `workers`,
+`captioner.tensor_parallel`, and `host.ram_gib` (at most the job's memory limit, e.g. Slurm `--mem`). `ar run`
+and `ar doctor` refuse a config where one tool's `workers` x `peak_rss_gib` + `shared_gib` +
+`host.kernel_reserve_gib` exceeds `host.ram_gib`. On a Slurm cluster, `sbatch scripts/sbatch_measure.sh` (from
+AutoResearcher/) measures these values for `configs/h100.yaml` and checks that LTX-2.5 without CPU offload and
+H3 with its DiT on the GPU render the same clips as with offload (`runs/measure-<job>/summary.json`).
 
 ## 7. Start the experiment
 
@@ -232,6 +239,9 @@ and open the panel on it; run it again to catch up with later phases:
 ```bash
 ar fetch --run-id $RUN     # into runs/$RUN, from <HFK's user>/$RUN
 ```
+
+A run that stopped (or crashed) between uploads: `ar upload --run-id $RUN` on its machine sends what changed
+since the last one (it refuses while the loop runs). `scripts/sbatch_run.sh` runs it when `ar run` ends.
 
 ## 9. Stop and resume
 

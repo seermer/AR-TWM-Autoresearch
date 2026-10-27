@@ -1,5 +1,5 @@
 from __future__ import annotations
-import argparse, json, os, signal, sys, time, traceback
+import argparse, faulthandler, json, os, signal, sys, time, traceback
 
 from .config import KernelConfig, load_dotenv
 from .control import Control, drive, exit_process, kill_recorded_groups
@@ -8,7 +8,7 @@ from .guards import alert, check_tools_fit, choose_gpus
 from .hf_upload import HfUpload, fetch
 from .loop import Loop
 from .monitor import Monitor
-from .run import PreflightError, RunNotFound, attach_run, bootstrap_run, code_changes, rescore_node
+from .run import PreflightError, RunNotFound, attach_run, bootstrap_run, code_changes, recorder_for, rescore_node
 from .run_kit import build_run_kit
 from .status import format_status, run_status
 from .subproc import cache_env, proc_running, proc_start_time
@@ -41,6 +41,8 @@ def main(argv: list[str] | None = None) -> int:
     stop = sub.add_parser("stop", help="stop a running loop")
     stop.add_argument("--run-id", required=True)
     stop.add_argument("--force", action="store_true")
+    uploadp = sub.add_parser("upload", help="upload a stopped run's new and changed files to Hugging Face (HFK)")
+    uploadp.add_argument("--run-id", required=True)
     fetchp = sub.add_parser("fetch", help="download a run that uploaded itself to Hugging Face (HFK), for the panel")
     fetchp.add_argument("--run-id", required=True)
     fetchp.add_argument("--repo", default=None, help="the dataset repo; default <HFK's user>/<run id>")
@@ -66,7 +68,10 @@ def main(argv: list[str] | None = None) -> int:
         print(fetch(cfg.runs_dir / args.run_id, args.repo, os.environ["HFK"]))
         return 0
 
+    if args.command == "upload":
+        return _upload(cfg, args.run_id)
     if args.command == "run":
+        faulthandler.enable(sys.__stderr__, all_threads=True)   # a crash (SIGBUS, SIGSEGV) prints every thread's stack
         return _run(cfg, args)
     if args.command == "stop":
         run_dir = cfg.runs_dir / args.run_id
@@ -112,6 +117,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     return 1
+
+
+def _upload(cfg, run_id: str) -> int:
+    run_dir = cfg.runs_dir / run_id
+    if not (run_dir / "config" / "run.json").exists():
+        raise RunNotFound(f"no run {run_id!r} under {cfg.runs_dir}")
+    if (pid := Control(run_dir).alive_pid()) is not None:
+        raise RuntimeError(f"the loop is still running (pid {pid}); `ar upload` is for a stopped run")
+    if not os.environ.get("HFK", "").strip():
+        raise ValueError("HFK is empty; set it in AutoResearcher/.env before `ar upload`")
+    state_file = run_dir / "control" / "state.json"
+    state = json.loads(state_file.read_text()) if state_file.exists() else {}
+    HfUpload(run_dir, recorder_for(run_dir, os.environ), os.environ["HFK"]).upload(
+        state.get("node") or "run", "manual", state.get("attempt") or 0)
+    print(f"uploaded {run_dir}")
+    return 0
 
 
 def _run(cfg, args) -> int:

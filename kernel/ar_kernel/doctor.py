@@ -198,7 +198,7 @@ def _fit(cfg: KernelConfig) -> list[Finding]:
         check_tools_fit(cfg, choose_gpus(cfg, os.environ))
     except GpuPolicyError as exc:
         return [Finding("fail", "gpus.fit", str(exc))]
-    return [Finding("ok", "gpus.fit", "every enabled tool's estimate fits the run's GPUs")]
+    return [Finding("ok", "gpus.fit", "every enabled tool fits the run's GPUs and host.ram_gib")]
 
 
 def _dotenv(cfg: KernelConfig) -> list[Finding]:

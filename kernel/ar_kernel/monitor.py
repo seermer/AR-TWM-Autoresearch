@@ -11,6 +11,7 @@ from pathlib import Path
 import psutil
 
 from .guards import alert, smi
+from .subproc import host_memory_gib
 
 
 def tree_mark(*paths) -> tuple[int, int, int]:
@@ -67,9 +68,10 @@ def _descends_from(pid: int, ancestor: int) -> bool:
 
 class Monitor:
     def __init__(self, cfg, run_dir: Path, recorder, gpus: list[int], budget, *,
-                 usage=gpu_usage_detailed, clock=time.time) -> None:
+                 usage=gpu_usage_detailed, memory=host_memory_gib, clock=time.time) -> None:
         self.cfg, self.run_dir, self.recorder, self.gpus, self.budget = cfg, Path(run_dir), recorder, list(gpus), budget
-        self.usage, self.clock = usage, clock
+        self.usage, self.memory, self.clock = usage, memory, clock
+        self._ram_high = False
         self._raised: set = set()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -86,6 +88,15 @@ class Monitor:
         if usage is not None:
             self.recorder.event("gpu.sample", node="gpu",
                                 gpus={str(g): {k: v for k, v in u.items() if k != "pids"} for g, u in usage.items()})
+        mem = {**self.memory(), "dev_shm": shutil.disk_usage("/dev/shm").used / 2**30}
+        self.recorder.event("host.sample", node="gpu", memory_gib={k: v if v is None else round(v, 2) for k, v in mem.items()})
+        held = mem["anon"] + mem["shmem"] if "anon" in mem else mem["used"]     # not reclaimable page cache
+        ram = float(self.cfg.get("host.ram_gib"))
+        high = held > float(self.cfg.get("host.alert_fraction")) * ram
+        if high and not self._ram_high:
+            alert(self.recorder, "host_memory_high", f"the job holds {held:.0f} GiB of host RAM (anon + shmem), "
+                  f"host.ram_gib is {ram:g}", level="warning", memory_gib=mem)
+        self._ram_high = high
 
     def check(self) -> None:
         now = self.clock()

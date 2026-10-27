@@ -41,7 +41,7 @@ class AnnotateBackend(GpuJob):
         return self.run_workers(a["env"], lambda r, w: [
             "python", str(BRIDGE), "--items", str(work / "items.json"), "--out", str(out), "--rank", str(r),
             "--world", str(w), "--repo", str(wm / a["repo"]), "--checkpoint", str(wm / a["checkpoint"]),
-            "--max-frames", str(a["max_frames"])], split_gpus(self.gpus, 1, None),
+            "--max-frames", str(a["max_frames"])], split_gpus(self.gpus, 1, a["workers"]),
             job=job, work=work, out=out, total=len(items), cancel=cancel, report=report)
 
     def finish(self, job, item, out):

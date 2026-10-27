@@ -115,16 +115,13 @@ def wait_gpu_release(gpu_memory, gpus: list[int], before: dict | None,
         time.sleep(1.0)
 
 
-def parallelism(gpus: list[int], tensor_parallel: int | None = None) -> tuple[int, int]:
-    """(tensor-parallel, data-parallel) sizes that use the passed GPUs: tp is the configured
-    value or the largest power of two <= len(gpus) (vLLM cannot shard this model across
-    other counts), dp fills what is left."""
-    n = len(gpus)
-    tp = tensor_parallel or 1 << (n.bit_length() - 1)
-    dp = max(1, n // tp)
-    if tp * dp < n:
-        log.warning("vLLM uses %d of the %d passed GPUs: tensor-parallel %d cannot shard the model "
-                    "across %d GPUs", tp * dp, n, tp, n)
+def parallelism(gpus: list[int], tensor_parallel: int) -> tuple[int, int]:
+    """(tensor-parallel, data-parallel) sizes: dp = len(gpus) // tp."""
+    if not 1 <= tensor_parallel <= len(gpus):
+        raise ValueError(f"captioner.tensor_parallel {tensor_parallel} does not fit GPUs {gpus}")
+    tp, dp = tensor_parallel, len(gpus) // tensor_parallel
+    if tp * dp < len(gpus):
+        log.warning("vLLM uses %d of the %d passed GPUs (tensor-parallel %d)", tp * dp, len(gpus), tp)
     return tp, dp
 
 
@@ -132,7 +129,7 @@ def serve_command(c: dict, gpus: list[int], port: int, served_name: str,
                   media_dir: Path | None = None, mm_limits: dict | None = None) -> list[str]:
     """`vllm serve` for the model in config section `c` (the `captioner` block). `mm_limits`: media items
     per prompt (default: one video, no images)."""
-    tp, dp = parallelism(gpus, c.get("tensor_parallel"))
+    tp, dp = parallelism(gpus, c["tensor_parallel"])
     return ["vllm", "serve", c["model"], "--host", "127.0.0.1", "--port", str(port),
             "--served-model-name", served_name,
             "--tensor-parallel-size", str(tp),

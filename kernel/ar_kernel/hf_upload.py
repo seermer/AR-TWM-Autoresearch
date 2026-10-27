@@ -59,12 +59,12 @@ class HfUpload:
     def __call__(self, node: str, phase: str, attempt: int) -> None:
         """A failed upload is an alert, not an error: its files go up with the next one."""
         try:
-            self._upload(node, phase, attempt)
+            self.upload(node, phase, attempt)
         except Exception as exc:                                  # noqa: BLE001 -- reported, the run goes on
             alert(self.recorder, "hf_upload_failed", f"the upload after {node} {phase} failed: "
                   f"{type(exc).__name__}: {exc}", level="warning", node_id=node)
 
-    def _upload(self, node: str, phase: str, attempt: int) -> None:
+    def upload(self, node: str, phase: str, attempt: int) -> None:
         state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {"seq": 0, "files": {}}
         repo = state.get("repo")
         if repo is None:

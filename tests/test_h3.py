@@ -123,7 +123,6 @@ def h3_env(tmp_path, monkeypatch):
     monkeypatch.setattr(h3, "H3_BRIDGE", FAKE)
     monkeypatch.setattr(h3, "launcher", lambda ranks: ["python"])
     monkeypatch.setattr(h3, "checked_repo", lambda *a: None)
-    monkeypatch.setattr(h3, "meminfo_gib", lambda: {"MemAvailable": 250.0})
     (tmp_path / "adaln").mkdir()
     config = tmp_path / "lightx2v.json"
     config.write_text(json.dumps({"adaln_cache_dir": str(tmp_path / "adaln"), "parallel": {"seq_p_size": 8}}))
@@ -213,13 +212,6 @@ def test_h3_produces_a_silent_clip_with_its_annotation(h3_env):
     assert w["weights"] == str(REAL.repo_root / REAL.get("generators.h3.weights"))
     assert w["config"]["parallel"] == {"seq_p_size": 4}          # a rank per GPU
     assert w["config"]["attn_type"] == REAL.get("generators.h3.attn_type")
-
-
-def test_h3_job_fails_while_host_ram_is_short(h3_env, monkeypatch):
-    q, caller, _ = h3_env
-    monkeypatch.setattr(h3, "meminfo_gib", lambda: {"MemAvailable": 150.0})
-    out = q.wait(caller, submit(q, caller, [item()])["job_id"], 120)
-    assert out["state"] == "failed" and "not enough free host RAM" in json.dumps(out)
 
 
 def test_h3_finish_refuses_a_render_of_the_wrong_size_or_length(tmp_path):

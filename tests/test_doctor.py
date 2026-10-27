@@ -22,6 +22,7 @@ def _tree(tmp_path, *, worldmodel="../WorldModel", wbench="../WBench"):
     (root / "configs" / "kernel.yaml").write_text(yaml.safe_dump({
         "paths": {"worldmodel": worldmodel, "wbench": wbench, "runs_dir": "runs"},
         "gpus": {"num_gpus": 4, "min_count": 4, "free_below_mib": 512},
+        "host": {"ram_gib": 1, "kernel_reserve_gib": 0}, "captioner": {"tensor_parallel": 1},
     }))
     return root
 

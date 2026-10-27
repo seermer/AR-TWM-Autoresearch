@@ -234,7 +234,40 @@ def file_tail(path: Path, limit: int) -> str:
         return ""
 
 
-def meminfo_gib() -> dict[str, float]:
-    """MemTotal and MemAvailable, in GiB."""
-    mem = psutil.virtual_memory()
-    return {"MemTotal": mem.total / 2**30, "MemAvailable": mem.available / 2**30}
+def memory_cgroup(proc_cgroup: Path = Path("/proc/self/cgroup"), root: Path = Path("/sys/fs/cgroup")) -> Path | None:
+    """The memory cgroup of this process (v1 memory controller, else v2), or None."""
+    lines = [line.split(":", 2) for line in proc_cgroup.read_text().splitlines()]
+    for _, controllers, path in lines:
+        if "memory" in controllers.split(","):
+            return root / "memory" / path.lstrip("/")
+    for _, controllers, path in lines:
+        if controllers == "":
+            return root / path.lstrip("/")
+    return None
+
+
+def memory_limit(cgroup: Path | None) -> tuple[Path, int] | None:
+    """(cgroup dir, bytes) of the lowest memory limit on `cgroup` and its ancestors, or None."""
+    best = None
+    for d in [cgroup, *cgroup.parents] if cgroup else []:
+        for name in ("memory.max", "memory.limit_in_bytes"):
+            value = (d / name).read_text().strip() if (d / name).is_file() else ""
+            if value.isdigit() and int(value) < 2**60 and (best is None or int(value) < best[1]):
+                best = (d, int(value))
+    return best
+
+
+def host_memory_gib(cgroup: Path | None = None) -> dict[str, float | None]:
+    """Memory of this job's cgroup (the one holding its limit) in GiB: limit, used (page cache included), anon,
+    file, shmem; without a limit, the whole host (limit None; used without reclaimable cache)."""
+    found = memory_limit(cgroup or memory_cgroup())
+    if found is None:
+        mem = psutil.virtual_memory()
+        return {"limit": None, "used": (mem.total - mem.available) / 2**30, "shmem": mem.shared / 2**30}
+    d, limit = found
+    stat = dict(line.split() for line in (d / "memory.stat").read_text().splitlines())
+    v2 = (d / "memory.current").is_file()
+    used = int((d / ("memory.current" if v2 else "memory.usage_in_bytes")).read_text())
+    keys = ("anon", "file", "shmem") if v2 else ("total_rss", "total_cache", "total_shmem")
+    return {"limit": limit / 2**30, "used": used / 2**30,
+            **{k: int(stat[s]) / 2**30 for k, s in zip(("anon", "file", "shmem"), keys) if s in stat}}

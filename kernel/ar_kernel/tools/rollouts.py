@@ -27,7 +27,7 @@ from ..archive.nodes import NodeStore
 from ..data.annotation import ACTIONS, FPS, PERSPECTIVES, SWITCH
 from ..data.ingest import SIZE
 from ..data.probe import aspect_ok, probe_video
-from ..subproc import file_tail, free_port, meminfo_gib
+from ..subproc import file_tail, free_port
 from .gpu_jobs import (IMAGE_EXTS, GpuJob, check_item_seed, check_keyframes, check_listed_size, is_int, sizes_text,
                        split_gpus)
 from .jobs import run_cancellable
@@ -379,7 +379,7 @@ class Wan22Backend(GpuJob):
         extra = self.block.get("extra_args") or {}
         offload = "--offload-model" if extra.get("offload_model", True) else "--no-offload-model"
         t5_cpu = "--t5-cpu" if extra.get("t5_cpu", True) else "--no-t5-cpu"
-        groups = split_gpus(self.gpus, int(self.block.get("gpus_per_worker", 1)), self.block.get("workers"))
+        groups = split_gpus(self.gpus, int(self.block.get("gpus_per_worker", 1)), self.block["workers"])
         return self.run_workers(self.block["env"], lambda r, w: [
             "python", str(WAN22_BRIDGE), "--items", str(work / "items.json"), "--out", str(out),
             "--rank", str(r), "--world", str(w), "--repo", str(repo), "--ckpt-dir", str(ckpt),
@@ -408,11 +408,8 @@ class Wan22Backend(GpuJob):
 class Ltx25Backend(GpuJob):
     """rollout_ltx25: training clips from LTX-2.5 (Lightricks'
     ltx-pipelines in its own env): the dev model (TI2VidTwoStagesPipeline + the distilled LoRA
-    for stage 2). On 24 GB cards each worker runs one GPU with
-    fp8-cast weights and CPU offload, so each worker also holds the model in host RAM: the worker
-    count shrinks to what MemAvailable holds (`worker_groups`), and a job that cannot fit one
-    worker fails before any starts rather than meeting the host OOM killer. The clip carries no
-    pose and no annotation, like Wan's."""
+    for stage 2). One GPU per worker, `workers` of them. The clip carries no pose and no annotation,
+    like Wan's."""
     name = tool = "rollout_ltx25"
     kind = "rollout"
     config_key = "generators.ltx25"
@@ -460,26 +457,10 @@ class Ltx25Backend(GpuJob):
         if any(f >= frames for f in seen):
             raise ToolError(f"a keyframe frame is outside the clip: frames are 0..{frames - 1}, or -1 for the last")
 
-    def worker_groups(self, n_items: int) -> list[list[int]]:
-        """One GPU per worker; workers = min(GPUs (capped by the config's `workers`), items,
-        floor((MemAvailable - host_reserve_gib) / peak_rss_gib)): the job shrinks to what free
-        host RAM holds (with the reserve kept for the kernel and OS) and refuses only below one."""
-        rss = float(self.block["peak_rss_gib"])
-        reserve = float(self.block.get("host_reserve_gib", 60))
-        avail = meminfo_gib()["MemAvailable"]
-        by_ram = int((avail - reserve) // rss)
-        groups = split_gpus(self.gpus, 1, self.block.get("workers"))
-        n = min(len(groups), n_items, by_ram)
-        if n < 1:
-            raise RuntimeError(f"not enough free host RAM for one ltx-2.5 worker: MemAvailable "
-                               f"{avail:.0f} GiB - host_reserve_gib {reserve:g} < peak_rss_gib {rss:g}; "
-                               f"free host memory and retry")
-        return groups[:n]
-
     def produce(self, job, items, work, out, cancel, report):
         repo = checked_repo(self.cfg, self.config_key, "LTX-2")
         a = job.args
-        groups = self.worker_groups(len(items))
+        groups = split_gpus(self.gpus, 1, self.block["workers"])[:len(items)]
         return self.run_workers(self.block["env"], lambda r, w: [
             "python", str(LTX25_BRIDGE), "--items", str(work / "items.json"), "--out", str(out),
             "--rank", str(r), "--world", str(w), "--weights", str(self.cfg.repo_root / self.block["weights"]),

@@ -179,9 +179,10 @@ def check_frame_image(cfg, path: Path, size: tuple[int, int], what: str) -> None
 UNFIT_EXIT = 78             # a worker's exit code for "this machine is too small": not the agent's to fix
 
 
-def split_gpus(gpus: list[int], per_worker: int, workers: int | None) -> list[list[int]]:
-    groups = [gpus[i:i + per_worker] for i in range(0, len(gpus) - per_worker + 1, per_worker)]
-    return groups[:workers] if workers else groups
+def split_gpus(gpus: list[int], per_worker: int, workers: int) -> list[list[int]]:
+    if workers * per_worker > len(gpus):
+        raise ValueError(f"{workers} workers x {per_worker} GPUs do not fit GPUs {gpus}")
+    return [gpus[i * per_worker:(i + 1) * per_worker] for i in range(workers)]
 
 
 class GpuJob:

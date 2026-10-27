@@ -53,7 +53,7 @@ class ImageBackend(GpuJob):
         return self.run_workers(i["env"], lambda r, w: [
             "python", str(BRIDGE), "--items", str(work / "items.json"), "--out", str(out), "--rank", str(r),
             "--world", str(w), "--weights", str(weights), "--width", str(width), "--height", str(height),
-            "--steps", str(i["steps"]), "--offload", i["offload"]], split_gpus(self.gpus, 1, None),
+            "--steps", str(i["steps"]), "--offload", i["offload"]], split_gpus(self.gpus, 1, i["workers"]),
             job=job, work=work, out=out, total=len(items), cancel=cancel, report=report)
 
     def finish(self, job, item, out):

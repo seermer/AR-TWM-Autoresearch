@@ -24,9 +24,15 @@ HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 """
 
 
-@pytest.mark.parametrize("n, tp, dp", [(2, 2, 1), (4, 4, 1), (8, 8, 1), (6, 4, 1), (1, 1, 1)])
-def test_parallelism_follows_the_gpu_list(n, tp, dp):
-    assert parallelism(list(range(n))) == (tp, dp)
+@pytest.mark.parametrize("n, tp, dp", [(4, 4, 1), (8, 8, 1), (8, 4, 2), (6, 4, 1), (1, 1, 1)])
+def test_parallelism_takes_the_configured_tensor_parallel(n, tp, dp):
+    assert parallelism(list(range(n)), tp) == (tp, dp)
+
+
+@pytest.mark.parametrize("tp", [0, 5])
+def test_tensor_parallel_outside_the_gpus_is_refused(tp):
+    with pytest.raises(ValueError, match="tensor_parallel"):
+        parallelism([0, 1, 2, 3], tp)
 
 
 def test_configured_tensor_parallel_fills_the_rest_with_data_parallel():
@@ -37,7 +43,7 @@ def test_configured_tensor_parallel_fills_the_rest_with_data_parallel():
 
 def test_a_non_power_of_two_count_warns_about_idle_gpus(caplog):
     with caplog.at_level("WARNING"):
-        parallelism([0, 1, 2, 3, 4, 5])
+        parallelism([0, 1, 2, 3, 4, 5], 4)
     assert "4 of the 6" in caplog.text
 
 

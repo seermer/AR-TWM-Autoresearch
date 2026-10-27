@@ -123,3 +123,30 @@ def test_recorded_files_go_up_except_those_of_hf_download(tmp_path):
     HfUpload(run, Recorder(run), "tok", api=hub)("root", "eval", 0)
     members = _members(hub.files["uploads/00001/0000.tar"])
     assert "telemetry/files/aaa" in members and "telemetry/files_hf/bbb" not in members
+
+
+def test_ar_upload_sends_a_stopped_runs_changes_and_refuses_a_live_loop(tmp_path, monkeypatch):
+    from ar_kernel import cli
+    from ar_kernel.control import Control
+    run, hub = _run(tmp_path), FakeHub()
+    (run / "control" / "state.json").write_text('{"node": "n1", "phase": "train", "attempt": 2}')
+    monkeypatch.setattr(cli.KernelConfig, "runs_dir", property(lambda self: tmp_path))
+    monkeypatch.setattr(cli, "load_dotenv", lambda path, env: [])
+    monkeypatch.setenv("HFK", "tok")
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "HfApi", lambda token: hub)
+    Control(run).claim()                                         # this process stands in for a live loop
+    with pytest.raises(RuntimeError, match="still running"):
+        cli.main(["upload", "--run-id", "myrun"])
+    Control(run).release()
+    assert cli.main(["upload", "--run-id", "myrun"]) == 0
+    assert "config/run.json" in _members(hub.files["uploads/00001/0000.tar"])
+    (event,) = [e for e in Recorder(run).read_events("n1") if e["type"] == "hf_upload"]
+    assert (event["phase"], event["attempt"]) == ("manual", 2)
+    hub.fail = True
+    (run / "nodes/n1/eval/b.mp4").write_text("new")
+    with pytest.raises(ConnectionError):                         # not an alert: the caller sees it
+        cli.main(["upload", "--run-id", "myrun"])
+    monkeypatch.setenv("HFK", "")
+    with pytest.raises(ValueError, match="HFK"):
+        cli.main(["upload", "--run-id", "myrun"])

@@ -188,10 +188,9 @@ def test_a_parent_directory_swapped_for_a_link_after_the_check_is_refused(make, 
     assert (host / "a.mp4").stat().st_nlink == 1     # never linked into the job's media dir
 
 
-def test_default_tensor_parallel_is_the_largest_power_of_two_within_the_gpus(tmp_path):
-    for gpus, tp in (([0, 1, 2, 3], "4"), ([0, 1, 2, 3, 4, 5], "4"), ([0, 1, 2, 3, 4, 5, 6, 7], "8")):
-        cmd = CaptionBackend(REAL, tmp_path, gpus, None, None).server_command(8000, tmp_path)
-        assert cmd[cmd.index("--tensor-parallel-size") + 1] == tp
+def test_the_server_takes_the_configured_tensor_parallel(tmp_path):
+    cmd = CaptionBackend(REAL, tmp_path, [0, 1, 2, 3], None, None).server_command(8000, tmp_path)
+    assert cmd[cmd.index("--tensor-parallel-size") + 1] == str(REAL.get("captioner.tensor_parallel"))
 
 
 def test_the_encoder_cache_fits_every_clip_the_video_budget_allows(tmp_path):

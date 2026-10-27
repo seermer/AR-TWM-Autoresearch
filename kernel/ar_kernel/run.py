@@ -69,7 +69,7 @@ class PreflightError(RuntimeError):
 _SECRET_KEYS = {"OPENAI_API_KEY", "VLM_API_KEY", "HF_TOKEN", "HFK"}
 
 
-def _recorder(run_dir: Path, env: Mapping[str, str]) -> Recorder:
+def recorder_for(run_dir: Path, env: Mapping[str, str]) -> Recorder:
     return Recorder(run_dir, redact=[v for k, v in env.items() if k in _SECRET_KEYS and v])
 
 
@@ -93,7 +93,7 @@ def bootstrap_run(cfg: KernelConfig, run_id: str | None, env: Mapping[str, str])
                              "(`ar doctor` for details):\n  " + "\n  ".join(problems))
     (run_dir / "config").mkdir(parents=True, exist_ok=True)
     (run_dir / "cache" / "text_embed").mkdir(parents=True, exist_ok=True)
-    recorder = _recorder(run_dir, env)
+    recorder = recorder_for(run_dir, env)
     for name in SNAPSHOT_FILES:
         shutil.copy2(live_config_path(cfg, name), run_dir / "config" / name)
     shutil.copy2(cfg.eval_cases, run_dir / "config" / "proxy_cases.txt")
@@ -170,7 +170,7 @@ def attach_run(cfg: KernelConfig, run_id: str, env: Mapping[str, str]) -> RunCon
         raise RunNotFound(f"no run {run_id!r} under {cfg.runs_dir}")
     meta = json.loads(meta_path.read_text())
     judge = _stored_judge(cfg, env, meta)
-    return RunContext(run_dir=run_dir, conn=open_db(run_dir), recorder=_recorder(run_dir, env),
+    return RunContext(run_dir=run_dir, conn=open_db(run_dir), recorder=recorder_for(run_dir, env),
                       gpus=choose_gpus(cfg, env), metric_set=meta["metric_set"],
                       case_ids=meta["case_ids"], versions=meta["versions"],
                       expected_n=meta.get("expected_n", {}), judge=judge)
@@ -262,7 +262,7 @@ def rescore_node(cfg: KernelConfig, run_id: str, node_id: str, env: Mapping[str,
         raise ValueError(f"node {node_id!r} has no checkpoint to score")
     checkpoint = run_dir / node["checkpoint_path"] if node["checkpoint_path"] else None
     out = cfg.scores_dir / f"{run_id}-{node_id}-{dt.datetime.now():%Y%m%d_%H%M%S}"
-    ctx = RunContext(run_dir=out, conn=None, recorder=_recorder(out, env), gpus=choose_gpus(run_cfg, env),
+    ctx = RunContext(run_dir=out, conn=None, recorder=recorder_for(out, env), gpus=choose_gpus(run_cfg, env),
                      metric_set=meta["metric_set"], case_ids=meta["case_ids"], versions=meta["versions"],
                      expected_n=meta["expected_n"], judge=_stored_judge(run_cfg, env, meta))
     score, detail = score_node(run_cfg, ctx, node_id, checkpoint, node["lora_rank"] or 0)
