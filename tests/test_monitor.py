@@ -1,10 +1,12 @@
 import copy
 import os
+import subprocess
+import sys
 import time
 
 from ar_kernel.budget import Budget
 from ar_kernel.config import KernelConfig
-from ar_kernel.monitor import Monitor
+from ar_kernel.monitor import Monitor, process_memory
 from ar_kernel.telemetry.recorder import Recorder
 
 CFG = KernelConfig.load()
@@ -34,6 +36,28 @@ def test_host_memory_is_sampled_and_alerts_once_per_crossing(tmp_path):
     samples = [e for e in rec.read_events("gpu") if e["type"] == "host.sample"]
     assert len(samples) == 5 and samples[0]["memory_gib"]["anon"] == 50.0 and "dev_shm" in samples[0]["memory_gib"]
     assert kinds(rec).count("host_memory_high") == 2
+
+
+def test_host_sample_names_the_processes_holding_memory_and_the_free_disk(tmp_path):
+    rec = Recorder(tmp_path)
+    Monitor(CFG, tmp_path, rec, [0], Budget(), usage=lambda: None).tick()
+    (sample,) = [e for e in rec.read_events("gpu") if e["type"] == "host.sample"]
+    assert sample["disk_free_gib"] > 0
+    (me,) = [p for p in sample["processes"] if p["pid"] == os.getpid()]
+    assert me["anon"] > 0 and "python" in me["cmd"] and set(me) == {"pid", "cmd", "anon", "file", "shmem"}
+
+
+def test_process_memory_includes_children(tmp_path):
+    child = subprocess.Popen([sys.executable, "-c", "import sys, time; x = bytearray(300 * 2**20); "
+                              "x[::4096] = b'1' * len(x[::4096]); print(flush=True); time.sleep(60)"],
+                             stdout=subprocess.PIPE)
+    try:
+        child.stdout.readline()
+        (found,) = [p for p in process_memory() if p["pid"] == child.pid]
+        assert found["anon"] >= 0.25
+    finally:
+        child.kill()
+        child.wait()
 
 
 def test_stall_alert_once(tmp_path):

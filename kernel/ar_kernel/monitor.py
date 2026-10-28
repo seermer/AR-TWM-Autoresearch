@@ -1,4 +1,4 @@
-"""Run monitoring: GPU samples and alerts. Alerts never stop anything."""
+"""Run monitoring: GPU and host samples, and alerts. Alerts never stop anything."""
 from __future__ import annotations
 
 import json
@@ -57,6 +57,25 @@ def gpu_usage_detailed() -> dict[int, dict] | None:
     return out
 
 
+def process_memory(top: int = 8) -> list[dict]:
+    """The `top` processes of this process's tree (ar, its tools, the agent sandboxes) holding the most host RAM
+    (anon + shmem, GiB, from /proc/<pid>/status)."""
+    me = psutil.Process()
+    out = []
+    for proc in [me, *me.children(recursive=True)]:
+        try:
+            status = Path(f"/proc/{proc.pid}/status").read_text()
+            argv = proc.cmdline()
+            cmd = " ".join([Path(argv[0]).name, *argv[1:]])[:160] if argv else proc.name()
+        except (OSError, psutil.Error):                    # ended meanwhile
+            continue
+        kb = {k: int(v.split()[0]) for k, v in (line.split(":", 1) for line in status.splitlines())
+              if k in ("RssAnon", "RssFile", "RssShmem")}
+        out.append({"pid": proc.pid, "cmd": cmd, **{k: round(kb.get(n, 0) / 2**20, 2) for k, n in
+                    (("anon", "RssAnon"), ("file", "RssFile"), ("shmem", "RssShmem"))}})
+    return sorted(out, key=lambda p: p["anon"] + p["shmem"], reverse=True)[:top]
+
+
 def _descends_from(pid: int, ancestor: int) -> bool:
     if pid == ancestor:
         return True
@@ -68,9 +87,10 @@ def _descends_from(pid: int, ancestor: int) -> bool:
 
 class Monitor:
     def __init__(self, cfg, run_dir: Path, recorder, gpus: list[int], budget, *,
-                 usage=gpu_usage_detailed, memory=host_memory_gib, clock=time.time) -> None:
+                 usage=gpu_usage_detailed, memory=host_memory_gib, processes=process_memory,
+                 clock=time.time) -> None:
         self.cfg, self.run_dir, self.recorder, self.gpus, self.budget = cfg, Path(run_dir), recorder, list(gpus), budget
-        self.usage, self.memory, self.clock = usage, memory, clock
+        self.usage, self.memory, self.processes, self.clock = usage, memory, processes, clock
         self._ram_high = False
         self._raised: set = set()
         self._stop = threading.Event()
@@ -89,7 +109,9 @@ class Monitor:
             self.recorder.event("gpu.sample", node="gpu",
                                 gpus={str(g): {k: v for k, v in u.items() if k != "pids"} for g, u in usage.items()})
         mem = {**self.memory(), "dev_shm": shutil.disk_usage("/dev/shm").used / 2**30}
-        self.recorder.event("host.sample", node="gpu", memory_gib={k: v if v is None else round(v, 2) for k, v in mem.items()})
+        self.recorder.event("host.sample", node="gpu", memory_gib={k: v if v is None else round(v, 2) for k, v in mem.items()},
+                            disk_free_gib=round(shutil.disk_usage(self.run_dir).free / 2**30, 1),
+                            processes=self.processes())
         held = mem["anon"] + mem["shmem"] if "anon" in mem else mem["used"]     # not reclaimable page cache
         ram = float(self.cfg.get("host.ram_gib"))
         high = held > float(self.cfg.get("host.alert_fraction")) * ram

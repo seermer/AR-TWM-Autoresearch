@@ -17,8 +17,9 @@
 #   RUN=exp1 MAX_NODES=6 sbatch -J exp1 scripts/sbatch_run.sh
 # CONDA_EXE=<conda install>/bin/conda when conda is only a shell function in the submitting shell.
 # Optional: CONFIG="configs/h100.yaml configs/rain_start.yaml" (new runs only; files applied in order).
-# SIGTERM (preemption, or 15 min before the time limit) stops the run, then the run folder is uploaded
-# (`ar upload`); it is never requeued: resubmit the same RUN to resume it.
+# SIGTERM (preemption, or 15 min before the time limit) stops the run; then ar's exit status, the job's sstat
+# figures and this log go into runs/$RUN/slurm-<job>.log and the run folder is uploaded (`ar upload`).
+# It is never requeued: resubmit the same RUN to resume it.
 # Host for 8 GPUs: >= 128 GB /dev/shm, an NVIDIA driver supporting CUDA >= 13.0, and 1.5 TB disk for the
 # whole tree (weights, envs, caches, runs).
 set -euo pipefail
@@ -53,6 +54,20 @@ while kill -0 $pid 2>/dev/null; do   # that wait returned early, when the trap r
   wait $pid || status=$?
 done
 trap '' TERM    # a late SIGTERM must not cut the upload or change the exit status
+if [ $status -gt 128 ]; then
+  echo "ar ended by SIG$(kill -l $((status - 128))) (exit status $status)" >&2
+else
+  echo "ar exited with status $status" >&2
+fi
+sstat --allsteps -j "$SLURM_JOB_ID" --format=JobID,MaxRSS,MaxVMSize,AveCPU,MaxDiskRead,MaxDiskWrite >&2 \
+  || echo "sstat failed" >&2
+# This log (ar's stderr: tracebacks, faulthandler stacks) into the run folder, so the upload carries it
+log=$(scontrol show job "$SLURM_JOB_ID" | sed -n 's/^ *StdOut=//p' || true)
+if [ -d "runs/$RUN" ] && [ -f "$log" ]; then
+  cp "$log" "runs/$RUN/slurm-$SLURM_JOB_ID.log"
+else
+  echo "the Slurm log ($log) was not copied into runs/$RUN" >&2
+fi
 # The run folder to Hugging Face however the run ended (HFK in .env); after the time limit's SIGKILL nothing runs.
 if [ -n "${HFK:-}" ] || grep -qE "^HFK=[\"']?[^\"'[:space:]]" .env 2>/dev/null; then
   ar upload --run-id "$RUN" || echo "ar upload failed; run it again: ar upload --run-id $RUN" >&2
