@@ -14,12 +14,13 @@
 # Measures the GPU tools of configs/h100.yaml for its host-RAM and worker values, with scripts/preflight.py:
 #   0. ar doctor --gpu: stops the job when an env or check fails (e.g. gen-lightx2v without FlashAttention 3, which
 #      configs/h100.yaml's H3 needs: on an H100 node, delete .envs/gen-lightx2v and run scripts/setup_envs.sh gen-lightx2v)
-#   1. the overlay as it is: weights, vllm (captioner), ltx25 (bf16, no offload), images, annotate, h3 (FlashAttention 3)
+#   1. the overlay as it is: weights, vllm (captioner), ltx25 (bf16, no offload), images, annotate, h3 (DiT on the
+#      GPU, FlashAttention 3)
 #   2. ltx25 with CPU offload (4 workers): the output 1 must reproduce
-#   3. h3 with its DiT on the GPU (configs/h3_lightx2v_h100.json): the output must reproduce 1's
+#   3. h3 with block offload (configs/h3_lightx2v.json): the output 1 must reproduce
 # Submit from AutoResearcher/ (same environment as scripts/sbatch_run.sh):  sbatch scripts/sbatch_measure.sh
-# Only some steps (overlay ltx_cpu h3_gpu), compared against an earlier job's overlay:
-#   OVERLAY=<earlier job id> sbatch scripts/sbatch_measure.sh h3_gpu
+# Only some steps (overlay ltx_cpu h3_offload), compared against an earlier job's overlay:
+#   OVERLAY=<earlier job id> sbatch scripts/sbatch_measure.sh h3_offload
 # Results in runs/measure-<job>/: summary.json (per step: seconds, items, GPU peak per card, the job's host memory
 # at start and peak; PSNR of each clip against its counterpart, inf = identical) and each preflight's log.
 set -euo pipefail
@@ -37,7 +38,7 @@ ulimit -u "$(ulimit -Hu)"
 
 out=runs/measure-${SLURM_JOB_ID:-$(date +%Y%m%d-%H%M%S)}
 mkdir -p "$out"
-steps="${*:-overlay ltx_cpu h3_gpu}"
+steps="${*:-overlay ltx_cpu h3_offload}"
 if [[ " $steps " != *" overlay "* ]]; then
   cp "runs/measure-${OVERLAY:?set OVERLAY=<earlier job id> to compare against its overlay}/overlay.run" "$out/"
 fi
@@ -45,9 +46,9 @@ cat > "$out/ltx_cpu.yaml" <<'EOF'
 generators:
   ltx25: {offload: cpu, workers: 4, peak_rss_gib: 80}
 EOF
-cat > "$out/h3_gpu.yaml" <<'EOF'
+cat > "$out/h3_offload.yaml" <<'EOF'
 generators:
-  h3: {config: configs/h3_lightx2v_h100.json}
+  h3: {config: configs/h3_lightx2v.json, peak_rss_gib: 170}
 EOF
 
 ar doctor --gpu --config configs/h100.yaml
@@ -62,8 +63,8 @@ for step in $steps; do
   case $step in
     overlay) preflight overlay --config configs/h100.yaml --steps weights vllm ltx25 images annotate h3 ;;
     ltx_cpu) preflight ltx_cpu --config configs/h100.yaml "$out/ltx_cpu.yaml" --steps ltx25 ;;
-    h3_gpu) preflight h3_gpu --config configs/h100.yaml "$out/h3_gpu.yaml" --steps h3 ;;
-    *) echo "unknown step $step (overlay, ltx_cpu, h3_gpu)" >&2; exit 1 ;;
+    h3_offload) preflight h3_offload --config configs/h100.yaml "$out/h3_offload.yaml" --steps h3 ;;
+    *) echo "unknown step $step (overlay, ltx_cpu, h3_offload)" >&2; exit 1 ;;
   esac
 done
 
@@ -85,10 +86,10 @@ def psnr(a, b):
 def videos(rep, step):
     return (rep.get(step, {}).get("detail") or {}).get("videos", [])
 
-reports = {name: report(name) for name in ("overlay", "ltx_cpu", "h3_gpu")}
+reports = {name: report(name) for name in ("overlay", "ltx_cpu", "h3_offload")}
 summary = {name: {step: {k: v for k, v in r.items() if k != "traceback"} for step, r in rep.items()}
            for name, rep in reports.items()}
-for name, step in (("ltx_cpu", "ltx25"), ("h3_gpu", "h3")):
+for name, step in (("ltx_cpu", "ltx25"), ("h3_offload", "h3")):
     a, b = videos(reports["overlay"], step), videos(reports[name], step)
     summary[f"psnr_{name}"] = [psnr(x, y) for x, y in zip(a, b)] if a and len(a) == len(b) else \
         f"not compared: {len(a)} and {len(b)} clips"
