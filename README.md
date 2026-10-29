@@ -255,6 +255,7 @@ since the last one (it refuses while the loop runs). `scripts/sbatch_run.sh` run
 ```bash
 ar stop --run-id $RUN                   # stops after the current node finishes (can take hours)
 ar stop --run-id $RUN --force           # stops now, waits until the loop has exited
+ar doctor --gpu --run-id $RUN           # checks under the run's own config before a resume
 nohup ar run --run-id $RUN --resume >> runs/$RUN.console.log 2>&1 &
 ```
 

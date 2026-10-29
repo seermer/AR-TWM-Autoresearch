@@ -38,12 +38,12 @@ export HF_HOME=$PWD/.cache/huggingface
 unset CUDA_VISIBLE_DEVICES
 ulimit -u "$(ulimit -Hu)"     # the soft process/thread limit can be as low as 512; 8 GPU workers need thousands
 
-ar doctor --gpu ${CONFIG:+--config $CONFIG}
-
 if [ -f "runs/$RUN/config/run.json" ]; then
+  ar doctor --gpu --run-id "$RUN"
   ar run --run-id "$RUN" --resume &
 else
   : "${MAX_NODES:?set MAX_NODES}"
+  ar doctor --gpu ${CONFIG:+--config $CONFIG}
   ar run --run-id "$RUN" --max-nodes "$MAX_NODES" ${CONFIG:+--config $CONFIG} &
 fi
 pid=$!

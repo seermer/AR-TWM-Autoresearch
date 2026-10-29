@@ -51,6 +51,7 @@ def main(argv: list[str] | None = None) -> int:
     doctor.add_argument("--strict", action="store_true", help="exit non-zero on warnings too")
     doctor.add_argument("--gpu", action="store_true", help="also check the cards, the driver and each env's GPU packages")
     doctor.add_argument("--config", nargs="+", default=[], metavar="FILE", help="check under these kernel.yaml overlays")
+    doctor.add_argument("--run-id", default=None, help="check under this run's frozen config (before a resume)")
     args = parser.parse_args(argv)
 
     overlays = getattr(args, "config", [])
@@ -62,6 +63,12 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv(cfg.repo_root / ".env", os.environ)
     # Before bootstrap_run: diagnostics must not create a run dir or rewrite versions.json.
     if args.command == "doctor":
+        if args.run_id:
+            if overlays:
+                raise ValueError("--config and --run-id: a run is checked under its own frozen config")
+            if not (cfg.runs_dir / args.run_id / "config" / "run.json").exists():
+                raise RunNotFound(f"no run {args.run_id!r} under {cfg.runs_dir}")
+            cfg = KernelConfig.for_run(cfg.runs_dir / args.run_id)
         return report(run_checks(cfg) + (gpu_checks(cfg) if args.gpu else []), strict=args.strict)
     if args.command == "fetch":
         if not os.environ.get("HFK", "").strip():

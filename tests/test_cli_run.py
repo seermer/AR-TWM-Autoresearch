@@ -302,3 +302,15 @@ def test_a_new_run_whose_tools_do_not_fit_creates_nothing(tmp_path, monkeypatch)
     monkeypatch.setattr(cli, "bootstrap_run", lambda *a, **k: pytest.fail("the run was created"))
     with pytest.raises(GpuPolicyError, match="do not fit"):
         cli.main(["run", "--max-nodes", "1"])
+
+def test_doctor_with_a_run_id_checks_under_the_runs_frozen_config(tmp_path, monkeypatch):
+    _existing_run(tmp_path, monkeypatch, num_gpus=8)     # the live config says 4
+    seen = []
+    monkeypatch.setattr(cli, "run_checks", lambda cfg: seen.append(cfg.get("gpus.num_gpus")) or [])
+    assert cli.main(["doctor", "--run-id", "r1"]) == 0
+    assert cli.main(["doctor"]) == 0
+    assert seen == [8, 4]
+    with pytest.raises(ValueError, match="own frozen config"):
+        cli.main(["doctor", "--run-id", "r1", "--config", "configs/h100.yaml"])
+    with pytest.raises(cli.RunNotFound):
+        cli.main(["doctor", "--run-id", "nope"])
