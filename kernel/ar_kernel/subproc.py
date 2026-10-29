@@ -12,7 +12,8 @@ KILL_FORCE_GRACE_SECONDS = 10
 CACHE_VARS = {"HF_HOME": "huggingface", "XDG_CACHE_HOME": "", "TORCH_HOME": "torch",
               "TRITON_CACHE_DIR": "triton", "TORCHINDUCTOR_CACHE_DIR": "torchinductor",
               "VLLM_CACHE_ROOT": "vllm", "CUDA_CACHE_PATH": "nv", "PIP_CACHE_DIR": "pip",
-              "UV_CACHE_DIR": "uv"}
+              "UV_CACHE_DIR": "uv", "VLLM_CONFIG_ROOT": "vllm-config", "FLASHINFER_WORKSPACE_BASE": "flashinfer",
+              "CUPY_CACHE_DIR": "cupy", "MPLCONFIGDIR": "matplotlib"}     # each defaults to the home folder or /tmp
 
 
 def free_port() -> int:
@@ -51,6 +52,7 @@ def cache_env() -> dict[str, str]:
     root = cache_dir()
     env = {var: str(root / sub) if sub else str(root) for var, sub in CACHE_VARS.items()}
     env["TMPDIR"] = str(tmp_link())
+    env["VLLM_NO_USAGE_STATS"] = "1"           # vLLM otherwise records and sends usage statistics
     return env
 
 

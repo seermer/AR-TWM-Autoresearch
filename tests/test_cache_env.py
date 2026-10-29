@@ -11,14 +11,15 @@ from ar_kernel.config import REPO_ROOT
 from ar_kernel.subproc import cache_dir, cache_env, run_in_env
 
 VARS = ("HF_HOME", "XDG_CACHE_HOME", "TORCH_HOME", "TRITON_CACHE_DIR", "TORCHINDUCTOR_CACHE_DIR",
-        "VLLM_CACHE_ROOT", "CUDA_CACHE_PATH", "PIP_CACHE_DIR", "UV_CACHE_DIR", "TMPDIR")
+        "VLLM_CACHE_ROOT", "CUDA_CACHE_PATH", "PIP_CACHE_DIR", "UV_CACHE_DIR", "VLLM_CONFIG_ROOT",
+        "FLASHINFER_WORKSPACE_BASE", "CUPY_CACHE_DIR", "MPLCONFIGDIR", "TMPDIR")
 
 
 def test_default_cache_dir_is_inside_the_repo(monkeypatch):
     monkeypatch.delenv("AR_CACHE_DIR", raising=False)
     assert cache_dir() == REPO_ROOT / ".cache"
     env = cache_env()
-    assert set(env) == set(VARS)
+    assert env.pop("VLLM_NO_USAGE_STATS") == "1" and set(env) == set(VARS)
     assert all(Path(v).resolve().is_relative_to(REPO_ROOT / ".cache") for v in env.values())
     assert env["HF_HOME"] == str(REPO_ROOT / ".cache" / "huggingface")
     tmp = Path(env["TMPDIR"])
