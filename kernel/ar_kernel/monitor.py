@@ -11,7 +11,7 @@ from pathlib import Path
 import psutil
 
 from .guards import alert, smi
-from .subproc import host_memory_gib
+from .subproc import host_memory_gib, memory_events
 
 
 def tree_mark(*paths) -> tuple[int, int, int]:
@@ -87,10 +87,11 @@ def _descends_from(pid: int, ancestor: int) -> bool:
 
 class Monitor:
     def __init__(self, cfg, run_dir: Path, recorder, gpus: list[int], budget, *,
-                 usage=gpu_usage_detailed, memory=host_memory_gib, processes=process_memory,
+                 usage=gpu_usage_detailed, memory=host_memory_gib, events=memory_events, processes=process_memory,
                  clock=time.time) -> None:
         self.cfg, self.run_dir, self.recorder, self.gpus, self.budget = cfg, Path(run_dir), recorder, list(gpus), budget
-        self.usage, self.memory, self.processes, self.clock = usage, memory, processes, clock
+        self.usage, self.memory, self.events, self.processes, self.clock = usage, memory, events, processes, clock
+        self._oom_kills: int | None = None
         self._ram_high = False
         self._raised: set = set()
         self._stop = threading.Event()
@@ -111,7 +112,12 @@ class Monitor:
         mem = {**self.memory(), "dev_shm": shutil.disk_usage("/dev/shm").used / 2**30}
         self.recorder.event("host.sample", node="gpu", memory_gib={k: v if v is None else round(v, 2) for k, v in mem.items()},
                             disk_free_gib=round(shutil.disk_usage(self.run_dir).free / 2**30, 1),
-                            processes=self.processes())
+                            memory_events=(events := self.events()), processes=self.processes())
+        kills = events.get("oom_kill", 0)
+        if self._oom_kills is not None and kills > self._oom_kills:
+            alert(self.recorder, "host_oom_kill", f"the kernel killed {kills - self._oom_kills} process(es) at the "
+                  f"job's memory limit", level="error", memory_gib=mem)
+        self._oom_kills = kills
         held = mem["anon"] + mem["shmem"] if "anon" in mem else mem["used"]     # not reclaimable page cache
         ram = float(self.cfg.get("host.ram_gib"))
         high = held > float(self.cfg.get("host.alert_fraction")) * ram

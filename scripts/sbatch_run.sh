@@ -18,7 +18,8 @@
 # CONDA_EXE=<conda install>/bin/conda when conda is only a shell function in the submitting shell.
 # Optional: CONFIG="configs/h100.yaml configs/rain_start.yaml" (new runs only; files applied in order).
 # SIGTERM (preemption, or 15 min before the time limit) stops the run; then ar's exit status, the job's sstat
-# figures and this log go into runs/$RUN/slurm-<job>.log and the run folder is uploaded (`ar upload`).
+# figures, its memory cgroup counters and this log go into runs/$RUN/slurm-<job>.log and the run folder is
+# uploaded (`ar upload`).
 # It is never requeued: resubmit the same RUN to resume it.
 # Host for 8 GPUs: >= 128 GB /dev/shm, an NVIDIA driver supporting CUDA >= 13.0, and 1.5 TB disk for the
 # whole tree (weights, envs, caches, runs).
@@ -61,6 +62,8 @@ else
 fi
 sstat --allsteps -j "$SLURM_JOB_ID" --format=JobID,MaxRSS,MaxVMSize,AveCPU,MaxDiskRead,MaxDiskWrite >&2 \
   || echo "sstat failed" >&2
+python -c "from ar_kernel.subproc import host_memory_gib as m, memory_events as e; print('job memory GiB', m(), e())" >&2 \
+  || echo "the job's memory cgroup could not be read" >&2
 # This log (ar's stderr: tracebacks, faulthandler stacks) into the run folder, so the upload carries it
 log=$(scontrol show job "$SLURM_JOB_ID" | sed -n 's/^ *StdOut=//p' || true)
 if [ -d "runs/$RUN" ] && [ -f "$log" ]; then

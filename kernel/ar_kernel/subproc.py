@@ -257,6 +257,20 @@ def memory_limit(cgroup: Path | None) -> tuple[Path, int] | None:
     return best
 
 
+def memory_events(cgroup: Path | None = None) -> dict[str, int]:
+    """Counters of the cgroup holding the job's limit: `max` (usage reached the limit), `oom_kill` (processes the
+    kernel killed there); {} without a limit."""
+    found = memory_limit(cgroup or memory_cgroup())
+    if found is None:
+        return {}
+    d = found[0]
+    if (d / "memory.events").is_file():                                   # v2
+        events = dict(line.split() for line in (d / "memory.events").read_text().splitlines())
+        return {"max": int(events.get("max", 0)), "oom_kill": int(events.get("oom_kill", 0))}
+    oom = dict(line.split() for line in (d / "memory.oom_control").read_text().splitlines())
+    return {"max": int((d / "memory.failcnt").read_text()), "oom_kill": int(oom.get("oom_kill", 0))}
+
+
 def host_memory_gib(cgroup: Path | None = None) -> dict[str, float | None]:
     """Memory of this job's cgroup (the one holding its limit) in GiB: limit, used (page cache included), anon,
     file, shmem; without a limit, the whole host (limit None; used without reclaimable cache)."""

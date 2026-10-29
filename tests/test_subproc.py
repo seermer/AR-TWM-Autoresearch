@@ -10,7 +10,7 @@ import time
 import pytest
 
 from ar_kernel.config import REPO_ROOT
-from ar_kernel.subproc import conda_command, host_memory_gib, memory_cgroup, memory_limit, run_in_env
+from ar_kernel.subproc import conda_command, host_memory_gib, memory_cgroup, memory_events, memory_limit, run_in_env
 from ar_kernel.telemetry.recorder import Recorder
 
 ENV = "autoresearcher"
@@ -154,3 +154,17 @@ def test_no_limit_means_the_whole_host(tmp_path):
     assert memory_limit(cg) is None
     mem = host_memory_gib(cg)
     assert mem["limit"] is None and 0 < mem["used"]
+
+
+def test_memory_events_of_the_limiting_cgroup(tmp_path):
+    for sub in "abc":
+        (tmp_path / sub).mkdir()
+    v2 = _cgroup(tmp_path / "a", "0::/slurm/job_1/step_batch\n", {
+        "slurm/job_1/memory.max": str(2**30), "slurm/job_1/memory.events": "low 0\nhigh 0\nmax 12\noom 1\noom_kill 1\n",
+        "slurm/job_1/step_batch/memory.events": "max 0\noom_kill 0\n"})
+    assert memory_events(v2) == {"max": 12, "oom_kill": 1}
+    v1 = _cgroup(tmp_path / "b", "9:memory:/slurm/job_2\n", {
+        "memory/slurm/job_2/memory.limit_in_bytes": str(2**30), "memory/slurm/job_2/memory.failcnt": "7\n",
+        "memory/slurm/job_2/memory.oom_control": "oom_kill_disable 0\nunder_oom 0\noom_kill 2\n"})
+    assert memory_events(v1) == {"max": 7, "oom_kill": 2}
+    assert memory_events(_cgroup(tmp_path / "c", "0::/user.slice\n", {"user.slice/memory.max": "max"})) == {}

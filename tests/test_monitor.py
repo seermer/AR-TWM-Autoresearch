@@ -47,6 +47,17 @@ def test_host_sample_names_the_processes_holding_memory_and_the_free_disk(tmp_pa
     assert me["anon"] > 0 and "python" in me["cmd"] and set(me) == {"pid", "cmd", "anon", "file", "shmem"}
 
 
+def test_an_oom_kill_at_the_job_limit_is_an_error_alert_per_increase(tmp_path):
+    rec, kills = Recorder(tmp_path), [0]
+    m = Monitor(CFG, tmp_path, rec, [0], Budget(), usage=lambda: None, processes=lambda: [],
+                events=lambda: {"max": 3, "oom_kill": kills[0]})
+    for kills[0] in (2, 2, 3, 3, 5):                       # kills before the run started do not count
+        m.tick()
+    alerts = [e for e in rec.read_events() if e["type"] == "alert" and e["kind"] == "host_oom_kill"]
+    assert [a["message"].split()[3] for a in alerts] == ["1", "2"] and alerts[0]["level"] == "error"
+    (sample, *_) = [e for e in rec.read_events("gpu") if e["type"] == "host.sample"]
+    assert sample["memory_events"] == {"max": 3, "oom_kill": 2}
+
 def test_process_memory_includes_children(tmp_path):
     child = subprocess.Popen([sys.executable, "-c", "import sys, time; x = bytearray(300 * 2**20); "
                               "x[::4096] = b'1' * len(x[::4096]); print(flush=True); time.sleep(60)"],
