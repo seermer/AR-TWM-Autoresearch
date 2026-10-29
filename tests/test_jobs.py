@@ -211,13 +211,13 @@ def test_job_waiting_for_the_gpu_lock_stays_queued_and_its_gpu_seconds_exclude_t
     q, a, _, _ = env
     with q.gpu_lock:
         job_id = q.submit(a, "sleepy", {"steps": 1, "dt": 0.01})
-        time.sleep(0.3)
+        time.sleep(1.5)                                 # longer than the limit below: a counted wait fails it
         view = q.status(a, job_id)
         assert view["state"] == "queued" and view["started"] is None
         released = time.time()
     done = q.wait(a, job_id, 30)
     assert done["state"] == "done" and done["started"] >= released
-    assert done["finished"] - done["started"] < 0.3      # what job.finished records as gpu_seconds
+    assert done["finished"] - done["started"] < 1.0      # what job.finished records as gpu_seconds
 
 
 def test_job_cancelled_while_waiting_for_the_gpu_lock_never_reaches_the_backend(env):
