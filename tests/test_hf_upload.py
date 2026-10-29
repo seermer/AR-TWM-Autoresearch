@@ -7,6 +7,7 @@ import tarfile
 from types import SimpleNamespace
 
 import pytest
+from huggingface_hub import CommitOperationDelete
 from huggingface_hub.hf_api import RepoFile
 
 from ar_kernel import hf_upload
@@ -16,9 +17,9 @@ from ar_kernel.telemetry.recorder import Recorder
 
 class FakeHub:
     """whoami / create_repo / create_commit / list_datasets / list_repo_tree / delete_repo / hf_hub_download over
-    a dict of repos, each a dict of uploaded files."""
+    a dict of repos, each a dict of uploaded files. `lost_reply`: the commit lands, the caller sees an error."""
     def __init__(self, fail=False):
-        self.repos, self.created, self.fail = {}, [], fail
+        self.repos, self.created, self.fail, self.lost_reply = {}, [], fail, False
 
     def whoami(self):
         return {"name": "me"}
@@ -31,7 +32,12 @@ class FakeHub:
         if self.fail:
             raise ConnectionError("hub down")
         for op in operations:
-            self.repos[repo_id][op.path_in_repo] = open(op.path_or_fileobj, "rb").read()
+            if isinstance(op, CommitOperationDelete):
+                del self.repos[repo_id][op.path_in_repo]
+            else:
+                self.repos[repo_id][op.path_in_repo] = open(op.path_or_fileobj, "rb").read()
+        if self.lost_reply:
+            raise TimeoutError("no reply")
 
     def list_datasets(self, author, search):
         return [SimpleNamespace(id=r) for r in self.repos if r.startswith(f"{author}/") and search in r]
@@ -218,10 +224,18 @@ def test_delete_refuses_and_deletes_nothing_when_a_repo_is_not_what_this_copy_ap
     _uploaded(tmp_path, hub, 2)
     there = tmp_path / "elsewhere" / "myrun"
     fetch(there, "tok", api=hub, download=hub.download)
-    hub.repos["me/myrun-00002"]["0000.tar"] += b"changed"
+    listed = hub.list_repo_tree
+
+    def change_after_the_fetch(repo, repo_type, recursive):      # the repo changes between fetch and delete
+        out = listed(repo, repo_type, recursive)
+        if repo.endswith("00002"):
+            hub.repos[repo]["0000.tar"] += b"changed"
+        return out
+    hub.list_repo_tree = change_after_the_fetch
     with pytest.raises(RuntimeError, match="myrun-00002 differs"):
         fetch(there, "tok", delete=True, api=hub, download=hub.download)
     assert sorted(hub.repos) == ["me/myrun-00001", "me/myrun-00002"]
+    hub.list_repo_tree = listed
     state = json.loads((there / "control/hf_fetch.json").read_text())
     del state["applied"]["1"]
     (there / "control/hf_fetch.json").write_text(json.dumps(state))
@@ -248,3 +262,55 @@ def test_the_upload_record_is_fsynced_with_its_folder(tmp_path, monkeypatch):
     assert [f for f in synced if "/control" in f] == [str(run / "control/hf_upload.tmp"), str(run / "control")]
     assert json.loads((run / "control/hf_upload.json").read_text())["seq"] == 1
 
+
+def test_a_retry_after_a_commit_that_landed_unnoticed_replaces_it_and_fetch_applies_it_again(tmp_path, monkeypatch):
+    run, hub = _run(tmp_path), FakeHub()
+    monkeypatch.setattr(hf_upload, "PART_BYTES", 40)
+    up = HfUpload(run, Recorder(run), "tok", api=hub)
+    gone = [f"nodes/n1/eval/x{i}.mp4" for i in range(10)]
+    for rel in gone:
+        (run / rel).write_text("x" * 50)
+    hub.lost_reply = True
+    up("root", "eval", 0)                                          # landed in 00001; the run does not know
+    first = set(hub.repos["me/myrun-00001"])
+    there = tmp_path / "elsewhere" / "myrun"
+    fetch(there, "tok", api=hub, download=hub.download)            # a copy of the lost attempt
+    hub.lost_reply = False
+    for rel in gone:
+        (run / rel).unlink()
+    (run / "nodes/n1/eval/b.mp4").write_text("b")
+    up("n1", "eval", 0)                                            # the retry: fewer parts, into 00001 again
+    assert list(hub.repos) == ["me/myrun-00001"] and len(hub.repos["me/myrun-00001"]) < len(first)
+    assert fetch(there, "tok", api=hub, download=hub.download) == (
+        f"fetched 0 uploads of myrun into {there} (1 applied again: changed on Hugging Face since)")
+    assert (there / "nodes/n1/eval/b.mp4").read_text() == "b" and not (there / "nodes/n1/eval/x0.mp4").exists()
+    assert fetch(there, "tok", delete=True, api=hub, download=hub.download).endswith("deleted 1 upload repos from Hugging Face")
+
+
+def test_a_retry_into_a_repo_the_copy_already_deleted_is_applied_again(tmp_path):
+    run, hub = _run(tmp_path), FakeHub()
+    up = HfUpload(run, Recorder(run), "tok", api=hub)
+    hub.lost_reply = True
+    up("root", "eval", 0)
+    there = tmp_path / "elsewhere" / "myrun"
+    fetch(there, "tok", delete=True, api=hub, download=hub.download)
+    assert hub.repos == {}
+    hub.lost_reply = False
+    (run / "nodes/n1/eval/b.mp4").write_text("b")
+    up("n1", "eval", 0)                                            # re-creates 00001
+    fetch(there, "tok", api=hub, download=hub.download)
+    assert (there / "nodes/n1/eval/b.mp4").read_text() == "b"
+
+
+def test_an_older_upload_rewritten_after_its_record_reverted_is_applied_again_in_order(tmp_path):
+    hub = FakeHub()
+    run, up = _uploaded(tmp_path, hub, 3)
+    there = tmp_path / "elsewhere" / "myrun"
+    fetch(there, "tok", api=hub, download=hub.download)
+    state = json.loads((run / "control/hf_upload.json").read_text())
+    (run / "control/hf_upload.json").write_text(json.dumps({**state, "seq": 1}))   # the record as after upload 1
+    (run / "nodes/n1/eval/new.mp4").write_text("new")
+    up("n1", "eval", 0)                                            # into 00002 again, while 00003 exists
+    assert fetch(there, "tok", api=hub, download=hub.download).endswith("(1 applied again: changed on Hugging Face since)")
+    assert (there / "nodes/n1/eval/new.mp4").read_text() == "new" and (there / "nodes/n1/eval/2.mp4").read_text() == "2"
+    assert fetch(there, "tok", api=hub, download=hub.download) == f"{there} is up to date"

@@ -242,7 +242,8 @@ ar fetch --run-id $RUN --delete   # the same, then deletes from Hugging Face eve
 ```
 
 The fetched copy is for viewing and analysis (and its checkpoints), never for resuming. Fetch refuses to skip a
-missing upload, so a new copy needs every upload from the first. `--delete` first checks each repo against the
+missing upload, so a new copy needs every upload from the first. An upload it already holds whose repo changed
+since (the run retried it) is applied again. `--delete` first checks each repo against the
 checksums of what this copy applied and deletes nothing if one differs. The run keeps uploading from where it was,
 also after a resume: deleting its repos does not disturb it.
 
