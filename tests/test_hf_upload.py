@@ -236,3 +236,15 @@ def test_fetch_refuses_a_copy_made_from_a_single_run_repo(tmp_path):
     (there / "control/hf_fetch.json").write_text('{"repo": "me/myrun", "last": "uploads/00015/0000.tar"}')
     with pytest.raises(ValueError, match="older `ar fetch`"):
         fetch(there, "tok", api=FakeHub(), download=None)
+
+
+def test_the_upload_record_is_fsynced_with_its_folder(tmp_path, monkeypatch):
+    run, hub = _run(tmp_path), FakeHub()
+    synced = []
+    real = hf_upload.os.fsync
+    monkeypatch.setattr(hf_upload.os, "fsync", lambda fd: synced.append(hf_upload.os.readlink(f"/proc/self/fd/{fd}"))
+                        or real(fd))
+    HfUpload(run, Recorder(run), "tok", api=hub)("root", "eval", 0)
+    assert [f for f in synced if "/control" in f] == [str(run / "control/hf_upload.tmp"), str(run / "control")]
+    assert json.loads((run / "control/hf_upload.json").read_text())["seq"] == 1
+

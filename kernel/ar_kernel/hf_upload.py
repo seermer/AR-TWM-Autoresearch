@@ -106,11 +106,24 @@ class HfUpload:
                                        commit_message=f"{node} {phase}{f' {attempt}' if attempt else ''}")
             finally:
                 enable_progress_bars()
-        tmp_state = self.state_path.with_suffix(".tmp")
-        tmp_state.write_text(json.dumps({"seq": seq, "files": files}))
-        tmp_state.replace(self.state_path)
+        _write_synced(self.state_path, json.dumps({"seq": seq, "files": files}))
         self.recorder.event("hf_upload", node=node, phase=phase, attempt=attempt,
                             payload={"repo": repo, "upload": seq, "parts": len(ops), "files": len(changed), "bytes": size})
+
+
+def _write_synced(path: Path, text: str) -> None:
+    """On disk before it returns: a network filesystem can lose what was only written."""
+    tmp = path.with_suffix(".tmp")
+    with tmp.open("w") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    tmp.replace(path)
+    fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def upload_repo(user: str, run: str, seq: int) -> str:
