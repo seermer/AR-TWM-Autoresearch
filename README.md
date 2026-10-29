@@ -276,6 +276,7 @@ Do not delete files under `runs/$RUN` by hand.
 |---|---|
 | `OPENAI_API_KEY is empty` | Fill `.env` (step 3). Run `ar` from `AutoResearcher`. |
 | `run ... exists; use --resume` | Use a new `--run-id`, or add `--resume` to continue it. |
+| `Hugging Face already holds uploads of a run named ...` | Another run of that name uploaded there (`HFK` set): use a new `--run-id`. |
 | `need 4 free GPUs` / GPU out of memory at start | Fewer idle cards than `gpus.num_gpus`. Check `nvidia-smi` for other processes. |
 | `unset CUDA_VISIBLE_DEVICES` | The run picks its own cards: `unset CUDA_VISIBLE_DEVICES` in that shell. |
 | `phase_failed` alert in `ar status`, and the run stopped | A phase failed twice for a reason that is not the agents' (machine, kernel or LLM provider); the alert carries the error. Fix it, then `--resume`: the phase starts again. |

@@ -303,6 +303,31 @@ def test_a_new_run_whose_tools_do_not_fit_creates_nothing(tmp_path, monkeypatch)
     with pytest.raises(GpuPolicyError, match="do not fit"):
         cli.main(["run", "--max-nodes", "1"])
 
+
+def test_a_new_run_named_like_uploads_on_hugging_face_creates_nothing(tmp_path, monkeypatch, capsys):
+    import huggingface_hub
+    monkeypatch.setattr(cli.KernelConfig, "runs_dir", property(lambda self: tmp_path))
+    monkeypatch.setattr(cli, "load_dotenv", lambda path, env: [])
+    monkeypatch.setattr(cli, "check_tools_fit", lambda cfg, gpus: None)
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("OPENAI_MODEL", "m")
+    monkeypatch.setenv("HFK", "tok")
+    hub = SimpleNamespace(whoami=lambda: {"name": "me"},
+                          list_datasets=lambda author, search: [SimpleNamespace(id="me/r2-00001"),
+                                                                SimpleNamespace(id="me/r2-extra")])
+    monkeypatch.setattr(huggingface_hub, "HfApi", lambda token: hub)
+    assert cli.main(["run", "--run-id", "r2", "--max-nodes", "1"]) == 2
+    assert "already holds uploads of a run named 'r2' (me/r2-00001)" in capsys.readouterr().err
+    assert not (tmp_path / "r2").exists()
+
+    def unreachable(author, search):
+        raise ConnectionError("hub down")
+    hub.list_datasets = unreachable
+    with pytest.raises(ConnectionError):                          # the check is never skipped
+        cli.main(["run", "--run-id", "r2", "--max-nodes", "1"])
+    assert not (tmp_path / "r2").exists()
+
+
 def test_doctor_with_a_run_id_checks_under_the_runs_frozen_config(tmp_path, monkeypatch):
     _existing_run(tmp_path, monkeypatch, num_gpus=8)     # the live config says 4
     seen = []

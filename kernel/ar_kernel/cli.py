@@ -5,7 +5,7 @@ from .config import KernelConfig, load_dotenv
 from .control import Control, drive, exit_process, kill_recorded_groups
 from .doctor import gpu_checks, report, run_checks
 from .guards import alert, check_tools_fit, choose_gpus
-from .hf_upload import HfUpload, fetch
+from .hf_upload import HfUpload, fetch, run_uploads
 from .loop import Loop
 from .monitor import Monitor
 from .run import PreflightError, RunNotFound, attach_run, bootstrap_run, code_changes, recorder_for, rescore_node
@@ -166,6 +166,13 @@ def _run(cfg, args) -> int:
             print(f"error: --git-remote {args.git_remote} already has a run named {args.run_id!r}; "
                   "use another --run-id", file=sys.stderr)
             return 2
+        if args.run_id and os.environ.get("HFK", "").strip():
+            from huggingface_hub import HfApi
+            if taken := run_uploads(HfApi(token=os.environ["HFK"]), args.run_id):
+                print(f"error: Hugging Face already holds uploads of a run named {args.run_id!r} "
+                      f"({', '.join(sorted(taken.values())[:3])}{', ...' if len(taken) > 3 else ''}); "
+                      "use another --run-id", file=sys.stderr)
+                return 2
     try:
         ctx = attach_run(cfg, args.run_id, os.environ) if args.resume else bootstrap_run(cfg, args.run_id, os.environ)
     except PreflightError as exc:
