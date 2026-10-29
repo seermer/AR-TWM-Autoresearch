@@ -1,11 +1,14 @@
-"""The run folder on a private Hugging Face dataset repo: after every phase, the new and changed files go up
-in one commit of tars (`uploads/<seq>/<part>.tar`); `fetch` rebuilds the folder from them, for the panel elsewhere."""
+"""The run folder on private Hugging Face dataset repos: after every phase, the new and changed files go up as one
+commit of tars (`<part>.tar`) to their own repo `<user>/<run>-<seq>`; `fetch` rebuilds the folder from them, in
+order, for the panel elsewhere, and can delete the repos it holds."""
 from __future__ import annotations
 
 import contextlib
 import fnmatch
+import hashlib
 import json
 import os
+import re
 import sqlite3
 import tarfile
 import tempfile
@@ -66,13 +69,11 @@ class HfUpload:
 
     def upload(self, node: str, phase: str, attempt: int) -> None:
         state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {"seq": 0, "files": {}}
-        repo = state.get("repo")
-        if repo is None:
-            repo = f"{self.api.whoami()['name']}/{self.run_dir.name}"
-            self.api.create_repo(repo, repo_type="dataset", private=True, exist_ok=True)
+        seq = state["seq"] + 1
+        repo = upload_repo(self.api.whoami()["name"], self.run_dir.name, seq)
+        self.api.create_repo(repo, repo_type="dataset", private=True, exist_ok=True)   # a retry reuses it
         files = run_files(self.run_dir)
         changed = [rel for rel, stamp in files.items() if state["files"].get(rel) != stamp]
-        seq = state["seq"] + 1
         parts, filled = [[]], 0
         for rel in changed:
             if parts[-1] and filled + files[rel][0] > PART_BYTES:
@@ -97,7 +98,7 @@ class HfUpload:
                     if i == len(parts) - 1:             # extracted last
                         out.add(db, arcname="archive.db")
                         out.add(Path(tmp) / MANIFEST, arcname=MANIFEST)
-                ops.append(CommitOperationAdd(path_in_repo=f"uploads/{seq:05d}/{tar.name}", path_or_fileobj=str(tar)))
+                ops.append(CommitOperationAdd(path_in_repo=tar.name, path_or_fileobj=str(tar)))
             size = sum(Path(op.path_or_fileobj).stat().st_size for op in ops)
             disable_progress_bars()                     # they would flood the console log
             try:
@@ -106,40 +107,89 @@ class HfUpload:
             finally:
                 enable_progress_bars()
         tmp_state = self.state_path.with_suffix(".tmp")
-        tmp_state.write_text(json.dumps({"repo": repo, "seq": seq, "files": files}))
+        tmp_state.write_text(json.dumps({"seq": seq, "files": files}))
         tmp_state.replace(self.state_path)
         self.recorder.event("hf_upload", node=node, phase=phase, attempt=attempt,
                             payload={"repo": repo, "upload": seq, "parts": len(ops), "files": len(changed), "bytes": size})
 
 
-def fetch(run_dir: Path, repo: str | None, token: str, api=None, download=None) -> str:
-    """Extracts the uploads not fetched yet into `run_dir`, then removes what the last upload no longer has."""
+def upload_repo(user: str, run: str, seq: int) -> str:
+    return f"{user}/{run}-{seq:05d}"
+
+
+def _hashes(path: Path) -> dict[str, str]:
+    """sha256 (what Hugging Face reports for an LFS file) and the git blob id (for a file kept in git)."""
+    sha256, git = hashlib.sha256(), hashlib.sha1(b"blob %d\0" % path.stat().st_size)
+    with path.open("rb") as f:
+        while chunk := f.read(1 << 20):
+            sha256.update(chunk)
+            git.update(chunk)
+    return {"sha256": sha256.hexdigest(), "git": git.hexdigest()}
+
+
+def _tars(api, repo: str) -> dict:
+    from huggingface_hub.hf_api import RepoFile
+    return {f.path: f for f in api.list_repo_tree(repo, repo_type="dataset", recursive=True)
+            if isinstance(f, RepoFile) and f.path != ".gitattributes"}
+
+
+def fetch(run_dir: Path, token: str, delete: bool = False, api=None, download=None) -> str:
+    """Extracts, in order, the uploads not fetched yet into `run_dir` and removes what the last one no longer has.
+    With `delete`, then deletes every upload repo this copy holds, after checking each against what it applied."""
     if api is None or download is None:
         import huggingface_hub
         api = api or huggingface_hub.HfApi(token=token)
         download = download or huggingface_hub.hf_hub_download
     run_dir = Path(run_dir)
-    repo = repo or f"{api.whoami()['name']}/{run_dir.name}"
+    user, run = api.whoami()["name"], run_dir.name
     state_path = run_dir / "control" / "hf_fetch.json"
     if run_dir.exists() and not state_path.exists():
         raise FileExistsError(f"{run_dir} exists and was not made by fetch; it is never overwritten")
-    last = json.loads(state_path.read_text())["last"] if state_path.exists() else ""
-    names = sorted(f for f in api.list_repo_files(repo, repo_type="dataset")
-                   if f.startswith("uploads/") and f > last)
-    if not names:
-        return f"{run_dir} is up to date with {repo}"
-    run_dir.mkdir(parents=True, exist_ok=True)
+    state = json.loads(state_path.read_text()) if state_path.exists() else {"last": 0, "applied": {}}
+    if "applied" not in state:
+        raise ValueError(f"{run_dir} was fetched from a single run repo (an older `ar fetch`); fetch into a new folder")
+    name = re.compile(re.escape(f"{user}/{run}-") + r"(\d{5})")
+    remote = {int(m[1]): d.id for d in api.list_datasets(author=user, search=f"{run}-") if (m := name.fullmatch(d.id))}
+    fetched = 0
     tmp_root = cache_dir() / "tmp"
-    tmp_root.mkdir(parents=True, exist_ok=True)
-    for name in names:
+    for seq in sorted(s for s in remote if s > state["last"]):
+        if seq != state["last"] + 1:
+            raise RuntimeError(f"upload {state['last'] + 1} of {run} is not on Hugging Face (the next there is {seq}): "
+                               f"fetching past it would leave {run_dir} incomplete")
+        tars = sorted(_tars(api, remote[seq]))
+        if not tars:                                # its commit has not landed yet: the next fetch takes it
+            break
+        run_dir.mkdir(parents=True, exist_ok=True)
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        applied = {}
         with tempfile.TemporaryDirectory(dir=tmp_root) as tmp:
-            path = download(repo_id=repo, filename=name, repo_type="dataset", local_dir=tmp, token=token)
-            with tarfile.open(path) as tar:
-                tar.extractall(run_dir, filter="data")
-    keep = set(json.loads((run_dir / MANIFEST).read_text()))
-    (run_dir / MANIFEST).unlink()
-    for rel in set(run_files(run_dir)) - keep:
-        (run_dir / rel).unlink()
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(json.dumps({"repo": repo, "last": names[-1]}))
-    return f"fetched {len(names)} uploads of {repo} into {run_dir}"
+            for tar_name in tars:
+                path = Path(download(repo_id=remote[seq], filename=tar_name, repo_type="dataset", local_dir=tmp,
+                                     token=token))
+                applied[tar_name] = _hashes(path)
+                with tarfile.open(path) as tar:
+                    tar.extractall(run_dir, filter="data")
+        keep = set(json.loads((run_dir / MANIFEST).read_text()))
+        (run_dir / MANIFEST).unlink()
+        for rel in set(run_files(run_dir)) - keep:
+            (run_dir / rel).unlink()
+        state = {"last": seq, "applied": {**state["applied"], str(seq): applied}}
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps(state))
+        fetched += 1
+    report = f"fetched {fetched} uploads of {run} into {run_dir}" if fetched else f"{run_dir} is up to date"
+    if not delete:
+        return report
+    held = {seq: repo for seq, repo in remote.items() if seq <= state["last"]}
+    for seq, repo in sorted(held.items()):          # every repo is checked before any is deleted
+        applied = state["applied"].get(str(seq))
+        if applied is None:
+            raise RuntimeError(f"{repo}: {run_dir} has no record of applying it; nothing was deleted")
+        there = _tars(api, repo)
+        same = set(there) == set(applied) and all(
+            (f.lfs.sha256 == applied[p]["sha256"]) if f.lfs else (f.blob_id == applied[p]["git"]) for p, f in there.items())
+        if not same:
+            raise RuntimeError(f"{repo} differs from what {run_dir} applied; nothing was deleted")
+    for repo in held.values():
+        api.delete_repo(repo, repo_type="dataset")
+    return f"{report}; deleted {len(held)} upload repos from Hugging Face"

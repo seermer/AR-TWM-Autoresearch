@@ -45,7 +45,8 @@ def main(argv: list[str] | None = None) -> int:
     uploadp.add_argument("--run-id", required=True)
     fetchp = sub.add_parser("fetch", help="download a run that uploaded itself to Hugging Face (HFK), for the panel")
     fetchp.add_argument("--run-id", required=True)
-    fetchp.add_argument("--repo", default=None, help="the dataset repo; default <HFK's user>/<run id>")
+    fetchp.add_argument("--delete", action="store_true",
+                        help="then delete from Hugging Face every upload repo this copy holds (each checked first)")
     doctor = sub.add_parser("doctor", help="check this tree is runnable here (paths, envs, symlinks)")
     doctor.add_argument("--strict", action="store_true", help="exit non-zero on warnings too")
     doctor.add_argument("--gpu", action="store_true", help="also check the cards, the driver and each env's GPU packages")
@@ -65,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "fetch":
         if not os.environ.get("HFK", "").strip():
             raise ValueError("HFK is empty; set it in AutoResearcher/.env before `ar fetch`")
-        print(fetch(cfg.runs_dir / args.run_id, args.repo, os.environ["HFK"]))
+        print(fetch(cfg.runs_dir / args.run_id, os.environ["HFK"], delete=args.delete))
         return 0
 
     if args.command == "upload":

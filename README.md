@@ -97,8 +97,8 @@ OPENAI_EFFORT=<reasoning effort the provider accepts, e.g. high; empty = not set
 # scores from the two judges are not comparable, and a run refuses to resume with the other one.
 VLM_API_KEY=
 
-# Optional. A Hugging Face token with write access: after every phase the run uploads itself to a private
-# dataset repo <token's user>/<run id> (step 8), and agents use it for gated repos. Empty: no upload.
+# Optional. A Hugging Face token with write access: after every phase the run uploads what changed to a new private
+# dataset repo <token's user>/<run id>-<00001, 00002, ...> (step 8), and agents use it for gated repos. Empty: no upload.
 HFK=
 EOF
 chmod 600 .env
@@ -237,8 +237,14 @@ With `HFK` set, another machine with this setup (step 1, the `autoresearcher` an
 and open the panel on it; run it again to catch up with later phases:
 
 ```bash
-ar fetch --run-id $RUN     # into runs/$RUN, from <HFK's user>/$RUN
+ar fetch --run-id $RUN            # into runs/$RUN, from <HFK's user>/$RUN-00001, -00002, ... in order
+ar fetch --run-id $RUN --delete   # the same, then deletes from Hugging Face every upload repo this copy holds
 ```
+
+The fetched copy is for viewing and analysis (and its checkpoints), never for resuming. Fetch refuses to skip a
+missing upload, so a new copy needs every upload from the first. `--delete` first checks each repo against the
+checksums of what this copy applied and deletes nothing if one differs. The run keeps uploading from where it was,
+also after a resume: deleting its repos does not disturb it.
 
 A run that stopped (or crashed) between uploads: `ar upload --run-id $RUN` on its machine sends what changed
 since the last one (it refuses while the loop runs). `scripts/sbatch_run.sh` runs it when `ar run` ends.
