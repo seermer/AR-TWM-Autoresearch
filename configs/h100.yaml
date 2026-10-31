@@ -35,7 +35,7 @@ generators:
   h3:
     attn_type: flash_attn3        # FlashAttention 3; SageAttention picks an fp8 kernel on H100 that renders H3 as noise
     config: configs/h3_lightx2v_h100.json   # the DiT on the GPU (47.5 GB per card measured), no block offload
-    max_items: 200
+    max_items: 100
     peak_rss_gib: 100             # measured: 31 GiB anon + 52 GiB shared memory
   ltx25:
     quantization: none            # bf16 weights on the GPU: no host copy, no per-layer streaming

@@ -194,5 +194,5 @@ generators:                       # rollout_* GPU jobs; switched on only after a
     revision: 42ed227ee7df40d41602854ae760620d6eb651fe
     enabled: true
     frames: [243, 243]              # [default, max]; 17n+5, min 124. Every clip is 960x544
-    max_items: 80
+    max_items: 100
     peak_rss_gib: 140               # host RAM of one job (all ranks, one shared weight copy)
