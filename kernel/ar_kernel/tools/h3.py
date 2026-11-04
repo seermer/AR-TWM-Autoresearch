@@ -4,10 +4,12 @@ scene, subject and turns.
 The kernel writes the whole prompt: one continuous shot in MiniMax's prompt format, the scene and
 subject, the first turn's perspective, then each turn announced by the time it starts ("About 4.0
 seconds in, in the same continuous shot, ...") with its event, the camera sentence of its action and,
-when the perspective changes, the switch sentence. The clip is split into equal turns. MiniMax's guide
-documents a timestamp only at a cut ("[Shot 2] At ..."); that keeps the timing but changes the scene,
-so the in-shot form is our own and its timing is loose. The clip is published with its annotation
-(the planned start of each turn) and carries no pose.
+when the perspective changes, the switch sentence. An item with a first frame whose turns are all first
+person and only move or stop gets the game-camera form instead: a gameplay style line, a player's-eye
+view, and each turn's camera move as what it does on screen, before its event. The clip is split into
+equal turns. MiniMax's guide documents a timestamp only at a cut ("[Shot 2] At ..."); that keeps the
+timing but changes the scene, so the in-shot form is our own and its timing is loose. The clip is
+published with its annotation (the planned start of each turn) and carries no pose.
 """
 from __future__ import annotations
 
@@ -71,6 +73,32 @@ CAMERA = {
         "stop": "The subject stays still. The camera holds its position.",
     },
 }
+# The game-camera form: items with a first frame whose turns are all first person and only move or stop.
+GAME_STYLE = "First-person video game footage, photorealistic, with no on-screen HUD."
+GAME_VIEW = ("The camera is the player's eyes at standing eye height with the horizon level; whenever it moves, it "
+             "moves like a game camera driven by keys, in straight lines at a constant speed.")
+GAME_SHOT = "The whole video is one continuous shot."
+GAME_EVENT = "This happens inside the current view, and the camera continues exactly as described."
+_AHEAD = "facing the same direction as at the start"
+GAME_FP = {
+    "W": f"the camera pushes in with large amplitude, moving straight forward and {_AHEAD}: the scene ahead grows "
+         "steadily larger.",
+    "S": f"the camera pulls out with large amplitude, moving straight backward and {_AHEAD}: the scene ahead steadily "
+         "shrinks.",
+    "A": f"the camera trucks left with large amplitude, {_AHEAD}: the whole scene slides to the right "
+         "across the frame.",
+    "D": f"the camera trucks right with large amplitude, {_AHEAD}: the whole scene slides to the left "
+         "across the frame.",
+    "W+A": f"the camera pushes in and trucks left at the same time with large amplitude, {_AHEAD}: the scene ahead "
+           "grows larger and slides to the right.",
+    "W+D": f"the camera pushes in and trucks right at the same time with large amplitude, {_AHEAD}: the scene ahead "
+           "grows larger and slides to the left.",
+    "S+A": f"the camera pulls out and trucks left at the same time with large amplitude, {_AHEAD}: the scene ahead "
+           "shrinks and slides to the right.",
+    "S+D": f"the camera pulls out and trucks right at the same time with large amplitude, {_AHEAD}: the scene ahead "
+           "shrinks and slides to the left.",
+    "stop": f"the camera stays exactly where it is, {_AHEAD}: the frame stays fixed and only things in the scene move.",
+}
 
 
 def clip_frames(seconds, default: int, maximum: int) -> int:
@@ -105,14 +133,21 @@ def _sentence(text: str) -> str:
 def build_prompt(item: dict, starts: list[int]) -> str:
     """The item as one continuous shot in MiniMax's base prompt format (alignment line, three fields)."""
     turns = item["turns"]
-    body = " ".join(["[Shot 1]", _sentence(item["scene_prompt"]),
-                     *([_sentence(item["character_prompt"])] if item.get("character_prompt", "").strip() else []),
-                     VIEW[turns[0]["perspective"]], NO_CUTS])
+    game = bool(item.get("image")) and all(t["perspective"] == "first_person" and t["action"] in GAME_FP
+                                           for t in turns)
+    scene = [_sentence(item["scene_prompt"]),
+             *([_sentence(item["character_prompt"])] if item.get("character_prompt", "").strip() else [])]
+    head = [GAME_STYLE, *scene, GAME_VIEW, GAME_SHOT] if game else [*scene, VIEW[turns[0]["perspective"]], NO_CUTS]
+    body = " ".join(["[Shot 1]", *head])
     previous = None
     for turn, start in zip(turns, starts):
         perspective = turn["perspective"]
-        parts = [*([_sentence(turn["event"])] if turn.get("event") else []), CAMERA[perspective][turn["action"]],
-                 *([SWITCH[perspective]] if previous and perspective != previous else [])]
+        event = _sentence(turn["event"]) if turn.get("event") else ""
+        if game:
+            parts = [GAME_FP[turn["action"]], *([event, GAME_EVENT] if event else [])]
+        else:
+            parts = [*([event] if event else []), CAMERA[perspective][turn["action"]],
+                     *([SWITCH[perspective]] if previous and perspective != previous else [])]
         when = "From the start," if start == 0 else f"About {start / FPS:.1f} seconds in, in the same continuous shot,"
         body += f" {when} {' '.join(parts)}"
         previous = perspective

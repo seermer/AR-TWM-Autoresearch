@@ -96,8 +96,47 @@ def test_a_first_frame_adds_the_alignment_line_and_nothing_an_item_wrote_breaks_
                       "turns": [{"action": "stop", "event": "a long\n\nevent  with   gaps", "perspective": FP}]}, [0])
     assert p.startswith("For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) "
                         "is fully referenced.\n\nintegrated_multimodal_description: [Shot 1] ")
-    assert "From the start, a long event with gaps. The camera holds still." in p
+    assert ("From the start, the camera stays exactly where it is, facing the same direction as at the start: the "
+            "frame stays fixed and only things in the scene move. a long event with gaps. This happens") in p
     assert p.count("\n\n") == 3                        # the alignment line and the three fields
+
+
+def test_a_first_person_item_with_a_first_frame_that_only_moves_or_stops_gets_the_game_camera():
+    turns = [{"action": "W+A", "perspective": FP}, {"action": "S+D", "perspective": FP},
+             {"action": "stop", "perspective": FP},
+             {"action": "D", "event": "A brown dog walks in from the left edge of the frame.", "perspective": FP}]
+    p = build_prompt({"scene_prompt": SCENE, "character_prompt": "A courier in a yellow raincoat", "image": "x.png",
+                      "turns": turns}, [0, 61, 122, 182])
+    assert p.split("\n\n")[1] == (
+        "integrated_multimodal_description: [Shot 1] First-person video game footage, photorealistic, with no "
+        "on-screen HUD. Live-action, a cobblestone street at dusk. A courier in a yellow raincoat. The camera is the "
+        "player's eyes at standing eye height with the horizon level; whenever it moves, it moves like a game camera "
+        "driven by keys, in straight lines at a constant speed. The whole video is one continuous shot. "
+        "From the start, the camera pushes in and trucks left at the same time with large amplitude, facing the same "
+        "direction as at the start: the scene ahead grows larger and slides to the right. "
+        "About 2.5 seconds in, in the same continuous shot, the camera pulls out and trucks right at the same time "
+        "with large amplitude, facing the same direction as at the start: the scene ahead shrinks and slides to the "
+        "left. "
+        "About 5.1 seconds in, in the same continuous shot, the camera stays exactly where it is, facing the same "
+        "direction as at the start: the frame stays fixed and only things in the scene move. "
+        "About 7.6 seconds in, in the same continuous shot, the camera trucks right with large amplitude, facing the "
+        "same direction as at the start: the whole scene slides to the left across the frame. A brown dog walks in "
+        "from the left edge of the frame. This happens inside the current view, and the camera continues exactly as "
+        "described.")
+    assert set(h3.GAME_FP) == {"W", "S", "A", "D", "W+A", "W+D", "S+A", "S+D", "stop"}
+
+
+@pytest.mark.parametrize("image, turns", [
+    (None, [{"action": "W", "perspective": FP}]),                                          # no first frame
+    ("x.png", [{"action": "W", "perspective": FP},                                         # a pan
+               {"action": "left", "event": "A white dog runs out of a doorway.", "perspective": FP}]),
+    ("x.png", [{"action": "W", "perspective": TP}]),                                       # third person
+    ("x.png", [{"action": "W", "perspective": FP}, {"action": "W", "perspective": TP}])])  # a switch
+def test_every_other_item_keeps_the_evaluation_camera_sentences(image, turns):
+    p = build_prompt({"scene_prompt": SCENE, "image": image, "turns": turns}, turn_starts(243, len(turns)))
+    assert "video game" not in p and h3.NO_CUTS in p
+    assert all(h3.CAMERA[t["perspective"]][t["action"]] in p for t in turns)
+    assert all(f"{t['event']} {h3.CAMERA[t['perspective']][t['action']]}" in p for t in turns if t.get("event"))
 
 
 REAL = KernelConfig.load()
