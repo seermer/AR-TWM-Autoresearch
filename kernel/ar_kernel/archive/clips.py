@@ -10,10 +10,11 @@ def hidden(ingested_by: str) -> bool:
     return _HIDDEN.fullmatch(ingested_by) is not None
 
 
-def hide_clips(conn, recorder, node: str, mark: str) -> None:
-    n = ClipStore(conn).hide(node, mark)
+def hide_clips(conn, recorder, node: str, mark: str, attempt: int | None = None) -> None:
+    n = ClipStore(conn).hide(node, mark, attempt)
     if n:
-        recorder.event("clips.hidden", node=node, payload={"node": node, "ingested_by": node + mark, "clips": n})
+        recorder.event("clips.hidden", node=node, payload={"node": node, "ingested_by": node + mark, "clips": n,
+                                                           "attempt": attempt})
 
 
 class ClipStore:
@@ -25,31 +26,36 @@ class ClipStore:
         which is kept in `moved_from`."""
         row = self.conn.execute("SELECT ingested_by FROM clips WHERE clip_id=?", (record["clip_id"],)).fetchone()
         if row is not None and hidden(row[0]):
-            self.conn.execute("UPDATE clips SET ingested_by=?, moved_from=? WHERE clip_id=?",
-                              (record["ingested_by"], row[0], record["clip_id"]))
+            self.conn.execute("UPDATE clips SET ingested_by=?, attempt=?, moved_from=? WHERE clip_id=?",
+                              (record["ingested_by"], record["attempt"], row[0], record["clip_id"]))
             return row[0]
         self.conn.execute(
             """INSERT OR IGNORE INTO clips (clip_id, video_digest, caption_digest, annotation_digest,
-               pose_digest, metadata, warnings, derived_from, ingested_by, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+               pose_digest, metadata, warnings, derived_from, ingested_by, attempt, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (record["clip_id"], record["video_digest"], record["caption_digest"],
              record["annotation_digest"], record["pose_digest"], json.dumps(record["metadata"]),
              json.dumps(record["warnings"]), json.dumps(record["derived_from"]),
-             record["ingested_by"], time.time()),
+             record["ingested_by"], record["attempt"], time.time()),
         )
         return None
 
-    def hide(self, node: str, mark: str) -> int:
-        """Mark the clips `node` ingested `<node><mark>`; quarantine also takes its failed attempts' clips."""
+    def hide(self, node: str, mark: str, attempt: int | None = None) -> int:
+        """Mark the clips `node` ingested (in `attempt` only, if given) `<node><mark>`; quarantine also takes
+        its failed attempts' clips."""
+        if attempt is not None:
+            return self.conn.execute("UPDATE clips SET ingested_by=? WHERE ingested_by=? AND attempt=?",
+                                     (node + mark, node, attempt)).rowcount
         failed = " OR ingested_by GLOB ?" if mark == "quarantine" else ""
         return self.conn.execute(f"UPDATE clips SET ingested_by=? WHERE ingested_by=?{failed}",
                                  (node + mark, node, *([node + "fail[1-9]*"] if failed else []))).rowcount
 
-    def remove_ingested(self, node: str) -> int:
-        """Undo `node`'s ingests: a clip it took from a hidden mark gets that mark back, the rest are deleted."""
+    def remove_ingested(self, node: str, attempt: int) -> int:
+        """Undo the ingests of `node`'s `attempt`: a clip it took from a hidden mark gets that mark back, the rest
+        are deleted."""
         moved = self.conn.execute("UPDATE clips SET ingested_by=moved_from, moved_from=NULL "
-                                  "WHERE ingested_by=? AND moved_from IS NOT NULL", (node,)).rowcount
-        return moved + self.conn.execute("DELETE FROM clips WHERE ingested_by=?", (node,)).rowcount
+                                  "WHERE ingested_by=? AND attempt=? AND moved_from IS NOT NULL", (node, attempt)).rowcount
+        return moved + self.conn.execute("DELETE FROM clips WHERE ingested_by=? AND attempt=?", (node, attempt)).rowcount
 
     @staticmethod
     def _row(row: sqlite3.Row) -> dict:

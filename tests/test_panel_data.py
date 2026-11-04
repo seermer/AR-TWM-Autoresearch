@@ -315,6 +315,16 @@ def test_node_detail(run):
     assert views.node_detail(run, "nope") is None
 
 
+def test_a_continued_part_is_listed_with_its_outcome(run_dir):
+    from ar_kernel.archive.db import open_db
+    from ar_kernel.archive.nodes import NodeStore
+    NodeStore(open_db(run_dir)).add_attempt("n2", "improve_recipe", 1, "continued", {"snapshot_id": "s", "summary": "x"})
+    run = views.Run(run_dir)
+    assert ("improve_recipe", 1, "continued") in [(a["phase"], a["attempt"], a["outcome"])
+                                                  for a in views.node_detail(run, "n2")["attempts"]]
+    assert views.training(run, "n2", 1)["outcome"]["outcome"] == "continued"
+
+
 def test_root_is_a_baseline_everywhere(run):
     assert views.node_detail(run, "root")["baseline"] is True
     assert views.code_edits(run, "root")["baseline"] is True

@@ -22,7 +22,7 @@ def test_accepted_clip_is_recorded_and_stores_its_own_copy(tmp_path):
     cand = _candidate(tmp_path)
     (cand.video.parent / "keep.mp4").hardlink_to(cand.video)        # the agent keeps a second name for the file
     original = cand.video.read_bytes()
-    [result] = ing.ingest([cand], node_id="n1")
+    [result] = ing.ingest([cand], node_id="n1", attempt=1)
     assert result.accepted, result.reasons
     clip = ing.clips.get(result.clip_id)
     assert clip["derived_from"] == DERIVED and clip["ingested_by"] == "n1"
@@ -49,27 +49,27 @@ def test_a_staged_folder_swapped_for_a_link_reaches_nothing_outside_staging(tmp_
     with pytest.raises(OSError, match="changed while it was being read"):
         ing._take(cand.video, tmp_path / "taken.mp4")
     # swapped before it: the candidate is rejected
-    [result] = ing.ingest([cand], node_id="n1")
+    [result] = ing.ingest([cand], node_id="n1", attempt=1)
     assert not result.accepted and "outside the staging directory" in result.reasons[0]
     assert {p.name: p.read_bytes() for p in outside.iterdir()} == before      # nothing written or removed there
     assert not ing.clips.all() and not (tmp_path / "taken.mp4").exists()
 
 def test_duplicate_content_yields_the_same_clip_id(tmp_path):
     ing = _ingestor(tmp_path)
-    [first] = ing.ingest([_candidate(tmp_path, "a")], node_id="n1")
-    [second] = ing.ingest([_candidate(tmp_path, "b")], node_id="n2")
+    [first] = ing.ingest([_candidate(tmp_path, "a")], node_id="n1", attempt=1)
+    [second] = ing.ingest([_candidate(tmp_path, "b")], node_id="n2", attempt=1)
     assert first.clip_id == second.clip_id
     assert len(ing.clips.all()) == 1
 
 def test_only_960x544_is_taken(tmp_path):
     ing = _ingestor(tmp_path)
-    [result] = ing.ingest([_candidate(tmp_path, width=1280, height=720)], node_id="n1")
+    [result] = ing.ingest([_candidate(tmp_path, width=1280, height=720)], node_id="n1", attempt=1)
     assert result.accepted is False
     assert any("1280x720" in r and "960x544 only" in r and "resize" in r for r in result.reasons)
 
 def test_a_clip_too_short_to_train_is_rejected_in_seconds(tmp_path):
     ing = _ingestor(tmp_path)
-    [result] = ing.ingest([_candidate(tmp_path, seconds=1.0)], node_id="n1")
+    [result] = ing.ingest([_candidate(tmp_path, seconds=1.0)], node_id="n1", attempt=1)
     assert result.accepted is False
     [reason] = result.reasons
     assert reason.startswith("the video lasts 1.00 s at 24 fps (30 frames at 30.00 fps)") and "at least 2.4 s" in reason
@@ -80,7 +80,7 @@ def test_derived_from_needs_a_listed_kind_and_a_name(tmp_path, derived_from):
     ing = _ingestor(tmp_path)
     candidate = _candidate(tmp_path)
     candidate.derived_from = derived_from
-    [result] = ing.ingest([candidate], node_id="n1")
+    [result] = ing.ingest([candidate], node_id="n1", attempt=1)
     assert result.accepted is False and any("derived_from" in r for r in result.reasons)
 
 def test_candidate_outside_run_dir_is_rejected(tmp_path, tmp_path_factory):
@@ -88,7 +88,7 @@ def test_candidate_outside_run_dir_is_rejected(tmp_path, tmp_path_factory):
     outside = tmp_path_factory.mktemp("outside")
     video, annotation, pose = staged_clip(outside)
     candidate = Candidate(video=video, annotation=annotation, pose=pose, derived_from=DERIVED, named=NAMED)
-    [result] = ing.ingest([candidate], node_id="n1")
+    [result] = ing.ingest([candidate], node_id="n1", attempt=1)
     assert result.accepted is False
     assert any("outside the staging directory" in r for r in result.reasons)
     assert video.exists() and annotation.exists() and pose.exists()
@@ -100,7 +100,7 @@ def test_candidate_inside_run_dir_but_outside_staging_is_rejected(tmp_path):
     elsewhere = tmp_path / "nodes" / "n7" / "view" / "cam"
     video, annotation, pose = staged_clip(elsewhere)
     result = ing.ingest([Candidate(video=video, annotation=annotation, pose=pose, derived_from=DERIVED, named=NAMED)],
-                        node_id="n1")[0]
+                        node_id="n1", attempt=1)[0]
     assert not result.accepted
     assert any("staging" in r for r in result.reasons)
     assert video.exists() and annotation.exists() and pose.exists()
@@ -122,7 +122,7 @@ def test_swapping_the_staged_file_mid_check_cannot_change_what_is_stored(tmp_pat
         return real_check(video)
 
     ing.leakage.check = swap_then_check
-    result = ing.ingest([cand], node_id="n1")[0]
+    result = ing.ingest([cand], node_id="n1", attempt=1)[0]
     assert result.accepted
     clip = ing.clips.get(result.clip_id)
     assert ing.blobs.path(clip["video_digest"], "video").read_bytes() == original
@@ -135,7 +135,7 @@ def test_corrupt_video_is_rejected_and_the_batch_continues(tmp_path):
     bad = _candidate(tmp_path, "bad")
     bad.video.write_bytes(b"this is not an mp4")
     good = _candidate(tmp_path, "good", seconds=5.0)
-    results = ing.ingest([bad, good], node_id="n1")
+    results = ing.ingest([bad, good], node_id="n1", attempt=1)
     assert not results[0].accepted
     assert any("could not read" in r for r in results[0].reasons)
     assert results[1].accepted
@@ -156,7 +156,7 @@ def test_a_checker_crash_rejects_only_its_candidate(tmp_path, monkeypatch):
         return real(*args, **kwargs)
     monkeypatch.setattr(ingest, "check_clip", flaky)
     ing = _ingestor(tmp_path)
-    results = ing.ingest([_candidate(tmp_path, "a"), _candidate(tmp_path, "b", seconds=5.0)], node_id="n1")
+    results = ing.ingest([_candidate(tmp_path, "a"), _candidate(tmp_path, "b", seconds=5.0)], node_id="n1", attempt=1)
     [crashed] = [r for r in results if not r.accepted]         # the checks run at the same time: either one
     assert "checker bridge failed" in crashed.reasons[0]
 
@@ -168,7 +168,7 @@ def test_a_full_disk_while_checking_is_raised_not_a_rejection(tmp_path, monkeypa
         raise OSError(28, "No space left on device")
     monkeypatch.setattr(ingest, "check_clip", full)
     with pytest.raises(OSError, match="No space left"):
-        _ingestor(tmp_path).ingest([_candidate(tmp_path, "a")], node_id="n1")
+        _ingestor(tmp_path).ingest([_candidate(tmp_path, "a")], node_id="n1", attempt=1)
     assert not list((tmp_path / "quarantine").glob("*/*"))          # its held copy is discarded
 
 
@@ -176,7 +176,7 @@ def test_every_candidate_hitting_a_checker_crash_marks_them(tmp_path, monkeypatc
     from ar_kernel.data import ingest
     from ar_kernel.data.checker import CheckerError
     monkeypatch.setattr(ingest, "check_clip", lambda *a, **k: (_ for _ in ()).throw(CheckerError("bridge died")))
-    results = _ingestor(tmp_path).ingest([_candidate(tmp_path, "a"), _candidate(tmp_path, "b")], node_id="n1")
+    results = _ingestor(tmp_path).ingest([_candidate(tmp_path, "a"), _candidate(tmp_path, "b")], node_id="n1", attempt=1)
     assert all(not r.accepted and r.checker_failed for r in results)
 
 
@@ -193,7 +193,7 @@ def test_a_clip_whose_frames_cannot_be_extracted_is_rejected_alone(tmp_path, mon
     cands = [_candidate(tmp_path, "a"), _candidate(tmp_path, "b", seconds=5.0)]
     short = cands[0].video.stat().st_size
     monkeypatch.setattr(ing.leakage, "check", no_frame)
-    first, second = ing.ingest(cands, node_id="n1")
+    first, second = ing.ingest(cands, node_id="n1", attempt=1)
     assert not first.accepted and "could not read the candidate" in first.reasons[0]
     assert second.accepted and cands[0].video.exists()
 
@@ -208,7 +208,7 @@ def test_clips_are_checked_several_at_a_time(tmp_path, monkeypatch):
         return real(*args, **kwargs)
     monkeypatch.setattr(ingest, "check_clip", both_inside)
     results = _ingestor(tmp_path).ingest(
-        [_candidate(tmp_path, "a"), _candidate(tmp_path, "b", seconds=5.0)], node_id="n1")
+        [_candidate(tmp_path, "a"), _candidate(tmp_path, "b", seconds=5.0)], node_id="n1", attempt=1)
     assert [r.accepted for r in results] == [True, True]
 
 
@@ -217,7 +217,7 @@ def test_an_unexpected_error_gives_every_candidates_files_back(tmp_path, monkeyp
     monkeypatch.setattr(ing.blobs, "put", lambda path, kind: (_ for _ in ()).throw(OSError("disk full")))
     cands = [_candidate(tmp_path, "a"), _candidate(tmp_path, "b", seconds=5.0)]
     with pytest.raises(OSError, match="disk full"):
-        ing.ingest(cands, node_id="n1")
+        ing.ingest(cands, node_id="n1", attempt=1)
     assert all(c.video.exists() and c.annotation.exists() and c.pose.exists() for c in cands)
     assert not [p for p in (tmp_path / "quarantine").rglob("*") if p.is_file()]
 
@@ -226,7 +226,7 @@ def test_a_rejected_candidates_files_stay_where_they_were_staged(tmp_path):
     ing = _ingestor(tmp_path)
     cand = _candidate(tmp_path, "narrow", width=640, height=480)
     before = cand.video.read_bytes()
-    result = ing.ingest([cand], node_id="n1")[0]
+    result = ing.ingest([cand], node_id="n1", attempt=1)[0]
     assert not result.accepted
     assert cand.video.read_bytes() == before and cand.annotation.exists()
     assert not list((tmp_path / "quarantine").iterdir())
@@ -241,7 +241,7 @@ def test_rotated_clip_is_rejected_with_a_fix_hint(tmp_path):
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-display_rotation", "180",
                     "-i", str(cand.video), "-c", "copy", str(rotated)], check=True)
     rotated.replace(cand.video)
-    result = ing.ingest([cand], node_id="n1")[0]
+    result = ing.ingest([cand], node_id="n1", attempt=1)[0]
     assert not result.accepted
     assert any("rotation" in r and "re-encode" in r for r in result.reasons)
 
@@ -252,7 +252,7 @@ def test_clip_metadata_records_turns_and_intrinsics(tmp_path):
     timed = _candidate(tmp_path, "timed", seconds=5.0, turns=[
         {"start_s": 0.0, "perspective": FP}, {"start_s": 2.5, "event": "A dog walks in.", "perspective": FP}])
     write_poses(timed.pose, n_frames=150, width=960, height=544, intrinsics=False)
-    results = ing.ingest([plain, timed], node_id="n1")
+    results = ing.ingest([plain, timed], node_id="n1", attempt=1)
     assert all(r.accepted for r in results), [r.reasons for r in results]
     meta = [ing.clips.get(r.clip_id)["metadata"] for r in results]
     assert [(m["turns"], m["has_intrinsics"]) for m in meta] == [(1, True), (2, False)]
@@ -267,7 +267,7 @@ def test_the_training_text_is_made_from_the_annotation_and_both_are_stored(tmp_p
     annotation = json.loads(cand.annotation.read_text())
     annotation["character_prompt"] = "A hiker in a red jacket."
     cand.annotation.write_text(json.dumps(annotation))
-    [result] = ing.ingest([cand], node_id="n1")
+    [result] = ing.ingest([cand], node_id="n1", attempt=1)
     assert result.accepted, result.reasons
     clip = ing.clips.get(result.clip_id)
     scene = "A camera moves slowly through a bright room. A hiker in a red jacket."
@@ -310,7 +310,7 @@ def test_a_malformed_annotation_is_rejected(tmp_path, annotation, message):
     ing = _ingestor(tmp_path)
     cand = _candidate(tmp_path)
     cand.annotation.write_text(annotation if isinstance(annotation, str) else json.dumps(annotation))
-    [result] = ing.ingest([cand], node_id="n1")
+    [result] = ing.ingest([cand], node_id="n1", attempt=1)
     assert not result.accepted and any(message in r for r in result.reasons), result.reasons
 
 
@@ -322,7 +322,7 @@ def test_a_malformed_annotation_is_rejected(tmp_path, annotation, message):
 def test_a_turn_too_short_to_train_is_rejected_in_seconds(tmp_path, starts, reasons):
     ing = _ingestor(tmp_path)
     cand = _candidate(tmp_path, seconds=8.0, fps=24, turns=[{"start_s": s, "perspective": FP} for s in starts])
-    [result] = ing.ingest([cand], node_id="n1")
+    [result] = ing.ingest([cand], node_id="n1", attempt=1)
     assert not result.accepted and result.reasons == reasons
 
 
@@ -331,7 +331,7 @@ def test_turns_of_exactly_the_shortest_lengths_are_accepted(tmp_path):
     cand = _candidate(tmp_path, seconds=89 / 24, fps=24, turns=[
         {"start_s": 0.0, "perspective": FP}, {"start_s": 57 / 24, "event": "Rain begins to fall.", "perspective": FP}])
     write_poses(cand.pose, n_frames=89, width=960, height=544)
-    [result] = ing.ingest([cand], node_id="n1")
+    [result] = ing.ingest([cand], node_id="n1", attempt=1)
     assert result.accepted, result.reasons
 
 
@@ -340,7 +340,7 @@ def test_every_ingest_event_names_its_candidate(tmp_path):
     good, wide = _candidate(tmp_path, "good"), _candidate(tmp_path, "wide", width=640, height=480)
     bare = _candidate(tmp_path, "bare")
     bare.derived_from = {}
-    ing.ingest([good, wide, bare], node_id="n1")
+    ing.ingest([good, wide, bare], node_id="n1", attempt=1)
     events = [e for e in ing.recorder.read_events("n1") if e["type"].startswith("ingest.")]
     named = [(e["type"], ing.recorder.load_payload(e["payload"])["candidate"]["video"]) for e in events]
     assert ("ingest.leakage", str(good.video)) in named and ("ingest.accepted", str(good.video)) in named
@@ -353,10 +353,10 @@ def test_every_ingest_event_names_its_candidate(tmp_path):
 def test_a_reingest_records_where_a_hidden_clip_moved_from(tmp_path):
     ing = _ingestor(tmp_path)
     cand = _candidate(tmp_path)
-    [first] = ing.ingest([cand], node_id="n1")
+    [first] = ing.ingest([cand], node_id="n1", attempt=1)
     ing.clips.hide("n1", "fail1")
-    ing.ingest([cand], node_id="n2")
-    ing.ingest([cand], node_id="n3")                                   # visible now: n2 keeps it
+    ing.ingest([cand], node_id="n2", attempt=1)
+    ing.ingest([cand], node_id="n3", attempt=1)                                   # visible now: n2 keeps it
     for node, moved_from in (("n2", "n1fail1"), ("n3", None)):
         [event] = [e for e in ing.recorder.read_events(node) if e["type"] == "ingest.accepted"]
         assert ing.recorder.load_payload(event["payload"])["moved_from"] == moved_from
@@ -413,7 +413,7 @@ def test_a_clip_with_a_cut_is_rejected(tmp_path):
     poses = _path()
     poses[57:, 2, 3] += 1.0
     np.savez(candidate.pose, cam_c2w=poses.astype(np.float32))
-    [result] = ing.ingest([candidate], node_id="n1")
+    [result] = ing.ingest([candidate], node_id="n1", attempt=1)
     assert not result.accepted
     assert result.reasons == ["the clip has a cut between frames 56 and 57: the picture and the measured camera "
                               "both jump there; a training clip is one continuous shot"]
@@ -440,7 +440,7 @@ def test_excluded_candidates_get_one_neutral_reason(tmp_path, annotation):
     ing = _ingestor(tmp_path)
     c = _candidate(tmp_path)
     c.annotation.write_text(json.dumps(annotation))
-    [result] = ing.ingest([c], node_id="n1")
+    [result] = ing.ingest([c], node_id="n1", attempt=1)
     assert result.accepted is False and result.reasons == [EXCLUDED_CLIP]
     assert _rejected_events(tmp_path)[-1]["excluded"] == "text"
 
@@ -452,7 +452,7 @@ def test_reasons_and_warnings_name_the_candidates_files_not_the_kernels_paths(tm
     write_poses(bad.pose, n_frames=100, width=960, height=544)
     good = _candidate(tmp_path, "good", seconds=5.0)
     write_poses(good.pose, n_frames=150, width=960, height=544, intrinsics=False)
-    rejected, accepted = ing.ingest([bad, good], node_id="n1")
+    rejected, accepted = ing.ingest([bad, good], node_id="n1", attempt=1)
     texts = [*rejected.reasons, *accepted.warnings]
     assert accepted.accepted and accepted.warnings and not rejected.accepted
     assert not any(str(tmp_path) in t or "probe_" in t for t in texts), texts
@@ -463,7 +463,7 @@ def test_the_bytes_ingest_checks_are_recorded(tmp_path):
     ing = _ingestor(tmp_path)
     cand = _candidate(tmp_path)
     with files.scope(ing.recorder, node="n1", tool="data_ingest"):
-        [result] = ing.ingest([cand], node_id="n1")
+        [result] = ing.ingest([cand], node_id="n1", attempt=1)
     assert result.accepted, result.reasons
     staged = {"video": cand.video, "annotation": cand.annotation, "pose": cand.pose}
     assert recorded(ing.recorder) == {("in", NAMED[k]): p.read_bytes() for k, p in staged.items()}   # as the agent named them

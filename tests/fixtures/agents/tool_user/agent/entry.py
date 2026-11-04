@@ -19,4 +19,4 @@ async def improve_recipe(ctx):
             "datasets": {"cam": {"weight": 1.0, "clips": ids}}})).content[0].text)
         snapshot = json.loads((await tools.call_tool("snapshot", {
             "data_commit": made["commit_id"], "recipe": {}, "rationale": f"{len(ids)} clips"})).content[0].text)
-    return RecipeResult(snapshot_id=snapshot["snapshot_id"], summary="the pool's first clips")
+    return RecipeResult(snapshot_id=snapshot["snapshot_id"], summary="the pool's first clips", train=True)

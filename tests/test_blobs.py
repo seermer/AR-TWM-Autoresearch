@@ -78,7 +78,8 @@ def test_remove_unreferenced_keeps_what_a_clip_names(tmp_path):
     kept = store.put(_clip(tmp_path, "a.mp4", b"kept"), "video")
     gone = store.put(_clip(tmp_path, "b.mp4", b"gone"), "video")
     ClipStore(conn).add({"clip_id": "c1", "video_digest": kept, "caption_digest": "c", "annotation_digest": "a",
-                         "pose_digest": "p", "metadata": {}, "warnings": [], "derived_from": {}, "ingested_by": "n1"})
+                         "pose_digest": "p", "metadata": {}, "warnings": [], "derived_from": {}, "ingested_by": "n1",
+                         "attempt": 1})
     assert store.remove_unreferenced() == 1
     assert store.path(kept, "video").exists() and not store.path(gone, "video").exists()
     assert [r[0] for r in conn.execute("SELECT digest FROM blobs")] == [kept]

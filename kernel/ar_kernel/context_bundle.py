@@ -17,6 +17,7 @@ from .eval.score import agent_aggregates, agent_metrics, metric_guide
 from .isolation import scrub
 from .process_digest import process_digest
 from .tools.data_tools import clip_source, dataset_stats, pool_clips
+from .tools.snapshot import recipe_snapshot
 from .train.recipe import RECIPE_RULES, TUNABLE_KEYS
 from .train.recipe_guide import recipe_guide
 
@@ -32,15 +33,20 @@ _SHARED = {
     "/tmp": "scratch in memory, gone when the phase ends"}
 FOLDERS = {
     "improve_recipe": {
-        "/workspace": "writable; later nodes see it under /nodes/<this node>/attempts/",
+        "/workspace": "writable; when a submitted result does not train, the work goes on with an empty one and "
+                      "this one under /earlier/<n>; later nodes see it under /nodes/<this node>/attempts/",
+        "/earlier/<n>/": "read-only, when there are any: the /workspace at each earlier result of this node that did "
+                         "not train, without its staging, n = 1 the oldest; a file written there as /workspace/<p> is "
+                         "now at /earlier/<n>/<p>. Kernel tools cannot read it; copy a file into /workspace to pass it to one",
         "/workspace/staging": "what goes to and comes from kernel tools: downloads (hf/), GPU job outputs "
                               "(annotations/, rollouts/, images/), result files (results/), clips copied from the pool "
                               "(pool_clips/) and the candidates "
                               "you stage for data_ingest, which copies them into the archive. A separate mount: a hard link "
-                              "between it and the rest of /workspace fails, so copy or move. Not kept for later "
-                              "nodes",
+                              "between it and the rest of /workspace fails, so copy or move. Not kept after the "
+                              "result is submitted",
         "/agent": "read-only: this agent's code",
         **_SHARED,
+        "/tmp": "scratch in memory, gone when the result is submitted",
         "kernel tool paths": "regular files under /workspace only; a symbolic link is refused unless it is "
                              "relative and stays inside /workspace or /workspace/staging, so copy the file instead"},
     "edit_self": {
@@ -135,8 +141,25 @@ def build_edit_context(*, conn, run_dir: Path, repo, parent_id: str, dry_run: bo
                        dry_run=dry_run, folders=FOLDERS["edit_self"])
 
 
+def continued_parts(conn, node: str) -> list[dict]:
+    """The node's finished improve_recipe parts (attempts that continued), oldest first."""
+    return [{"attempt": a["idx"], **a["detail"]} for a in NodeStore(conn).attempts(node, "improve_recipe")
+            if a["outcome"] == "continued"]
+
+
+def _earlier_part(conn, run_dir: Path, node: str, n: int, part: dict) -> dict:
+    snap = recipe_snapshot(run_dir, node, "improve_recipe", part["attempt"], part["snapshot_id"])
+    commits = conn.execute("SELECT commit_id FROM data_commits WHERE node_id=? AND attempt=? ORDER BY created_at",
+                           (node, part["attempt"])).fetchall()
+    clips = conn.execute("SELECT COUNT(*) FROM clips WHERE ingested_by=? AND attempt=?",
+                         (node, part["attempt"])).fetchone()[0]
+    return {"path": f"/earlier/{n}", "summary": part["summary"],
+            "snapshot": {k: snap[k] for k in ("data_commit", "recipe", "rationale")} if snap["has_result"] else None,
+            "data_commits": [r[0] for r in commits], "clips_ingested": clips}
+
+
 def build_recipe_context(*, cfg, conn, run_dir: Path, repo, node_id: str, parent_id: str, n_gpus: int,
-                         tools: list[str], dry_run: bool = False) -> RecipeContext:
+                         tools: list[str], dry_run: bool = False, parts: list[dict] = ()) -> RecipeContext:
     parent = NodeStore(conn).get(parent_id)
     pool = pool_clips(conn)
     recipe_path = _node_file(run_dir, parent_id, "recipe.yaml")
@@ -156,7 +179,8 @@ def build_recipe_context(*, cfg, conn, run_dir: Path, repo, node_id: str, parent
         tunable_rules={k: {"type": RECIPE_RULES[k][0], "min": RECIPE_RULES[k][1], "max": RECIPE_RULES[k][2]}
                        for k in sorted(TUNABLE_KEYS)},
         lora_allowlist=[list(p) for p in cfg.get("train.lora_allowlist")],
-        n_gpus=n_gpus, tools=list(tools))
+        n_gpus=n_gpus, tools=list(tools), clips_per_part=int(cfg.get("improve_recipe.clips_per_part")),
+        earlier_parts=[_earlier_part(conn, run_dir, node_id, n, part) for n, part in enumerate(parts, 1)])
 
 
 def write_bundle(ctx, dest: Path, censor: list[str] = (), roots=()) -> Path:

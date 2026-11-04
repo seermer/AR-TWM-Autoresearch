@@ -16,7 +16,7 @@ from .archive.blobs import BlobStore
 from .archive.clips import ClipStore
 from .archive.commits import CommitStore
 from .archive.nodes import NOT_SHOWN, NodeStore
-from .context_bundle import build_edit_context, build_recipe_context, write_bundle
+from .context_bundle import build_edit_context, build_recipe_context, continued_parts, write_bundle
 from .faults import KernelFault
 from .isolation import host_roots, scrub
 from .sandbox.runner import Mounts, RunResult, container_name, diff, run_container, snapshot
@@ -90,7 +90,7 @@ def install_requirements(runner, *, name: str, mounts: Mounts, path: str, cfg, r
 
 
 def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str, ctx,
-         mock_script: str | None, agent_readonly: bool, nodes: dict[str, Path]) -> tuple:
+         mock_script: str | None, agent_readonly: bool, nodes: dict[str, Path], parts: list[Path] = ()) -> tuple:
     """`code_commit` is checked out at /agent; when /agent is writable, the code runs from a second
     checkout at /code, so an edit that breaks the agent mid-phase does not stop the roles."""
     dirs = attempt_dirs(env.run_dir, node, phase, attempt)
@@ -115,7 +115,7 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
     write_bundle(ctx, dirs["context"], env.cfg.get("isolation.blocked_names") or [], host_roots(env.cfg))
     mounts = Mounts(agent=dirs["agent"], workspace=dirs["workspace"], staging=dirs["staging"], context=dirs["context"],
                     contract=env.cfg.repo_root / "contract", sockets=env.socket_dir, agent_readonly=agent_readonly,
-                    nodes=nodes, code=None if agent_readonly else running)
+                    nodes=nodes, code=None if agent_readonly else running, parts=list(parts))
     try:
         listed = requirements_listed(running)
     except (OSError, UnicodeDecodeError) as exc:
@@ -147,7 +147,7 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
             name=container_name(env.run_id, node, phase, attempt), mounts=mounts,
             command=["python", "-m", "ar_contract.run", phase],
             env={"AR_TOKEN": caller.token, "AR_DEFAULT_MODEL": env.default_model, "AR_NODE": node,
-                 "AR_PHASE": phase, "AR_ATTEMPT": str(attempt),
+                 "AR_PHASE": phase,
                  "AR_CONTEXT_WINDOW": str(env.cfg.get("agents.context_window_tokens")),
                  "AR_COMPACT_AT": str(env.cfg.get("agents.compact_at")),
                  **({"HF_TOKEN": os.environ["HFK"]} if os.environ.get("HFK", "").strip() else {})},  # gated repos
@@ -258,6 +258,10 @@ def smoke_contexts(env: PhaseEnv, *, conn, node: str, parent_id: str) -> dict[st
     common = dict(conn=conn, run_dir=env.run_dir, repo=env.repo, parent_id=parent_id, dry_run=True)
     recipe = build_recipe_context(cfg=env.cfg, node_id=node, n_gpus=len(env.gpus), tools=_recipe_tools(env),
                                   **common)
+    # made up, so code that reads earlier parts runs too
+    recipe.earlier_parts = [{"path": "/earlier/1", "summary": "dry run: an earlier conversation", "data_commits": [],
+                             "clips_ingested": 0, "snapshot": {"data_commit": recipe.parent_data_commit,
+                                                               "recipe": recipe.parent_recipe, "rationale": "dry run"}}]
     return scrub({"edit_self": build_edit_context(**common).model_dump(mode="json"),
                   "improve_recipe": recipe.model_dump(mode="json")},
                  env.cfg.get("isolation.blocked_names") or [], host_roots(env.cfg))
@@ -266,27 +270,31 @@ def smoke_contexts(env: PhaseEnv, *, conn, node: str, parent_id: str) -> dict[st
 def run_improve_recipe(env: PhaseEnv, *, conn, node: str, parent_id: str, agent_commit: str, attempt: int,
                        mock_script: str | None = None,
                        dry_run: bool = False) -> PhaseOutcome:
+    parts = continued_parts(conn, node)
     ctx = build_recipe_context(cfg=env.cfg, conn=conn, run_dir=env.run_dir, repo=env.repo, node_id=node,
                                parent_id=parent_id, n_gpus=len(env.gpus),
-                               tools=_recipe_tools(env), dry_run=dry_run)
+                               tools=_recipe_tools(env), dry_run=dry_run, parts=parts)
     # improve_recipe mounts /agent read-only: only edit_self changes code.
-    dirs, result, body, diffs, duration = _run(env, phase="improve_recipe", node=node, attempt=attempt,
-                                               code_commit=agent_commit, ctx=ctx, mock_script=mock_script,
-                                               agent_readonly=True, nodes=finished_node_dirs(conn, env.run_dir))
+    dirs, result, body, diffs, duration = _run(
+        env, phase="improve_recipe", node=node, attempt=attempt, code_commit=agent_commit, ctx=ctx,
+        mock_script=mock_script, agent_readonly=True, nodes=finished_node_dirs(conn, env.run_dir),
+        parts=[attempt_dirs(env.run_dir, node, "improve_recipe", p["attempt"])["workspace"] for p in parts])
 
     def resolve(res: dict) -> tuple:
         stored = snapshots.recipe_snapshot(env.run_dir, node, "improve_recipe", attempt, res["snapshot_id"])
         if stored is None:
             return None, _unknown(res["snapshot_id"], node, "improve_recipe", attempt)
+        if not res["train"]:
+            return {"train": False, "snapshot_id": res["snapshot_id"], "summary": res["summary"]}, None
         if not stored["has_result"]:
             return None, (f"result names snapshot {res['snapshot_id']!r}, which holds no data commit and recipe: "
-                          "the phase's result must be a snapshot taken with data_commit, recipe and rationale")
+                          "a result with train true must name a snapshot taken with data_commit, recipe and rationale")
         try:
             CommitStore(conn, BlobStore(env.run_dir, conn), ClipStore(conn)).get(stored["data_commit"])
         except KeyError:
             return None, f"snapshot {res['snapshot_id']!r} names data commit {stored['data_commit']!r}, which does not exist"
-        return {"snapshot_id": res["snapshot_id"], "data_commit": stored["data_commit"], "recipe": stored["recipe"],
-                "rationale": stored["rationale"], "summary": res["summary"]}, None
+        return {"train": True, "snapshot_id": res["snapshot_id"], "data_commit": stored["data_commit"],
+                "recipe": stored["recipe"], "rationale": stored["rationale"], "summary": res["summary"]}, None
 
     return _outcome(env, "improve_recipe", node, attempt, dirs, result,
                     _judge("improve_recipe", result, body, resolve), diffs, duration, None)

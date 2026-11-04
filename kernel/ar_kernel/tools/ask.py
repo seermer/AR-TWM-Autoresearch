@@ -43,7 +43,8 @@ class Ask:
                 "model sees only `question` and `images`, nothing of your conversation. `images`: at most "
                 f"{self.per_call} image files under /workspace per call (relative paths resolve against "
                 f"/workspace), each downscaled to at most {self.max_side} px on its longer side. At most "
-                f"{self.per_phase} images in this phase, shared by every role working in it; a question without images "
+                f"{self.per_phase} images until the result is submitted, shared by everyone working with you; a question "
+                "without images "
                 "is not limited. The model sees still images only: it cannot judge motion, or whether a clip has "
                 "a cut, from frames picked out of it. "
                 "Returns {answer, images_left}.")
@@ -78,7 +79,7 @@ class Ask:
         with self._lock:
             used = self._used.get(caller.token, 0)
             if used + len(images) > self.per_phase:
-                raise ToolError(f"{self.per_phase - used} of the {self.per_phase} images of this phase are left: "
+                raise ToolError(f"{self.per_phase - used} of the {self.per_phase} images are left: "
                                 f"got {len(images)}")
             self._used[caller.token] = used + len(images)
         for path, (_, data) in zip(images, read):

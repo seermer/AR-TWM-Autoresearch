@@ -25,7 +25,7 @@ def _gate_store(tmp_path_factory):
         video, annotation, pose = staged_clip(tmp_path / "staging" / f"c{i}", seconds)
         clip_ids.append(ing.ingest([Candidate(video=video, annotation=annotation, pose=pose, derived_from=DERIVED,
                                               named=NAMED)],
-                                   node_id="n1")[0].clip_id)
+                                   node_id="n1", attempt=1)[0].clip_id)
     assert len(set(clip_ids)) == 8, "fixture must produce 8 distinct clips"
     commits = CommitStore(conn, ing.blobs, ing.clips)
     commit = commits.commit(None, {"cam": {"weight": 1.0, "clips": clip_ids}}, "v", node_id="n1")
@@ -99,7 +99,7 @@ def test_fewer_clips_than_gpus_is_rejected(tmp_path):
     video, annotation, pose = staged_clip(tmp_path / "staging" / "solo")
     clip_id = ing.ingest([Candidate(video=video, annotation=annotation, pose=pose, derived_from=DERIVED,
                                     named=NAMED)],
-                         node_id="n1")[0].clip_id
+                         node_id="n1", attempt=1)[0].clip_id
     commits = CommitStore(conn, ing.blobs, ing.clips)
     commit = commits.commit(None, {"cam": {"weight": 1.0, "clips": [clip_id]}}, "v", node_id="n1")
     failures = Gate(CFG, commits, rec).check({}, commit, None, "n1", tmp_path / "n1",

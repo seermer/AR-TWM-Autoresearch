@@ -95,6 +95,25 @@ print(json.dumps(out))
     assert not (mounts.agent / "new").exists() and (node / "eval" / "case_1.json").exists()
 
 
+def test_earlier_parts_are_readable_and_not_writable(tmp_path, mounts):
+    part = tmp_path / "part1"
+    (part / "scratch").mkdir(parents=True)
+    (part / "scratch" / "notes.md").write_text("kept")
+    mounts.parts = [part]
+    script = r"""
+import json
+out = {"read": open("/earlier/1/scratch/notes.md").read()}
+for target in ("/earlier/1/new", "/earlier/1/scratch/notes.md"):
+    try: open(target, "w").write("x"); out[target] = "writable"
+    except OSError: out[target] = "denied"
+print(json.dumps(out))
+"""
+    res = _run(tmp_path, mounts, script)
+    assert res.exit_code == 0, res.stderr
+    assert json.loads(res.stdout) == {"read": "kept", "/earlier/1/new": "denied", "/earlier/1/scratch/notes.md": "denied"}
+    assert (part / "scratch" / "notes.md").read_text() == "kept"
+
+
 def test_exit_code_and_streams_are_captured(tmp_path, mounts):
     res = _run(tmp_path, mounts, "import sys; print('out'); print('err', file=sys.stderr); sys.exit(3)")
     assert res.exit_code == 3 and res.stdout == "out\n" and res.stderr == "err\n"
@@ -171,7 +190,7 @@ print(json.dumps({"exit_code": res.exit_code, "stdout": res.stdout}))
 
 def _child(tmp_path, mounts, command):
     arg = json.dumps({"run": str(tmp_path / "run"), "env_dir": str(ENV_DIR), "command": command,
-                      "mounts": {k: str(v) for k, v in vars(mounts).items() if k not in ("agent_readonly", "nodes", "code")}})
+                      "mounts": {k: str(v) for k, v in vars(mounts).items() if k not in ("agent_readonly", "nodes", "code", "parts")}})
     return subprocess.Popen([os.sys.executable, "-c", _CHILD, arg], stdout=subprocess.PIPE, text=True,
                             cwd=CFG.repo_root, start_new_session=True,
                             env={**os.environ, "PYTHONPATH": str(CFG.repo_root / "kernel")})

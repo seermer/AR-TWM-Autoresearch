@@ -149,7 +149,7 @@ def test_runner_gets_the_agent_env_shared_memory_and_the_runs_gpus(env):
 
 def test_improve_recipe_mounts_code_read_only_and_rejects_unknown_commits(env):
     make, conn, root, _, _ = env
-    runner = FakeRunner({"ok": True, "result": {"summary": "s"}},
+    runner = FakeRunner({"ok": True, "result": {"summary": "s", "train": True}},
                         snap={"data_commit": "f" * 64, "recipe": {}, "rationale": "r"})
     out = run_improve_recipe(make(runner), conn=conn, node="n1", parent_id="root", agent_commit=root,
                              attempt=1)
@@ -506,7 +506,7 @@ def test_container_commits_data_through_the_real_tool_server(tmp_path):
         d = run / "staging" / "seed" / f"c{i}"
         video, annotation, pose = staged_clip(d, 4.0 + 0.5 * i)
         Ingestor(CFG, run, conn, rec).ingest([Candidate(video=video, annotation=annotation, pose=pose,
-                                                       derived_from=DERIVED, named=NAMED)], node_id="root")
+                                                       derived_from=DERIVED, named=NAMED)], node_id="root", attempt=1)
     repo = AgentsRepo(run / "agents.git")
     commit = repo.init(Path(__file__).parent / "fixtures" / "agents" / "tool_user")
     nodes = NodeStore(conn)
@@ -617,12 +617,12 @@ def test_a_recipe_result_resolves_to_its_snapshot(env):
     penv = make(None)
     commit = _data_commit(conn)
     snap = {"data_commit": commit, "recipe": {"lr": 0.1}, "rationale": "why"}
-    penv.runner = runner = FakeRunner({"ok": True, "result": {"summary": "tested x"}}, snap=snap)
+    penv.runner = runner = FakeRunner({"ok": True, "result": {"summary": "tested x", "train": True}}, snap=snap)
     runner.penv = penv
     out = run_improve_recipe(penv, conn=conn, node="n1", parent_id="root", agent_commit=root,
                              attempt=1)
     sid = json.loads((out.attempt_dir / "workspace" / "result.json").read_text())["result"]["snapshot_id"]
-    assert out.ok and out.result == {"snapshot_id": sid, **snap, "summary": "tested x"}
+    assert out.ok and out.result == {"train": True, "snapshot_id": sid, **snap, "summary": "tested x"}
     end = [e for e in rec.read_events("n1") if e["type"] == "phase.end"][0]
     assert rec.load_payload(end["payload"])["result"] == out.result
 
@@ -630,7 +630,7 @@ def test_a_recipe_result_resolves_to_its_snapshot(env):
 @pytest.mark.parametrize("snap,error", [({}, "holds no data commit"), (None, "not a snapshot of n1")])
 def test_a_recipe_result_without_a_usable_snapshot_is_a_failed_attempt(env, snap, error):
     make, conn, root, _, _ = env
-    result = {"summary": "s"} if snap is not None else {"snapshot_id": "f" * 32, "summary": "s"}
+    result = {"summary": "s", "train": True} if snap is not None else {"snapshot_id": "f" * 32, "summary": "s", "train": True}
     out = run_improve_recipe(make(FakeRunner({"ok": True, "result": result}, snap=snap)), conn=conn, node="n1",
                              parent_id="root", agent_commit=root, attempt=1)
     assert not out.ok and out.result is None and error in out.error
@@ -638,15 +638,81 @@ def test_a_recipe_result_without_a_usable_snapshot_is_a_failed_attempt(env, snap
 
 def test_rerunning_an_attempt_clears_its_snapshots(env):
     make, conn, root, _, _ = env
-    first = FakeRunner({"ok": True, "result": {"summary": "s"}}, snap={})
+    first = FakeRunner({"ok": True, "result": {"summary": "s", "train": False}}, snap={})
     out1 = run_improve_recipe(make(first), conn=conn, node="n1", parent_id="root", agent_commit=root, attempt=1)
     stale = json.loads((out1.attempt_dir / "workspace" / "result.json").read_text())["result"]["snapshot_id"]
     edit = FakeRunner({"ok": True, "result": {"summary": "s"}}, snap={})
     penv = make(edit)
     run_edit_self(penv, conn=conn, node="n1", parent_id="root", agent_commit=root, attempt=1)
     old = penv.repo.resolve("refs/attempts/n1/edit_self-1")
-    again = FakeRunner({"ok": True, "result": {"snapshot_id": stale, "summary": "s"}})
+    again = FakeRunner({"ok": True, "result": {"snapshot_id": stale, "summary": "s", "train": False}})
     out = run_improve_recipe(make(again), conn=conn, node="n1", parent_id="root", agent_commit=root, attempt=1)
     assert not out.ok and "not a snapshot" in out.error
     rerun = FakeRunner({"ok": True, "result": {"snapshot_id": old, "summary": "s"}})
     assert not run_edit_self(make(rerun), conn=conn, node="n1", parent_id="root", agent_commit=root, attempt=1).ok
+
+
+@pytest.mark.parametrize("snap", [{}, {"data_commit": "c" * 64, "recipe": {"lr": 0.1}, "rationale": "why"}])
+def test_a_continue_result_names_any_snapshot_of_this_part(env, snap):
+    make, conn, root, _, _ = env
+    _data_commit(conn)
+    runner = FakeRunner({"ok": True, "result": {"summary": "half done", "train": False}}, snap=snap)
+    out = run_improve_recipe(make(runner), conn=conn, node="n1", parent_id="root", agent_commit=root, attempt=1)
+    sid = json.loads((out.attempt_dir / "workspace" / "result.json").read_text())["result"]["snapshot_id"]
+    assert out.ok and out.result == {"train": False, "snapshot_id": sid, "summary": "half done"}
+
+
+def test_a_continue_result_naming_no_snapshot_of_this_part_fails(env):
+    make, conn, root, _, _ = env
+    runner = FakeRunner({"ok": True, "result": {"snapshot_id": "f" * 32, "summary": "s", "train": False}})
+    out = run_improve_recipe(make(runner), conn=conn, node="n1", parent_id="root", agent_commit=root, attempt=1)
+    assert not out.ok and "not a snapshot of n1" in out.error
+
+
+def test_earlier_parts_are_mounted_and_in_the_context_and_failed_ones_are_not(env):
+    make, conn, root, _, _ = env
+    nodes = NodeStore(conn)
+    for k, outcome in ((1, "continued"), (2, "failed"), (3, "continued")):
+        runner = FakeRunner({"ok": True, "result": {"summary": f"part {k}", "train": False}}, snap={})
+        out = run_improve_recipe(make(runner), conn=conn, node="n1", parent_id="root", agent_commit=root, attempt=k)
+        nodes.add_attempt("n1", "improve_recipe", k, outcome,
+                          {"snapshot_id": out.result["snapshot_id"], "summary": out.result["summary"]})
+    runner = FakeRunner({"ok": False, "error": "x"}, exit_code=1)
+    penv = make(runner)
+    run_improve_recipe(penv, conn=conn, node="n1", parent_id="root", agent_commit=root, attempt=4)
+    call = runner.calls[0]
+    assert call["mounts"].parts == [attempt_dirs(penv.run_dir, "n1", "improve_recipe", k)["workspace"] for k in (1, 3)]
+    assert "AR_ATTEMPT" not in call["env"]
+    ctx = json.loads((call["mounts"].context / "context.json").read_text())
+    assert [(p["path"], p["summary"], p["snapshot"]) for p in ctx["earlier_parts"]] == [
+        ("/earlier/1", "part 1", None), ("/earlier/2", "part 3", None)]
+    assert ctx["clips_per_part"] == CFG.get("improve_recipe.clips_per_part")
+
+
+def test_a_part_run_again_after_cleanup_gets_the_same_context_and_mounts(env):
+    from ar_kernel.archive.clips import ClipStore
+    make, conn, root, _, _ = env
+    runner = FakeRunner({"ok": True, "result": {"summary": "part 1", "train": False}}, snap={})
+    out = run_improve_recipe(make(runner), conn=conn, node="n1", parent_id="root", agent_commit=root, attempt=1)
+    NodeStore(conn).add_attempt("n1", "improve_recipe", 1, "continued",
+                                {"snapshot_id": out.result["snapshot_id"], "summary": "part 1"})
+
+    def part_2():
+        runner = FakeRunner({"ok": False, "error": "x"}, exit_code=1)
+        run_improve_recipe(make(runner), conn=conn, node="n1", parent_id="root", agent_commit=root, attempt=2)
+        call = runner.calls[0]
+        return call["mounts"].parts, json.loads((call["mounts"].context / "context.json").read_text())
+    fresh = part_2()
+    ClipStore(conn).add({"clip_id": "half", "video_digest": "v", "caption_digest": "c", "annotation_digest": "a",
+                         "pose_digest": "p", "metadata": {}, "warnings": [], "derived_from": {"kind": "model", "name": "x"},
+                         "ingested_by": "n1", "attempt": 2})
+    assert part_2()[1]["clip_pool_size"] == fresh[1]["clip_pool_size"] + 1
+    ClipStore(conn).remove_ingested("n1", 2)                  # what the loop's cleanup of part 2 does to the pool
+    assert part_2() == fresh
+
+
+def test_the_smoke_context_holds_an_earlier_part(env):
+    from ar_kernel.agent_phase import smoke_contexts
+    make, conn, _, _, _ = env
+    parts = smoke_contexts(make(FakeRunner({})), conn=conn, node="n1", parent_id="root")["improve_recipe"]["earlier_parts"]
+    assert [p["path"] for p in parts] == ["/earlier/1"] and parts[0]["snapshot"]["rationale"] == "dry run"

@@ -17,7 +17,7 @@ def store(tmp_path):
         video, annotation, pose = staged_clip(tmp_path / "staging" / name, seconds)
         ids.append(ing.ingest([Candidate(video=video, annotation=annotation, pose=pose, derived_from=DERIVED,
                                          named=NAMED)],
-                              node_id="n1")[0].clip_id)
+                              node_id="n1", attempt=1)[0].clip_id)
     return CommitStore(conn, ing.blobs, ing.clips), ids, tmp_path
 
 def test_commit_is_content_addressed_and_stable(store):

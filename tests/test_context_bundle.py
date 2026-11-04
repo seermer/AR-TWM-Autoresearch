@@ -169,7 +169,7 @@ def test_a_quarantined_node_is_in_no_context_and_its_clips_leave_the_pool(world)
     nodes.create("n2", "root", 1), nodes.set_status("n2", "quarantined")
     clip = {"clip_id": "a" * 64, "video_digest": "v", "caption_digest": "c", "annotation_digest": "a",
             "pose_digest": "p", "metadata": {}, "warnings": [],
-            "derived_from": {"kind": "model", "name": "alayaworld"}}
+            "derived_from": {"kind": "model", "name": "alayaworld"}, "attempt": 1}
     ClipStore(conn).add({**clip, "ingested_by": "n2"})
     ClipStore(conn).add({**clip, "clip_id": "b" * 64, "ingested_by": "n1"})
     ClipStore(conn).hide("n2", "quarantine")                       # as the loop does when it quarantines n2
@@ -194,3 +194,31 @@ def test_the_written_bundle_has_blocked_names_replaced(world, tmp_path):
     write_bundle(ctx, tmp_path / "ctx", ["wbench"])
     text = (tmp_path / "ctx" / "context.json").read_text()
     assert "wbench" not in text.lower() and "run_render.py" in text
+
+
+def test_earlier_parts_show_only_continued_attempts_with_their_snapshot_commits_and_clips(world):
+    from ar_kernel.archive.clips import ClipStore
+    from ar_kernel.context_bundle import continued_parts
+    from ar_kernel.tools.snapshot import folder
+    conn, repo, run = world
+    nodes = NodeStore(conn)
+    snap = {"has_result": True, "data_commit": "d" * 64, "recipe": {"lr": 0.1}, "rationale": "why"}
+    for k, outcome in ((1, "continued"), (2, "failed"), (3, "continued")):
+        folder(run, "n1", "improve_recipe", k).mkdir(parents=True)
+        (folder(run, "n1", "improve_recipe", k) / f"s{k}.json").write_text(json.dumps(snap))
+        nodes.add_attempt("n1", "improve_recipe", k, outcome, {"snapshot_id": f"s{k}", "summary": f"part {k}"})
+        conn.execute("INSERT INTO data_commits VALUES (?, NULL, 'n1', ?, '{}', 'm', ?)", (f"c{k}", k, k))
+        ClipStore(conn).add({"clip_id": f"clip{k}", "video_digest": "v", "caption_digest": "c", "annotation_digest": "a",
+                             "pose_digest": "p", "metadata": {}, "warnings": [],
+                             "derived_from": {"kind": "model", "name": "x"}, "ingested_by": "n1", "attempt": k})
+    ClipStore(conn).hide("n1", "fail2", attempt=2)
+    parts = continued_parts(conn, "n1")
+    assert [p["attempt"] for p in parts] == [1, 3]
+    ctx = build_recipe_context(cfg=CFG, conn=conn, run_dir=run, repo=repo, node_id="n1", parent_id="root", n_gpus=4,
+                               tools=[], parts=parts)
+    assert ctx.earlier_parts == [
+        {"path": "/earlier/1", "summary": "part 1", "snapshot": {k: snap[k] for k in ("data_commit", "recipe", "rationale")},
+         "data_commits": ["c1"], "clips_ingested": 1},
+        {"path": "/earlier/2", "summary": "part 3", "snapshot": {k: snap[k] for k in ("data_commit", "recipe", "rationale")},
+         "data_commits": ["c3"], "clips_ingested": 1}]
+    assert "/earlier/<n>/" in ctx.folders and ctx.clips_per_part == CFG.get("improve_recipe.clips_per_part")

@@ -62,7 +62,7 @@ export function Q<T>({ query, what, children }: { query: { data?: T; error: any;
 
 const STATUS: Record<string, string> = {
   ok: "good", scored: "good", passed: "good", done: "good", accepted: "good", success: "good", true: "good", recorded: "info",
-  running: "info", started: "info", inferred: "warn", warning: "warn", cancelled: "warn", canceled: "warn", "no end recorded": "warn",
+  running: "info", started: "info", continued: "info", inferred: "warn", warning: "warn", cancelled: "warn", canceled: "warn", "no end recorded": "warn",
   error: "bad", failed: "bad", rejected: "bad", false: "bad", critical: "bad",
 };
 export function statusTone(s: any): string {

@@ -47,6 +47,8 @@ class DataTools:
         self.gpus, self.gpu_lock, self.require_free = list(gpus), gpu_lock, require_free
         self._leakage: LeakageChecker | None = None
         self._leakage_lock = threading.Lock()
+        self._ingest_lock = threading.Lock()       # the per-part cap is checked and used in one step
+        self.clips_per_part = int(cfg.get("improve_recipe.clips_per_part"))
         self._passed: dict[str, set] = {}          # token -> (recipe, data commit) recipe_check passed
 
     def _leakage_checker(self) -> LeakageChecker:
@@ -116,8 +118,15 @@ class DataTools:
         refuse(caller, "data_ingest", candidates, bad)
         conn = open_db(self.run_dir)
         try:
-            ingestor = Ingestor(self.cfg, self.run_dir, conn, self.recorder, self._leakage_checker())
-            results = ingestor.ingest(built, node_id=caller.node)
+            with self._ingest_lock:
+                used = conn.execute("SELECT COUNT(*) FROM clips WHERE ingested_by=? AND attempt=?",
+                                    (caller.node, caller.attempt)).fetchone()[0]
+                cap = self.clips_per_part
+                if used + len(built) > cap:
+                    left = f"send at most {cap - used} candidates" if used < cap else "none are left"
+                    raise ToolError(f"{used} of the {cap} clips allowed until the result is submitted are added; {left}")
+                ingestor = Ingestor(self.cfg, self.run_dir, conn, self.recorder, self._leakage_checker())
+                results = ingestor.ingest(built, node_id=caller.node, attempt=caller.attempt)
         finally:
             conn.close()
         if results and all(r.checker_failed for r in results):     # a counted tool error, not the agent's
@@ -359,6 +368,11 @@ Candidates = Annotated[list[dict[str, Any]] | str, items_schema("the clips to in
 
 
 def register_data_tools(mcp, kit, tools: DataTools) -> None:
+    cap = getattr(tools, "clips_per_part", None)
+    send = (f"Send your candidates together, not one at a time. At most {cap} clips may be added to the pool until "
+            "the result is submitted: a call with more candidates than the clips still allowed is refused, and only "
+            "accepted clips new to the pool count." if cap else "Send every candidate in one call.")
+
     @mcp.tool(name="video_probe", description="Frame count, fps, coded size, rotation, pixel "
               "aspect and display aspect of a video under /workspace.")
     async def video_probe(path: Annotated[str, Field(description="a video file under /workspace (a relative path "
@@ -368,7 +382,7 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
 
     @mcp.tool(name="data_ingest", description="Ingest staged candidates into the run's clip pool. What "
               "a clip must meet is in knowledge file data_formats. Ingest copies each staged file into the archive and "
-              "leaves yours where it is. Send every candidate in one call. Returns how many were accepted "
+              f"leaves yours where it is. {send} Returns how many were accepted "
               "and rejected, the rejection reasons and warnings with counts, and `result_file`: a JSON array "
               "under /workspace/staging/results/ with, per candidate, index, video, accepted, clip_id, "
               "warnings and reasons. Take the clip ids from that file with a script. Read the reasons and change "
@@ -412,8 +426,9 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
             message: Annotated[str, Field(description="what this commit contains")],
             ctx: Context,
             include: Annotated[list[str] | None, Field(description="data commits of earlier nodes (the parent's, or any "
-                               "other finished node's) whose datasets this commit takes over as they are: name, "
-                               "weight and clips. A dataset in `datasets` with the same name replaces the inherited one whole; "
+                               "other finished node's) or earlier data commits of this node, whose datasets this commit "
+                               "takes over as they are: name, weight and clips. A dataset in `datasets` with the same "
+                               "name replaces the inherited one whole; "
                                "to stop training on one, pass it with weight 0")] = None) -> dict:
         return await kit.call(ctx, "data_commit",
                               {"parent": parent, "datasets": datasets, "message": message, "include": include or []},

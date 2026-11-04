@@ -609,10 +609,10 @@ def test_the_root_key_follows_what_changes_the_roots_score(tmp_path):
     assert root_key(api, changed(captioner={**real.raw["captioner"], "max_model_len": 4096})) == root_key(api, real)
 
 
-def _clip(clip_id: str, node: str) -> dict:
+def _clip(clip_id: str, node: str, attempt: int = 1) -> dict:
     return {"clip_id": clip_id, "video_digest": "v", "caption_digest": "c", "annotation_digest": "a",
             "pose_digest": "p", "metadata": {}, "warnings": [], "derived_from": {"kind": "model", "name": "x"},
-            "ingested_by": node}
+            "ingested_by": node, "attempt": attempt}
 
 
 def _ingesting(script, loop):
@@ -620,7 +620,7 @@ def _ingesting(script, loop):
     real = script.improve_recipe
 
     def improve_recipe(env, *, node, attempt, **kw):
-        ClipStore(loop.ctx.conn).add(_clip(f"{node}-{attempt}", node))
+        ClipStore(loop.ctx.conn).add(_clip(f"{node}-{attempt}", node, attempt))
         return real(env, node=node, attempt=attempt, **kw)
     loop.phases.improve_recipe = improve_recipe
 
@@ -634,7 +634,8 @@ def test_a_failed_attempts_clips_leave_the_pool_and_a_passing_ones_stay(make_loo
     assert {c["clip_id"]: c["ingested_by"] for c in ClipStore(loop.ctx.conn).all()} == {
         "node0001-1": "node0001fail1", "node0001-2": "node0001"}
     (event,) = [e for e in loop.ctx.recorder.read_events("node0001") if e["type"] == "clips.hidden"]
-    assert loop.ctx.recorder.load_payload(event["payload"]) == {"node": "node0001", "ingested_by": "node0001fail1", "clips": 1}
+    assert loop.ctx.recorder.load_payload(event["payload"]) == {"node": "node0001", "ingested_by": "node0001fail1", "clips": 1,
+                                                                    "attempt": 1}
 
 
 def test_a_node_ended_by_a_fault_in_eval_hides_its_passing_attempts_clips(make_loop):
@@ -693,3 +694,112 @@ def test_a_quarantined_nodes_clips_leave_the_pool_with_its_failed_attempts(make_
     loop.run()
     assert NodeStore(loop.ctx.conn).get("node0001")["status"] == "quarantined"
     assert [c["ingested_by"] for c in ClipStore(loop.ctx.conn).all()] == ["node0001quarantine"] * 2
+
+
+# --- improve_recipe in parts ----------------------------------------------------------------------
+
+
+def _outcomes(loop, node="node0001") -> list[str]:
+    return [a["outcome"] for a in NodeStore(loop.ctx.conn).attempts(node, "improve_recipe")]
+
+
+def test_parts_continue_until_one_trains_and_only_that_one_is_resolved(make_loop):
+    run, make = make_loop
+    script = Script(run, recipe=["continue", "continue", True])
+    loop = make(script)
+    loop.run()
+    assert _outcomes(loop) == ["continued", "continued", "passed"]
+    assert [r for r in script.calls if r[0] == "resolve"] == [("resolve", "node0001", "improve_recipe-3")]
+    first = NodeStore(loop.ctx.conn).attempts("node0001", "improve_recipe")[0]["detail"]
+    assert first == {"snapshot_id": "1" * 32, "summary": "part 1"}
+    assert NodeStore(loop.ctx.conn).get("node0001")["status"] == "scored"
+
+
+def test_a_failed_part_hides_only_its_own_clips(make_loop):
+    run, make = make_loop
+    script = Script(run, recipe=["continue", False, True])
+    loop = make(script)
+    _ingesting(script, loop)
+    loop.run()
+    assert _outcomes(loop) == ["continued", "failed", "passed"]
+    assert {c["clip_id"]: c["ingested_by"] for c in ClipStore(loop.ctx.conn).all()} == {
+        "node0001-1": "node0001", "node0001-2": "node0001fail2", "node0001-3": "node0001"}
+
+
+def test_failures_across_parts_reach_the_retry_cap(make_loop):
+    run, make = make_loop
+    script = Script(run, recipe=["continue", False, "continue", False, False])
+    loop = make(script)
+    loop.run()
+    assert _outcomes(loop) == ["continued", "failed", "continued", "failed", "failed"]
+    n1 = NodeStore(loop.ctx.conn).get("node0001")
+    assert n1["status"] == "invalid_recipe" and "no commit" in n1["error"]
+
+
+def test_a_part_stopped_by_the_machine_restarts_on_resume_and_loses_only_its_own_clips(make_loop):
+    from ar_kernel.loop import StopRun
+    run, make = make_loop
+    script = Script(run, recipe=["continue", "continue"])
+    loop = make(script)
+    _ingesting(script, loop)
+    real = loop.phases.improve_recipe
+
+    def stop_in_part_3(env, *, node, attempt, **kw):
+        out = real(env, node=node, attempt=attempt, **kw)
+        if attempt == 3:
+            raise StopRun("the machine went away")
+        return out
+    loop.phases.improve_recipe = stop_in_part_3
+    assert loop.run() == "the machine went away"
+    assert {c["clip_id"] for c in ClipStore(loop.ctx.conn).all()} == {"node0001-1", "node0001-2", "node0001-3"}
+    script2 = Script(run)
+    loop2 = make(script2)
+    seen = []
+
+    def improve_recipe(env, *, node, attempt, **kw):
+        seen.append((attempt, sorted(c["clip_id"] for c in ClipStore(loop2.ctx.conn).all())))
+        return script2.improve_recipe(env, node=node, attempt=attempt, **kw)
+    loop2.phases.improve_recipe = improve_recipe
+    loop2.run()
+    assert seen == [(3, ["node0001-1", "node0001-2"])]
+    assert _outcomes(loop2) == ["continued", "continued", "passed"]
+
+
+def test_a_node_fault_after_training_hides_every_parts_clips(make_loop):
+    run, make = make_loop
+    script = Script(run, recipe=["continue", True], train=[False, False])
+    loop = make(script)
+    _ingesting(script, loop)
+    loop.run()
+    assert NodeStore(loop.ctx.conn).get("node0001")["status"] == "train_failed"
+    assert {c["ingested_by"] for c in ClipStore(loop.ctx.conn).all()} == {"node0001fail2"}
+
+
+def test_a_node_out_of_retries_hides_its_continued_parts_clips_too(make_loop):
+    run, make = make_loop
+    script = Script(run, recipe=["continue", False, False, False])
+    loop = make(script)
+    _ingesting(script, loop)
+    loop.run()
+    assert _outcomes(loop) == ["continued", "failed", "failed", "failed"]
+    assert NodeStore(loop.ctx.conn).get("node0001")["status"] == "invalid_recipe"
+    assert {c["clip_id"]: c["ingested_by"] for c in ClipStore(loop.ctx.conn).all()} == {
+        "node0001-1": "node0001fail4", "node0001-2": "node0001fail2", "node0001-3": "node0001fail3",
+        "node0001-4": "node0001fail4"}
+
+
+def test_a_stop_in_training_after_a_continued_part_trains_that_part_again_on_resume(make_loop):
+    run, make = make_loop
+    uploads = []
+    script = Script(run, recipe=["continue", True], train=["infra", "infra"])
+    loop = make(script, upload=lambda *phase: uploads.append(phase))
+    _ingesting(script, loop)
+    loop.run()
+    assert _outcomes(loop) == ["continued"]
+    assert ("node0001", "improve_recipe", 1) in uploads and ("node0001", "improve_recipe", 2) in uploads
+    loop2 = make(Script(run))
+    loop2.run()
+    assert _outcomes(loop2) == ["continued", "passed"]
+    assert NodeStore(loop2.ctx.conn).get("node0001")["status"] == "scored"
+    assert {c["clip_id"]: c["ingested_by"] for c in ClipStore(loop2.ctx.conn).all()} == {
+        "node0001-1": "node0001", "node0001-2": "node0001"}

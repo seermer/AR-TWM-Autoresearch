@@ -186,7 +186,7 @@ class Loop:
     def _clean_recipe(self, node: str, attempt: int) -> None:
         """What an abandoned improve_recipe attempt made outside its folders (which `_run` clears)."""
         conn, run_dir = self.ctx.conn, self.ctx.run_dir
-        clips = ClipStore(conn).remove_ingested(node)
+        clips = ClipStore(conn).remove_ingested(node, attempt)
         commits = CommitStore(conn, None, None).remove(node, attempt)
         blobs = BlobStore(run_dir, conn).remove_unreferenced()
         self._clean_dirs(node, "improve_recipe", attempt, [attempt_jobs_dir(run_dir, node, "improve_recipe", attempt)],
@@ -418,14 +418,18 @@ class Loop:
 
     # -- steps 5-7 ---------------------------------------------------------------------------
     def _recipe(self, child: str, parent: dict, code: str, start: int = 1, resolved: Path | None = None):
-        """improve_recipe attempts from `start`, then training; `resolved`: attempt `start`'s recipe is
-        already recorded (a resumed node starts at its training)."""
+        """improve_recipe attempts from `start` until one trains: an attempt that continues ends a part, and
+        the next attempt is the next part. `resolved`: attempt `start`'s recipe is already recorded (a resumed
+        node starts at its training)."""
+        self._recipe_attempt = start
+        if resolved is not None:
+            return self._train(child, start, resolved)
         n = int(self.cfg.get("retries.improve_recipe"))
         failure = self._last_failure(child, "improve_recipe")
-        for k in range(start, n + 1):
+        failures = sum(a["outcome"] == "failed" for a in self.nodes.attempts(child, "improve_recipe"))
+        k = start
+        while failures < n:
             self._recipe_attempt = k
-            if resolved is not None:
-                return self._train(child, k, resolved)
             self._check_budget()
 
             def attempt(k=k):
@@ -433,7 +437,7 @@ class Loop:
                 out = self.phases.improve_recipe(self.env, conn=self.ctx.conn, node=child,
                                                  parent_id=parent["node_id"], agent_commit=code, attempt=k)
                 self._audit(child, "improve_recipe", k)
-                if not out.ok:
+                if not out.ok or not out.result["train"]:
                     return out, None
                 return out, self.phases.resolve(self, out.result["recipe"], out.result["data_commit"], child,
                                                 Path(out.attempt_dir))
@@ -443,10 +447,17 @@ class Loop:
                 failure = {"kind": "improve_recipe", "error": out.error,
                            "process": self._process(child, "improve_recipe", k)}
                 self.nodes.add_attempt(child, "improve_recipe", k, "failed", failure)
-                hide_clips(self.ctx.conn, self.ctx.recorder, child, f"fail{k}")
+                hide_clips(self.ctx.conn, self.ctx.recorder, child, f"fail{k}", attempt=k)
+                failures, k = failures + 1, k + 1
+                continue
+            if not out.result["train"]:
+                self.nodes.add_attempt(child, "improve_recipe", k, "continued",
+                                       {"snapshot_id": out.result["snapshot_id"], "summary": out.result["summary"]})
+                k += 1
                 continue
             self._record_recipe(child, out.result, resolved)
             return self._train(child, k, resolved)
+        hide_clips(self.ctx.conn, self.ctx.recorder, child, f"fail{k - 1}")     # the continued parts' clips
         cause = {key: v for key, v in failure.items() if key != "process"}
         return None, "invalid_recipe", f"improve_recipe retries exhausted; last failure: {json.dumps(cause)[:2000]}"
 

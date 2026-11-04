@@ -78,7 +78,7 @@ class Ingestor:
         self.base_recipe = run_config_path(cfg, run_dir, "base_recipe.yaml")
         self.workers = int(cfg.get("ingest.workers"))
 
-    def ingest(self, candidates: list[Candidate], node_id: str) -> list[IngestResult]:
+    def ingest(self, candidates: list[Candidate], node_id: str, attempt: int) -> list[IngestResult]:
         """A clip's checks are subprocesses, so `ingest.workers` clips are checked at a time; the archive
         is then written one clip at a time, in order. The kernel works on its own copy of each staged
         file and never writes or deletes in staging, which the agent owns and can relink meanwhile."""
@@ -88,7 +88,7 @@ class Ingestor:
         try:
             for candidate, check in zip(candidates, checks):
                 result, held, facts = check.result()
-                results.append(result or self._store(candidate, held, facts, node_id))
+                results.append(result or self._store(candidate, held, facts, node_id, attempt))
         finally:
             for check in checks:
                 if not check.exception():
@@ -241,14 +241,15 @@ class Ingestor:
                              "turns": len(annotation["turns"]), "has_intrinsics": has_intrinsics},
                 "warnings": sorted({named(w) for w in report["warnings"]})}
 
-    def _store(self, candidate: Candidate, held: dict[str, Path], facts: dict, node_id: str) -> IngestResult:
+    def _store(self, candidate: Candidate, held: dict[str, Path], facts: dict, node_id: str,
+               attempt: int) -> IngestResult:
         digests = {key: self.blobs.put(held[key], key) for key in ("video", "caption", "annotation", "pose")}
         clip_id = hashlib.sha256(json.dumps(
             {key: digests[key] for key in ("video", "caption", "pose")}, sort_keys=True).encode()).hexdigest()
         moved_from = self.clips.add({
             "clip_id": clip_id, **{f"{key}_digest": digest for key, digest in digests.items()}, **facts,
             "derived_from": {"kind": candidate.derived_from["kind"], "name": candidate.derived_from["name"]},
-            "ingested_by": node_id,
+            "ingested_by": node_id, "attempt": attempt,
         })
         self._event(candidate, "ingest.accepted", node_id,
                     {"clip_id": clip_id, "warnings": facts["warnings"], "moved_from": moved_from})

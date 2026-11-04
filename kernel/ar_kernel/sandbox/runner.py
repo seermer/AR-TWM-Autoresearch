@@ -36,6 +36,8 @@ class Mounts:
     # The agent code that runs, mounted read-only at /code, when it is not the tree at /agent
     # (edit_self: the parent's code edits the tree).
     code: Path | None = None
+    # The /workspace of each earlier part of this improve_recipe phase, oldest first, mounted read-only at /earlier/<n>.
+    parts: list[Path] = field(default_factory=list)
 
 
 @dataclass
@@ -144,6 +146,8 @@ def bwrap_args(mounts: Mounts, command, env, env_dir: Path, shm_gb: float,
         argv += ["--ro-bind", str(path), f"/nodes/{node}"]
         if (Path(path) / "eval").is_dir():
             argv += ["--size", "4096", "--tmpfs", f"/nodes/{node}/eval", "--remount-ro", f"/nodes/{node}/eval"]
+    for n, path in enumerate(mounts.parts, 1):
+        argv += ["--ro-bind", str(path), f"/earlier/{n}"]
     argv += ["--remount-ro", "/", "--chdir", "/workspace", "--", *command]     # the root folder bwrap made, too
     return argv, {**environment, **env}
 

@@ -136,7 +136,7 @@ def delegate(builder: Role, reviewer, schema: type[BaseModel], handbacks: list, 
     async def call(**kwargs) -> str:
         nonlocal calls
         if calls >= MAX_ROUNDS:
-            raise ToolException(f"No calls left: {builder.name} was called {MAX_ROUNDS} times in this phase. "
+            raise ToolException(f"No calls left: {builder.name} was called {MAX_ROUNDS} times in this conversation. "
                                 "Finish with submit_result.")
         calls += 1
         plan = schema.model_validate(kwargs)
@@ -164,11 +164,12 @@ def delegate(builder: Role, reviewer, schema: type[BaseModel], handbacks: list, 
 
 def result_check(handbacks: list, needs_result: bool):
     async def check(value: dict) -> None:
-        valid = [h for h in handbacks if not needs_result or h["submission"].get("data_commit")]
+        needs = needs_result and value["train"]
+        valid = [h for h in handbacks if not needs or h["submission"].get("data_commit")]
         if not any(h["snapshot_id"] == value["snapshot_id"] for h in valid):
             ids = "; ".join(f"{h['snapshot_id']} ({h['review']['verdict']})" for h in valid) or "none yet"
-            raise ToolException(f"{value['snapshot_id']} is not a snapshot handed back in this phase"
-                                f"{' with a data commit and a recipe' if needs_result else ''}. The ones you can "
+            raise ToolException(f"{value['snapshot_id']} is not a snapshot handed back in this conversation"
+                                f"{' with a data commit and a recipe' if needs else ''}. The ones you can "
                                 f"accept: {ids}.")
     return check
 
@@ -178,7 +179,7 @@ class EditSubmit(EditResult):
 
 
 class RecipeSubmit(RecipeResult):
-    """End the phase with the snapshot you accept, one with a data commit and a recipe, and the node's summary."""
+    """End this conversation with a snapshot handed back in it: train it, which needs one with a data commit and a recipe, or continue this node's work in a new conversation."""
 
 
 async def snapshot(session, args: dict) -> str:
@@ -257,12 +258,11 @@ async def run_task(ctx: RecipeContext) -> RecipeResult:
                 commit = json.loads(result_text(await session.call_tool(
                     "data_commit", {"parent": None, "datasets": {}, "message": "dry run"})))["commit_id"]
                 sid = await snapshot(session, {"data_commit": commit, "recipe": {}, "rationale": "dry run"})
-                return RecipeResult(snapshot_id=sid, summary=f"dry run: roles and contexts built, {len(ktools)} "
-                                                             f"kernel tools, model said {await ping()!r}")
+                return RecipeResult(snapshot_id=sid, train=True, summary=f"dry run: roles and contexts built, "
+                                    f"{len(ktools)} kernel tools, model said {await ping()!r}")
             return RecipeResult(**await planner.run("Plan this node's data, have it built, and submit the result."))
         finally:
             planner.close()
-            engineer.close()
 
 
 # ---- edit_self ----

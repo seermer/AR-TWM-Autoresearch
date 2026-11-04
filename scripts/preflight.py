@@ -230,7 +230,7 @@ class Preflight:
                     res = ing.ingest([Candidate(video=d / "video.mp4", annotation=d / "annotation.json",
                                                 pose=d / "pose.npz", named=named,
                                                 derived_from={"kind": "dataset", "name": "WorldModel example clips"})],
-                                     node_id="preflight")[0]
+                                     node_id="preflight", attempt=1)[0]
                 if not res.accepted:
                     raise Failed(f"ingest refused {d.name}: {res.reasons}")
                 clip_ids.append(res.clip_id)

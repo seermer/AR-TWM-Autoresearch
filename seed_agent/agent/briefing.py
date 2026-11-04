@@ -33,10 +33,11 @@ TOOL_OUTPUT = ("every tool call's full output, one file per call named <role>-<t
                "workspace under /nodes/<node>/attempts/ keeps its own tool_output folder")
 
 
-def folders_section(folders: dict, scratch: str) -> str:
-    """What each folder is for."""
+def folders_section(folders: dict, scratch: str, kept: bool = False) -> str:
+    """What each folder is for; `kept`: the scratch folder stays when the conversation ends."""
+    end = "kept with /workspace" if kept else "removed when your conversation ends"
     folders = {**folders, "/workspace/tool_output": TOOL_OUTPUT,
-               scratch: "your scratch folder, for throwaway files; removed when your conversation ends"}
+               scratch: f"your scratch folder, for throwaway files; {end}"}
     return "## Folders\n\n" + "\n".join(f"- `{path}`: {what}" for path, what in folders.items())
 
 
@@ -153,9 +154,13 @@ def _process(p: dict, node: str) -> list[str]:
     if ingest.get("accepted") or ingest.get("rejected"):
         reasons = "".join(f"; {r['count']}x {clip(r['reason'], 200)}" for r in ingest.get("reasons") or [])
         lines.append(f"- Ingest: {ingest['accepted']} accepted, {ingest['rejected']} rejected{reasons}")
-    failed = [a for a in p.get("attempts") or [] if a["outcome"] != "passed"]
+    failed = [a for a in p.get("attempts") or [] if a["outcome"] == "failed"]
     if failed:
         lines.append("- Failed attempts: " + ", ".join(f"{a['phase']} {a['attempt']} {a['outcome']}" for a in failed))
+    continued = [str(a["attempt"]) for a in p.get("attempts") or [] if a["outcome"] == "continued"]
+    if continued:
+        lines.append("- improve_recipe attempts that did not train, their work going on in a later attempt: "
+                     + ", ".join(continued))
     if p.get("gates"):
         lines.append("- Pre-training checks: " + ", ".join(f"{k} {v}" for k, v in p["gates"].items()))
     return lines
@@ -208,7 +213,26 @@ def siblings_section(siblings: list[dict], describe, scores: bool) -> str:
         *[describe(n) for n in shown]])
 
 
-def _node_and_recipe(ctx, scratch: str) -> list[str]:
+def parts_section(parts: list[dict]) -> str:
+    """This node's earlier conversations."""
+    if not parts:
+        return ""
+    lines = ["## Earlier conversations on this node",
+             "Oldest first; each one's /workspace is at its path, read-only, without its staging. The clips they "
+             "added are in the pool, and are trained only if the data commit trained at the end holds them. Each "
+             "one's snapshot is the one its planner handed on to build on."]
+    for p in parts:
+        snap, shown = p.get("snapshot"), "no data commit or recipe"
+        if snap:
+            recipe = ", ".join(f"{k} {v}" for k, v in (snap["recipe"] or {}).items()) or "all base values"
+            shown = f"data commit {snap['data_commit']}, recipe {recipe}; rationale: {clip(snap['rationale'])}"
+        lines.append("\n".join([f"### {p['path']}", f"- Summary: {clip(p['summary'])}",
+                                f"- Clips added: {p['clips_ingested']}",
+                                f"- Data commits: {', '.join(p['data_commits']) or 'none'}", f"- Snapshot: {shown}"]))
+    return "\n\n".join(lines)
+
+
+def _node_and_recipe(ctx, scratch: str, kept: bool = False) -> list[str]:
     """This node's facts for the data roles."""
     guide = ctx.recipe_guide or {}
     keys = [[k, r.get("type"), r.get("min"), r.get("max"), (guide.get(k) or {}).get("base"),
@@ -221,9 +245,15 @@ def _node_and_recipe(ctx, scratch: str) -> list[str]:
             f"- Node id: {ctx.node_id}",
             f"- Training GPUs: {ctx.n_gpus}",
             f"- Parent data commit: {ctx.parent_data_commit or 'none (the parent is the root)'}",
-            _pool(ctx)]),
+            _pool(ctx),
+            "- Conversations: this node's work can span several conversations of the planner and the data engineer. "
+            "One ends when the planner submits the result with submit_result: the node then trains the data commit "
+            "and recipe of the snapshot it names, or the work goes on in a new conversation, which every role begins "
+            "from this context with an empty /workspace and a summary of each earlier conversation",
+            f"- Clips one conversation may add to the pool: {ctx.clips_per_part}"]),
+        parts_section(ctx.earlier_parts),
         skill_section(ctx.target_skill),
-        folders_section(ctx.folders, scratch),
+        folders_section(ctx.folders, scratch, kept),
         "## Recipe\n\nTunable keys, with the base recipe's and the parent's values:\n\n"
         + table(["key", "type", "min", "max", "base", "parent", "meaning"], keys)
         + f"\n\nLoRA (rank/alpha): {pairs(ctx.lora_allowlist, '/')}. The full base recipe is `base_recipe` "
@@ -242,7 +272,7 @@ def recipe_planner_context(ctx, scratch: str) -> str:
 
 
 def data_engineer_context(ctx, scratch: str) -> str:
-    return _join(_node_and_recipe(ctx, scratch))
+    return _join(_node_and_recipe(ctx, scratch, kept=True))
 
 
 def recipe_reviewer_context(ctx, scratch: str) -> str:

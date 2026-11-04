@@ -41,8 +41,10 @@ def _edit_lineage(depth):
                "gpu_jobs": {"run": 2, "failed": 1},
                "ingest": {"accepted": 5, "rejected": 4, "reasons": [{"reason": "moving clips need poses", "count": 4}]},
                "gates": {},
-               "attempts": [{"phase": "edit_self", "attempt": 1, "outcome": "contract_failed"},
-                            {"phase": "edit_self", "attempt": 2, "outcome": "passed"}]}
+               "attempts": [{"phase": "edit_self", "attempt": 1, "outcome": "failed"},
+                            {"phase": "edit_self", "attempt": 2, "outcome": "passed"},
+                            {"phase": "improve_recipe", "attempt": 1, "outcome": "continued"},
+                            {"phase": "improve_recipe", "attempt": 2, "outcome": "passed"}]}
     node = {"status": "scored", "error": None, "edit": {"snapshot_id": "a" * 40, "summary": "Added a pose check tool."},
             "code_diff_stats": [{"path": "agent/tools.py", "added": 30, "removed": 2}], "process": process}
     return [{"node_id": "root", "status": "scored", "error": None, "edit": None, "code_diff_stats": [],
@@ -105,9 +107,27 @@ def test_the_edit_digest_shows_how_runs_went_and_no_score():
                  "(/nodes/n2/transcripts/improve_recipe-1/01-recipe_planner.jsonl); snapshots: s1, s2; result: s2",
                  "- Kernel tool calls (errors): data_ingest 9 (4)", "- GPU jobs: 2 run, 1 failed",
                  "- Ingest: 5 accepted, 4 rejected; 4x moving clips need poses",
-                 "- Failed attempts: edit_self 1 contract_failed"):
+                 "- Failed attempts: edit_self 1 failed\n", "- improve_recipe attempts that did not train, their work going on in a later attempt: 1\n"):
         assert line in text, line
     assert "rounds" not in text and "compactions" not in text and "Local tool" not in text
+
+
+def test_the_data_roles_see_the_part_cap_and_the_earlier_parts():
+    from agent.briefing import data_engineer_context, recipe_planner_context
+    parts = [{"path": "/earlier/1", "summary": "built the walking set", "clips_ingested": 40, "data_commits": ["c1"],
+              "snapshot": {"data_commit": "c1", "recipe": {"optimizer.lr": 1e-5}, "rationale": "fits"}},
+             {"path": "/earlier/2", "summary": "checked captions", "clips_ingested": 0, "data_commits": [],
+              "snapshot": None}]
+    for build in (recipe_planner_context, data_engineer_context):
+        text = build(_recipe_ctx(clips_per_part=100, earlier_parts=parts), "/s")
+        assert "- Clips one conversation may add to the pool: 100" in text
+        assert text.index("## This node") < text.index("## Earlier conversations on this node") < text.index("## Folders")
+        for line in ("### /earlier/1\n- Summary: built the walking set\n- Clips added: 40\n- Data commits: c1\n"
+                     "- Snapshot: data commit c1, recipe optimizer.lr 1e-05; rationale: fits",
+                     "### /earlier/2\n- Summary: checked captions\n- Clips added: 0\n- Data commits: none\n"
+                     "- Snapshot: no data commit or recipe"):
+            assert line in text, line
+    assert "## Earlier conversations" not in data_engineer_context(_recipe_ctx(), "/s")
 
 
 def test_builders_and_reviewers_get_what_they_act_on_and_not_the_history():
@@ -121,6 +141,8 @@ def test_builders_and_reviewers_get_what_they_act_on_and_not_the_history():
         assert "## Lineage" not in text and "## Archive" not in text
         assert "## Target skill" in text and "- name: rain starting" in text and "- sentence: rain begins to fall" in text
         assert "`/workspace/scratch/x-3`: your scratch folder" in text
+    assert "kept with /workspace" in data_engineer_context(ctx, "/s")
+    assert "removed when your conversation ends" in recipe_reviewer_context(ctx, "/s")
     assert "## Target skill" not in data_engineer_context(_recipe_ctx(), "/s")
     assert "- Node id: n7\n" in data_engineer_context(_recipe_ctx(node_id="n7"), "/s")      # data_query's ingested_by
     edit = EditContext(folders={"/agent": "the agent code you change"})
@@ -350,13 +372,14 @@ def test_submit_result_accepts_only_a_handed_back_snapshot_and_lists_the_valid_o
     handbacks = [{"snapshot_id": "a", "review": {"verdict": "falls_short"}, "submission": {"data_commit": None}},
                  {"snapshot_id": "b", "review": {"verdict": "carries_out_plan"}, "submission": {"data_commit": "c"}}]
     asyncio.run(o.result_check(handbacks, needs_result=False)({"snapshot_id": "a"}))
-    with pytest.raises(ToolException, match=r"^z is not a snapshot handed back in this phase\. The ones you can "
+    with pytest.raises(ToolException, match=r"^z is not a snapshot handed back in this conversation\. The ones you can "
                                             r"accept: a \(falls_short\); b \(carries_out_plan\)\.$"):
         asyncio.run(o.result_check(handbacks, needs_result=False)({"snapshot_id": "z"}))
     with pytest.raises(ToolException, match=r"with a data commit and a recipe\. The ones you can accept: b "):
-        asyncio.run(o.result_check(handbacks, needs_result=True)({"snapshot_id": "a"}))
+        asyncio.run(o.result_check(handbacks, needs_result=True)({"snapshot_id": "a", "train": True}))
+    asyncio.run(o.result_check(handbacks, needs_result=True)({"snapshot_id": "a", "train": False}))   # continue
     with pytest.raises(ToolException, match="none yet"):
-        asyncio.run(o.result_check([], needs_result=True)({"snapshot_id": "a"}))
+        asyncio.run(o.result_check([], needs_result=True)({"snapshot_id": "a", "train": False}))
     from ar_contract.models import SUMMARY_CHARS
     from pydantic import ValidationError
     with pytest.raises(ValidationError):
@@ -616,14 +639,15 @@ def _scripts():
         [_call("submit_data_engineer", {"report": "downloads are disabled; the pool has clips"})],      # SNAP1
         [_text("ENGINEER SUMMARY 1")],                                                  # compaction on delegation
         [_call("submit_review", {"verdict": "falls_short", "findings": "no data commit"})],
-        [_call("submit_result", {"snapshot_id": "SNAP1", "summary": "s"})],             # planner: refused
+        [_call("submit_result", {"snapshot_id": "SNAP1", "summary": "s", "train": True})],   # planner: refused
         [_call("data_engineer", {**PLAN, "hypothesis": "pool clips suffice"})],
         [_call("submit_data_engineer", {"report": "pool clips, 200 steps", "data_commit": C0,      # SNAP2
                                         "recipe": {"optimizer.max_steps": 200.4, "optimizer.lr": 1e-5},
                                         "rationale": "fits the data"})],
         [_text("ENGINEER SUMMARY 2")],
         [_call("submit_review", {"verdict": "carries_out_plan", "findings": "checked 3 clips"})],
-        [_call("submit_result", {"snapshot_id": "SNAP2", "summary": "Pool clips suffice; trained for 200 steps."})],
+        [_call("submit_result", {"snapshot_id": "SNAP2", "summary": "Pool clips suffice; trained for 200 steps.",
+                                 "train": True})],
     ]
     edit = [
         [_call("run_command", {"command": "pwd && touch notes.txt"}),                   # planner: in its scratch
@@ -803,7 +827,7 @@ def test_improve_recipe_full_flow(kernel, tmp_path):
     outputs = _tool_outputs(rec, "n-recipe")
     for fragment in ("Error: invalid arguments for data_engineer:\ndata: ", "Not run: data_engineer ran in this turn",
                      "Error: no_such_tool is not a valid tool", "Give data_commit, recipe and rationale together",
-                     "is not a snapshot handed back in this phase with a data commit and a "
+                     "is not a snapshot handed back in this conversation with a data commit and a "
                      "recipe. The ones you can accept: none yet."):
         assert any(fragment in o for o in outputs), fragment
     assert any(o.startswith("Error: ") and "ToolException" not in o and "downloads are disabled" in o
@@ -830,7 +854,8 @@ def test_improve_recipe_full_flow(kernel, tmp_path):
     assert [h["review"]["verdict"] for h in handbacks] == ["falls_short", "carries_out_plan"]
     assert {p.name.split("-")[0] for p in (tmp_path / "ws" / "tool_output").iterdir()} == {
         "recipe_planner", "data_engineer", "recipe_reviewer"}
-    assert not list((tmp_path / "ws" / "scratch").iterdir()) and not (tmp_path / "ws" / "staging" / ".guard").exists()
+    assert [p.name for p in (tmp_path / "ws" / "scratch").iterdir()] == ["data_engineer-1"]   # kept for later parts
+    assert not (tmp_path / "ws" / "staging" / ".guard").exists()
 
 
 def test_edit_self_plans_builds_reviews_and_accepts_a_snapshot(kernel, tmp_path):
@@ -846,7 +871,7 @@ def test_edit_self_plans_builds_reviews_and_accepts_a_snapshot(kernel, tmp_path)
     assert not any("belongs to coder: agent/briefing.py" in o for o in _tool_outputs(rec, "n-edit"))
     outputs = _tool_outputs(rec, "n-edit")
     for fragment in (f"Error: run_command changed files in {agent}, which belongs to coder: agent/stray.py (reverted)",
-                     "nope is not a snapshot handed back in this phase. The ones you can accept: none yet.",
+                     "nope is not a snapshot handed back in this conversation. The ones you can accept: none yet.",
                      "Error: invalid arguments for coder:\nproblem: ",
                      "Error: The self-test failed. Fix these first:\nedit_self must take exactly one positional",
                      "self-test passed", "exit 0\n1\n"):

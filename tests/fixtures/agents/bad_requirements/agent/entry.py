@@ -6,4 +6,4 @@ def edit_self(ctx):
 
 
 def improve_recipe(ctx):
-    return RecipeResult(snapshot_id="dry-run", summary="dry run")
+    return RecipeResult(snapshot_id="dry-run", summary="dry run", train=True)

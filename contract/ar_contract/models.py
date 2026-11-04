@@ -34,14 +34,15 @@ class RecipeContext(_Ctx):
     lora_allowlist: list[list[int]] = Field(default_factory=list)
     n_gpus: int = 4
     tools: list[str] = Field(default_factory=list)   # enabled kernel tool names
+    clips_per_part: int = 100                        # clips one part may add to the pool
+    earlier_parts: list[dict[str, Any]] = Field(default_factory=list)   # this node's finished parts, oldest first
 
 
 SUMMARY_CHARS = 4000
 
 
 class _Result(BaseModel):
-    snapshot_id: str = Field(min_length=1, description="the id of the snapshot that holds the work this phase "
-                                                       "hands back")
+    snapshot_id: str = Field(min_length=1, description="the id of the snapshot that holds the work handed back")
     summary: str = Field(min_length=1, max_length=SUMMARY_CHARS,
                          description="what this node tested and built, the change it was expected to cause, and "
                                      "why this snapshot; stored with the node and shown to later nodes")
@@ -52,7 +53,13 @@ class EditResult(_Result):
 
 
 class RecipeResult(_Result):
-    pass
+    train: bool = Field(description="true: the node trains this snapshot, which needs a data commit and a recipe; "
+                                    "false: the node does not train yet and the work goes on with this summary")
+    summary: str = Field(min_length=1, max_length=SUMMARY_CHARS,
+                         description="when training: everything this node tested and built, the change it was "
+                                     "expected to cause, and why this snapshot; stored with the node and shown to later "
+                                     "nodes. When not training: the idea, what was done and found, and what is left; "
+                                     "shown when the work goes on")
 
 
 CONTEXT_MODELS = {"edit_self": EditContext, "improve_recipe": RecipeContext}

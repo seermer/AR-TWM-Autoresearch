@@ -24,7 +24,7 @@ def outcome(ok, attempt_dir, result=None, error=None, commit=None):
 
 
 class Script:
-    """Scripted phases: each list is consumed per call; default is success.
+    """Scripted phases: each list is consumed per call; default is success. A recipe entry "continue" ends a part.
     slow: None, a phase name (that phase sleeps up to 600 s) or "pace" (every phase sleeps 1.2 s)."""
     def __init__(self, tmp, edit=(), recipe=(), train=(), score=(), slow=None):
         self.tmp, self.q = tmp, {k: list(v) for k, v in dict(edit=edit, recipe=recipe, train=train,
@@ -58,11 +58,14 @@ class Script:
         (d / "workspace").mkdir(parents=True, exist_ok=True)
         self._wait("improve_recipe")
         ok = self._next("recipe", True)
-        return outcome(ok, d, {"snapshot_id": "a" * 32, "data_commit": "c" * 64,
+        if ok == "continue":
+            return outcome(True, d, {"train": False, "snapshot_id": f"{attempt}" * 32, "summary": f"part {attempt}"})
+        return outcome(ok, d, {"train": True, "snapshot_id": "a" * 32, "data_commit": "c" * 64,
                                "recipe": {"optimizer.max_steps": 2}, "rationale": "why",
                                "summary": "tested"} if ok else None, None if ok else "no commit")
 
     def resolve(self, loop, recipe, data_commit, node, attempt_dir):
+        self.calls.append(("resolve", node, attempt_dir.name))
         resolved = attempt_dir / "train_config.yaml"
         resolved.write_text("lora: {rank: 16, alpha: 16}\n")
         return resolved

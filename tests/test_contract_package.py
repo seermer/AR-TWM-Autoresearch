@@ -51,7 +51,7 @@ from ar_contract.models import EditResult, RecipeResult
 def edit_self(ctx):
     return EditResult(snapshot_id="s1", summary=f"{len(ctx.lineage)} ancestors")
 def improve_recipe(ctx):
-    return RecipeResult(snapshot_id="s2", summary="why")
+    return RecipeResult(snapshot_id="s2", summary="why", train=True)
 """
 
 
@@ -145,10 +145,17 @@ def test_unknown_kind_is_rejected(env):
                                     {"snapshot_id": "s", "summary": "x" * (models.SUMMARY_CHARS + 1)},
                                     {"summary": "x"}])
 def test_a_result_needs_a_snapshot_id_and_a_capped_summary(fields):
-    for model in models.RESULT_MODELS.values():
+    for model, extra in [(models.EditResult, {}), (models.RecipeResult, {"train": True})]:
         with pytest.raises(Exception):
-            model(**fields)
-        assert model(snapshot_id="s", summary="x").model_dump() == {"snapshot_id": "s", "summary": "x"}
+            model(**fields, **extra)
+        assert model(snapshot_id="s", summary="x", **extra).model_dump() == {"snapshot_id": "s", "summary": "x", **extra}
+
+
+@pytest.mark.parametrize("train", [True, False])
+def test_a_recipe_result_says_whether_to_train(train):
+    assert models.RecipeResult(snapshot_id="s", summary="x", train=train).train is train
+    with pytest.raises(Exception):
+        models.RecipeResult(snapshot_id="s", summary="x")
 
 
 

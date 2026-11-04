@@ -13,10 +13,10 @@ from ar_kernel.train.gate import Gate
 CFG = KernelConfig.load()
 
 
-def _clip(clip_id: str, node: str) -> dict:
+def _clip(clip_id: str, node: str, attempt: int = 1) -> dict:
     return {"clip_id": clip_id, "video_digest": "v", "caption_digest": "c", "annotation_digest": "a",
             "pose_digest": "p", "metadata": {}, "warnings": [], "derived_from": {"kind": "model", "name": "x"},
-            "ingested_by": node}
+            "ingested_by": node, "attempt": attempt}
 
 
 def _pool(conn) -> dict:
@@ -51,6 +51,19 @@ def test_a_reingest_moves_a_hidden_clip_and_leaves_a_visible_one_with_its_owner(
     assert clips.add(_clip("a", "node0007")) == "node0005fail1"
     assert clips.add(_clip("b", "node0007")) is None
     assert _pool(conn) == {"a": "node0007", "b": "node0006"}
+
+
+def test_hide_and_remove_by_attempt_leave_the_nodes_other_attempts(tmp_path):
+    conn = open_db(tmp_path)
+    clips = ClipStore(conn)
+    clips.add(_clip("a", "node0005", 1)), clips.add(_clip("b", "node0005", 2)), clips.add(_clip("c", "node0005", 3))
+    clips.add(_clip("x", "node0004")), clips.hide("node0004", "fail1")
+    assert clips.hide("node0005", "fail2", attempt=2) == 1
+    assert clips.add(_clip("x", "node0005", 3)) == "node0004fail1"         # reclaimed: takes the new attempt
+    assert conn.execute("SELECT attempt FROM clips WHERE clip_id='x'").fetchone()[0] == 3
+    assert clips.remove_ingested("node0005", 3) == 2
+    assert {c["clip_id"]: c["ingested_by"] for c in clips.all()} == {
+        "a": "node0005", "b": "node0005fail2", "x": "node0004fail1"}
 
 
 def test_a_data_commit_refuses_clips_not_in_the_pool(tmp_path):
