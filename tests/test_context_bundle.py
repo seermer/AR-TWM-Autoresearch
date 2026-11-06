@@ -196,9 +196,9 @@ def test_the_written_bundle_has_blocked_names_replaced(world, tmp_path):
     assert "wbench" not in text.lower() and "run_render.py" in text
 
 
-def test_earlier_parts_show_only_continued_attempts_with_their_snapshot_commits_and_clips(world):
+def test_earlier_subphases_show_only_continued_attempts_with_their_snapshots_and_clips(world):
     from ar_kernel.archive.clips import ClipStore
-    from ar_kernel.context_bundle import continued_parts
+    from ar_kernel.context_bundle import continued_subphases
     from ar_kernel.tools.snapshot import folder
     conn, repo, run = world
     nodes = NodeStore(conn)
@@ -206,19 +206,18 @@ def test_earlier_parts_show_only_continued_attempts_with_their_snapshot_commits_
     for k, outcome in ((1, "continued"), (2, "failed"), (3, "continued")):
         folder(run, "n1", "improve_recipe", k).mkdir(parents=True)
         (folder(run, "n1", "improve_recipe", k) / f"s{k}.json").write_text(json.dumps(snap))
-        nodes.add_attempt("n1", "improve_recipe", k, outcome, {"snapshot_id": f"s{k}", "summary": f"part {k}"})
-        conn.execute("INSERT INTO data_commits VALUES (?, NULL, 'n1', ?, '{}', 'm', ?)", (f"c{k}", k, k))
+        nodes.add_attempt("n1", "improve_recipe", k, outcome, {"snapshot_id": f"s{k}", "summary": f"subphase {k}"})
         ClipStore(conn).add({"clip_id": f"clip{k}", "video_digest": "v", "caption_digest": "c", "annotation_digest": "a",
                              "pose_digest": "p", "metadata": {}, "warnings": [],
                              "derived_from": {"kind": "model", "name": "x"}, "ingested_by": "n1", "attempt": k})
     ClipStore(conn).hide("n1", "fail2", attempt=2)
-    parts = continued_parts(conn, "n1")
-    assert [p["attempt"] for p in parts] == [1, 3]
+    subphases = continued_subphases(conn, "n1")
+    assert [p["attempt"] for p in subphases] == [1, 3]
     ctx = build_recipe_context(cfg=CFG, conn=conn, run_dir=run, repo=repo, node_id="n1", parent_id="root", n_gpus=4,
-                               tools=[], parts=parts)
-    assert ctx.earlier_parts == [
-        {"path": "/earlier/1", "summary": "part 1", "snapshot": {k: snap[k] for k in ("data_commit", "recipe", "rationale")},
-         "data_commits": ["c1"], "clips_ingested": 1},
-        {"path": "/earlier/2", "summary": "part 3", "snapshot": {k: snap[k] for k in ("data_commit", "recipe", "rationale")},
-         "data_commits": ["c3"], "clips_ingested": 1}]
-    assert "/earlier/<n>/" in ctx.folders and ctx.clips_per_part == CFG.get("improve_recipe.clips_per_part")
+                               tools=[], subphases=subphases)
+    shown = {k: snap[k] for k in ("data_commit", "recipe", "rationale")}
+    assert ctx.earlier_subphases == [
+        {"path": "/earlier/1", "summary": "subphase 1", "snapshot": shown, "clips_ingested": 1},
+        {"path": "/earlier/2", "summary": "subphase 3", "snapshot": shown, "clips_ingested": 1}]
+    assert "/earlier/<n>/" in ctx.folders
+    assert ctx.new_clips_per_commit == CFG.get("improve_recipe.new_clips_per_commit")

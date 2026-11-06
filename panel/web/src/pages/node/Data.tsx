@@ -135,7 +135,7 @@ export default function DataTab({ id }: { id: string }) {
         <div>
           {d.commit ? (
             <Section title="Data commit" note={d.commit.commit_id}>
-              <KV items={[["message", d.commit.message], ["parent commit", d.commit.parent_commit], ["node", d.commit.node_id], ["attempt", d.commit.attempt]]} />
+              <KV items={[["message", d.commit.message], ["node", d.commit.node_id], ["attempt", d.commit.attempt]]} />
               <Section title="manifest" collapsed><Json value={(() => { try { return JSON.parse(d.commit.manifest); } catch { return d.commit.manifest; } })()} open={2} /></Section>
             </Section>
           ) : <div className="note">No data commit (baseline, or not built yet).</div>}

@@ -1,8 +1,9 @@
 from __future__ import annotations
-import hashlib, json, math, os, re, shutil, sqlite3, time
+import json, math, os, re, shutil, sqlite3, time
 from pathlib import Path
 
 from .clips import hidden
+from .db import transaction
 
 BUILTIN_NAMES = {"sekai_real_hq", "spatialvid_hq", "sekai_game_walking", "sekai_real_walking",
                  "mugen_v2", "RealEstate10K", "spatialvid", "veo3", "OpenVid", "mp4_frame_game_3",
@@ -13,6 +14,19 @@ VIEW_MARKER = ".ar_view"
 
 class CommitError(ValueError):
     """The proposed data commit is invalid."""
+
+
+def limit_text(cap: int) -> str:
+    return f"A data commit may hold at most {cap} new clips: clips that no kept data commit holds."
+
+
+def over_limit(n: int, cap: int) -> str:
+    return f"{n} new clips, more than the {cap} a data commit may hold; a clip is new unless a kept data commit holds it"
+
+
+UNUSABLE = {"obsolete": "data commit {} can no longer be used: a result was submitted that did not name it. "
+                        "Its clips are still in the pool",
+            "failed": "data commit {} can no longer be used: the work that made it failed"}
 
 class BadClips(CommitError):
     """Clips of one dataset cannot be committed. `bad`: index in `clips` -> what is wrong with that clip."""
@@ -72,20 +86,55 @@ class CommitStore:
             raise CommitError("no dataset has both weight > 0 and clips")
         return {"datasets": dict(sorted(normalized.items()))}
 
-    def commit(self, parent: str | None, datasets: dict[str, dict], message: str,
-               node_id: str, attempt: int = 0) -> str:
+    def commit(self, datasets: dict[str, dict], message: str, node_id: str, attempt: int = 0,
+               cap: int | None = None) -> tuple[str, int]:
+        """A new draft `dc<n>` and its new clips; refused over `cap` new clips."""
         manifest = self._validate(datasets)
-        blob = json.dumps(manifest, sort_keys=True)
-        commit_id = hashlib.sha256(
-            f"{parent or ''}|{hashlib.sha256(blob.encode()).hexdigest()}|{message}".encode()
-        ).hexdigest()
-        self.conn.execute(
-            """INSERT OR IGNORE INTO data_commits
-               (commit_id, parent_commit, node_id, attempt, manifest, message, created_at)
-               VALUES (?,?,?,?,?,?,?)""",
-            (commit_id, parent, node_id, attempt, blob, message, time.time()),
-        )
-        return commit_id
+        new = self.new_clips(manifest)
+        if cap is not None and new > cap:
+            raise CommitError(over_limit(new, cap))
+        with transaction(self.conn):
+            row = self.conn.execute("SELECT seq FROM sqlite_sequence WHERE name='data_commits'").fetchone()
+            n = (row[0] if row else 0) + 1
+            self.conn.execute(
+                """INSERT INTO data_commits (n, commit_id, node_id, attempt, status, manifest, message, created_at)
+                   VALUES (?,?,?,?,'draft',?,?,?)""",
+                (n, f"dc{n}", node_id, attempt, json.dumps(manifest, sort_keys=True), message, time.time()))
+        return f"dc{n}", new
+
+    def new_clips(self, manifest: dict) -> int:
+        """Clips of the manifest that no accepted commit holds."""
+        kept = set()
+        for row in self.conn.execute("SELECT manifest FROM data_commits WHERE status='accepted'"):
+            kept.update(c for d in json.loads(row[0])["datasets"].values() for c in d["clips"])
+        return len({c for d in manifest["datasets"].values() for c in d["clips"]} - kept)
+
+    def usable(self, commit_id: str) -> dict:
+        """The commit's row; KeyError when unknown, CommitError when obsolete or failed."""
+        row = self.get(commit_id)
+        if row["status"] in UNUSABLE:
+            raise CommitError(UNUSABLE[row["status"]].format(commit_id))
+        return row
+
+    def settle(self, node_id: str, attempt: int, accepted: str | None) -> dict[str, list[str]]:
+        """An attempt's result named `accepted`: it is kept, the attempt's other drafts are obsolete."""
+        changed = {"accepted": [], "obsolete": []}
+        if accepted is not None and self.usable(accepted)["status"] != "accepted":
+            self.conn.execute("UPDATE data_commits SET status='accepted' WHERE commit_id=?", (accepted,))
+            changed["accepted"].append(accepted)
+        changed["obsolete"] = self._mark("obsolete", "node_id=? AND attempt=? AND status='draft'", (node_id, attempt))
+        return changed
+
+    def fail(self, node_id: str, attempt: int | None = None) -> list[str]:
+        """An attempt's drafts, or every commit of the node, are failed."""
+        if attempt is not None:
+            return self._mark("failed", "node_id=? AND attempt=? AND status='draft'", (node_id, attempt))
+        return self._mark("failed", "node_id=? AND status!='failed'", (node_id,))
+
+    def _mark(self, status: str, where: str, args: tuple) -> list[str]:
+        ids = [r[0] for r in self.conn.execute(f"SELECT commit_id FROM data_commits WHERE {where} ORDER BY n", args)]
+        self.conn.executemany("UPDATE data_commits SET status=? WHERE commit_id=?", [(status, i) for i in ids])
+        return ids
 
     def remove(self, node_id: str, attempt: int) -> int:
         """Delete the commits a cleaned-up attempt made."""

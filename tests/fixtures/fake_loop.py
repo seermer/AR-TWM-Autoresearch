@@ -24,7 +24,7 @@ def outcome(ok, attempt_dir, result=None, error=None, commit=None):
 
 
 class Script:
-    """Scripted phases: each list is consumed per call; default is success. A recipe entry "continue" ends a part.
+    """Scripted phases: each list is consumed per call; default is success. A recipe entry "continue" ends a subphase.
     slow: None, a phase name (that phase sleeps up to 600 s) or "pace" (every phase sleeps 1.2 s)."""
     def __init__(self, tmp, edit=(), recipe=(), train=(), score=(), slow=None):
         self.tmp, self.q = tmp, {k: list(v) for k, v in dict(edit=edit, recipe=recipe, train=train,
@@ -59,8 +59,12 @@ class Script:
         self._wait("improve_recipe")
         ok = self._next("recipe", True)
         if ok == "continue":
-            return outcome(True, d, {"train": False, "snapshot_id": f"{attempt}" * 32, "summary": f"part {attempt}"})
-        return outcome(ok, d, {"train": True, "snapshot_id": "a" * 32, "data_commit": "c" * 64,
+            return outcome(True, d, {"train": False, "snapshot_id": f"{attempt}" * 32, "data_commit": None,
+                                     "summary": f"subphase {attempt}"})
+        commit = f"dc_{node}_{attempt}"                   # the draft the result names, as data_commit would store it
+        kw["conn"].execute("INSERT OR IGNORE INTO data_commits (commit_id, node_id, attempt, status, manifest, message, "
+                           "created_at) VALUES (?,?,?,'draft','{\"datasets\": {}}','fake',0)", (commit, node, attempt))
+        return outcome(ok, d, {"train": True, "snapshot_id": "a" * 32, "data_commit": commit,
                                "recipe": {"optimizer.max_steps": 2}, "rationale": "why",
                                "summary": "tested"} if ok else None, None if ok else "no commit")
 

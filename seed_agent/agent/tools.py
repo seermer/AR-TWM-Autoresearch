@@ -130,7 +130,7 @@ class _PaperText(HTMLParser):
 
 
 @tool(description="Fetch an arXiv paper's full text (from its HTML version) and save it to /workspace/papers/<id>.txt. "
-                  "Returns the file path, its length and the section headings; read the parts you need from the file.")
+                  "Returns the file path, its length and the section headings; read the sections you need from the file.")
 def arxiv_read(arxiv_id: str) -> dict:
     try:
         html = _fetch(f"https://arxiv.org/html/{arxiv_id}")

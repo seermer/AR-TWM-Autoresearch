@@ -10,11 +10,16 @@ from ar_kernel.services import RunServices, socket_dir_for
 from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools import snapshot
 from ar_kernel.tools.context import TokenRegistry
-from ar_kernel.tools.server import ToolKit, build_tool_app, new_mcp
+from ar_kernel.tools.server import ToolError, ToolKit, build_tool_app, new_mcp
 from ar_kernel.tools.snapshot import SnapshotStore, register_snapshot_tool
 from ar_kernel.vcs.agents_repo import AgentsRepo
 
-KNOWN = "c" * 64
+KNOWN = "dc1"
+
+
+def _usable(commit_id):
+    if commit_id != KNOWN:
+        raise ToolError(f"unknown data commit {commit_id!r}")
 
 
 @pytest.fixture
@@ -28,7 +33,7 @@ def live(tmp_path):
     rec = Recorder(run)
     reg = TokenRegistry(rec)
     mcp = new_mcp()
-    register_snapshot_tool(mcp, ToolKit(reg, rec), SnapshotStore(run, repo, lambda c: c == KNOWN))
+    register_snapshot_tool(mcp, ToolKit(reg, rec), SnapshotStore(run, repo, _usable))
     services = RunServices(socket_dir_for(run))
     services.start(FastAPI(), build_tool_app(mcp))
     agent = tmp_path / "agent"
@@ -83,7 +88,7 @@ def test_a_recipe_snapshot_is_stored_for_its_attempt(live):
 @pytest.mark.parametrize("args,fragment", [
     ({"data_commit": KNOWN}, "together, or none"),
     ({"recipe": {}, "rationale": "r"}, "together, or none"),
-    ({"data_commit": "d" * 64, "recipe": {}, "rationale": "r"}, "does not exist"),
+    ({"data_commit": "dc9", "recipe": {}, "rationale": "r"}, "unknown data commit"),
 ])
 def test_a_recipe_snapshot_is_refused_with_an_error(live, args, fragment):
     services, _, run, rec, _, recipe, *_ = live
@@ -117,7 +122,7 @@ def _direct(tmp_path, **checks):
     edit = reg.issue(node="n1", phase="edit_self", attempt=1, workspace_host=tmp_path, staging_host=tmp_path,
                      agent_host=agent, base_commit=root)
     recipe = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=tmp_path, staging_host=tmp_path)
-    return SnapshotStore(run, repo, lambda c: c == KNOWN, **checks), repo, edit, recipe
+    return SnapshotStore(run, repo, _usable, **checks), repo, edit, recipe
 
 
 def test_a_recipe_snapshot_the_gate_refuses_is_not_stored(tmp_path):

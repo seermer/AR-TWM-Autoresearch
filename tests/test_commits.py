@@ -20,22 +20,31 @@ def store(tmp_path):
                               node_id="n1", attempt=1)[0].clip_id)
     return CommitStore(conn, ing.blobs, ing.clips), ids, tmp_path
 
-def test_commit_is_content_addressed_and_stable(store):
+def _commit(cs, *args, **kwargs) -> str:
+    return cs.commit(*args, **kwargs)[0]
+
+def test_commits_are_numbered_in_order_and_identical_content_gets_a_new_id(store):
     cs, ids, _ = store
     datasets = {"cam": {"weight": 1.0, "clips": ids}}
-    first = cs.commit(None, datasets, "initial", node_id="n1")
-    second = cs.commit(None, dict(datasets), "initial", node_id="n1")
-    assert first == second
+    assert [_commit(cs, datasets, "initial", node_id="n1", attempt=1) for _ in range(2)] == ["dc1", "dc2"]
+    assert cs.get("dc2")["status"] == "draft"
+
+def test_a_number_is_not_reused_after_the_newest_commit_is_removed(store):
+    cs, ids, _ = store
+    _commit(cs, _cam(ids), "first", node_id="n1", attempt=1)
+    _commit(cs, _cam(ids), "second", node_id="n1", attempt=2)
+    assert cs.remove("n1", 2) == 1
+    assert _commit(cs, _cam(ids), "third", node_id="n1", attempt=2) == "dc3"
 
 def test_clip_ingested_by_another_branch_is_selectable(store):
     cs, ids, _ = store
-    commit = cs.commit(None, {"cam": {"weight": 1.0, "clips": [ids[1]]}}, "cross", node_id="n9")
+    commit = _commit(cs, {"cam": {"weight": 1.0, "clips": [ids[1]]}}, "cross", node_id="n9")
     assert cs.manifest(commit)["datasets"]["cam"]["clips"] == [ids[1]]
 
 def test_bad_clips_are_named_all_at_once(store):
     cs, ids, _ = store
     with pytest.raises(BadClips) as refused:
-        cs.commit(None, {"cam": {"weight": 1.0, "clips": [*ids, "nope", ids[0]]}}, "bad", node_id="n1")
+        _commit(cs, {"cam": {"weight": 1.0, "clips": [*ids, "nope", ids[0]]}}, "bad", node_id="n1")
     bad = refused.value.bad                     # by place in the list
     assert refused.value.dataset == "cam" and sorted(bad) == [len(ids), len(ids) + 1]
     assert bad[len(ids)] == "unknown clip" and "more than once" in bad[len(ids) + 1]
@@ -44,11 +53,11 @@ def test_bad_clips_are_named_all_at_once(store):
 def test_builtin_dataset_name_is_rejected(store):
     cs, ids, _ = store
     with pytest.raises(CommitError, match="built-in"):
-        cs.commit(None, {"spatialvid_hq": {"weight": 1.0, "clips": ids}}, "bad", node_id="n1")
+        _commit(cs, {"spatialvid_hq": {"weight": 1.0, "clips": ids}}, "bad", node_id="n1")
 
 def test_materialize_builds_hardlinked_standard_roots(store):
     cs, ids, tmp_path = store
-    commit = cs.commit(None, {"cam": {"weight": 1.0, "clips": ids}}, "v", node_id="n1")
+    commit = _commit(cs, {"cam": {"weight": 1.0, "clips": ids}}, "v", node_id="n1")
     roots = cs.materialize(commit, tmp_path / "view")
     root = roots["cam"]
     assert sorted(p.name for p in (root / "videos").iterdir()) == sorted(f"{c}.mp4" for c in ids)
@@ -65,8 +74,8 @@ def test_rematerializing_a_smaller_commit_removes_stale_clips(store):
     attempts must not survive in the view, or the node trains on data its
     recorded commit does not contain -- the loader lists videos/ directly."""
     cs, ids, tmp = store
-    big = cs.commit(None, _cam(ids), "both clips", node_id="n1")
-    small = cs.commit(None, _cam(ids[:1]), "one clip", node_id="n1")
+    big = _commit(cs, _cam(ids), "both clips", node_id="n1")
+    small = _commit(cs, _cam(ids[:1]), "one clip", node_id="n1")
     view = tmp / "node" / "view"
     cs.materialize(big, view)
     assert len(list((view / "cam" / "videos").iterdir())) == 2
@@ -78,8 +87,8 @@ def test_rematerializing_a_smaller_commit_removes_stale_clips(store):
 
 def test_rematerializing_drops_a_dataset_absent_from_the_new_commit(store):
     cs, ids, tmp = store
-    two = cs.commit(None, {**_cam(ids), "cam2": _cam(ids[1:])["cam"]}, "two sets", node_id="n1")
-    one = cs.commit(None, _cam(ids), "one set", node_id="n1")
+    two = _commit(cs, {**_cam(ids), "cam2": _cam(ids[1:])["cam"]}, "two sets", node_id="n1")
+    one = _commit(cs, _cam(ids), "one set", node_id="n1")
     view = tmp / "node" / "view"
     cs.materialize(two, view)
     cs.materialize(one, view)
@@ -94,7 +103,7 @@ def test_materialize_refuses_to_replace_a_directory_it_did_not_build(store):
     precious.mkdir()
     (precious / "keep.txt").write_text("do not delete")
     with pytest.raises(CommitError, match="not a kernel-built view"):
-        cs.materialize(cs.commit(None, _cam(ids), "x", node_id="n1"), precious)
+        cs.materialize(_commit(cs, _cam(ids), "x", node_id="n1"), precious)
     assert (precious / "keep.txt").read_text() == "do not delete"
 
 
@@ -102,8 +111,8 @@ def test_rematerialize_leaves_blobs_intact(store):
     """Removing the old view unlinks hardlinks only; the blob store keeps its copy."""
     cs, ids, tmp = store
     view = tmp / "node" / "view"
-    cs.materialize(cs.commit(None, _cam(ids), "both", node_id="n1"), view)
-    cs.materialize(cs.commit(None, _cam(ids[:1]), "one", node_id="n1"), view)
+    cs.materialize(_commit(cs, _cam(ids), "both", node_id="n1"), view)
+    cs.materialize(_commit(cs, _cam(ids[:1]), "one", node_id="n1"), view)
     clip = cs.clips.get(ids[1])
     assert cs.blobs.path(clip["video_digest"], "video").exists()
 
@@ -113,7 +122,7 @@ def test_duplicate_clip_in_a_dataset_is_rejected(store):
     and silently reweight sampling. Upsampling is what dataset weights are for."""
     cs, ids, _ = store
     with pytest.raises(CommitError, match="more than once"):
-        cs.commit(None, _cam([ids[0], ids[0], ids[1]]), "dup", node_id="n1")
+        _commit(cs, _cam([ids[0], ids[0], ids[1]]), "dup", node_id="n1")
 
 
 @pytest.mark.parametrize("weight", [float("inf"), float("nan"), "heavy"])
@@ -122,11 +131,11 @@ def test_non_finite_or_non_numeric_weight_is_rejected(store, weight):
     'cannot convert float NaN to integer' inside the gate."""
     cs, ids, _ = store
     with pytest.raises(CommitError, match="weight"):
-        cs.commit(None, {"cam": {**_cam(ids)["cam"], "weight": weight}}, "w", node_id="n1")
+        _commit(cs, {"cam": {**_cam(ids)["cam"], "weight": weight}}, "w", node_id="n1")
 
 
 def test_commit_with_no_enabled_dataset_is_rejected(store):
     """All-zero weights left steps_per_epoch taking max() of nothing."""
     cs, ids, _ = store
     with pytest.raises(CommitError, match="no dataset"):
-        cs.commit(None, {"cam": {**_cam(ids)["cam"], "weight": 0.0}}, "off", node_id="n1")
+        _commit(cs, {"cam": {**_cam(ids)["cam"], "weight": 0.0}}, "off", node_id="n1")

@@ -22,7 +22,7 @@ retries:
   edit_self: 3
   improve_recipe: 3
 improve_recipe:
-  clips_per_part: 100            # clips one improve_recipe part may add to the pool
+  new_clips_per_commit: 100      # new clips an improve_recipe data commit may hold
 budget:                          # run-wide LLM spend cap in dollars, enforced by the gateway
   max_usd: null                  # null = no cap (the default)
   usd_per_mtok: {input: null, cached_input: null, output: null}   # needed for max_usd and for cost in `ar status`

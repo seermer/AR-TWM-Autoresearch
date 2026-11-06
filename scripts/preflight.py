@@ -235,7 +235,7 @@ class Preflight:
                     raise Failed(f"ingest refused {d.name}: {res.reasons}")
                 clip_ids.append(res.clip_id)
         commits = CommitStore(self.ctx.conn, ing.blobs, ing.clips)
-        commit = commits.commit(None, {"examples": {"weight": 1.0, "clips": clip_ids}}, "preflight", node_id="preflight")
+        commit, _ = commits.commit({"examples": {"weight": 1.0, "clips": clip_ids}}, "preflight", node_id="preflight")
         node_dir = self.run_dir / "nodes" / "preflight"
         recipe = {"optimizer.max_steps": 3, "optimizer.epochs": 500}
         failures = Gate(self.cfg, commits, self.rec).check(recipe, commit, None, "preflight", self.run_dir / "gate",

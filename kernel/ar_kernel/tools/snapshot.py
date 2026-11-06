@@ -14,7 +14,7 @@ from pydantic import Field
 
 from .server import ToolError
 
-DESCRIPTION = ("Store the work as it is now as an immutable snapshot and return its id. A phase's result names "
+DESCRIPTION = ("Store the work as it is now as an immutable snapshot and return its id. A result names "
                "the snapshot it hands back by this id (snapshot_id); later changes cannot alter a snapshot. In "
                "edit_self it takes no arguments and records the /agent tree. In improve_recipe it takes "
                "data_commit, recipe and rationale, all three or none; with none, the snapshot records that there "
@@ -51,11 +51,12 @@ def edit_snapshot(repo, node: str, phase: str, attempt: int, snapshot_id: str) -
 
 
 class SnapshotStore:
-    """`gate(caller, recipe, data_commit)` -> findings, and `verify(caller, commit)` -> ContractReport, check a
-    snapshot before it is stored; None (the contract's smoke runs) checks nothing."""
+    """`usable(data_commit)` raises ToolError for a commit a snapshot may not name. `gate(caller, recipe,
+    data_commit)` -> findings, and `verify(caller, commit)` -> ContractReport, check a snapshot before it is stored;
+    None (the contract's smoke runs) checks nothing."""
 
-    def __init__(self, run_dir: Path, repo, commit_exists: Callable[[str], bool], gate=None, verify=None) -> None:
-        self.run_dir, self.repo, self.commit_exists = Path(run_dir), repo, commit_exists
+    def __init__(self, run_dir: Path, repo, usable: Callable[[str], Any], gate=None, verify=None) -> None:
+        self.run_dir, self.repo, self.usable = Path(run_dir), repo, usable
         self.gate, self.verify = gate, verify
         self._verifying = threading.Lock()        # one contract check at a time: they share its work folder
 
@@ -79,9 +80,8 @@ class SnapshotStore:
             return {"snapshot_id": sha}
         if any(given) and not all(given):
             raise ToolError("give data_commit, recipe and rationale together, or none of them")
-        if all(given) and not self.commit_exists(data_commit):
-            raise ToolError(f"data commit {data_commit!r} does not exist")
         if all(given):
+            self.usable(data_commit)
             try:
                 rationale.encode("utf-8")
             except UnicodeEncodeError as exc:

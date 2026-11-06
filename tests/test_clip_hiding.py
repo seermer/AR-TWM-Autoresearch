@@ -72,7 +72,7 @@ def test_a_data_commit_refuses_clips_not_in_the_pool(tmp_path):
     clips.add(_clip("a" * 64, "node0005")), clips.add(_clip("b" * 64, "node0006"))
     clips.hide("node0005", "fail1")
     with pytest.raises(BadClips) as exc:
-        CommitStore(conn, None, clips).commit(None, {"d": {"clips": ["a" * 64, "b" * 64]}}, "m", node_id="node0007")
+        CommitStore(conn, None, clips).commit({"d": {"clips": ["a" * 64, "b" * 64]}}, "m", node_id="node0007")
     assert exc.value.bad == {0: "not in the pool"}
 
 

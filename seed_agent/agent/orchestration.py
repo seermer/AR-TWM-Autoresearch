@@ -179,7 +179,7 @@ class EditSubmit(EditResult):
 
 
 class RecipeSubmit(RecipeResult):
-    """End this conversation with a snapshot handed back in it: train it, which needs one with a data commit and a recipe, or continue this node's work in a new conversation."""
+    """End this subphase with a snapshot handed back in it: train it, which needs one with a data commit and a recipe, or continue this node's work in a new subphase."""
 
 
 async def snapshot(session, args: dict) -> str:
@@ -256,7 +256,7 @@ async def run_task(ctx: RecipeContext) -> RecipeResult:
                 for role in (planner, engineer, reviewer()):
                     role.context_fn(str(role.scratch))
                 commit = json.loads(result_text(await session.call_tool(
-                    "data_commit", {"parent": None, "datasets": {}, "message": "dry run"})))["commit_id"]
+                    "data_commit", {"datasets": {}, "message": "dry run"})))["commit_id"]
                 sid = await snapshot(session, {"data_commit": commit, "recipe": {}, "rationale": "dry run"})
                 return RecipeResult(snapshot_id=sid, train=True, summary=f"dry run: roles and contexts built, "
                                     f"{len(ktools)} kernel tools, model said {await ping()!r}")

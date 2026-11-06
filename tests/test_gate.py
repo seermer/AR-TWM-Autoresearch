@@ -28,7 +28,7 @@ def _gate_store(tmp_path_factory):
                                    node_id="n1", attempt=1)[0].clip_id)
     assert len(set(clip_ids)) == 8, "fixture must produce 8 distinct clips"
     commits = CommitStore(conn, ing.blobs, ing.clips)
-    commit = commits.commit(None, {"cam": {"weight": 1.0, "clips": clip_ids}}, "v", node_id="n1")
+    commit, _ = commits.commit({"cam": {"weight": 1.0, "clips": clip_ids}}, "v", node_id="n1")
     return commits, commit
 
 
@@ -72,7 +72,7 @@ def test_unchanged_data_commit_is_rejected(gate_env):
 def test_recommitted_identical_data_is_rejected(gate_env):
     gate, commit, tmp_path = gate_env
     manifest = gate.commits.manifest(commit)["datasets"]
-    twin = gate.commits.commit(None, manifest, "same data, new message", node_id="n2")
+    twin, _ = gate.commits.commit(manifest, "same data, new message", node_id="n2")
     assert twin != commit
     failures = gate.check({}, twin, commit, "n2", tmp_path / "n2", tmp_path, [0, 1, 2, 3])
     assert failures and any("identical to the parent" in f for f in failures)
@@ -101,7 +101,7 @@ def test_fewer_clips_than_gpus_is_rejected(tmp_path):
                                     named=NAMED)],
                          node_id="n1", attempt=1)[0].clip_id
     commits = CommitStore(conn, ing.blobs, ing.clips)
-    commit = commits.commit(None, {"cam": {"weight": 1.0, "clips": [clip_id]}}, "v", node_id="n1")
+    commit, _ = commits.commit({"cam": {"weight": 1.0, "clips": [clip_id]}}, "v", node_id="n1")
     failures = Gate(CFG, commits, rec).check({}, commit, None, "n1", tmp_path / "n1",
                                            tmp_path, [0, 1, 2, 3])
     assert failures and any("clips" in f for f in failures)

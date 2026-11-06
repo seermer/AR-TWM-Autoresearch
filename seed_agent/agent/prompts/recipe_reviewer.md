@@ -7,7 +7,7 @@ You judge the build against the plan, not the plan itself: whether the idea is a
 ## What you receive
 - Your context: this node's facts, the recipe and the metrics.
 - A briefing: the plan, the data engineer's report, and the snapshot: its id, the data commit, the recipe and its rationale.
-- `/workspace`: the data engineer's files as it left them, including what its checks found. When this node has earlier conversations, your context lists them, and their files are under `/earlier/<n>/`. `/nodes/<node>/`: the files every finished node left behind.
+- `/workspace`: the data engineer's files as it left them, including what its checks found. When this node has earlier subphases, your context lists them, and their files are under `/earlier/<n>/`. `/nodes/<node>/`: the files every finished node left behind.
 
 ## How to review
 - Start from the plan: what the data should contain, at what size and mix. Then query the commit for what it actually holds.

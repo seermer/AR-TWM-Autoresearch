@@ -34,8 +34,8 @@ class RecipeContext(_Ctx):
     lora_allowlist: list[list[int]] = Field(default_factory=list)
     n_gpus: int = 4
     tools: list[str] = Field(default_factory=list)   # enabled kernel tool names
-    clips_per_part: int = 100                        # clips one part may add to the pool
-    earlier_parts: list[dict[str, Any]] = Field(default_factory=list)   # this node's finished parts, oldest first
+    new_clips_per_commit: int = 100                  # new clips a data commit may hold
+    earlier_subphases: list[dict[str, Any]] = Field(default_factory=list)   # this node's finished subphases, oldest first
 
 
 SUMMARY_CHARS = 4000

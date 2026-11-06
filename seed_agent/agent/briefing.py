@@ -65,7 +65,7 @@ def metric_section(guide: dict) -> str:
     if not guide:
         return ""
     return ("## Metrics\n\nThe score is the weighted mean of these metrics. A dimension is the plain mean of its "
-            "metrics and is not part of the score.\n\n"
+            "metrics and does not count toward the score.\n\n"
             + table(["metric", "dimension", "weight", "measures"],
                     [[name, g.get("dimension"), g.get("weight"), g.get("measures")] for name, g in guide.items()]))
 
@@ -213,22 +213,21 @@ def siblings_section(siblings: list[dict], describe, scores: bool) -> str:
         *[describe(n) for n in shown]])
 
 
-def parts_section(parts: list[dict]) -> str:
-    """This node's earlier conversations."""
-    if not parts:
+def subphases_section(subphases: list[dict]) -> str:
+    """This node's earlier subphases."""
+    if not subphases:
         return ""
-    lines = ["## Earlier conversations on this node",
+    lines = ["## Earlier subphases on this node",
              "Oldest first; each one's /workspace is at its path, read-only, without its staging. The clips they "
              "added are in the pool, and are trained only if the data commit trained at the end holds them. Each "
              "one's snapshot is the one its planner handed on to build on."]
-    for p in parts:
+    for p in subphases:
         snap, shown = p.get("snapshot"), "no data commit or recipe"
         if snap:
             recipe = ", ".join(f"{k} {v}" for k, v in (snap["recipe"] or {}).items()) or "all base values"
             shown = f"data commit {snap['data_commit']}, recipe {recipe}; rationale: {clip(snap['rationale'])}"
         lines.append("\n".join([f"### {p['path']}", f"- Summary: {clip(p['summary'])}",
-                                f"- Clips added: {p['clips_ingested']}",
-                                f"- Data commits: {', '.join(p['data_commits']) or 'none'}", f"- Snapshot: {shown}"]))
+                                f"- Clips added: {p['clips_ingested']}", f"- Snapshot: {shown}"]))
     return "\n\n".join(lines)
 
 
@@ -246,12 +245,11 @@ def _node_and_recipe(ctx, scratch: str, kept: bool = False) -> list[str]:
             f"- Training GPUs: {ctx.n_gpus}",
             f"- Parent data commit: {ctx.parent_data_commit or 'none (the parent is the root)'}",
             _pool(ctx),
-            "- Conversations: this node's work can span several conversations of the planner and the data engineer. "
-            "One ends when the planner submits the result with submit_result: the node then trains the data commit "
-            "and recipe of the snapshot it names, or the work goes on in a new conversation, which every role begins "
-            "from this context with an empty /workspace and a summary of each earlier conversation",
-            f"- Clips one conversation may add to the pool: {ctx.clips_per_part}"]),
-        parts_section(ctx.earlier_parts),
+            "- Subphases: this node's work can span several subphases. One ends when the planner submits the result "
+            "with submit_result: the node then trains the data commit and recipe of the snapshot it names, or the work "
+            "goes on in a new subphase, where every role starts a new conversation from this context with an empty "
+            "/workspace and a summary of each earlier subphase"]),
+        subphases_section(ctx.earlier_subphases),
         skill_section(ctx.target_skill),
         folders_section(ctx.folders, scratch, kept),
         "## Recipe\n\nTunable keys, with the base recipe's and the parent's values:\n\n"

@@ -19,8 +19,9 @@ import yaml
 
 from .agent_phase import run_edit_self, run_improve_recipe
 from .archive.blobs import BlobStore
-from .archive.clips import ClipStore, hide_clips
+from .archive.clips import ClipStore, clips_hidden
 from .archive.commits import CommitStore
+from .archive.db import transaction
 from .archive.nodes import NOT_SHOWN, NodeStore, run_rel
 from .faults import KernelFault, NodeFault, disk_fault
 from .guards import alert
@@ -321,8 +322,7 @@ class Loop:
             self.ctx.recorder.event("node.created", payload={"node": child, "parent": parent_id}, child=child)
         else:
             child, parent = resumed["node_id"], self.nodes.get(resumed["parent_id"])
-        started, status, error, hide = time.time(), "scored", None, None
-        self._recipe_attempt = _attempt_of(resumed) if phase == "eval" else 0 if phase == "edit_self" else k
+        started, status, error = time.time(), "scored", None
         run_dir = Path(self.ctx.run_dir)
         try:
             if phase == "edit_self":
@@ -353,7 +353,6 @@ class Loop:
             status, error = "quarantined", f"quarantined: {exc}"
         except NodeFault as exc:
             status, error = exc.status, str(exc)
-            hide = f"fail{self._recipe_attempt}" if self._recipe_attempt else None
             self._node_faults += 1
             if self._node_faults >= 2:
                 why = f"two nodes in a row ended by a fault, the last: {exc}; fix it, then resume"
@@ -364,7 +363,7 @@ class Loop:
             raise
         finally:
             if status is not None:
-                self._finish(child, status, error, started, hide)
+                self._finish(child, status, error, started)
 
     def _evaluate(self, node: str, checkpoint, resolved):
         """A node's eval failing is the node's (its LoRA renders or scores badly), unless a disk or kernel
@@ -418,10 +417,9 @@ class Loop:
 
     # -- steps 5-7 ---------------------------------------------------------------------------
     def _recipe(self, child: str, parent: dict, code: str, start: int = 1, resolved: Path | None = None):
-        """improve_recipe attempts from `start` until one trains: an attempt that continues ends a part, and
-        the next attempt is the next part. `resolved`: attempt `start`'s recipe is already recorded (a resumed
+        """improve_recipe attempts from `start` until one trains: an attempt that continues ends a subphase, and
+        the next attempt is the next subphase. `resolved`: attempt `start`'s recipe is already recorded (a resumed
         node starts at its training)."""
-        self._recipe_attempt = start
         if resolved is not None:
             return self._train(child, start, resolved)
         n = int(self.cfg.get("retries.improve_recipe"))
@@ -429,7 +427,6 @@ class Loop:
         failures = sum(a["outcome"] == "failed" for a in self.nodes.attempts(child, "improve_recipe"))
         k = start
         while failures < n:
-            self._recipe_attempt = k
             self._check_budget()
 
             def attempt(k=k):
@@ -446,18 +443,29 @@ class Loop:
                 self._check_budget()                     # a spent budget is not the agent's: stop, not charge
                 failure = {"kind": "improve_recipe", "error": out.error,
                            "process": self._process(child, "improve_recipe", k)}
-                self.nodes.add_attempt(child, "improve_recipe", k, "failed", failure)
-                hide_clips(self.ctx.conn, self.ctx.recorder, child, f"fail{k}", attempt=k)
+                with transaction(self.ctx.conn):
+                    self.nodes.add_attempt(child, "improve_recipe", k, "failed", failure)
+                    failed = self._commits.fail(child, k)
+                    hidden = ClipStore(self.ctx.conn).hide(child, f"fail{k}", k)
+                clips_hidden(self.ctx.recorder, child, f"fail{k}", hidden, attempt=k)
+                self._commits_changed(child, k, failed=failed)
                 failures, k = failures + 1, k + 1
                 continue
             if not out.result["train"]:
-                self.nodes.add_attempt(child, "improve_recipe", k, "continued",
-                                       {"snapshot_id": out.result["snapshot_id"], "summary": out.result["summary"]})
+                with transaction(self.ctx.conn):
+                    self.nodes.add_attempt(child, "improve_recipe", k, "continued",
+                                           {"snapshot_id": out.result["snapshot_id"], "summary": out.result["summary"]})
+                    changed = self._commits.settle(child, k, out.result["data_commit"])
+                self._commits_changed(child, k, **changed)
                 k += 1
                 continue
-            self._record_recipe(child, out.result, resolved)
+            self._record_recipe(child, k, out.result, resolved)
             return self._train(child, k, resolved)
-        hide_clips(self.ctx.conn, self.ctx.recorder, child, f"fail{k - 1}")     # the continued parts' clips
+        with transaction(self.ctx.conn):                  # the continued subphases' commits and clips
+            failed = self._commits.fail(child)
+            hidden = ClipStore(self.ctx.conn).hide(child, f"fail{k - 1}")
+        clips_hidden(self.ctx.recorder, child, f"fail{k - 1}", hidden)
+        self._commits_changed(child, None, failed=failed)
         cause = {key: v for key, v in failure.items() if key != "process"}
         return None, "invalid_recipe", f"improve_recipe retries exhausted; last failure: {json.dumps(cause)[:2000]}"
 
@@ -471,19 +479,22 @@ class Loop:
         self.nodes.add_attempt(child, "improve_recipe", k, "passed", {"checkpoint": run_rel(self.ctx.run_dir, checkpoint)})
         return (checkpoint, resolved), "scored", None
 
-    def _record_recipe(self, child: str, res: dict, resolved: Path) -> None:
+    def _record_recipe(self, child: str, k: int, res: dict, resolved: Path) -> None:
         d = self._node_dir(child)
         d.mkdir(parents=True, exist_ok=True)
         (d / "recipe.yaml").write_text(yaml.safe_dump(res["recipe"], sort_keys=True), encoding="utf-8")
         (d / "rationale.md").write_text(res["rationale"], encoding="utf-8")
         (d / "summary.md").write_text(res["summary"], encoding="utf-8")
         rank, alpha = lora_of(resolved)
-        self.nodes.set_fields(
-            child, data_commit=res["data_commit"],
-            recipe_hash=hashlib.sha256(json.dumps(res["recipe"], sort_keys=True).encode()).hexdigest(),
-            recipe_path=run_rel(self.ctx.run_dir, d / "recipe.yaml"),
-            rationale_path=run_rel(self.ctx.run_dir, d / "rationale.md"),
-            resolved_config_path=run_rel(self.ctx.run_dir, resolved), lora_rank=rank, lora_alpha=alpha)
+        with transaction(self.ctx.conn):
+            self.nodes.set_fields(
+                child, data_commit=res["data_commit"],
+                recipe_hash=hashlib.sha256(json.dumps(res["recipe"], sort_keys=True).encode()).hexdigest(),
+                recipe_path=run_rel(self.ctx.run_dir, d / "recipe.yaml"),
+                rationale_path=run_rel(self.ctx.run_dir, d / "rationale.md"),
+                resolved_config_path=run_rel(self.ctx.run_dir, resolved), lora_rank=rank, lora_alpha=alpha)
+            changed = self._commits.settle(child, k, res["data_commit"])
+        self._commits_changed(child, k, **changed)
 
     # -- steps 8-9 ---------------------------------------------------------------------------
     def _record_score(self, node: str, score: float, detail: dict) -> None:
@@ -494,14 +505,27 @@ class Loop:
         agg.write_text(json.dumps(detail["aggregates"], indent=1))
         update_values(self.ctx.conn, self.cfg)
 
-    def _finish(self, node: str, status: str, error: str | None, started: float, hide: str | None = None) -> None:
-        """`hide`: the mark for the node's clips when a fault ended it."""
+    @property
+    def _commits(self) -> CommitStore:
+        return CommitStore(self.ctx.conn, None, None)
+
+    def _commits_changed(self, node: str, attempt: int | None, **changed: list) -> None:
+        changed = {status: ids for status, ids in changed.items() if ids}
+        if changed:
+            self.ctx.recorder.event("data_commits.status", node=node, attempt=attempt,
+                                    payload={"node": node, "attempt": attempt, **changed})
+
+    def _finish(self, node: str, status: str, error: str | None, started: float) -> None:
         if status == "quarantined":
-            hide_clips(self.ctx.conn, self.ctx.recorder, node, "quarantine")
-        elif hide:
-            hide_clips(self.ctx.conn, self.ctx.recorder, node, hide)
-        if status != "scored":
+            with transaction(self.ctx.conn):
+                failed = self._commits.fail(node)
+                hidden = ClipStore(self.ctx.conn).hide(node, "quarantine")
+                self.nodes.set_status(node, status)
+            clips_hidden(self.ctx.recorder, node, "quarantine", hidden)
+            self._commits_changed(node, None, failed=failed)
+        elif status != "scored":
             self.nodes.set_status(node, status)
+        if status != "scored":
             alert(self.ctx.recorder, "node_failed", f"{node} ended {status}: {error}", node_id=node)
         counts = {p: len(self.nodes.attempts(node, p)) for p in ("edit_self", "improve_recipe")}
         self.nodes.set_fields(node, error=error, attempt_counts=json.dumps(counts),

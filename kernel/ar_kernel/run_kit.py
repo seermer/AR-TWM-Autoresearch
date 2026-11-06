@@ -91,7 +91,7 @@ def build_run_kit(cfg, run_dir: Path, gpus: list[int], recorder, environ, repo) 
         return verify_contract(cfg=cfg, run_dir=run_dir, run_id=Path(run_dir).name, repo=repo, commit=commit,
                                harness=harness, recorder=recorder, node=caller.node, attempt=caller.attempt,
                                contexts=contexts)
-    register_snapshot_tool(mcp, kit, SnapshotStore(run_dir, repo, data.commit_exists, gate=data.snapshot_gate,
+    register_snapshot_tool(mcp, kit, SnapshotStore(run_dir, repo, data.usable, gate=data.snapshot_gate,
                                                    verify=verify))
     register_hf_tools(mcp, kit, HfTools(cfg, hf_tmp(run_dir)))
     register_job_tools(mcp, kit, queue)

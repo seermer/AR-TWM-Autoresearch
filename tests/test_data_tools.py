@@ -99,7 +99,7 @@ def test_rejections_are_summarised_with_counts_and_commit_takes_clip_ids_from_a_
     assert out["rejected_for"] == [{"count": 2, "example": "derived_from must be {kind, name} with kind one of "
                                                            "model, dataset, synthetic_method"}]
     (caller.workspace_host / "ids.json").write_text(json.dumps([r["clip_id"] for r in results]))
-    done = tools.commit(caller, None, {"from_file": {"weight": 1.0, "clips": "ids.json"}}, "ids from a file")
+    done = tools.commit(caller, {"from_file": {"weight": 1.0, "clips": "ids.json"}}, "ids from a file")
     assert done["datasets"]["from_file"]["clips"] == 4
     assert tools.query(caller, {"clip_ids": "/workspace/ids.json"})["total"] == 4
     (caller.workspace_host / "records.json").write_text(json.dumps([{"clip_id": r["clip_id"]} for r in results]))
@@ -150,9 +150,9 @@ def test_query_returns_the_archive_wide_pool_with_what_each_clip_was_derived_fro
 
 def test_commit_returns_id_and_per_dataset_stats(env):
     tools, caller, results, _ = env
-    out = tools.commit(caller, None, {"cam": {"weight": 1.0, "clips": [r["clip_id"] for r in results]}},
+    out = tools.commit(caller, {"cam": {"weight": 1.0, "clips": [r["clip_id"] for r in results]}},
                        "four clips")
-    assert len(out["commit_id"]) == 64
+    assert out["commit_id"] == "dc1" and out["new_clips"] == 4
     stats = out["datasets"]["cam"]
     assert stats.pop("sources") == {"synthetic_method:unit test fixture": 4}
     assert stats == {"weight": 1.0, "clips": 4}
@@ -163,20 +163,20 @@ def test_a_commit_takes_over_the_datasets_of_included_commits_and_a_query_reads_
     tools, caller, results, _ = env
     ids = [r["clip_id"] for r in results]
     cam = {"weight": 2.0, "clips": ids[:3]}
-    first = tools.commit(caller, None, {"cam": cam}, "three clips")["commit_id"]
+    first = tools.commit(caller, {"cam": cam}, "three clips")["commit_id"]
     extra = {"weight": 1.0, "clips": ids[3:]}
-    second = tools.commit(caller, first, {"extra": extra}, "the parent's data and one clip", include=[first])
+    second = tools.commit(caller, {"extra": extra}, "the parent's data and one clip", include=[first])
     assert {n: (d["clips"], d["weight"]) for n, d in second["datasets"].items()} == {"cam": (3, 2.0), "extra": (1, 1.0)}
-    replaced = tools.commit(caller, first, {"cam": {**cam, "clips": ids[:2]}}, "one dropped", include=[first])
+    replaced = tools.commit(caller, {"cam": {**cam, "clips": ids[:2]}}, "one dropped", include=[first])
     assert replaced["datasets"]["cam"]["clips"] == 2
     out = tools.query(caller, {"data_commit": second["commit_id"]})
     assert {c["clip_id"]: c["datasets"] for c in out["clips"]} == {**{i: ["cam"] for i in ids[:3]}, ids[3]: ["extra"]}
     with pytest.raises(ToolError, match="unknown data commit"):
-        tools.commit(caller, None, {}, "m", include=["f" * 64])
+        tools.commit(caller, {}, "m", include=["f" * 64])
     with pytest.raises(ToolError, match="unknown data commit"):
         tools.query(caller, {"data_commit": "f" * 64})
     with pytest.raises(ToolError, match="more than one included commit"):
-        tools.commit(caller, None, {}, "m", include=[first, replaced["commit_id"]])
+        tools.commit(caller, {}, "m", include=[first, replaced["commit_id"]])
 
 
 def test_a_clips_source_is_what_it_was_derived_from():
@@ -220,9 +220,9 @@ def test_fetch_copies_pool_clips_into_staging(env):
 def test_commit_validation_errors_become_tool_errors(env):
     tools, caller, results, _ = env
     with pytest.raises(ToolError, match="more than once"):
-        tools.commit(caller, None, {"cam": {"weight": 1.0, "clips": [results[0]["clip_id"]] * 2}}, "dup")
+        tools.commit(caller, {"cam": {"weight": 1.0, "clips": [results[0]["clip_id"]] * 2}}, "dup")
     with pytest.raises(ToolError, match="weight must be a number"):            # one line, no file: not a list
-        tools.commit(caller, None, {"cam": {"weight": "x", "clips": [results[0]["clip_id"]]}}, "w")
+        tools.commit(caller, {"cam": {"weight": "x", "clips": [results[0]["clip_id"]]}}, "w")
 
 
 def test_every_bad_clip_of_a_commit_is_named_in_one_refusal_with_a_file(env):
@@ -230,7 +230,7 @@ def test_every_bad_clip_of_a_commit_is_named_in_one_refusal_with_a_file(env):
     tools, caller, results, _ = env
     ids = [r["clip_id"] for r in results]
     with pytest.raises(ToolError) as refused:
-        tools.commit(caller, None, {"still": {"weight": 1.0,
+        tools.commit(caller, {"still": {"weight": 1.0,
                                               "clips": [*ids, "nope"]}}, "bad")
     text = str(refused.value)
     assert f"1 of {len(ids) + 1} items are bad" in text and f"item {len(ids)}: unknown clip" in text
@@ -249,7 +249,7 @@ def test_recipe_check_reports_gate_failures_without_leaving_a_view(env, monkeypa
     clip files -- proving recipe_check's cleanup has something real to remove.
     """
     tools, caller, results, _ = env
-    commit = tools.commit(caller, None, {"cam": {"weight": 1.0, "clips": [r["clip_id"] for r in results]}},
+    commit = tools.commit(caller, {"cam": {"weight": 1.0, "clips": [r["clip_id"] for r in results]}},
                           "for check")["commit_id"]
 
     seen_populated_view = []
@@ -278,7 +278,7 @@ def test_recipe_check_reports_gate_failures_without_leaving_a_view(env, monkeypa
 
 def test_a_snapshot_skips_the_gate_recipe_check_passed_in_this_attempt(env, monkeypatch):
     tools, caller, results, _ = env
-    commit = tools.commit(caller, None, {"cam": {"weight": 1.0, "clips": [r["clip_id"] for r in results]}},
+    commit = tools.commit(caller, {"cam": {"weight": 1.0, "clips": [r["clip_id"] for r in results]}},
                           "for check")["commit_id"]
     runs = []
     monkeypatch.setattr("ar_kernel.train.gate.run_in_env",
@@ -293,7 +293,7 @@ def test_a_snapshot_skips_the_gate_recipe_check_passed_in_this_attempt(env, monk
 
 def test_recipe_check_is_refused_at_once_while_a_gpu_job_holds_the_gpus(env):
     tools, caller, results, _ = env
-    commit = tools.commit(caller, None, {"cam": {"weight": 1.0, "clips": [r["clip_id"] for r in results]}},
+    commit = tools.commit(caller, {"cam": {"weight": 1.0, "clips": [r["clip_id"] for r in results]}},
                           "for check")["commit_id"]
     with tools.gpu_lock, pytest.raises(ToolError, match="a GPU job is running"):
         tools.recipe_check(caller, {}, commit)

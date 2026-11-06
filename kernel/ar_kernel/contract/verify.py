@@ -30,7 +30,7 @@ from ..tools.snapshot import SnapshotStore, register_snapshot_tool
 from ..vcs.agents_repo import CheckoutError
 
 MOCK_MODEL = "mock-model"
-MOCK_DATA_COMMIT = "0" * 64       # the one data commit the mock data tools hold
+MOCK_DATA_COMMIT = "dc1"          # the one data commit the mock data tools hold
 
 
 @dataclass
@@ -67,11 +67,12 @@ class _MockData:
     def fetch(self, c, clip_ids):
         return {"folder": "/workspace/staging/pool_clips", "copied": 0, "not_in_pool": []}
 
-    def commit(self, c, parent, datasets, message, include=()):
-        return {"commit_id": MOCK_DATA_COMMIT, "datasets": {}}
+    def commit(self, c, datasets, message, include=()):
+        return {"commit_id": MOCK_DATA_COMMIT, "datasets": {}, "new_clips": 0}
 
-    def commit_exists(self, commit_id):
-        return commit_id == MOCK_DATA_COMMIT
+    def usable(self, commit_id):
+        if commit_id != MOCK_DATA_COMMIT:
+            raise ToolError(f"unknown data commit {commit_id!r}")
 
     def recipe_check(self, c, recipe, data_commit):
         return {"ok": True, "failures": []}
@@ -110,7 +111,7 @@ class _MockLocate:
 class ContractHarness:
     def __init__(self, cfg, run_dir: Path, recorder, repo) -> None:
         self.cfg, self.recorder = cfg, recorder
-        self.snapshots = SnapshotStore(run_dir, repo, _MockData().commit_exists)
+        self.snapshots = SnapshotStore(run_dir, repo, _MockData().usable)
         self.registry = TokenRegistry(recorder)
         self.services = RunServices(socket_dir_for(Path(run_dir) / "contract-harness"))
         self.queue = JobQueue(recorder, threading.Lock(), wait_cap_s=5.0)

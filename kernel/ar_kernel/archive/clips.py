@@ -2,7 +2,7 @@ from __future__ import annotations
 import json, re, sqlite3, time
 
 # A clip's `ingested_by` is the id of the node that ingested it, or that id marked hidden from agents:
-# <node>fail<k> (attempt k failed, or the node ended by a fault after it), <node>quarantine.
+# <node>fail<k> (attempt k failed, or the node ran out of retries after it), <node>quarantine.
 _HIDDEN = re.compile(r".+(fail[1-9][0-9]*|quarantine)")
 
 
@@ -10,8 +10,8 @@ def hidden(ingested_by: str) -> bool:
     return _HIDDEN.fullmatch(ingested_by) is not None
 
 
-def hide_clips(conn, recorder, node: str, mark: str, attempt: int | None = None) -> None:
-    n = ClipStore(conn).hide(node, mark, attempt)
+def clips_hidden(recorder, node: str, mark: str, n: int, attempt: int | None = None) -> None:
+    """The event for `n` clips ClipStore.hide marked, written once the hide is committed."""
     if n:
         recorder.event("clips.hidden", node=node, payload={"node": node, "ingested_by": node + mark, "clips": n,
                                                            "attempt": attempt})

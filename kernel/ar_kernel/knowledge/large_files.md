@@ -6,7 +6,7 @@ description: Use when a file or command output is too large to read whole, for e
 # Reading large files
 
 - Size first: `wc -c -l file`, `ls -lh dir`.
-- Parts: `head -n 50`, `tail -n 50`, `sed -n '200,260p' file`.
+- Slices: `head -n 50`, `tail -n 50`, `sed -n '200,260p' file`.
 - Search: `grep -n "pattern" file`, `grep -c` to count, `grep -l "pattern" -r dir` to find files, `grep -A 5 -B 2` for context around a match.
 - JSON: `python -c "import json; d = json.load(open('f.json')); print(list(d))"` to see the keys, then print one key.
 - Tables (CSV, TSV, JSON lines): `pandas.read_csv` or `pandas.read_json(lines=True)`, then `df.shape`, `df.columns`, `df.head()`, `df.describe()`, `df.groupby(...)`.

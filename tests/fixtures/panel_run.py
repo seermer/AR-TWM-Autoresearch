@@ -104,9 +104,9 @@ def make_run(base: Path, name: str = "r1") -> Path:
     nodes.add_attempt("n1", "improve_recipe", 1, "passed", {"checkpoint": "nodes/n1/x"})
     nodes.create("n2", "n1", 2)
     nodes.add_attempt("n2", "edit_self", 1, "failed", {"error": "cannot check out the agent code"})
-    conn.execute("INSERT INTO data_commits VALUES (?,?,?,?,?,?,?)",
-                 ("dc1", None, "n1", 1, json.dumps({"datasets": {"ds1": {"clips": ["clip1"]}}}),
-                  "ds1: one clip", 1.0))
+    conn.execute("INSERT INTO data_commits (commit_id, node_id, attempt, status, manifest, message, created_at) "
+                 "VALUES (?,?,?,?,?,?,?)", ("dc1", "n1", 1, "accepted", json.dumps({"datasets": {"ds1": {"clips": ["clip1"]}}}),
+                                            "ds1: one clip", 1.0))
     conn.execute("INSERT INTO clips VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                  ("clip1", "vd1", "cd1", "ad1", "pd1",
                   json.dumps({"frames": 5, "fps": 24.0, "width": 960, "height": 544, "turns": 1}),

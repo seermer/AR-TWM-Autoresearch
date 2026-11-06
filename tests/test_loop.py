@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from ar_kernel.archive.clips import ClipStore
+from ar_kernel.archive.commits import CommitStore
 from ar_kernel.archive.db import open_db
 from ar_kernel.archive.nodes import NodeStore
 from ar_kernel.budget import Budget
@@ -175,7 +176,7 @@ def test_a_kernel_fault_once_reruns_the_phase(make_loop):
     assert NodeStore(loop.ctx.conn).attempts("node0001", "improve_recipe")[0]["outcome"] == "passed"
 
 
-def test_a_node_fault_twice_ends_the_node_and_hides_its_clips(make_loop):
+def test_a_node_fault_twice_ends_the_node_and_keeps_its_clips_and_trained_commit(make_loop):
     run, make = make_loop
     script = Script(run, score=[0.7])
     loop = make(script, max_nodes=1)
@@ -184,7 +185,8 @@ def test_a_node_fault_twice_ends_the_node_and_hides_its_clips(make_loop):
     assert loop.run() == "max_nodes reached"
     n1 = NodeStore(loop.ctx.conn).get("node0001")
     assert n1["status"] == "train_failed" and "loss=nan" in n1["error"]
-    assert [c["ingested_by"] for c in ClipStore(loop.ctx.conn).all()] == ["node0001fail1"]
+    assert [c["ingested_by"] for c in ClipStore(loop.ctx.conn).all()] == ["node0001"]
+    assert _status(loop, "dc_node0001_1") == "accepted"
     assert _alerts(loop) == ["phase_retry", "node_failed"]
 
 
@@ -240,7 +242,8 @@ def test_a_retried_recipe_attempt_leaves_nothing_of_the_first_try(make_loop):
         if len(tries) == 1:
             assert ClipStore(conn).add(_clip("old", node)) == "node0009fail1"      # taken from a hidden mark
             ClipStore(conn).add(_clip("new", node))
-            conn.execute("INSERT INTO data_commits VALUES ('c1', NULL, ?, 1, '{}', 'm', 0)", (node,))
+            conn.execute("INSERT INTO data_commits (commit_id, node_id, attempt, status, manifest, message, created_at) "
+                         "VALUES ('c1', ?, 1, 'draft', '{}', 'm', 0)", (node,))
             job.mkdir(parents=True)
             raise KernelFault("the agent sandbox did not start")
         assert {c["clip_id"]: c["ingested_by"] for c in ClipStore(conn).all()} == {"old": "node0009fail1"}
@@ -638,7 +641,7 @@ def test_a_failed_attempts_clips_leave_the_pool_and_a_passing_ones_stay(make_loo
                                                                     "attempt": 1}
 
 
-def test_a_node_ended_by_a_fault_in_eval_hides_its_passing_attempts_clips(make_loop):
+def test_a_node_ended_by_a_fault_in_eval_keeps_its_clips(make_loop):
     run, make = make_loop
     script = Script(run, score=[0.7])
     loop = make(script)
@@ -652,11 +655,12 @@ def test_a_node_ended_by_a_fault_in_eval_hides_its_passing_attempts_clips(make_l
     loop.phases.score = score
     loop.run()
     assert NodeStore(loop.ctx.conn).get("node0001")["status"] == "eval_failed"
-    assert [c["ingested_by"] for c in ClipStore(loop.ctx.conn).all()] == ["node0001fail1"]
+    assert [c["ingested_by"] for c in ClipStore(loop.ctx.conn).all()] == ["node0001"]
+    assert _status(loop, "dc_node0001_1") == "accepted"
 
 
 
-def test_a_node_resumed_at_eval_and_ended_by_a_fault_hides_its_clips_too(make_loop):
+def test_a_node_resumed_at_eval_and_ended_by_a_fault_keeps_its_clips_too(make_loop):
     run, make = make_loop
     from ar_kernel.loop import StopRun
     script = Script(run)
@@ -677,7 +681,7 @@ def test_a_node_resumed_at_eval_and_ended_by_a_fault_hides_its_clips_too(make_lo
     loop2.phases.score = fault
     loop2.run()
     assert NodeStore(loop2.ctx.conn).get("node0001")["status"] == "eval_failed"
-    assert [c["ingested_by"] for c in ClipStore(loop2.ctx.conn).all()] == ["node0001fail1"]
+    assert [c["ingested_by"] for c in ClipStore(loop2.ctx.conn).all()] == ["node0001"]
 
 def test_a_quarantined_nodes_clips_leave_the_pool_with_its_failed_attempts(make_loop):
     run, make = make_loop
@@ -694,16 +698,18 @@ def test_a_quarantined_nodes_clips_leave_the_pool_with_its_failed_attempts(make_
     loop.run()
     assert NodeStore(loop.ctx.conn).get("node0001")["status"] == "quarantined"
     assert [c["ingested_by"] for c in ClipStore(loop.ctx.conn).all()] == ["node0001quarantine"] * 2
+    assert _status(loop, "dc_node0001_2") == "failed"          # trained on, but its clips are hidden
+    assert _status_events(loop)[-1] == {"node": "node0001", "attempt": None, "failed": ["dc_node0001_2"]}
 
 
-# --- improve_recipe in parts ----------------------------------------------------------------------
+# --- improve_recipe in subphases ----------------------------------------------------------------------
 
 
 def _outcomes(loop, node="node0001") -> list[str]:
     return [a["outcome"] for a in NodeStore(loop.ctx.conn).attempts(node, "improve_recipe")]
 
 
-def test_parts_continue_until_one_trains_and_only_that_one_is_resolved(make_loop):
+def test_subphases_continue_until_one_trains_and_only_that_one_is_resolved(make_loop):
     run, make = make_loop
     script = Script(run, recipe=["continue", "continue", True])
     loop = make(script)
@@ -711,11 +717,11 @@ def test_parts_continue_until_one_trains_and_only_that_one_is_resolved(make_loop
     assert _outcomes(loop) == ["continued", "continued", "passed"]
     assert [r for r in script.calls if r[0] == "resolve"] == [("resolve", "node0001", "improve_recipe-3")]
     first = NodeStore(loop.ctx.conn).attempts("node0001", "improve_recipe")[0]["detail"]
-    assert first == {"snapshot_id": "1" * 32, "summary": "part 1"}
+    assert first == {"snapshot_id": "1" * 32, "summary": "subphase 1"}
     assert NodeStore(loop.ctx.conn).get("node0001")["status"] == "scored"
 
 
-def test_a_failed_part_hides_only_its_own_clips(make_loop):
+def test_a_failed_subphase_hides_only_its_own_clips(make_loop):
     run, make = make_loop
     script = Script(run, recipe=["continue", False, True])
     loop = make(script)
@@ -726,7 +732,7 @@ def test_a_failed_part_hides_only_its_own_clips(make_loop):
         "node0001-1": "node0001", "node0001-2": "node0001fail2", "node0001-3": "node0001"}
 
 
-def test_failures_across_parts_reach_the_retry_cap(make_loop):
+def test_failures_across_subphases_reach_the_retry_cap(make_loop):
     run, make = make_loop
     script = Script(run, recipe=["continue", False, "continue", False, False])
     loop = make(script)
@@ -736,7 +742,7 @@ def test_failures_across_parts_reach_the_retry_cap(make_loop):
     assert n1["status"] == "invalid_recipe" and "no commit" in n1["error"]
 
 
-def test_a_part_stopped_by_the_machine_restarts_on_resume_and_loses_only_its_own_clips(make_loop):
+def test_a_subphase_stopped_by_the_machine_restarts_on_resume_and_loses_only_its_own_clips(make_loop):
     from ar_kernel.loop import StopRun
     run, make = make_loop
     script = Script(run, recipe=["continue", "continue"])
@@ -744,12 +750,12 @@ def test_a_part_stopped_by_the_machine_restarts_on_resume_and_loses_only_its_own
     _ingesting(script, loop)
     real = loop.phases.improve_recipe
 
-    def stop_in_part_3(env, *, node, attempt, **kw):
+    def stop_in_subphase_3(env, *, node, attempt, **kw):
         out = real(env, node=node, attempt=attempt, **kw)
         if attempt == 3:
             raise StopRun("the machine went away")
         return out
-    loop.phases.improve_recipe = stop_in_part_3
+    loop.phases.improve_recipe = stop_in_subphase_3
     assert loop.run() == "the machine went away"
     assert {c["clip_id"] for c in ClipStore(loop.ctx.conn).all()} == {"node0001-1", "node0001-2", "node0001-3"}
     script2 = Script(run)
@@ -765,17 +771,17 @@ def test_a_part_stopped_by_the_machine_restarts_on_resume_and_loses_only_its_own
     assert _outcomes(loop2) == ["continued", "continued", "passed"]
 
 
-def test_a_node_fault_after_training_hides_every_parts_clips(make_loop):
+def test_a_node_fault_after_training_keeps_every_subphases_clips(make_loop):
     run, make = make_loop
     script = Script(run, recipe=["continue", True], train=[False, False])
     loop = make(script)
     _ingesting(script, loop)
     loop.run()
     assert NodeStore(loop.ctx.conn).get("node0001")["status"] == "train_failed"
-    assert {c["ingested_by"] for c in ClipStore(loop.ctx.conn).all()} == {"node0001fail2"}
+    assert {c["ingested_by"] for c in ClipStore(loop.ctx.conn).all()} == {"node0001"}
 
 
-def test_a_node_out_of_retries_hides_its_continued_parts_clips_too(make_loop):
+def test_a_node_out_of_retries_hides_its_continued_subphases_clips_too(make_loop):
     run, make = make_loop
     script = Script(run, recipe=["continue", False, False, False])
     loop = make(script)
@@ -788,7 +794,7 @@ def test_a_node_out_of_retries_hides_its_continued_parts_clips_too(make_loop):
         "node0001-4": "node0001fail4"}
 
 
-def test_a_stop_in_training_after_a_continued_part_trains_that_part_again_on_resume(make_loop):
+def test_a_stop_in_training_after_a_continued_subphase_trains_that_subphase_again_on_resume(make_loop):
     run, make = make_loop
     uploads = []
     script = Script(run, recipe=["continue", True], train=["infra", "infra"])
@@ -803,3 +809,153 @@ def test_a_stop_in_training_after_a_continued_part_trains_that_part_again_on_res
     assert NodeStore(loop2.ctx.conn).get("node0001")["status"] == "scored"
     assert {c["clip_id"]: c["ingested_by"] for c in ClipStore(loop2.ctx.conn).all()} == {
         "node0001-1": "node0001", "node0001-2": "node0001"}
+
+
+# --- data commit status -----------------------------------------------------------------------------
+
+
+def _status(loop, commit_id: str) -> str:
+    return CommitStore(loop.ctx.conn, None, None).get(commit_id)["status"]
+
+
+def _committing(script, loop):
+    """Each improve_recipe attempt stores drafts a and b; a continue names a."""
+    real = script.improve_recipe
+
+    def improve_recipe(env, *, node, attempt, **kw):
+        for name in "ab":
+            loop.ctx.conn.execute("INSERT INTO data_commits (commit_id, node_id, attempt, status, manifest, message, "
+                                  "created_at) VALUES (?,?,?,'draft','{\"datasets\": {}}','m',0)",
+                                  (f"{node}-{attempt}{name}", node, attempt))
+        out = real(env, node=node, attempt=attempt, **kw)
+        if out.ok and not out.result["train"]:
+            out.result["data_commit"] = f"{node}-{attempt}a"
+        return out
+    loop.phases.improve_recipe = improve_recipe
+
+
+def _status_events(loop) -> list[dict]:
+    return [loop.ctx.recorder.load_payload(e["payload"]) for e in loop.ctx.recorder.read_events("node0001")
+            if e["type"] == "data_commits.status"]
+
+
+def test_a_subphase_end_keeps_the_named_commit_and_makes_its_other_drafts_obsolete(make_loop):
+    run, make = make_loop
+    script = Script(run, recipe=["continue", False, True])
+    loop = make(script)
+    _committing(script, loop)
+    loop.run()
+    assert _outcomes(loop) == ["continued", "failed", "passed"]
+    assert {i: _status(loop, i) for i in ("node0001-1a", "node0001-1b", "node0001-2a", "node0001-2b",
+                                          "node0001-3a", "node0001-3b", "dc_node0001_3")} == {
+        "node0001-1a": "accepted", "node0001-1b": "obsolete", "node0001-2a": "failed", "node0001-2b": "failed",
+        "node0001-3a": "obsolete", "node0001-3b": "obsolete", "dc_node0001_3": "accepted"}
+    assert _status_events(loop) == [
+        {"node": "node0001", "attempt": 1, "accepted": ["node0001-1a"], "obsolete": ["node0001-1b"]},
+        {"node": "node0001", "attempt": 2, "failed": ["node0001-2a", "node0001-2b", "dc_node0001_2"]},
+        {"node": "node0001", "attempt": 3, "accepted": ["dc_node0001_3"], "obsolete": ["node0001-3a", "node0001-3b"]}]
+
+
+def test_a_continue_naming_a_snapshot_without_a_data_commit_keeps_none(make_loop):
+    run, make = make_loop
+    script = Script(run, recipe=["continue", True])
+    loop = make(script)
+    _committing(script, loop)
+    real = loop.phases.improve_recipe
+
+    def without_commit(env, **kw):
+        out = real(env, **kw)
+        if not out.result["train"]:
+            out.result["data_commit"] = None
+        return out
+    loop.phases.improve_recipe = without_commit
+    loop.run()
+    assert [_status(loop, i) for i in ("node0001-1a", "node0001-1b")] == ["obsolete", "obsolete"]
+
+
+def test_a_node_out_of_retries_fails_every_commit_it_made(make_loop):
+    run, make = make_loop
+    script = Script(run, recipe=["continue", False, False, False])
+    loop = make(script)
+    _committing(script, loop)
+    loop.run()
+    assert NodeStore(loop.ctx.conn).get("node0001")["status"] == "invalid_recipe"
+    statuses = {r["status"] for r in loop.ctx.conn.execute("SELECT status FROM data_commits WHERE node_id='node0001'")}
+    assert statuses == {"failed"}
+    assert _status_events(loop)[-1] == {"node": "node0001", "attempt": None, "failed": ["node0001-1a", "node0001-1b"]}
+
+
+def test_a_subphase_end_is_recorded_whole_or_not_at_all(make_loop, monkeypatch):
+    run, make = make_loop
+    script = Script(run, recipe=["continue"])
+    loop = make(script)
+    _committing(script, loop)
+
+    def broken(self, *a):
+        raise RuntimeError("disk gone")
+    monkeypatch.setattr(CommitStore, "settle", broken)
+    with pytest.raises(RuntimeError, match="disk gone"):
+        loop.run()
+    assert _outcomes(loop) == [] and _status(loop, "node0001-1a") == "draft"
+
+
+def _breaking(monkeypatch, cls, name, when=lambda *a, **k: True):
+    real = getattr(cls, name)
+
+    def broken(self, *a, **k):
+        if when(*a, **k):
+            raise RuntimeError("disk gone")
+        return real(self, *a, **k)
+    monkeypatch.setattr(cls, name, broken)
+
+
+def test_a_failed_subphase_is_recorded_whole_or_not_at_all(make_loop, monkeypatch):
+    run, make = make_loop
+    script = Script(run, recipe=[False])
+    loop = make(script)
+    _committing(script, loop)
+    _breaking(monkeypatch, ClipStore, "hide")
+    with pytest.raises(RuntimeError, match="disk gone"):
+        loop.run()
+    assert _outcomes(loop) == [] and _status(loop, "node0001-1a") == "draft"
+
+
+def test_a_recorded_recipe_is_written_whole_or_not_at_all(make_loop, monkeypatch):
+    run, make = make_loop
+    script = Script(run, recipe=[True])
+    loop = make(script)
+    _breaking(monkeypatch, CommitStore, "settle")
+    with pytest.raises(RuntimeError, match="disk gone"):
+        loop.run()
+    assert NodeStore(loop.ctx.conn).get("node0001")["resolved_config_path"] is None
+    assert _status(loop, "dc_node0001_1") == "draft"
+
+
+def test_running_out_of_retries_is_recorded_whole_or_not_at_all(make_loop, monkeypatch):
+    run, make = make_loop
+    script = Script(run, recipe=["continue", False, False, False])
+    loop = make(script)
+    _committing(script, loop)
+    _breaking(monkeypatch, ClipStore, "hide", when=lambda node, mark, attempt=None: attempt is None)
+    with pytest.raises(RuntimeError, match="disk gone"):
+        loop.run()
+    assert _status(loop, "node0001-1a") == "accepted"
+
+
+def test_a_quarantine_is_recorded_whole_or_not_at_all(make_loop, monkeypatch):
+    run, make = make_loop
+    script = Script(run)
+    loop = make(script)
+    _ingesting(script, loop)
+
+    def reaching_train(loop_, resolved, node, attempt_dir):
+        message = {"role": "assistant", "content": "I will fetch WBench."}
+        loop.ctx.recorder.event("llm.response", node=node, phase="improve_recipe", attempt=1, conversation_id="c",
+                                payload={"body": {"choices": [{"message": message}]}})
+        raise RuntimeError("sandbox died")
+    loop.phases.train = reaching_train
+    _breaking(monkeypatch, NodeStore, "set_status", when=lambda node, status: status == "quarantined")
+    with pytest.raises(RuntimeError, match="disk gone"):
+        loop.run()
+    assert [c["ingested_by"] for c in ClipStore(loop.ctx.conn).all()] == ["node0001"]
+    assert _status(loop, "dc_node0001_1") == "accepted"

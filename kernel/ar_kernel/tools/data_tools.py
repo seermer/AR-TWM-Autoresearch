@@ -15,7 +15,7 @@ from pydantic import Field
 
 from ..archive.blobs import KINDS, BlobStore
 from ..archive.clips import ClipStore, hidden
-from ..archive.commits import BadClips, CommitError, CommitStore
+from ..archive.commits import BadClips, CommitError, CommitStore, limit_text
 from ..archive.db import open_db
 from ..archive.nodes import NodeStore
 from ..data.annotation import DERIVED_KINDS
@@ -47,8 +47,7 @@ class DataTools:
         self.gpus, self.gpu_lock, self.require_free = list(gpus), gpu_lock, require_free
         self._leakage: LeakageChecker | None = None
         self._leakage_lock = threading.Lock()
-        self._ingest_lock = threading.Lock()       # the per-part cap is checked and used in one step
-        self.clips_per_part = int(cfg.get("improve_recipe.clips_per_part"))
+        self.new_clips_per_commit = int(cfg.get("improve_recipe.new_clips_per_commit"))
         self._passed: dict[str, set] = {}          # token -> (recipe, data commit) recipe_check passed
 
     def _leakage_checker(self) -> LeakageChecker:
@@ -118,15 +117,8 @@ class DataTools:
         refuse(caller, "data_ingest", candidates, bad)
         conn = open_db(self.run_dir)
         try:
-            with self._ingest_lock:
-                used = conn.execute("SELECT COUNT(*) FROM clips WHERE ingested_by=? AND attempt=?",
-                                    (caller.node, caller.attempt)).fetchone()[0]
-                cap = self.clips_per_part
-                if used + len(built) > cap:
-                    left = f"send at most {cap - used} candidates" if used < cap else "none are left"
-                    raise ToolError(f"{used} of the {cap} clips allowed until the result is submitted are added; {left}")
-                ingestor = Ingestor(self.cfg, self.run_dir, conn, self.recorder, self._leakage_checker())
-                results = ingestor.ingest(built, node_id=caller.node, attempt=caller.attempt)
+            ingestor = Ingestor(self.cfg, self.run_dir, conn, self.recorder, self._leakage_checker())
+            results = ingestor.ingest(built, node_id=caller.node, attempt=caller.attempt)
         finally:
             conn.close()
         if results and all(r.checker_failed for r in results):     # a counted tool error, not the agent's
@@ -154,7 +146,7 @@ class DataTools:
         in_commit = None
         if filter.get("data_commit"):
             in_commit = {}                                  # clip id -> the commit's datasets that hold it
-            for name, d in _manifest(self.run_dir, filter["data_commit"])["datasets"].items():
+            for name, d in json.loads(self.usable(filter["data_commit"])["manifest"])["datasets"].items():
                 for clip_id in d["clips"]:
                     in_commit.setdefault(clip_id, []).append(name)
         out = []
@@ -194,12 +186,12 @@ class DataTools:
         return {"folder": str(STAGING / "pool_clips"), "copied": sum(i in pool for i in wanted),
                 "not_in_pool": [i for i in wanted if i not in pool]}
 
-    def commit(self, caller, parent: str | None, datasets: dict, message: str, include: list[str] = ()) -> dict:
+    def commit(self, caller, datasets: dict, message: str, include: list[str] = ()) -> dict:
         datasets = {name: {**d, "clips": listed(caller, d.get("clips"), f"{name}.clips")} if isinstance(d, dict) else d
                     for name, d in datasets.items()}
         inherited: dict[str, dict] = {}
         for commit_id in include:
-            for name, d in _manifest(self.run_dir, commit_id)["datasets"].items():
+            for name, d in json.loads(self.usable(commit_id)["manifest"])["datasets"].items():
                 if name in inherited and inherited[name] != d and name not in datasets:
                     raise ToolError(f"dataset {name} is in more than one included commit, with different content: "
                                     "pass it in `datasets` as it should be")
@@ -209,8 +201,8 @@ class DataTools:
         try:
             store = CommitStore(conn, BlobStore(self.run_dir, conn), ClipStore(conn))
             try:
-                commit_id = store.commit(parent, datasets, message, node_id=caller.node,
-                                         attempt=caller.attempt)
+                commit_id, new = store.commit(datasets, message, node_id=caller.node, attempt=caller.attempt,
+                                              cap=self.new_clips_per_commit)
             except BadClips as exc:
                 refuse(caller, f"data_commit-{exc.dataset}", exc.clips, exc.bad)
             except CommitError as exc:
@@ -218,22 +210,25 @@ class DataTools:
             stats = dataset_stats(store.manifest(commit_id), ClipStore(conn).all())
         finally:
             conn.close()
-        return {"commit_id": commit_id, "datasets": stats}
+        return {"commit_id": commit_id, "datasets": stats, "new_clips": new}
 
-    def commit_exists(self, commit_id: str) -> bool:
+    def usable(self, commit_id: str) -> dict:
+        """The data commit's row; ToolError when it is unknown, obsolete or failed."""
         conn = open_db(self.run_dir)
         try:
-            CommitStore(conn, BlobStore(self.run_dir, conn), ClipStore(conn)).get(commit_id)
+            return CommitStore(conn, None, None).usable(commit_id)
         except KeyError:
-            return False
+            raise ToolError(f"unknown data commit {commit_id!r}") from None
+        except CommitError as exc:
+            raise ToolError(str(exc)) from None
         finally:
             conn.close()
-        return True
 
     def forget(self, token: str) -> None:
         self._passed.pop(token, None)
 
     def recipe_check(self, caller, recipe: dict, data_commit: str) -> dict:
+        self.usable(data_commit)
         failures = self._gate(caller, recipe, data_commit)
         if not failures:
             self._passed.setdefault(caller.token, set()).add((json.dumps(recipe, sort_keys=True), data_commit))
@@ -250,11 +245,7 @@ class DataTools:
         scratch = caller.workspace_host.parent / "recipe_check" / uuid.uuid4().hex
         conn = open_db(self.run_dir)
         try:
-            store = CommitStore(conn, BlobStore(self.run_dir, conn), ClipStore(conn))
-            try:
-                store.manifest(data_commit)
-            except Exception as exc:
-                raise ToolError(f"unknown data commit {data_commit!r}") from exc
+            store = CommitStore(conn, BlobStore(self.run_dir, conn), ClipStore(conn))     # callers checked usable
             parent_commit = _parent_commit(conn, caller.node)
             if not self.gpu_lock.acquire(blocking=False):       # the describe step is a GPU job
                 raise ToolError("a GPU job is running and the check needs the GPUs: "
@@ -288,16 +279,6 @@ def _counted(texts) -> list[dict]:
         shapes.setdefault(_VARIES.sub("#", _shape(text)), []).append(text)
     return [{"count": len(found), "example": found[0]}
             for found in sorted(shapes.values(), key=len, reverse=True)[:SHOWN]]
-
-
-def _manifest(run_dir: Path, commit_id: str) -> dict:
-    conn = open_db(run_dir)
-    try:
-        return CommitStore(conn, BlobStore(run_dir, conn), ClipStore(conn)).manifest(commit_id)
-    except KeyError:
-        raise ToolError(f"unknown data commit {commit_id!r}") from None
-    finally:
-        conn.close()
 
 
 def _parent_commit(conn, node_id: str) -> str | None:
@@ -368,10 +349,9 @@ Candidates = Annotated[list[dict[str, Any]] | str, items_schema("the clips to in
 
 
 def register_data_tools(mcp, kit, tools: DataTools) -> None:
-    cap = getattr(tools, "clips_per_part", None)
-    send = (f"Send your candidates together, not one at a time. At most {cap} clips may be added to the pool until "
-            "the result is submitted: a call with more candidates than the clips still allowed is refused, and only "
-            "accepted clips new to the pool count." if cap else "Send every candidate in one call.")
+    cap = getattr(tools, "new_clips_per_commit", None)
+    limit = f" {limit_text(cap)}" if cap is not None else ""
+    new = ", and `new_clips`: how many of its clips are new" if cap is not None else ""
 
     @mcp.tool(name="video_probe", description="Frame count, fps, coded size, rotation, pixel "
               "aspect and display aspect of a video under /workspace.")
@@ -382,7 +362,7 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
 
     @mcp.tool(name="data_ingest", description="Ingest staged candidates into the run's clip pool. What "
               "a clip must meet is in knowledge file data_formats. Ingest copies each staged file into the archive and "
-              f"leaves yours where it is. {send} Returns how many were accepted "
+              "leaves yours where it is. Send every candidate in one call. Returns how many were accepted "
               "and rejected, the rejection reasons and warnings with counts, and `result_file`: a JSON array "
               "under /workspace/staging/results/ with, per candidate, index, video, accepted, clip_id, "
               "warnings and reasons. Take the clip ids from that file with a script. Read the reasons and change "
@@ -415,24 +395,26 @@ def register_data_tools(mcp, kit, tools: DataTools) -> None:
             ctx: Context) -> dict:
         return await kit.call(ctx, "data_fetch", {"clip_ids": clip_ids}, lambda c: tools.fetch(c, clip_ids))
 
-    @mcp.tool(name="data_commit", description="Create an immutable data commit: the whole training set of this node. "
-              "It holds the datasets of the commits in `include` plus the ones in `datasets`, and nothing else: "
-              "`parent` is recorded as history and brings no data with it.")
+    @mcp.tool(name="data_commit", description="Create an immutable data commit: the tentative whole training set of "
+              "this node. It holds the datasets of the commits in `include` plus the ones in `datasets`. Every node's "
+              "improve_recipe phase runs in subphases. When a subphase ends, the data commit of the snapshot its "
+              f"result names is kept, and the subphase's other data commits can no longer be used.{limit} Returns the "
+              f"commit id, each dataset's weight and clip counts{new}.")
     async def data_commit(
-            parent: Annotated[str | None, Field(description="the commit this one follows (the parent node's data commit), or null. History only")],
             datasets: Annotated[dict[str, Dataset], Field(description="{name: {weight, clips}}. "
                                 f"clips is a list of clip ids, {FROM_FILE}. weight is the dataset's sampling "
                                 "weight. Each dataset needs at least as many clips as training GPUs")],
             message: Annotated[str, Field(description="what this commit contains")],
             ctx: Context,
-            include: Annotated[list[str] | None, Field(description="data commits of earlier nodes (the parent's, or any "
-                               "other finished node's) or earlier data commits of this node, whose datasets this commit "
+            include: Annotated[list[str] | None, Field(description="kept data commits of earlier nodes (the parent's, or "
+                               "any other finished node's) or data commits of this node that can still be used, whose "
+                               "datasets this commit "
                                "takes over as they are: name, weight and clips. A dataset in `datasets` with the same "
                                "name replaces the inherited one whole; "
                                "to stop training on one, pass it with weight 0")] = None) -> dict:
         return await kit.call(ctx, "data_commit",
-                              {"parent": parent, "datasets": datasets, "message": message, "include": include or []},
-                              lambda c: tools.commit(c, parent, datasets, message, include or []))
+                              {"datasets": datasets, "message": message, "include": include or []},
+                              lambda c: tools.commit(c, datasets, message, include or []))
 
     @mcp.tool(name="recipe_check", description="Run every pre-training check on a recipe and a data commit. "
               "It uses the GPUs, so it is refused while a GPU job "

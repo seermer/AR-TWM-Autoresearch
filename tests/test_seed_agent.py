@@ -112,22 +112,22 @@ def test_the_edit_digest_shows_how_runs_went_and_no_score():
     assert "rounds" not in text and "compactions" not in text and "Local tool" not in text
 
 
-def test_the_data_roles_see_the_part_cap_and_the_earlier_parts():
+def test_the_data_roles_see_the_subphases_and_the_earlier_ones():
     from agent.briefing import data_engineer_context, recipe_planner_context
-    parts = [{"path": "/earlier/1", "summary": "built the walking set", "clips_ingested": 40, "data_commits": ["c1"],
-              "snapshot": {"data_commit": "c1", "recipe": {"optimizer.lr": 1e-5}, "rationale": "fits"}},
-             {"path": "/earlier/2", "summary": "checked captions", "clips_ingested": 0, "data_commits": [],
-              "snapshot": None}]
+    subphases = [{"path": "/earlier/1", "summary": "built the walking set", "clips_ingested": 40,
+                  "snapshot": {"data_commit": "dc1", "recipe": {"optimizer.lr": 1e-5}, "rationale": "fits"}},
+                 {"path": "/earlier/2", "summary": "checked captions", "clips_ingested": 0, "snapshot": None}]
     for build in (recipe_planner_context, data_engineer_context):
-        text = build(_recipe_ctx(clips_per_part=100, earlier_parts=parts), "/s")
-        assert "- Clips one conversation may add to the pool: 100" in text
-        assert text.index("## This node") < text.index("## Earlier conversations on this node") < text.index("## Folders")
-        for line in ("### /earlier/1\n- Summary: built the walking set\n- Clips added: 40\n- Data commits: c1\n"
-                     "- Snapshot: data commit c1, recipe optimizer.lr 1e-05; rationale: fits",
-                     "### /earlier/2\n- Summary: checked captions\n- Clips added: 0\n- Data commits: none\n"
+        text = build(_recipe_ctx(new_clips_per_commit=100, earlier_subphases=subphases), "/s")
+        assert "- Subphases: this node's work can span several subphases. One ends when the planner submits" in text
+        assert "new clips" not in text and "Data commits:" not in text
+        assert text.index("## This node") < text.index("## Earlier subphases on this node") < text.index("## Folders")
+        for line in ("### /earlier/1\n- Summary: built the walking set\n- Clips added: 40\n"
+                     "- Snapshot: data commit dc1, recipe optimizer.lr 1e-05; rationale: fits",
+                     "### /earlier/2\n- Summary: checked captions\n- Clips added: 0\n"
                      "- Snapshot: no data commit or recipe"):
             assert line in text, line
-    assert "## Earlier conversations" not in data_engineer_context(_recipe_ctx(), "/s")
+    assert "## Earlier subphases" not in data_engineer_context(_recipe_ctx(), "/s")
 
 
 def test_builders_and_reviewers_get_what_they_act_on_and_not_the_history():
@@ -609,7 +609,7 @@ def test_the_held_out_rule_is_in_the_data_prompts_and_the_node_rule_in_the_edit_
 
 # ---- both entry points against the kernel services -------------------------------------------
 
-C0 = "0" * 64                                        # the mock data_commit id
+C0 = "dc1"                                           # the mock data_commit id
 
 
 def _call(name, args):
@@ -714,7 +714,7 @@ def kernel(tmp_path_factory):
     registry, queue = TokenRegistry(rec), JobQueue(rec, threading.Lock(), wait_cap_s=5.0)
     kit, mcp = ToolKit(registry, rec), new_mcp()
     register_data_tools(mcp, kit, _MockData())
-    register_snapshot_tool(mcp, kit, NamingStore(run, repo, _MockData().commit_exists))
+    register_snapshot_tool(mcp, kit, NamingStore(run, repo, _MockData().usable))
     register_hf_tools(mcp, kit, _MockHf())
     register_job_tools(mcp, kit, queue)
     queue.register(_MockCaption())
@@ -854,7 +854,7 @@ def test_improve_recipe_full_flow(kernel, tmp_path):
     assert [h["review"]["verdict"] for h in handbacks] == ["falls_short", "carries_out_plan"]
     assert {p.name.split("-")[0] for p in (tmp_path / "ws" / "tool_output").iterdir()} == {
         "recipe_planner", "data_engineer", "recipe_reviewer"}
-    assert [p.name for p in (tmp_path / "ws" / "scratch").iterdir()] == ["data_engineer-1"]   # kept for later parts
+    assert [p.name for p in (tmp_path / "ws" / "scratch").iterdir()] == ["data_engineer-1"]   # kept for later subphases
     assert not (tmp_path / "ws" / "staging" / ".guard").exists()
 
 

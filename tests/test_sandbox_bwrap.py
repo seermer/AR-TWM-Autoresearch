@@ -95,11 +95,11 @@ print(json.dumps(out))
     assert not (mounts.agent / "new").exists() and (node / "eval" / "case_1.json").exists()
 
 
-def test_earlier_parts_are_readable_and_not_writable(tmp_path, mounts):
-    part = tmp_path / "part1"
-    (part / "scratch").mkdir(parents=True)
-    (part / "scratch" / "notes.md").write_text("kept")
-    mounts.parts = [part]
+def test_earlier_subphases_are_readable_and_not_writable(tmp_path, mounts):
+    subphase = tmp_path / "subphase1"
+    (subphase / "scratch").mkdir(parents=True)
+    (subphase / "scratch" / "notes.md").write_text("kept")
+    mounts.subphases = [subphase]
     script = r"""
 import json
 out = {"read": open("/earlier/1/scratch/notes.md").read()}
@@ -111,7 +111,7 @@ print(json.dumps(out))
     res = _run(tmp_path, mounts, script)
     assert res.exit_code == 0, res.stderr
     assert json.loads(res.stdout) == {"read": "kept", "/earlier/1/new": "denied", "/earlier/1/scratch/notes.md": "denied"}
-    assert (part / "scratch" / "notes.md").read_text() == "kept"
+    assert (subphase / "scratch" / "notes.md").read_text() == "kept"
 
 
 def test_exit_code_and_streams_are_captured(tmp_path, mounts):
@@ -190,7 +190,7 @@ print(json.dumps({"exit_code": res.exit_code, "stdout": res.stdout}))
 
 def _child(tmp_path, mounts, command):
     arg = json.dumps({"run": str(tmp_path / "run"), "env_dir": str(ENV_DIR), "command": command,
-                      "mounts": {k: str(v) for k, v in vars(mounts).items() if k not in ("agent_readonly", "nodes", "code", "parts")}})
+                      "mounts": {k: str(v) for k, v in vars(mounts).items() if k not in ("agent_readonly", "nodes", "code", "subphases")}})
     return subprocess.Popen([os.sys.executable, "-c", _CHILD, arg], stdout=subprocess.PIPE, text=True,
                             cwd=CFG.repo_root, start_new_session=True,
                             env={**os.environ, "PYTHONPATH": str(CFG.repo_root / "kernel")})

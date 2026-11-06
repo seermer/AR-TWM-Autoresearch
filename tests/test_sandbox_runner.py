@@ -93,8 +93,8 @@ def test_separate_running_code_is_mounted_read_only_and_named_in_the_env(tmp_pat
     assert "AR_CODE_DIR" not in bwrap_args(_mounts(tmp_path), ["true"], {}, ENV_DIR, 64)[1]
 
 
-def test_earlier_parts_are_mounted_read_only_in_order(tmp_path):
-    argv, _ = bwrap_args(_mounts(tmp_path, parts=[tmp_path / "p1", tmp_path / "p3"]), ["true"], {}, ENV_DIR, 64)
+def test_earlier_subphases_are_mounted_read_only_in_order(tmp_path):
+    argv, _ = bwrap_args(_mounts(tmp_path, subphases=[tmp_path / "p1", tmp_path / "p3"]), ["true"], {}, ENV_DIR, 64)
     b = _binds(argv)
     assert b["/earlier/1"] == ("--ro-bind", str(tmp_path / "p1")) and b["/earlier/2"] == ("--ro-bind", str(tmp_path / "p3"))
     assert argv.index("/earlier/2") < argv.index("--remount-ro")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 import shutil, sqlite3, tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 SCHEMA = """
@@ -34,7 +35,8 @@ CREATE TABLE IF NOT EXISTS clips (
   created_at REAL NOT NULL, moved_from TEXT
 );
 CREATE TABLE IF NOT EXISTS data_commits (
-  commit_id TEXT PRIMARY KEY, parent_commit TEXT, node_id TEXT, attempt INTEGER,
+  n INTEGER PRIMARY KEY AUTOINCREMENT, commit_id TEXT UNIQUE NOT NULL, node_id TEXT, attempt INTEGER,
+  status TEXT NOT NULL CHECK (status IN ('draft', 'accepted', 'obsolete', 'failed')),
   manifest TEXT NOT NULL, message TEXT NOT NULL, created_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS selection_events (
@@ -55,6 +57,19 @@ def open_db(run_dir: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
     return conn
+
+
+@contextmanager
+def transaction(conn: sqlite3.Connection):
+    """One atomic write on an autocommit connection."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield conn
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
 
 
 def open_db_readonly(run_dir: Path, writer_alive: bool) -> sqlite3.Connection:

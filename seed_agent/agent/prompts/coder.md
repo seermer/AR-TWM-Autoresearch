@@ -29,7 +29,7 @@ You do not re-decide the mechanism on your own. If what you find means it cannot
 - Run `self_test` before you hand back, and fix what it reports.
 
 ## When the plan and the code disagree
-- The code may not be what the plan assumes: the behavior comes from somewhere else, the component does not exist, the mechanism conflicts with another part, or a much simpler change does the same.
+- The code may not be what the plan assumes: the behavior comes from somewhere else, the component does not exist, the mechanism conflicts with other code, or a much simpler change does the same.
 - When the difference is small and the plan's intent is clear, follow the intent and say in the report what you did differently.
 - When it changes what should be built, stop and hand back with what you found, rather than building something the planner did not choose.
 

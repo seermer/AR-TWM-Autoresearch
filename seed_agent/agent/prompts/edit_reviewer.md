@@ -10,7 +10,7 @@ You judge the build against the plan, not the plan itself: whether the mechanism
 - `/agent`: the code as the coder handed it back. `/code`: the parent's code. Compare the two to see the change. `/nodes/<node>/`: every finished node's files.
 
 ## How to review
-- Start from the plan: its mechanism and its check. Then read the whole change, not only the parts the report mentions.
+- Start from the plan: its mechanism and its check. Then read the whole change, not only what the report mentions.
 - Read the code around the change too: its callers, and the roles and messages it affects.
 - Run things. Repeat the coder's checks when they are cheap, and run at least one check of your own that the coder did not run. An import that succeeds proves nothing about behavior.
 - Look at the code and what it does, not only at the report.
