@@ -75,6 +75,16 @@ def test_cancel_kills_the_whole_process_group(tmp_path):
     assert not _alive(child), "grandchild survived the cancel -- it would keep holding the GPU"
 
 
+@pytest.mark.parametrize("logged", [True, False])
+def test_a_child_left_running_after_the_leader_exits_is_killed(tmp_path, logged):
+    """A server or worker the leader started and did not stop would keep holding the GPU."""
+    pidfile = tmp_path / "child.pid"
+    proc = run_in_env(ENV, ["bash", "-c", f"sleep 600 >/dev/null 2>&1 & echo $! > {pidfile}; exit 0"], cwd=tmp_path,
+                      log_path=tmp_path / "log" if logged else None)
+    assert proc.returncode == 0 and not proc.cancelled
+    assert not _alive(int(pidfile.read_text()))
+
+
 def _wait_for(path, seconds=60):
     deadline = time.time() + seconds
     while not (path.exists() and path.read_text().strip()) and time.time() < deadline:

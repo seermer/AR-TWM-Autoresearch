@@ -2,9 +2,9 @@
 generate_images.
 
 A backend stages the agent's input files into a kernel-private job dir (never trusting the
-path between check and use), runs one worker per GPU group in the generator's own conda env, and publishes each finished item into the
-caller's staging dir with O_NOFOLLOW moves, so a link the agent plants cannot redirect a
-kernel write. A per-item failure is an item error, not a failed job.
+path between check and use), runs the tool's bridge (bridges/) in its own conda env, and publishes each finished
+item into the caller's staging dir as it is reported, by hard links placed through O_NOFOLLOW directory fds, so a
+link the agent plants cannot redirect a kernel write. A per-item failure is an item error, not a failed job.
 """
 from __future__ import annotations
 
@@ -13,17 +13,16 @@ import shutil
 import threading
 import time
 from pathlib import Path
-from typing import Annotated, Any, Callable
+from types import SimpleNamespace
+from typing import Annotated, Any
 
 from mcp.server.mcpserver import Context
 from PIL import Image
 from pydantic import Field, WithJsonSchema
 
-from ..control import Control
 from ..data.annotation import ACTIONS, PERSPECTIVES
 from ..data.probe import TARGET_ASPECT
 from ..faults import disk_fault
-from ..guards import alert
 from ..isolation import EXCLUDED_PROMPT, copies_held_out, strings
 from ..subproc import file_tail
 from .captioner import clip_host_path, container_path, input_error, stage_clip
@@ -176,20 +175,117 @@ def check_frame_image(cfg, path: Path, size: tuple[int, int], what: str) -> None
                         f"image as it is: make it exactly that size")
 
 
-UNFIT_EXIT = 78             # a worker's exit code for "this machine is too small": not the agent's to fix
-
-
 def split_gpus(gpus: list[int], per_worker: int, workers: int) -> list[list[int]]:
     if workers * per_worker > len(gpus):
         raise ValueError(f"{workers} workers x {per_worker} GPUs do not fit GPUs {gpus}")
     return [gpus[i * per_worker:(i + 1) * per_worker] for i in range(workers)]
 
 
+TAIL = 2000                 # characters of a log an item's error carries
+
+
+def _messages(work: Path, offsets: dict[Path, int]) -> list[dict]:
+    """The complete lines appended to every messages*.jsonl in `work` since the last call."""
+    new = []
+    for path in sorted(work.glob("messages*.jsonl")):
+        with open(path, "rb") as f:
+            f.seek(offsets.get(path, 0))
+            data = f.read()
+        end = data.rfind(b"\n") + 1
+        offsets[path] = offsets.get(path, 0) + end
+        new += [json.loads(line) for line in data[:end].splitlines() if line.strip()]
+    return new
+
+
+def _logs_tail(logs) -> str:
+    return "\n".join(f"--- {p} ---\n{file_tail(Path(p), TAIL)}" for p in ([logs] if isinstance(logs, str) else logs))
+
+
+def run_bridge(backend, job, work: Path, spec: dict, items: list[dict], cancel, report, on_item,
+               done: int = 0, poll=None) -> dict:
+    """Writes `work/job.json` and runs `spec["bridge"]` in `spec["env"]` on the backend's GPUs; each `item` message
+    becomes `on_item(message)`, the item's row. Items with no `item` message get an error row. Returns {"rows":
+    {index: row}, "ready": the first `ready` message or None, "gpu_memory_mib": {"before", "after"},
+    "gpu_memory_released"}. `done`: rows the caller already has, for progress; `poll`: called every 2 s while
+    the bridge runs. If handling a message raises, the bridge is killed and waited for before the error goes on."""
+    total = done + len(items)
+    job_file = {"tool": backend.tool, "args": {k: v for k, v in job.args.items() if k != "items"}, "items": items,
+                "gpus": backend.gpus, "work": str(work), "out": str(work / "out"),
+                "config": getattr(backend, "block", None), **spec.get("job", {})}
+    (work / "job.json").write_text(json.dumps(job_file, ensure_ascii=False, indent=1), encoding="utf-8")
+    before = backend.gpu_memory(backend.gpus)
+    kill, code = threading.Event(), []
+
+    def launch() -> None:
+        try:
+            code.append(run_cancellable(
+                spec["env"], ["python", str(spec["bridge"]), "--job", str(work / "job.json")],
+                cwd=spec.get("cwd", work), log_path=work / "bridge.log",
+                cancel=SimpleNamespace(is_set=lambda: cancel.is_set() or kill.is_set()),
+                extra_env={**spec.get("env_vars", {}), "CUDA_VISIBLE_DEVICES": ",".join(map(str, backend.gpus)),
+                           "CUDA_DEVICE_ORDER": "PCI_BUS_ID"},
+                recorder=backend.recorder, node=job.node, phase=backend.tool))
+        except Exception as exc:                 # noqa: BLE001 -- every item gets it below
+            code.append(f"launch failed: {type(exc).__name__}: {exc}")
+
+    rows: dict[int, dict] = {}
+    started: dict[int, dict] = {}
+    ready, offsets, polled = None, {}, 0.0
+    thread = threading.Thread(target=launch, name=f"ar-{backend.tool}-bridge", daemon=True)
+    thread.start()
+    try:
+        while True:
+            alive = thread.is_alive()
+            for m in _messages(work, offsets):
+                if m["type"] == "ready" and ready is None:
+                    ready = m
+                elif m["type"] == "item_started":
+                    started[m["index"]] = m
+                elif m["type"] == "item" and m["index"] not in rows:
+                    rows[m["index"]] = on_item(m)
+            report({"done": done + len(rows), "total": total})
+            if poll and time.monotonic() - polled >= 2.0:
+                poll()
+                polled = time.monotonic()
+            if not alive:
+                break
+            time.sleep(0.2)
+    except BaseException:
+        kill.set()
+        thread.join()
+        raise
+    thread.join()
+    exit_code = code[0] if code else None
+    world = len(spec.get("job", {}).get("groups") or [])
+    for item in items:
+        index = item["index"]
+        if index in rows:
+            continue
+        if cancel.is_set():
+            rows[index] = {"index": index, "error": "canceled"}
+            continue
+        if index in started:
+            error, logs = "the bridge ended while processing it", started[index]["log"]
+        else:
+            error = "not reached"
+            logs = str(work / "logs" / f"worker{index % world}.log") if world else str(work / "bridge.log")
+        if exit_code != 0:
+            error += f" (bridge exit code {exit_code})"
+        rows[index] = {"index": index, "error": f"{error}; log tail:\n{_logs_tail(logs)}"}
+    timeout = 5.0 if cancel.is_set() else float(backend.cfg.get("captioner.memory_release_timeout_s", 120))
+    after, released = wait_gpu_release(backend.gpu_memory, backend.gpus, before, timeout)
+    if released is False:
+        backend.recorder.event(f"{backend.tool}.gpu_not_released", node=job.node, component="tools",
+                               job_id=job.id, payload={"before": before, "after": after})
+    return {"rows": rows, "ready": ready, "gpu_memory_mib": {"before": before, "after": after},
+            "gpu_memory_released": released}
+
+
 class GpuJob:
     """Base JobQueue backend. Subclasses set name/tool, kind ("rollout" | "annotation" | "image"),
     generator (the name in `derived_from`), file_keys (item fields naming workspace files), frame_keys
     (those of them holding an image that must have the job's size, with `frame_size`),
-    optionally config_key (the kernel.yaml block, `self.block`) and implement check_args, produce and finish. A job takes any number of items, or at most the block's
+    optionally config_key (the kernel.yaml block, `self.block`) and implement check_args, prepare and finish. A job takes any number of items, or at most the block's
     `max_items`."""
     name = tool = kind = generator = description = config_key = ""
     file_keys: tuple[str, ...] = ()
@@ -275,9 +371,8 @@ class GpuJob:
         inp, out = work / "in", work / "out"
         inp.mkdir(parents=True)
         out.mkdir()
-        before = self.gpu_memory(self.gpus)
         results: dict[int, dict] = {}
-        missing: dict[int, str] = {}
+        memory = {"gpu_memory_mib": None, "gpu_memory_released": None}
         try:
             staged = []
             for index, item in enumerate(job.args["items"]):
@@ -285,23 +380,22 @@ class GpuJob:
                     staged.append(self._stage(caller, index, item, inp, job.args))
                 except (PathError, OSError, ToolError) as exc:
                     results[index] = {"index": index, "error": input_error(exc)}
-            (work / "items.json").write_text(json.dumps(staged), encoding="utf-8")
             if staged and not cancel.is_set():
-                produced = self.produce(job, staged, work, out, cancel, report)
-                if produced:
-                    _, missing = produced
+                spec = self.prepare(job, staged, work)
+                results.update(spec.get("rows", {}))
+                send = [item for item in staged if item["index"] not in results]
+                if send:
+                    by_index = {item["index"]: item for item in send}
+                    ran = run_bridge(self, job, work, spec, send, cancel, report,
+                                     lambda m: self._item(caller, job, by_index[m["index"]], out, m), done=len(results))
+                    results.update(ran["rows"])
+                    memory = {k: ran[k] for k in memory}
             for item in staged:
-                results[item["index"]] = self._collect(caller, job, item, out, missing)
+                results.setdefault(item["index"], {"index": item["index"], "error": "canceled"})
         finally:
             shutil.rmtree(inp, ignore_errors=True)
             shutil.rmtree(out, ignore_errors=True)
-        timeout = 5.0 if cancel.is_set() else float(self.cfg.get("captioner.memory_release_timeout_s", 120))
-        after, released = wait_gpu_release(self.gpu_memory, self.gpus, before, timeout)
-        if released is False:
-            self.recorder.event(f"{self.tool}.gpu_not_released", node=job.node, component="tools",
-                                job_id=job.id, payload={"before": before, "after": after})
-        return {"items": [results[i] for i in sorted(results)],
-                "gpu_memory_mib": {"before": before, "after": after}, "gpu_memory_released": released}
+        return {"items": [results[i] for i in sorted(results)], **memory}
 
     def _stage(self, caller, index: int, item: dict, inp: Path, args: dict) -> dict:
         """The item with its files copied into `inp`. The agent can change a file after submit, so a
@@ -324,52 +418,51 @@ class GpuJob:
                 staged["keyframes"].append({**k, "image": str(dst)})
         return staged
 
-    def produce(self, job, items: list[dict], work: Path, out: Path, cancel, report):
-        """Run the workers that fill `out` for `items` (typically via `run_workers`, whose
-        result is returned directly). Raise to fail the whole job."""
+    def prepare(self, job, items: list[dict], work: Path) -> dict:
+        """The bridge for `items` (staged): {"bridge": script, "env": its conda env, "cwd"?: its working folder
+        (default `work`), "env_vars"?: extra environment, "job"?: the tool's part of the job file, "rows"?: {index:
+        row} of items whose input is bad, left out of the job}. Raise to fail the whole job."""
         raise NotImplementedError
 
-    def finish(self, job, item: dict, out: Path) -> dict:
-        """Post-process one finished item; return {"video": Path, "annotation"?: Path, "pose"?: Path,
-        plus any extra JSON-able fields}. Raise to report an item error."""
+    def finish(self, job, item: dict, outputs: dict[str, Path], info: dict, out: Path) -> dict:
+        """Post-process one finished item from the bridge's `outputs` and `info` (files it makes itself go into
+        `out`); return {"video": Path, "annotation"?: Path, "pose"?: Path, plus any extra JSON-able fields}. Raise
+        to report an item error."""
         raise NotImplementedError
 
-    def _collect(self, caller, job, item: dict, out: Path, missing: dict[int, str]) -> dict:
+    def _item(self, caller, job, item: dict, out: Path, message: dict) -> dict:
+        """The row of an `item` message: its error, or its outputs finished and published by hard link."""
         index = item["index"]
-        status_path = out / f"{index}.json"
-        if not status_path.exists():
-            return {"index": index, "error": missing.get(index, "no output (canceled or not reached)")}
+        if not message["ok"]:
+            return {"index": index, "error": message["error"]}
+        info = message.get("info") or {}
         try:
-            status = json.loads(status_path.read_text(encoding="utf-8"))
-            if not isinstance(status, dict):
-                raise ValueError(f"status is a {type(status).__name__}, not an object")
-            if not status.get("ok"):
-                return {"index": index, "error": status.get("error", "failed")}
-            files = self.finish(job, item, out)
+            files = self.finish(job, item, {k: Path(v) for k, v in message["outputs"].items()}, info, out)
             published = {}
             for role in ("video", "annotation", "pose", "image", "commanded_camera"):
                 if files.get(role):
                     src = Path(files[role])
+                    if not src.resolve().is_relative_to(out.resolve()):    # only the job's own files get a link
+                        raise ValueError(f"{role} {src} is not under the job's output folder")
                     # metadata files get their role in the name, so they never pass for a pose
                     name = "" if role in ("video", "pose", "image") else f".{role}"
                     rel = f"{self.kind}s/{job.id}/{index}{name}{src.suffix}"
-                    publish_file(src, caller.staging_host, rel)
+                    publish_file(src, caller.staging_host, rel, link=True)
                     published[role] = str(STAGING / rel)
-        except Exception as exc:            # noqa: BLE001 -- a bad/truncated status or a finish()
-            # bug must be this item's error, not a job failure that orphans the others.
+        except Exception as exc:            # noqa: BLE001 -- a finish() bug must be this item's error,
+            # not a job failure that orphans the others.
             if disk_fault(exc):                 # the machine's: the phase stops
                 raise
             return {"index": index, "error": f"{type(exc).__name__}: {exc}"}
         extra = {k: v for k, v in files.items() if k not in ("video", "annotation", "pose", "commanded_camera")}
-        worker = {k: v for k, v in status.items() if k != "ok"}
         if self.kind == "annotation":
             return {"index": index, "video": job.args["items"][index]["video"], **published, **extra,
-                    "worker": worker}
+                    "worker": info}
         if self.kind == "image":
             return {"index": index, "image": published["image"], "prompt": item.get("prompt"),
-                    "seed": item.get("seed"), "generator": self.generator_name(job), "worker": worker}
+                    "seed": item.get("seed"), "generator": self.generator_name(job), "worker": info}
         candidate = {**published, **extra, "derived_from": {"kind": "model", "name": self.generator_name(job)}}
-        return {"index": index, "candidate": candidate, "worker": worker}
+        return {"index": index, "candidate": candidate, "worker": info}
 
     def generator_name(self, job) -> str:
         return self.generator
@@ -378,64 +471,6 @@ class GpuJob:
         path = out / f"{item['index']}.annotation.json"
         path.write_text(json.dumps(annotation, ensure_ascii=False, indent=1), encoding="utf-8")
         return path
-
-    # ---- workers ----
-    def run_workers(self, env: str, argv_for: Callable[[int, int], list[str]], groups: list[list[int]], *,
-                    job, work: Path, out: Path, total: int, cancel, report, cwd: Path | None = None,
-                    extra_env: dict | None = None,
-                    done: Callable[[], int] | None = None) -> tuple[list[int | str], dict[int, str]]:
-        """One worker per GPU group, in parallel; each handles items with index % world == rank.
-        A cancel kills every worker's process group. An item whose worker died without writing its status becomes an
-        item error carrying the worker's exit code and log tail.
-
-        Returns (codes, missing): `missing` maps such an item's index to that error message, for
-        `run` to pass into `_collect`. The staged items' indices are read back from
-        `work/items.json` (items that failed staging never reach here); `total` is only the
-        progress-report denominator, and `done` counts the finished items of a worker that does not
-        write `out/<index>.json` itself.
-        """
-        done = done or (lambda: len([p for p in out.glob("*.json") if p.stem.isdigit()]))
-        if not groups:
-            raise ValueError("run_workers: no GPU groups (check the GPU list, gpus_per_worker and workers)")
-        indices = [item["index"] for item in json.loads((work / "items.json").read_text(encoding="utf-8"))]
-        codes: list[int | str | None] = [None] * len(groups)
-
-        def one(rank: int, group: list[int]) -> None:
-            try:
-                codes[rank] = run_cancellable(
-                    env, argv_for(rank, len(groups)), cwd=cwd or work, cancel=cancel,
-                    extra_env={**(extra_env or {}), "CUDA_VISIBLE_DEVICES": ",".join(map(str, group)),
-                               "CUDA_DEVICE_ORDER": "PCI_BUS_ID"},
-                    log_path=work / f"worker{rank}.log", recorder=self.recorder, node=job.node, phase=self.tool)
-            except Exception as exc:                 # noqa: BLE001 -- reported per item below
-                codes[rank] = f"launch failed: {type(exc).__name__}: {exc}"
-
-        threads = [threading.Thread(target=one, args=(r, g), name=f"ar-{self.tool}-w{r}", daemon=True)
-                   for r, g in enumerate(groups)]
-        for t in threads:
-            t.start()
-        while any(t.is_alive() for t in threads):
-            report({"done": done(), "total": total})
-            time.sleep(0.2)             # short poll so a finished job returns promptly
-        for t in threads:
-            t.join()
-        report({"done": done(), "total": total})
-        if UNFIT_EXIT in codes:
-            log = work / f"worker{codes.index(UNFIT_EXIT)}.log"
-            message = f"{self.tool} does not fit this machine; the run is stopping"
-            alert(self.recorder, "tool_does_not_fit", f"{message} (see {log})")
-            Control(self.run_dir).request_stop()
-            raise RuntimeError(f"{message}:\n{file_tail(log, 2000)}")
-        world = len(groups)
-        missing: dict[int, str] = {}
-        if cancel.is_set():
-            return codes, missing           # the cancel killed the workers: _collect's "canceled or not reached"
-        for index in indices:
-            code = codes[index % world]
-            if code not in (0, None) and not (out / f"{index}.json").exists():
-                missing[index] = (f"worker {index % world} failed (exit code {code}); log tail:\n"
-                                  f"{file_tail(work / f'worker{index % world}.log', 2000)}")
-        return codes, missing
 
 
 JOB_NOTE = (" One call is one job: send every item in it, however many (jobs run one at a time, so many small "

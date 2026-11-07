@@ -102,7 +102,7 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
                poll_s: float = 1.0) -> subprocess.CompletedProcess:
     """Run `args` inside conda env `env`, in its own session.
 
-    `cancel` and any exception kill the WHOLE process group:
+    `cancel`, any exception and the leader's exit kill the WHOLE process group:
     killing only `conda run` orphaned torchrun ranks that kept holding GPUs. With `log_path`,
     output streams to that file and comes back as stdout. The result's `.cancelled` tells a
     cancel apart from an exit code that happens to match. With `AR_PGID_DIR` set, the group
@@ -140,6 +140,7 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
     ended = False           # the wait or the kill sequence finished: the group is gone
     try:
         stdout, stderr, cancelled = _wait(proc, cancel, poll_s)
+        kill_group(proc.pid)       # what the leader left running: its group outlives it
         ended = True
     except BaseException:
         _kill_group(proc)          # e.g. KeyboardInterrupt: never leave the job running
@@ -202,11 +203,7 @@ def kill_group(pgid: int, reap=None) -> bool:
 
 
 def _kill_group(proc: subprocess.Popen) -> None:
-    try:
-        pgid = os.getpgid(proc.pid)
-    except ProcessLookupError:
-        return
-    kill_group(pgid, reap=proc.poll)
+    kill_group(proc.pid, reap=proc.poll)       # start_new_session: pgid == pid, also once the leader is reaped
 
 
 def _error(recorder, node, phase, message, stdout, stderr, log_path) -> None:
