@@ -28,7 +28,7 @@ from ar_kernel.tools.server import ToolError
 from tests.conftest import make_mp4
 
 REAL = KernelConfig.load()
-FAKE = Path(__file__).parent / "fixtures" / "fake_gen_worker.py"
+FAKE_WBENCH = Path(__file__).parent / "fixtures" / "fake_wbench.py"
 FAKE_BRIDGE = Path(__file__).parent / "fixtures" / "fake_bridge.py"
 
 
@@ -139,10 +139,10 @@ def _flat(d, prefix=()):
 def test_render_config_has_the_listed_fields(tmp_path):
     c = render_config(REAL, indices=[0, 2], work=tmp_path, text_cache=tmp_path / "te")
     mode = c["validation"]["modes"]["wbench"]
-    assert mode["dataset"]["root"] == str(tmp_path / "data")
+    assert mode["dataset"]["root"] == str(tmp_path / "in" / "data")
     assert mode["dataset"]["case_ids"] == ["0", "2"]
     assert mode["dataset"]["include_non_navigation"] is True
-    assert mode["wbench_output_dir"] == str(tmp_path / "videos")
+    assert mode["wbench_output_dir"] == str(tmp_path / "out" / "videos")
     assert mode["wbench_chunks_per_turn"] * 32 == rollouts.TURN_FRAMES and mode["wbench_keep_last_frame"] is True
     assert c["run"]["output_dir"] == str(tmp_path / "rollout") and c["run"]["log_dir"] == str(tmp_path / "logs")
     assert "per_sample_seed" not in c["validation"] and c["validation"]["save_joystick"] is False
@@ -167,10 +167,10 @@ def test_render_config_uses_the_ar_teacher(tmp_path):
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    """The real AlayaWorldBackend: produce launches the fake worker in place of the prompt
-    precache and run_wbench.py (wbench mode: it writes the measured output layout)."""
-    monkeypatch.setattr(rollouts, "PRECACHE", [str(FAKE), "--precache"])
-    monkeypatch.setattr(rollouts, "RUN_WBENCH", [str(FAKE)])
+    """The real AlayaWorldBackend and its bridge, with a fake prompt precache and run_wbench.py (they write the
+    measured output layout)."""
+    monkeypatch.setattr(rollouts, "PRECACHE", [str(FAKE_WBENCH), "--precache"])
+    monkeypatch.setattr(rollouts, "RUN_WBENCH", [str(FAKE_WBENCH)])
     rec = Recorder(tmp_path / "run")
     reg = TokenRegistry(rec)
     q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
@@ -242,14 +242,17 @@ def test_limits_come_from_the_generator_config_block(tmp_path):
 # ---- finish: the whole clip, the commanded camera, the annotation ----
 
 def _render_output(out, i, *, turns, extra=0):
-    """What produce leaves in out/ for one case: the input frame, then 96 frames per turn."""
+    """What the render leaves for one case: the input frame, then 96 frames per turn."""
     frames = 1 + rollouts.TURN_FRAMES * turns + extra
     make_mp4(out / f"{i}.mp4", seconds=frames / 24, fps=24, width=960, height=544)
     c2w = np.tile(np.eye(4), (frames, 1, 1))
     c2w[:, 0, 3] = 3.0 + np.arange(frames) * 0.02
     np.savez(out / f"{i}.camera.npz", cam_c2w=c2w.astype(np.float32))
-    (out / f"{i}.json").write_text(json.dumps({"ok": True}))
     return frames
+
+
+def _outputs(out, i=0):
+    return {"video": out / f"{i}.mp4", "camera": out / f"{i}.camera.npz"}
 
 
 def _job(**args):
@@ -268,7 +271,7 @@ def test_finish_publishes_the_whole_clip_with_exact_turn_starts(tmp_path):
         {"action": "W", "perspective": TP}, {"action": "stop", "event": "A goat climbs onto the rock.", "perspective": TP},
         {"action": "stop", "perspective": FP}])}
     frames = _render_output(out, 0, turns=3)
-    res = _backend(tmp_path).finish(_job(), item, out)
+    res = _backend(tmp_path).finish(_job(), item, _outputs(out), {}, out)
     assert res["video"] == out / "0.mp4" and res["frames"] == frames == 289       # nothing is trimmed
     assert res["actions"] == ["W", "stop", "stop"]
     assert json.loads(Path(res["annotation"]).read_text()) == {
@@ -285,7 +288,7 @@ def test_finish_refuses_a_frame_count_off_the_turn_layout(tmp_path):
     out.mkdir()
     _render_output(out, 0, turns=2, extra=3)
     with pytest.raises(ValueError, match="196 frames for 2 turns of 96"):
-        _backend(tmp_path).finish(_job(), {"index": 0, **first_person()}, out)
+        _backend(tmp_path).finish(_job(), {"index": 0, **first_person()}, _outputs(out), {}, out)
 
 
 def test_finish_refuses_a_camera_path_of_the_wrong_length(tmp_path):
@@ -294,7 +297,7 @@ def test_finish_refuses_a_camera_path_of_the_wrong_length(tmp_path):
     frames = _render_output(out, 0, turns=2)
     np.savez(out / "0.camera.npz", cam_c2w=np.tile(np.eye(4, dtype=np.float32), (frames - 1, 1, 1)))
     with pytest.raises(ValueError, match="camera path has 192 frames, the video 193"):
-        _backend(tmp_path).finish(_job(), {"index": 0, **first_person()}, out)
+        _backend(tmp_path).finish(_job(), {"index": 0, **first_person()}, _outputs(out), {}, out)
 
 
 def test_finished_candidate_passes_the_real_ingestor(tmp_path):
@@ -304,7 +307,7 @@ def test_finished_candidate_passes_the_real_ingestor(tmp_path):
     out = run_dir / "staging" / "rollouts"
     out.mkdir(parents=True)
     _render_output(out, 0, turns=2)
-    res = _backend(tmp_path).finish(_job(), {"index": 0, **first_person()}, out)
+    res = _backend(tmp_path).finish(_job(), {"index": 0, **first_person()}, _outputs(out), {}, out)
     pose = write_poses(out / "vigeo.npz", n_frames=res["frames"], width=960, height=544)
     ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
     [r] = ing.ingest([Candidate(video=Path(res["video"]), annotation=Path(res["annotation"]), pose=pose,
@@ -316,7 +319,7 @@ def test_finished_candidate_passes_the_real_ingestor(tmp_path):
                                    {"time_range_s": [97 / 24, 193 / 24], "prompt": f"{base} It starts to rain heavily."}]
 
 
-# ---- the real produce/run_workers/_collect with the fake worker ----
+# ---- the real backend and bridge with a fake precache and render ----
 
 def run_job(q, caller, items, **params):
     out = q.wait(caller, submit(q, caller, items, **params)["job_id"], 120)
@@ -352,7 +355,11 @@ def test_produce_renders_and_publishes_candidates(env):
     assert pre["gpus"] == "0,1" and pre["gemma"] and "--device-map" in pre["argv"]
     cfg = yaml.safe_load((work / "render_config.yaml").read_text())
     assert cfg["runtime"]["text_embed_cache_dir"] == str(run_dir / "cache" / "text_embed")
-    assert not (work / "data").exists() and not (work / "videos").exists()
+    assert not (work / "in").exists() and not (work / "out").exists()
+    started = [m for m in (json.loads(line) for line in (work / "messages.jsonl").read_text().splitlines())
+               if m["type"] == "item_started"]
+    assert [m["index"] for m in started] == [0, 1] and "[Validation] case_start case=1" in Path(
+        started[1]["log"]).read_text()
 
 
 def test_a_hung_precache_runs_until_the_job_is_cancelled(env):
@@ -371,8 +378,23 @@ def test_a_hung_precache_runs_until_the_job_is_cancelled(env):
 def test_a_case_without_video_fails_alone(env):
     q, caller, staging, _ = env
     _, by = run_job(q, caller, [first_person(scene_prompt="NO_VIDEO here"), first_person()])
-    assert by[0]["error"] == "no video rendered"
+    assert by[0]["error"].startswith("no video rendered (run_wbench exit 0); log tail:\n")
     assert "candidate" in by[1]
+
+
+def test_a_failed_render_gives_its_exit_code_and_log_to_the_cases_it_did_not_render(env):
+    q, caller, staging, _ = env
+    _, by = run_job(q, caller, [first_person(scene_prompt="WBENCH_FAIL NO_VIDEO here"), first_person()])
+    assert by[0]["error"].startswith("no video rendered (run_wbench exit 1); log tail:")
+    assert "generation FAILED" in by[0]["error"] and "candidate" in by[1]
+
+
+def test_a_failed_precache_fails_every_item_with_its_log(env):
+    q, caller, staging, _ = env
+    _, by = run_job(q, caller, [first_person(scene_prompt="PRECACHE_FAIL street"), first_person()])
+    for row in by.values():
+        assert row["error"].startswith("not reached (bridge exit code 1); log tail:")
+        assert "prompt precache failed (exit 4)" in row["error"] and "Gemma did not load" in row["error"]
 
 
 def test_frame_images_of_another_size_are_refused_at_submit_with_their_item_and_check(env):

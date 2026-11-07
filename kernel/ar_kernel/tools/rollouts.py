@@ -14,7 +14,6 @@ annotate_camera (ViGeo) on the clip for the pose it ingests with.
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -27,17 +26,17 @@ from ..archive.nodes import NodeStore
 from ..data.annotation import ACTIONS, FPS, PERSPECTIVES, SWITCH
 from ..data.ingest import SIZE
 from ..data.probe import aspect_ok, probe_video
-from ..subproc import file_tail, free_port
+from ..subproc import free_port
 from .gpu_jobs import (IMAGE_EXTS, GpuJob, check_item_seed, check_keyframes, check_listed_size, is_int, sizes_text,
                        split_gpus)
-from .jobs import run_cancellable
 from .server import ToolError
 
+ALAYAWORLD_BRIDGE = Path(__file__).resolve().parents[1] / "bridges" / "alayaworld_render.py"
 WAN22_BRIDGE = Path(__file__).resolve().parents[1] / "bridges" / "wan22_generate.py"
 LTX25_BRIDGE = Path(__file__).resolve().parents[1] / "bridges" / "ltx25_generate.py"
 
-# The launches, as argv after "python" (run in the generator env, cwd WorldModel). The tests
-# swap both for the fake worker.
+# WorldModel's scripts the bridge runs, as argv after "python" (in the generator env, cwd WorldModel). The tests
+# swap both for a fake.
 PRECACHE = ["-m", "scripts.tools.precache_wbench_text_embeds"]
 RUN_WBENCH = ["scripts/tools/run_wbench.py"]
 
@@ -130,8 +129,8 @@ def render_config(cfg, *, indices: list[int], work: Path,
     c["runtime"]["text_embed_cache_dir"] = str(text_cache)
     c["validation"]["save_joystick"] = False
     mode = c["validation"]["modes"]["wbench"]
-    mode["dataset"].update(root=str(work / "data"), case_ids=[str(i) for i in indices])
-    mode["wbench_output_dir"] = str(work / "videos")
+    mode["dataset"].update(root=str(work / "in" / "data"), case_ids=[str(i) for i in indices])
+    mode["wbench_output_dir"] = str(work / "out" / "videos")
     mode["wbench_keep_last_frame"] = True      # every turn is TURN_FRAMES long, the last one too
     for (section, key), value in AR30.items():
         c[section][key] = value
@@ -241,11 +240,11 @@ class AlayaWorldBackend(GpuJob):
         node = job.args.get("node")
         return "alayaworld-ar30" + (f"@{node}" if node else "")
 
-    def produce(self, job, items, work, out, cancel, report):
-        data = work / "data"
+    def prepare(self, job, items, work):
+        data = work / "in" / "data"              # removed with in/ after the job
         for sub in ("cases", "images", "masks"):
             (data / sub).mkdir(parents=True, exist_ok=True)
-        indices = []
+        indices, rows = [], {}
         for item in items:
             i = item["index"]
             try:
@@ -260,72 +259,46 @@ class AlayaWorldBackend(GpuJob):
             except Exception as exc:            # noqa: BLE001 -- a bad image/mask (e.g. PIL raising
                 # DecompressionBombError, SyntaxError or ValueError on a broken file) must be this
                 # item's error, not a job failure that orphans the others.
-                (out / f"{i}.json").write_text(json.dumps(
-                    {"ok": False, "error": f"input: {type(exc).__name__}: {exc}"}))
+                rows[i] = {"index": i, "error": f"input: {type(exc).__name__}: {exc}"}
                 continue
             (data / "cases" / f"case_{i}.json").write_text(
                 json.dumps(case_json(i, item, image, mask), ensure_ascii=False, indent=1), encoding="utf-8")
             indices.append(i)
         if not indices:
-            return None
-        env, wm = self.block["env"], self.cfg.worldmodel
-        try:
-            fine_tune = {}
-            if job.args.get("node"):
-                node = self._node(job.args["node"])
-                checkpoint = self.run_dir / node["checkpoint_path"]
-                fine_tune = dict(node_lora=checkpoint, node_rank=node["lora_rank"],
-                                 history_encoder=checkpoint / "history_encoder.pt")
-            config = work / "render_config.yaml"
-            config.write_text(yaml.safe_dump(render_config(
-                self.cfg, indices=indices, work=work,
-                text_cache=self.run_dir / "cache" / "text_embed", **fine_tune), sort_keys=True), encoding="utf-8")
+            return {"rows": rows}
+        wm = self.cfg.worldmodel
+        fine_tune = {}
+        if job.args.get("node"):
+            node = self._node(job.args["node"])
+            checkpoint = self.run_dir / node["checkpoint_path"]
+            fine_tune = dict(node_lora=checkpoint, node_rank=node["lora_rank"],
+                             history_encoder=checkpoint / "history_encoder.pt")
+        config = work / "render_config.yaml"
+        config.write_text(yaml.safe_dump(render_config(
+            self.cfg, indices=indices, work=work,
+            text_cache=self.run_dir / "cache" / "text_embed", **fine_tune), sort_keys=True), encoding="utf-8")
+        return {"bridge": ALAYAWORLD_BRIDGE, "env": self.block["env"], "cwd": wm, "rows": rows, "job": {
+            "videos": str(work / "out" / "videos"),
             # The eval renders with the text encoder off (a 24 GB card cannot hold Gemma next to the
             # DiT), so every prompt of these cases is encoded first, into the run's prompt cache.
-            code = run_cancellable(
-                env, ["python", *PRECACHE, "--config", str(config), "--device-map", "auto"], cwd=wm,
-                cancel=cancel,
-                log_path=work / "precache.log", recorder=self.recorder, node=job.node,
-                phase=self.tool, extra_env={"CUDA_VISIBLE_DEVICES": ",".join(map(str, self.gpus[:2])),
-                                            "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
-                                            "ALAYA_GEMMA_MAX_MEMORY": "0=13GiB,1=13GiB"})
-            if cancel.is_set():
-                return None
-            if code != 0:
-                raise RuntimeError(f"prompt precache failed (exit {code}):\n"
-                                   f"{file_tail(work / 'precache.log', 2000)}")
-            videos = work / "videos"
+            "precache": {"argv": ["python", *PRECACHE, "--config", str(config), "--device-map", "auto"],
+                         "cwd": str(wm), "env": {"CUDA_VISIBLE_DEVICES": ",".join(map(str, self.gpus[:2])),
+                                                 "ALAYA_GEMMA_MAX_MEMORY": "0=13GiB,1=13GiB"}},
             # run_wbench.py sets CUDA_VISIBLE_DEVICES from --gpus itself (PCI order is inherited).
-            codes, missing = self.run_workers(env, lambda r, w: [
-                "python", *RUN_WBENCH, "--config", str(config), "--gpus", ",".join(map(str, self.gpus)),
-                "--cases", ",".join(map(str, indices)), "--master-port", str(free_port())],
-                [self.gpus], job=job, work=work, out=out, total=len(items), cancel=cancel, report=report, cwd=wm,
-                done=lambda: len(items) - len(indices) + len(list(videos.glob("case_*_combined.json"))))
-            for i in indices:
-                src = videos / f"case_{i}_combined"
-                if src.with_suffix(".mp4").exists() and src.with_suffix(".json").exists():
-                    shutil.move(src.with_suffix(".mp4"), out / f"{i}.mp4")
-                    camera = src.with_name(src.name + "_camera.npz")
-                    if camera.exists():
-                        shutil.move(camera, out / f"{i}.camera.npz")
-                    (out / f"{i}.json").write_text(json.dumps({"ok": True}))
-                elif codes[0] == 0:
-                    (out / f"{i}.json").write_text(json.dumps({"ok": False, "error": "no video rendered"}))
-            return codes, missing
-        finally:
-            shutil.rmtree(data, ignore_errors=True)
-            shutil.rmtree(work / "videos", ignore_errors=True)
+            "render": {"argv": ["python", *RUN_WBENCH, "--config", str(config), "--gpus", ",".join(map(str, self.gpus)),
+                                "--cases", ",".join(map(str, indices)), "--master-port", str(free_port())],
+                       "cwd": str(wm), "env": {}}}}
 
-    def finish(self, job, item, out):
+    def finish(self, job, item, outputs, info, out):
         i = item["index"]
-        video = out / f"{i}.mp4"
+        video = outputs["video"]
         info = probe_video(video)
         check_published(info)
         turns = len(item["turns"])
         # mp4 frame 0 is the input frame, so turn k starts on frame 1 + TURN_FRAMES * k (the first on 0)
         if info.frames != 1 + TURN_FRAMES * turns:
             raise ValueError(f"{info.frames} frames for {turns} turns of {TURN_FRAMES}")
-        with np.load(out / f"{i}.camera.npz") as z:
+        with np.load(outputs["camera"]) as z:
             poses = z["cam_c2w"].astype(np.float64)
         if len(poses) != info.frames:
             raise ValueError(f"camera path has {len(poses)} frames, the video {info.frames}")
