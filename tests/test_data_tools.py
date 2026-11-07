@@ -149,10 +149,11 @@ def test_query_returns_the_archive_wide_pool_with_what_each_clip_was_derived_fro
 
 
 def test_commit_returns_id_and_per_dataset_stats(env):
-    tools, caller, results, _ = env
+    tools, caller, results, run = env
+    made = open_db(run).execute("SELECT COUNT(*) FROM data_commits").fetchone()[0]     # by earlier tests
     out = tools.commit(caller, {"cam": {"weight": 1.0, "clips": [r["clip_id"] for r in results]}},
                        "four clips")
-    assert out["commit_id"] == "dc1" and out["new_clips"] == 4
+    assert out["commit_id"] == f"dc{made + 1}" and out["new_clips"] == 4
     stats = out["datasets"]["cam"]
     assert stats.pop("sources") == {"synthetic_method:unit test fixture": 4}
     assert stats == {"weight": 1.0, "clips": 4}

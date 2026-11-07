@@ -59,9 +59,9 @@ def _layout(names: list[str]) -> str:
             "; extensions: " + ", ".join(f"{k}: {v}" for k, v in exts.most_common(12)))
 
 
-def move_into(src: Path, base: Path, rel: str) -> None:
-    """Move `src` to base/rel without following any link under `base`: each directory is opened
-    with O_NOFOLLOW and the move is relative to that directory's fd, so a link the agent plants
+def _place(place, base: Path, rel: str) -> None:
+    """`place(name, dir_fd)` in base/rel's folder without following any link under `base`: each directory is
+    opened with O_NOFOLLOW and the file is placed relative to that directory's fd, so a link the agent plants
     or swaps in (it owns staging, and its container runs meanwhile) raises instead of redirecting."""
     *dirs, name = PurePosixPath(rel).parts
     fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
@@ -74,16 +74,26 @@ def move_into(src: Path, base: Path, rel: str) -> None:
             sub = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             os.close(fd)
             fd = sub
-        os.replace(src, name, dst_dir_fd=fd)
+        place(name, fd)
     finally:
         os.close(fd)
 
 
-def publish_file(src: Path, staging: Path, rel: str, folder: str = "files") -> None:
-    """move_into staging, after recording `src` as a kernel output."""
+def move_into(src: Path, base: Path, rel: str) -> None:
+    """Move `src` to base/rel (see `_place`)."""
+    _place(lambda name, fd: os.replace(src, name, dst_dir_fd=fd), base, rel)
+
+
+def link_into(src: Path, base: Path, rel: str) -> None:
+    """Hard-link `src` as base/rel (see `_place`); `src` keeps its own name."""
+    _place(lambda name, fd: os.link(src, name, dst_dir_fd=fd, follow_symlinks=False), base, rel)
+
+
+def publish_file(src: Path, staging: Path, rel: str, folder: str = "files", link: bool = False) -> None:
+    """move_into (or with `link`, link_into) staging, after recording `src` as a kernel output."""
     with open(src, "rb") as handle:
         files.record(handle, direction="out", path=str(STAGING / rel), folder=folder)
-    move_into(src, staging, rel)
+    (link_into if link else move_into)(src, staging, rel)
 
 
 class HfTools:

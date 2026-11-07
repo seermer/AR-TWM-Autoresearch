@@ -8,7 +8,8 @@ gpus:
   num_gpus: 4                     # the run takes the first num_gpus free cards; a positive multiple of min_count
   min_count: 4
   # Each GPU tool's block has `min_total_gpu_gib`: the memory it needs across the run's cards, an
-  # estimate of 96 (4 x 24 GB) or 48 (2 x 24 GB). A run does not start while an enabled tool needs more.
+  # estimate of 96 (4 x 24 GB) or 48 (2 x 24 GB), and `min_gpu_gib`: the memory each card needs (24: every
+  # tool was measured on 24 GB cards only). A run does not start while an enabled tool needs more.
   free_below_mib: 512            # a kernel GPU job an agent asked for is refused while a GPU holds more than
                                  # this (the agent sandbox sees the same GPUs; a display server uses less)
 host:                            # host RAM, checked once at start (`ar run`, `ar doctor`); nothing scales at run time
@@ -89,6 +90,7 @@ ask:                             # the ask tool: one stateless question to the a
 captioner:                       # caption_videos GPU job: a local vLLM server, never the paid agent model
   env: vllm             # conda env with vLLM (0.32.0), lives in .envs/vllm
   min_total_gpu_gib: 96          # the launch below was tuned on 4 x 24 GB
+  min_gpu_gib: 24
   model: Qwen/Qwen3.8-27B-FP8    # resolved by id through the HF cache (HF_HUB_OFFLINE=1: never downloads)
   tensor_parallel: 4             # vLLM shards this model across powers of two only; data parallel fills the GPUs
   # vLLM test-runs the vision encoder at startup on min(max_num_batched_tokens / 12288, max_num_seqs)
@@ -128,6 +130,7 @@ annotate:                         # annotate_camera GPU job
   enabled: true
   env: alayaworld
   min_total_gpu_gib: 48
+  min_gpu_gib: 24
   workers: 4                      # one GPU each
   repo: third_party/ViGeo         # relative to paths.worldmodel
   checkpoint: third_party/ViGeo/checkpoints/ViGeo1.1
@@ -136,6 +139,7 @@ images:                           # generate_images GPU job (Z-Image-Turbo first
   enabled: true                   # verified: 8 prompts on 4 GPUs, gpu_memory_released true
   env: .envs/gen-zimage           # a conda-prefix env inside the repo
   min_total_gpu_gib: 48
+  min_gpu_gib: 24
   workers: 4                      # one GPU each
   weights: weights/z-image-turbo
   revision: f332072aa78be7aecdf3ee76d5c247082da564a6
@@ -147,12 +151,14 @@ generators:                       # rollout_* GPU jobs; switched on only after a
   alayaworld:
     env: alayaworld
     min_total_gpu_gib: 48         # the prompt precache spreads Gemma over two cards
+    min_gpu_gib: 24
     # Rendered with the 30-step AR teacher (the DMD LoRA off). Clips carry no pose; agents run annotate_camera.
     enabled: true
     max_turns: 9
   wan22:
     env: .envs/gen-wan22           # a conda-prefix env inside the repo
     min_total_gpu_gib: 48
+    min_gpu_gib: 24
     repo: third_party/Wan2.2      # relative to the AutoResearcher repo; gitignored
     commit: 1ea34ff48f87168174e12956e200b1d908b1c5ff   # pinned; the backend refuses to run off this commit
     weights: weights/wan2.2-ti2v-5b
@@ -168,6 +174,7 @@ generators:                       # rollout_* GPU jobs; switched on only after a
   ltx25:
     env: .envs/gen-ltx25           # a conda-prefix env inside the repo
     min_total_gpu_gib: 48
+    min_gpu_gib: 24
     repo: third_party/LTX-2       # relative to the AutoResearcher repo; gitignored
     commit: a95ab856bf29407b6b066ede0abe1846050db56c   # pinned; the backend refuses to run off this commit
     weights: weights/ltx-2.5
@@ -192,6 +199,7 @@ generators:                       # rollout_* GPU jobs; switched on only after a
                                     # for all ranks, sequence parallel, SageAttention, parallel VAE decode
     attn_type: sage_attn2           # the DiT's attention; replaces attn_type in config
     min_total_gpu_gib: 96           # measured on 4 x 24 GB only
+    min_gpu_gib: 24
     weights: weights/minimax-h3     # MiniMaxAI/MiniMax-H3, diffusers layout, fl2va/t2va partition
     revision: 42ed227ee7df40d41602854ae760620d6eb651fe
     enabled: true

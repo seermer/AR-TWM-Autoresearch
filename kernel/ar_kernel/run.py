@@ -152,7 +152,8 @@ def root_key(ctx: RunContext, cfg: KernelConfig) -> str:
               "judge_settings": cfg.get("eval.judge"), "vp_weights": cfg.get("eval.vp_weights"),
               # a local judge is the captioner's server: how it is served decides what it sees
               "local_judge": {k: v for k, v in cfg.get("captioner").items()
-                              if not k.endswith("timeout_s") and k != "concurrent_requests"} if local else None,
+                              if not k.endswith("timeout_s") and k not in ("concurrent_requests", "min_gpu_gib")}
+                             if local else None,
               "eval_code": eval_code,
               "render_overrides": cfg.get("eval.render_overrides"),
               "versions": {k: ctx.versions.get(k) for k in ("worldmodel_sha", "wbench_sha")}}

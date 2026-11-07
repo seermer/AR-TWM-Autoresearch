@@ -23,7 +23,7 @@ from tests.conftest import make_mp4
 REAL = KernelConfig.load()
 
 
-FAKE = Path(__file__).parent / "fixtures" / "fake_gen_worker.py"
+FAKE = Path(__file__).parent / "fixtures" / "fake_bridge.py"
 
 
 def small_cfg(max_frames=60, env="alayaworld"):
@@ -34,8 +34,8 @@ def small_cfg(max_frames=60, env="alayaworld"):
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    """The real AnnotateBackend.produce/run_workers, with the ViGeo bridge swapped for the fake
-    worker (annotate mode: it honors --max-frames and echoes --repo/--checkpoint)."""
+    """The real AnnotateBackend, with the ViGeo bridge swapped for the fake bridge (it honors config.max_frames
+    and echoes the repo and checkpoint paths)."""
     monkeypatch.setattr(annotate, "BRIDGE", FAKE)
     rec = Recorder(tmp_path / "run")
     reg = TokenRegistry(rec)
@@ -93,7 +93,7 @@ def test_a_pose_with_the_wrong_frame_count_is_an_item_error(env):
 def test_a_clip_over_max_frames_fails_alone(env):
     q, caller, staging = env
     _, by = run(q, caller, [{"video": "long.mp4"}, {"video": "a.mp4"}, {"video": "a.mp4"}])
-    assert by[0]["error"] == "72 frames > max_frames (60)"
+    assert by[0]["error"] == "ValueError: 72 frames > max_frames (60)"
     assert "pose" in by[1] and "pose" in by[2]
 
 

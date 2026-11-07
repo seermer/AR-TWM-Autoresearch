@@ -140,7 +140,7 @@ def test_every_other_item_keeps_the_evaluation_camera_sentences(image, turns):
 
 
 REAL = KernelConfig.load()
-FAKE = Path(__file__).parent / "fixtures" / "fake_gen_worker.py"
+FAKE = Path(__file__).parent / "fixtures" / "fake_bridge.py"
 
 
 def h3_cfg(env="autoresearcher", **over):
@@ -158,9 +158,8 @@ def item(**over):
 
 @pytest.fixture
 def h3_env(tmp_path, monkeypatch):
-    """The real H3Backend.produce/run_workers, with torchrun and h3_generate.py swapped for the fake worker."""
+    """The real H3Backend, with h3_generate.py (and its torchrun) swapped for the fake bridge."""
     monkeypatch.setattr(h3, "H3_BRIDGE", FAKE)
-    monkeypatch.setattr(h3, "launcher", lambda ranks: ["python"])
     monkeypatch.setattr(h3, "checked_repo", lambda *a: None)
     (tmp_path / "adaln").mkdir()
     config = tmp_path / "lightx2v.json"
@@ -247,7 +246,7 @@ def test_h3_produces_a_silent_clip_with_its_annotation(h3_env):
     assert w["prompt"].startswith("For the target video, at 0.00 seconds") and w["frames"] == 192
     assert w["image"].endswith("/in/1_image.png")
     assert by[1]["candidate"]["frames"] == 192 and by[1]["candidate"]["seconds"] == 8.0
-    assert w["gpus"] == "0,1,4,5" and w["rank"] == 0             # one worker with every GPU
+    assert w["gpus"] == "0,1,4,5"                                 # one bridge with every GPU
     assert w["weights"] == str(REAL.repo_root / REAL.get("generators.h3.weights"))
     assert w["config"]["parallel"] == {"seq_p_size": 4}          # a rank per GPU
     assert w["config"]["attn_type"] == REAL.get("generators.h3.attn_type")
@@ -262,10 +261,10 @@ def test_h3_finish_refuses_a_render_of_the_wrong_size_or_length(tmp_path):
     staged, job = {"index": 0, **item()}, SimpleNamespace(args={})
     make_mp4(out / "0.mp4", seconds=2, fps=24, width=1024, height=576)
     with pytest.raises(ValueError, match="960x544"):
-        b.finish(job, staged, out)
+        b.finish(job, staged, {"video": out / "0.mp4"}, {}, out)
     make_mp4(out / "0.mp4", seconds=2, fps=24, width=960, height=544)
     with pytest.raises(ValueError, match="48 frames, not 243"):
-        b.finish(job, staged, out)
+        b.finish(job, staged, {"video": out / "0.mp4"}, {}, out)
 
 
 def test_h3_finished_candidate_passes_the_real_ingestor(tmp_path):
@@ -279,7 +278,7 @@ def test_h3_finished_candidate_passes_the_real_ingestor(tmp_path):
     make_mp4(out / "0.mp4", seconds=243 / 24, fps=24, width=960, height=544)
     rec = Recorder(run_dir)
     res = H3Backend(h3_cfg(), run_dir, [0, 1, 2, 3], TokenRegistry(rec), rec).finish(
-        SimpleNamespace(args={}), {"index": 0, **item()}, out)
+        SimpleNamespace(args={}), {"index": 0, **item()}, {"video": out / "0.mp4"}, {}, out)
     pose = write_poses(out / "vigeo.npz", n_frames=res["frames"], width=960, height=544)
     ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
     [r] = ing.ingest([Candidate(video=Path(res["video"]), annotation=Path(res["annotation"]), pose=pose,

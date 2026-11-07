@@ -83,9 +83,10 @@ WORKER_TOOLS = ("annotate", "images", "generators.wan22", "generators.ltx25")
 def check_tools_fit(cfg, gpus: list[int], totals=gpu_total_gib,
                     limit=lambda: memory_limit(memory_cgroup()), host_total=lambda: psutil.virtual_memory().total) -> None:
     """Raise when an enabled GPU tool does not fit the run: its `min_total_gpu_gib` (an estimate of the memory
-    it needs across the run's cards) exceeds the cards, its `workers` (x `gpus_per_worker`) exceed the GPU
-    count, or its host RAM (`workers` x `peak_rss_gib` + `shared_gib` + `host.kernel_reserve_gib`) exceeds
-    `host.ram_gib`; or when this job's memory limit (without one, the host's RAM) is below `host.ram_gib`."""
+    it needs across the run's cards) exceeds the cards, its `min_gpu_gib` exceeds the smallest card, its `workers`
+    (x `gpus_per_worker`) exceed the GPU count, or its host RAM (`workers` x `peak_rss_gib` + `shared_gib` +
+    `host.kernel_reserve_gib`) exceeds `host.ram_gib`; or when this job's memory limit (without one, the host's
+    RAM) is below `host.ram_gib`."""
     blocks = {"captioner": cfg.get("captioner") or {},
               **{k: b for k in ("annotate", "images") if (b := cfg.get(k) or {}).get("enabled")},
               **{f"generators.{k}": b for k, b in (cfg.get("generators") or {}).items()
@@ -93,6 +94,8 @@ def check_tools_fit(cfg, gpus: list[int], totals=gpu_total_gib,
     missing = [k for k in ("host.ram_gib", "host.kernel_reserve_gib", "captioner.tensor_parallel")
                if not isinstance(cfg.get(k), int)]
     missing += [f"{k}.workers" for k in WORKER_TOOLS if k in blocks and not isinstance(blocks[k].get("workers"), int)]
+    missing += [f"{name}.{key}" for name, block in blocks.items() for key in ("min_total_gpu_gib", "min_gpu_gib")
+                if not isinstance(block.get(key), int)]
     if missing:
         raise GpuPolicyError(f"the config needs an int for {', '.join(missing)} (a run started before these keys "
                              "existed cannot be resumed)")
@@ -117,6 +120,9 @@ def check_tools_fit(cfg, gpus: list[int], totals=gpu_total_gib,
     cards = totals(gpus)
     whole = sum(cards.values()) if cards else 0
     problems += [f"{name} needs {block['min_total_gpu_gib']} GiB of GPU memory, the GPUs have {whole}"
-                 for name, block in blocks.items() if cards and block.get("min_total_gpu_gib", 0) > whole]
+                 for name, block in blocks.items() if cards and block["min_total_gpu_gib"] > whole]
+    smallest = min(cards.values()) if cards else 0
+    problems += [f"{name} needs {block['min_gpu_gib']} GiB on each GPU, the smallest has {smallest}"
+                 for name, block in blocks.items() if cards and block["min_gpu_gib"] > smallest]
     if problems:
         raise GpuPolicyError(f"enabled tools do not fit this machine (GPUs {','.join(map(str, gpus))}): " + "; ".join(problems))

@@ -1,8 +1,7 @@
-"""GpuJob plumbing with a fake worker (no GPU)."""
+"""GpuJob plumbing with a fake bridge (no GPU)."""
 from conftest import job_result, job_folder, recorded
 import asyncio
 import json
-import os
 import threading
 import time
 from pathlib import Path
@@ -17,7 +16,7 @@ from ar_kernel.tools.jobs import JobQueue
 from ar_kernel.tools.server import ToolError, ToolKit, new_mcp
 from tests.conftest import make_mp4
 
-FAKE = Path(__file__).parent / "fixtures" / "fake_gen_worker.py"
+FAKE = Path(__file__).parent / "fixtures" / "fake_bridge.py"
 
 
 class FakeJob(GpuJob):
@@ -29,14 +28,11 @@ class FakeJob(GpuJob):
         if not args.get("items"):
             raise ToolError("items is empty")
 
-    def produce(self, job, items, work, out, cancel, report):
-        groups = split_gpus(self.gpus, 1, len(self.gpus))
-        return self.run_workers("autoresearcher", lambda r, w: ["python", str(FAKE), "--items",
-                                str(work / "items.json"), "--out", str(out), "--rank", str(r), "--world", str(w)],
-                                groups, job=job, work=work, out=out, total=len(items), cancel=cancel, report=report)
+    def prepare(self, job, items, work):
+        return {"bridge": FAKE, "env": "autoresearcher", "job": {"groups": split_gpus(self.gpus, 1, len(self.gpus))}}
 
-    def finish(self, job, item, out):
-        return {"video": out / f"{item['index']}.mp4",
+    def finish(self, job, item, outputs, info, out):
+        return {"video": outputs["video"],
                 "annotation": self.write_annotation(out, item, {"scene_prompt": item.get("prompt", "x")})}
 
 
@@ -68,12 +64,15 @@ def test_split_gpus():
         split_gpus([0, 1, 2], 2, 2)
 
 
-def test_run_workers_refuses_empty_gpu_groups(env):
-    q, caller, rec, ws, staging, run = env
-    backend = q.backends["rollout_fake"]
-    with pytest.raises(ValueError):
-        backend.run_workers("autoresearcher", lambda r, w: [], [], job=None, work=run, out=run,
-                            total=0, cancel=threading.Event(), report=lambda p: None)
+def _dead(pid: int) -> bool:
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z"
+    except FileNotFoundError:
+        return True
+
+
+def pids(run, job_id) -> list[int]:
+    return [int(p.name) for p in (job_folder(run, job_id) / "pids").iterdir()]
 
 
 def test_items_fan_out_one_worker_per_gpu_and_publish_candidates(env):
@@ -92,7 +91,13 @@ def test_items_fan_out_one_worker_per_gpu_and_publish_candidates(env):
     assert c["derived_from"] == {"kind": "model", "name": "fake-gen"}
     assert set(c) == {"video", "annotation", "derived_from"}
     assert got[0]["worker"]["gpus"] == "0" and got[1]["worker"]["gpus"] == "1" and got[4]["worker"]["gpus"] == "0"
-    assert not (job_folder(run, job) / "in").exists() and not (job_folder(run, job) / "out").exists()
+    assert got[5]["worker"] == {"rank": 1, "gpus": "1"}
+    work = job_folder(run, job)
+    assert not (work / "in").exists() and not (work / "out").exists()
+    assert sorted(p.name for p in work.glob("messages*.jsonl")) == [f"messages-{r}.jsonl" for r in range(4)] + [
+        "messages.jsonl"]                                        # the bridge's own: each worker's exit code
+    assert (work / "logs" / "5.log").read_text() == "item 5\n" and (work / "logs" / "worker3.log").exists()
+    assert json.loads((work / "job.json").read_text())["groups"] == [[0], [1], [4], [5]]
     assert job_result(out)["gpu_memory_released"] is True
     files = recorded(rec)
     assert {(e["tool"], e["job_id"]) for e in rec.read_events("n1") if e["type"] == "file"} == {("rollout_fake", job)}
@@ -101,21 +106,7 @@ def test_items_fan_out_one_worker_per_gpu_and_publish_candidates(env):
     assert json.loads(files[("out", out["result_file"])]) == job_result(out)
 
 
-def test_a_worker_that_finds_the_machine_too_small_stops_the_run(env):
-    """Exit code 78 is nothing the agent can fix: the job fails, the user is alerted and the run is asked to stop."""
-    from ar_kernel.control import Control
-    q, caller, rec, ws, staging, run = env
-    out = q.wait(caller, submit(q, caller, [{"src": "a.mp4", "unfit": True}])["job_id"], 120)
-    assert out["state"] == "failed" and "does not fit this machine" in out["error"] and "too small" in out["error"]
-    assert Control(run).stop_requested()
-    [alert] = [e for e in rec.read_events() if e["type"] == "alert"]
-    assert alert["kind"] == "tool_does_not_fit"
-    log = job_folder(run, out["id"]) / "worker0.log"
-    assert alert["message"] == f"rollout_fake does not fit this machine; the run is stopping (see {log})"
-    assert "the cards are too small" in log.read_text()
-
-
-def test_a_disk_error_placing_an_output_stops_the_phase(env, monkeypatch):
+def test_a_disk_error_placing_an_output_stops_the_phase_after_killing_the_bridge(env, monkeypatch):
     q, caller, rec, ws, staging, run = env
     import errno
     from ar_kernel.tools import gpu_jobs
@@ -123,30 +114,91 @@ def test_a_disk_error_placing_an_output_stops_the_phase(env, monkeypatch):
     def full(*args, **kwargs):
         raise OSError(errno.ENOSPC, "No space left on device")
     monkeypatch.setattr(gpu_jobs, "publish_file", full)
-    out = q.wait(caller, submit(q, caller, [{"src": "a.mp4"}])["job_id"], 120)
-    assert out["state"] == "failed" and "No space left" in out["error"]
+    t0 = time.monotonic()
+    job_id = submit(q, caller, [{"src": "a.mp4"}, {"src": "a.mp4", "sleep": 300}])["job_id"]
+    out = q.wait(caller, job_id, 120)
+    assert out["state"] == "failed" and "No space left" in out["error"] and time.monotonic() - t0 < 60
     assert caller.fault.event.is_set()
+    assert all(_dead(pid) for pid in pids(run, job_id))         # the GPU lock is released only after this
 
 
-def test_per_item_failure_and_worker_crash_are_item_errors(env):
+def test_item_failures_crashes_and_cut_messages_are_item_errors(env):
     q, caller, rec, ws, staging, run = env
-    items = [{"src": "a.mp4"}, {"src": "a.mp4", "fail": True}, {"src": "a.mp4", "crash": True}, {"src": "a.mp4"}]
+    items = [{"src": "a.mp4"}, {"src": "a.mp4", "fail": True}, {"src": "a.mp4", "crash": True}, {"src": "a.mp4"},
+             {"src": "a.mp4"}, {"src": "a.mp4"}, {"src": "a.mp4"}, {"src": "a.mp4", "truncate": True}]
     out = q.wait(caller, submit(q, caller, items)["job_id"], 120)
     assert out["state"] == "done"
     by = {i["index"]: i for i in job_result(out)["items"]}
-    assert "candidate" in by[0] and "candidate" in by[3]
-    assert by[1]["error"] == "boom"
-    assert "exit code 3" in by[2]["error"] and "log tail" in by[2]["error"]
+    assert "candidate" in by[0] and "candidate" in by[3] and "candidate" in by[4] and "candidate" in by[5]
+    assert by[1]["error"] == "ValueError: boom"                  # the traceback stays in the messages file
+    assert by[2]["error"].startswith("worker 2 started this item but ended without its result (exit code 3); "
+                                     "log tail:\nitem 2\ndying")
+    assert by[6]["error"] == "not run: worker 2 ended while working on item 2 (exit code 3); see item 2's error"
+    assert by[7]["error"].startswith("worker 3 started this item but ended without its result (exit code 0); "
+                                     "log tail:")                                           # a cut last line
+    assert "---" not in by[2]["error"] and str(run) not in by[2]["error"]
 
 
-def test_a_truncated_status_file_is_an_item_error_not_a_job_failure(env):
+def test_an_item_with_a_log_per_rank_gets_each_tail_under_its_file_name(tmp_path):
+    from ar_kernel.tools.gpu_jobs import _unfinished
+    logs = [str(tmp_path / f"0.rank{r}.log") for r in range(2)]
+    for r, p in enumerate(logs):
+        Path(p).write_text(f"rank {r} said")
+    rows = _unfinished(tmp_path, [{"index": 0}, {"index": 1}], {}, {0: {"log": logs}}, {}, 1, 0)
+    assert rows[0]["error"] == ("worker 0 started this item but ended without its result (exit code 1); log tails:\n"
+                                "--- 0.rank0.log ---\nrank 0 said\n--- 0.rank1.log ---\nrank 1 said")
+    assert rows[1]["error"] == "not run: worker 0 ended while working on item 0 (exit code 1); see item 0's error"
+
+
+def test_a_log_tail_is_shown_once_and_later_rows_point_to_it(tmp_path):
+    from ar_kernel.tools.gpu_jobs import _unfinished
+    (tmp_path / "server.log").write_text("CUDA error")
+    started = {i: {"log": str(tmp_path / "server.log")} for i in (0, 1)}
+    rows = _unfinished(tmp_path, [{"index": i} for i in range(4)], {3: {"index": 3}}, started, {}, -9, 0)
+    assert rows == {0: {"index": 0, "error": "worker 0 started this item but ended without its result "
+                                             "(exit code -9); log tail:\nCUDA error"},
+                    1: {"index": 1, "error": "worker 0 started this item but ended without its result "
+                                             "(exit code -9); see item 0's error"},
+                    2: {"index": 2, "error": "not run: worker 0 ended while working on items 0, 1 (exit code -9); "
+                                             "see their errors"}}
+
+
+def test_a_bridge_that_fails_before_any_item_gives_every_item_its_error(env):
     q, caller, rec, ws, staging, run = env
-    items = [{"src": "a.mp4"}, {"src": "a.mp4"}, {"src": "a.mp4", "truncated": True}, {"src": "a.mp4"}]
-    out = q.wait(caller, submit(q, caller, items)["job_id"], 120)
-    assert out["state"] == "done", out
-    by = {i["index"]: i for i in job_result(out)["items"]}
-    assert "candidate" in by[0] and "candidate" in by[1] and "candidate" in by[3]
-    assert "error" in by[2] and "JSONDecodeError" in by[2]["error"]
+    out = q.wait(caller, submit(q, caller, [{"src": "a.mp4"}] * 2, fake="exit_early")["job_id"], 120)
+    assert out["state"] == "done"
+    for row in job_result(out)["items"]:
+        w = row["index"]
+        assert row["error"] == f"not run: worker {w} ended before starting any item (exit code 2); log tail:\ncannot start\n"
+
+
+def test_what_the_bridge_leaves_running_is_killed(env):
+    q, caller, rec, ws, staging, run = env
+    out = q.wait(caller, submit(q, caller, [{"src": "a.mp4"}], fake="orphan")["job_id"], 120)
+    assert out["state"] == "done" and "candidate" in job_result(out)["items"][0]
+    assert _dead(int((job_folder(run, out["id"]) / "orphan.pid").read_text()))
+
+
+def test_only_files_under_the_jobs_output_folder_are_published(env, tmp_path):
+    q, caller, rec, ws, staging, run = env
+    backend = q.backends["rollout_fake"]
+    elsewhere = tmp_path / "weights.bin"
+    elsewhere.write_bytes(b"w")
+    backend.finish = lambda job, item, outputs, info, out: {"video": elsewhere}
+    out = q.wait(caller, submit(q, caller, [{"src": "a.mp4"}])["job_id"], 120)
+    assert "is not under the job's output folder" in job_result(out)["items"][0]["error"]
+    assert elsewhere.stat().st_nlink == 1
+
+
+def test_progress_counts_finished_items(env):
+    q, caller, rec, ws, staging, run = env
+    job_id = submit(q, caller, [{"src": "a.mp4"}, {"src": "a.mp4", "sleep": 300}])["job_id"]
+    deadline = time.monotonic() + 60
+    while q.status(caller, job_id)["progress"] != {"done": 1, "total": 2} and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert q.status(caller, job_id)["progress"] == {"done": 1, "total": 2}
+    q.cancel(caller, job_id)
+    assert q.wait(caller, job_id, 120)["state"] == "canceled"
 
 
 def test_a_slow_job_runs_to_its_end(env):
@@ -183,17 +235,16 @@ def test_cancel_kills_every_worker(env):
     q, caller, rec, ws, staging, run = env
     job_id = submit(q, caller, [{"src": "a.mp4", "sleep": 300} for _ in range(4)])["job_id"]
     deadline = time.monotonic() + 30
-    while len(list((job_folder(run, job_id) / "out").glob("worker*.pid"))) < 4 and time.monotonic() < deadline:
+    while (not (job_folder(run, job_id) / "pids").is_dir() or len(pids(run, job_id)) < 5) \
+            and time.monotonic() < deadline:
         time.sleep(0.2)
-    pids = [int(p.read_text()) for p in (job_folder(run, job_id) / "out").glob("worker*.pid")]
-    assert len(pids) == 4
+    running = pids(run, job_id)
+    assert len(running) == 5                                     # the bridge and its 4 workers
     q.cancel(caller, job_id)
     out = q.wait(caller, job_id, 120)
     assert out["state"] == "canceled"
-    assert [i["error"] for i in job_result(out)["items"]] == ["no output (canceled or not reached)"] * 4
-    for pid in pids:
-        with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
+    assert [i["error"] for i in job_result(out)["items"]] == ["canceled before this item finished"] * 4
+    assert all(_dead(pid) for pid in running)
 
 
 def test_registration_exposes_only_tools_for_backends_on_the_queue(env):
@@ -217,9 +268,10 @@ def test_commanded_camera_is_published_under_its_own_name_not_as_pose(env):
     q, caller, rec, ws, staging, run = env
     backend = q.backends["rollout_fake"]
 
-    def finish(job, item, out):
+    def finish(job, item, outputs, info, out):
         np.savez(out / f"{item['index']}.cmd.npz", cam_c2w=np.tile(np.eye(4), (3, 1, 1)))
-        return {**FakeJob.finish(backend, job, item, out), "commanded_camera": out / f"{item['index']}.cmd.npz"}
+        return {**FakeJob.finish(backend, job, item, outputs, info, out),
+                "commanded_camera": out / f"{item['index']}.cmd.npz"}
     backend.finish = finish
     out = q.wait(caller, submit(q, caller, [{"src": "a.mp4", "seed": 1}])["job_id"], 120)
     assert out["state"] == "done", out
@@ -437,11 +489,8 @@ class KeyframeJob(FakeJob):
         from ar_kernel.tools.gpu_jobs import check_keyframes
         check_keyframes(item)
 
-    def produce(self, job, items, work, out, cancel, report):
-        for item in items:                                   # no worker: echo what was staged
-            (out / f"{item['index']}.json").write_text(json.dumps({"ok": True, "keyframes": item["keyframes"]}))
-            make_mp4(out / f"{item['index']}.mp4", seconds=1, fps=24, width=64, height=36)
-        return [0], {}
+    def prepare(self, job, items, work):                     # no workers; the fake echoes what was staged
+        return {"bridge": FAKE, "env": "autoresearcher"}
 
 
 @pytest.fixture

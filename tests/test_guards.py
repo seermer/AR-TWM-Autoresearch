@@ -19,13 +19,16 @@ def test_device_minors_on_this_machine():
     assert device_minors([0, 1, 2, 3, 4, 5]) == [1, 2, 0, 3, 5, 4]
 
 
+SIZES = {"min_total_gpu_gib": 48, "min_gpu_gib": 24}
+
+
 def _fit_cfg(host=None, captioner=None, **generators):
     from ar_kernel.config import KernelConfig
-    return KernelConfig(raw={"captioner": {"min_total_gpu_gib": 96, "tensor_parallel": 2, **(captioner or {})},
-                             "annotate": {"enabled": True, "min_total_gpu_gib": 48, "workers": 2},
-                             "images": {"enabled": False, "min_total_gpu_gib": 999, "workers": 99},
+    return KernelConfig(raw={"captioner": {**SIZES, "min_total_gpu_gib": 96, "tensor_parallel": 2, **(captioner or {})},
+                             "annotate": {"enabled": True, **SIZES, "workers": 2},
+                             "images": {"enabled": False, "workers": 99},
                              "host": {"ram_gib": 240, "kernel_reserve_gib": 72, **(host or {})},
-                             "generators": generators}, repo_root=None)
+                             "generators": {k: {**SIZES, **b} for k, b in generators.items()}}, repo_root=None)
 
 
 def _fit(cfg, gpus, cards=24, limit=None, host_gib=251):
@@ -46,7 +49,16 @@ def test_enabled_tools_must_fit_the_runs_cards():
     assert "annotate" not in text and "ltx25" not in text            # they fit
     assert "images" not in text and "wan22" not in text              # not enabled
     _fit(_fit_cfg(h3=h3), [0, 1], cards=None)                        # no nvidia-smi: cannot check
-    _fit(_fit_cfg(h3={"enabled": True}), [0, 1], cards=48)           # h3 without an estimate: not checked
+
+
+def test_enabled_tools_must_fit_each_card():
+    h3 = {"enabled": True, "min_total_gpu_gib": 96, "min_gpu_gib": 24}
+    _fit(_fit_cfg(h3=h3), [0, 1, 2, 3])
+    with pytest.raises(GpuPolicyError) as exc:                       # 8 x 16 GiB: enough in total, not per card
+        _fit(_fit_cfg(h3=h3, wan22={"enabled": False, "min_gpu_gib": 999}), list(range(8)), cards=16)
+    text = str(exc.value)
+    assert "generators.h3 needs 24 GiB on each GPU, the smallest has 16" in text
+    assert "wan22" not in text and "GiB of GPU memory" not in text
 
 
 def test_workers_and_tensor_parallel_must_fit_the_gpu_count():
@@ -87,6 +99,11 @@ def test_a_config_without_the_explicit_keys_names_them():
                                              r"generators.ltx25.workers \(a run started before"):
         _fit(_fit_cfg(host={"ram_gib": None}, captioner={"tensor_parallel": None},
                       ltx25={"enabled": True, "workers": None}, wan22={"enabled": False}), [0, 1, 2, 3])
+    with pytest.raises(GpuPolicyError, match=r"needs an int for captioner.min_gpu_gib, generators.h3.min_total_gpu_gib, "
+                                             r"generators.h3.min_gpu_gib \(a run started before"):
+        _fit(_fit_cfg(captioner={"min_gpu_gib": None}, h3={"enabled": True, "min_total_gpu_gib": None,
+                                                           "min_gpu_gib": None},
+                      wan22={"enabled": False, "min_gpu_gib": None}), [0, 1, 2, 3])
 
 
 def test_card_sizes_are_whole_gib_and_unreadable_output_means_no_check(monkeypatch):

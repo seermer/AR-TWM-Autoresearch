@@ -36,18 +36,21 @@ from ar_kernel.eval.render import build_render_config, render_proxy
 from ar_kernel.run import bootstrap_run
 from ar_kernel.subproc import cache_env, free_port, host_memory_gib
 from ar_kernel.telemetry import files
+from ar_kernel.tools import captioner, locate_events
 from ar_kernel.tools.annotate import AnnotateBackend
-from ar_kernel.tools.captioner import CaptionBackend
 from ar_kernel.tools.context import TokenRegistry
 from ar_kernel.tools.h3 import H3Backend
 from ar_kernel.tools.images import ImageBackend
 from ar_kernel.tools.jobs import JobQueue
-from ar_kernel.tools.locate_events import LocateEventsBackend
 from ar_kernel.tools.rollouts import AlayaWorldBackend, Ltx25Backend
 from ar_kernel.tools.vllm_server import VllmServer, gpu_memory_mib, local_client, serve_command
 from ar_kernel.train.gate import Gate, resolve_config
 from ar_kernel.train.recipe import lora_of
 from ar_kernel.train.runner import TrainRunner
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "kernel" / "ar_kernel" / "bridges"))
+from caption_vllm import caption  # noqa: E402 -- the tools' own request functions
+from locate_vllm import ask  # noqa: E402
 
 STEPS = ("doctor", "weights", "vllm", "train", "render", "ltx25", "images", "annotate", "alayaworld", "h3")
 DEFAULT = ("doctor", "weights", "vllm", "train", "render", "ltx25")
@@ -140,8 +143,7 @@ class Preflight:
         command[names:names + 1] = ["captioner", "locator", judge]       # the names the three callers use
         server = VllmServer(c["env"], command, self.gpus, port, cwd=self.run_dir, log_path=self.run_dir / "vllm.log",
                             recorder=self.rec, node="preflight", phase="vllm", label="vLLM server")
-        caption, locate = CaptionBackend(self.cfg, self.run_dir, self.gpus, None, self.rec), \
-            LocateEventsBackend(self.cfg, self.run_dir, self.gpus, None, self.rec)
+        effort = self.cfg.get("locate_events.reasoning_effort")
 
         def ask_judge(content):
             done = client.chat.completions.create(
@@ -155,9 +157,10 @@ class Preflight:
             load_s = server.start()
             with local_client(server.base_url, float(c["clip_timeout_s"]), server.api_key) as client, \
                     ThreadPoolExecutor(max_workers=n) as pool:
-                captions = list(pool.map(lambda f: caption._caption(client, f, "Describe the scene in one sentence.", c),
-                                         clips))
-                answers = list(pool.map(lambda u: locate.ask(client, u, "A car drives past.")[0], urls[:n]))
+                captions = list(pool.map(lambda f: caption(client, f, captioner.SYSTEM, "Describe the scene in one sentence.",
+                                                           c["reasoning_effort"]), clips))
+                answers = list(pool.map(lambda u: ask(client, u, locate_events.SYSTEM, "A car drives past.", effort)[0],
+                                        urls[:n]))
                 judged = list(pool.map(ask_judge, [[{"type": "video_url", "video_url": {"url": video}}],
                                                    [{"type": "image_url", "image_url": {"url": u}} for u in urls]] * (n // 2)))
         finally:

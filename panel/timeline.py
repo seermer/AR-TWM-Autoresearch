@@ -6,8 +6,7 @@ import time
 from .views import Run
 
 MARKS = {"alert", "gate.passed", "gate.failed", "eval.scored", "node.created", "select", "ingest.rejected", "hf_upload",
-         "contract.report", "run.start", "node.end", "tool.error", "eval.cleanup", "judge.server_ready",
-         "caption.server_ready", "caption.server_stopped", "locate.server_stopped"}
+         "contract.report", "run.start", "node.end", "tool.error", "eval.cleanup", "judge.server_ready"}
 OWN_PAIRS = {"phase", "sandbox", "subproc", "job", "tool", "llm", "run"}   # run.start has no end event
 
 

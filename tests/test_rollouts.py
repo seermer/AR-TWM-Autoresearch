@@ -28,7 +28,8 @@ from ar_kernel.tools.server import ToolError
 from tests.conftest import make_mp4
 
 REAL = KernelConfig.load()
-FAKE = Path(__file__).parent / "fixtures" / "fake_gen_worker.py"
+FAKE_WBENCH = Path(__file__).parent / "fixtures" / "fake_wbench.py"
+FAKE_BRIDGE = Path(__file__).parent / "fixtures" / "fake_bridge.py"
 
 
 def small_cfg(env="autoresearcher", enabled=True):
@@ -138,10 +139,10 @@ def _flat(d, prefix=()):
 def test_render_config_has_the_listed_fields(tmp_path):
     c = render_config(REAL, indices=[0, 2], work=tmp_path, text_cache=tmp_path / "te")
     mode = c["validation"]["modes"]["wbench"]
-    assert mode["dataset"]["root"] == str(tmp_path / "data")
+    assert mode["dataset"]["root"] == str(tmp_path / "in" / "data")
     assert mode["dataset"]["case_ids"] == ["0", "2"]
     assert mode["dataset"]["include_non_navigation"] is True
-    assert mode["wbench_output_dir"] == str(tmp_path / "videos")
+    assert mode["wbench_output_dir"] == str(tmp_path / "out" / "videos")
     assert mode["wbench_chunks_per_turn"] * 32 == rollouts.TURN_FRAMES and mode["wbench_keep_last_frame"] is True
     assert c["run"]["output_dir"] == str(tmp_path / "rollout") and c["run"]["log_dir"] == str(tmp_path / "logs")
     assert "per_sample_seed" not in c["validation"] and c["validation"]["save_joystick"] is False
@@ -166,10 +167,10 @@ def test_render_config_uses_the_ar_teacher(tmp_path):
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    """The real AlayaWorldBackend: produce launches the fake worker in place of the prompt
-    precache and run_wbench.py (wbench mode: it writes the measured output layout)."""
-    monkeypatch.setattr(rollouts, "PRECACHE", [str(FAKE), "--precache"])
-    monkeypatch.setattr(rollouts, "RUN_WBENCH", [str(FAKE)])
+    """The real AlayaWorldBackend and its bridge, with a fake prompt precache and run_wbench.py (they write the
+    measured output layout)."""
+    monkeypatch.setattr(rollouts, "PRECACHE", [str(FAKE_WBENCH), "--precache"])
+    monkeypatch.setattr(rollouts, "RUN_WBENCH", [str(FAKE_WBENCH)])
     rec = Recorder(tmp_path / "run")
     reg = TokenRegistry(rec)
     q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
@@ -241,14 +242,17 @@ def test_limits_come_from_the_generator_config_block(tmp_path):
 # ---- finish: the whole clip, the commanded camera, the annotation ----
 
 def _render_output(out, i, *, turns, extra=0):
-    """What produce leaves in out/ for one case: the input frame, then 96 frames per turn."""
+    """What the render leaves for one case: the input frame, then 96 frames per turn."""
     frames = 1 + rollouts.TURN_FRAMES * turns + extra
     make_mp4(out / f"{i}.mp4", seconds=frames / 24, fps=24, width=960, height=544)
     c2w = np.tile(np.eye(4), (frames, 1, 1))
     c2w[:, 0, 3] = 3.0 + np.arange(frames) * 0.02
     np.savez(out / f"{i}.camera.npz", cam_c2w=c2w.astype(np.float32))
-    (out / f"{i}.json").write_text(json.dumps({"ok": True}))
     return frames
+
+
+def _outputs(out, i=0):
+    return {"video": out / f"{i}.mp4", "camera": out / f"{i}.camera.npz"}
 
 
 def _job(**args):
@@ -267,7 +271,7 @@ def test_finish_publishes_the_whole_clip_with_exact_turn_starts(tmp_path):
         {"action": "W", "perspective": TP}, {"action": "stop", "event": "A goat climbs onto the rock.", "perspective": TP},
         {"action": "stop", "perspective": FP}])}
     frames = _render_output(out, 0, turns=3)
-    res = _backend(tmp_path).finish(_job(), item, out)
+    res = _backend(tmp_path).finish(_job(), item, _outputs(out), {}, out)
     assert res["video"] == out / "0.mp4" and res["frames"] == frames == 289       # nothing is trimmed
     assert res["actions"] == ["W", "stop", "stop"]
     assert json.loads(Path(res["annotation"]).read_text()) == {
@@ -284,7 +288,7 @@ def test_finish_refuses_a_frame_count_off_the_turn_layout(tmp_path):
     out.mkdir()
     _render_output(out, 0, turns=2, extra=3)
     with pytest.raises(ValueError, match="196 frames for 2 turns of 96"):
-        _backend(tmp_path).finish(_job(), {"index": 0, **first_person()}, out)
+        _backend(tmp_path).finish(_job(), {"index": 0, **first_person()}, _outputs(out), {}, out)
 
 
 def test_finish_refuses_a_camera_path_of_the_wrong_length(tmp_path):
@@ -293,7 +297,7 @@ def test_finish_refuses_a_camera_path_of_the_wrong_length(tmp_path):
     frames = _render_output(out, 0, turns=2)
     np.savez(out / "0.camera.npz", cam_c2w=np.tile(np.eye(4, dtype=np.float32), (frames - 1, 1, 1)))
     with pytest.raises(ValueError, match="camera path has 192 frames, the video 193"):
-        _backend(tmp_path).finish(_job(), {"index": 0, **first_person()}, out)
+        _backend(tmp_path).finish(_job(), {"index": 0, **first_person()}, _outputs(out), {}, out)
 
 
 def test_finished_candidate_passes_the_real_ingestor(tmp_path):
@@ -303,7 +307,7 @@ def test_finished_candidate_passes_the_real_ingestor(tmp_path):
     out = run_dir / "staging" / "rollouts"
     out.mkdir(parents=True)
     _render_output(out, 0, turns=2)
-    res = _backend(tmp_path).finish(_job(), {"index": 0, **first_person()}, out)
+    res = _backend(tmp_path).finish(_job(), {"index": 0, **first_person()}, _outputs(out), {}, out)
     pose = write_poses(out / "vigeo.npz", n_frames=res["frames"], width=960, height=544)
     ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
     [r] = ing.ingest([Candidate(video=Path(res["video"]), annotation=Path(res["annotation"]), pose=pose,
@@ -315,7 +319,7 @@ def test_finished_candidate_passes_the_real_ingestor(tmp_path):
                                    {"time_range_s": [97 / 24, 193 / 24], "prompt": f"{base} It starts to rain heavily."}]
 
 
-# ---- the real produce/run_workers/_collect with the fake worker ----
+# ---- the real backend and bridge with a fake precache and render ----
 
 def run_job(q, caller, items, **params):
     out = q.wait(caller, submit(q, caller, items, **params)["job_id"], 120)
@@ -351,7 +355,11 @@ def test_produce_renders_and_publishes_candidates(env):
     assert pre["gpus"] == "0,1" and pre["gemma"] and "--device-map" in pre["argv"]
     cfg = yaml.safe_load((work / "render_config.yaml").read_text())
     assert cfg["runtime"]["text_embed_cache_dir"] == str(run_dir / "cache" / "text_embed")
-    assert not (work / "data").exists() and not (work / "videos").exists()
+    assert not (work / "in").exists() and not (work / "out").exists()
+    started = [m for m in (json.loads(line) for line in (work / "messages.jsonl").read_text().splitlines())
+               if m["type"] == "item_started"]
+    assert [m["index"] for m in started] == [0, 1] and "[Validation] case_start case=1" in Path(
+        started[1]["log"]).read_text()
 
 
 def test_a_hung_precache_runs_until_the_job_is_cancelled(env):
@@ -370,8 +378,47 @@ def test_a_hung_precache_runs_until_the_job_is_cancelled(env):
 def test_a_case_without_video_fails_alone(env):
     q, caller, staging, _ = env
     _, by = run_job(q, caller, [first_person(scene_prompt="NO_VIDEO here"), first_person()])
-    assert by[0]["error"] == "no video rendered"
+    assert by[0]["error"].startswith("worker 0 started this item but ended without its result (exit code 0); "
+                                     "log tail:\n")
     assert "candidate" in by[1]
+
+
+def test_a_failed_render_gives_its_exit_code_and_log_to_the_cases_it_did_not_render(env):
+    q, caller, staging, _ = env
+    _, by = run_job(q, caller, [first_person(scene_prompt="WBENCH_FAIL NO_VIDEO here"), first_person()])
+    assert by[0]["error"].startswith("worker 0 started this item but ended without its result (exit code 1); "
+                                     "log tail:")
+    assert "generation FAILED" in by[0]["error"] and "candidate" in by[1]
+
+
+def test_a_render_that_leaves_a_process_holding_its_output_still_ends_the_job(env):
+    """The bridge waits for the render itself, not for its output pipe to close; the leftover is killed after."""
+    import time
+    q, caller, staging, run_dir = env
+    t0 = time.monotonic()
+    job, by = run_job(q, caller, [first_person(scene_prompt="WBENCH_LINGER street")])
+    assert time.monotonic() - t0 < 90 and "candidate" in by[0]
+    pid = int((job_folder(run_dir, job) / "linger.pid").read_text())
+    stat = Path(f"/proc/{pid}/stat")
+    assert not stat.exists() or stat.read_text().rsplit(")", 1)[1].split()[0] == "Z"
+
+
+def test_a_render_that_dies_mid_case_points_the_cases_after_it_to_that_case(env):
+    q, caller, staging, _ = env
+    _, by = run_job(q, caller, [first_person(scene_prompt="WBENCH_CRASH here"), first_person()])
+    assert by[0]["error"].startswith("worker 0 started this item but ended without its result (exit code -9); "
+                                     "log tail:")
+    assert "case_start case=0" in by[0]["error"]
+    assert by[1]["error"] == "not run: worker 0 ended while working on item 0 (exit code -9); see item 0's error"
+
+
+def test_a_failed_precache_fails_every_item_with_its_log(env):
+    q, caller, staging, _ = env
+    _, by = run_job(q, caller, [first_person(scene_prompt="PRECACHE_FAIL street"), first_person()])
+    assert by[0]["error"].startswith("not run: worker 0 ended before starting any item (exit code 4); log tail:")
+    assert "prompt precache failed" in by[0]["error"] and "Gemma did not load" in by[0]["error"]
+    assert by[1]["error"] == ("not run: worker 0 ended before starting any item (exit code 4); "
+                              "see item 0's error")
 
 
 def test_frame_images_of_another_size_are_refused_at_submit_with_their_item_and_check(env):
@@ -711,9 +758,9 @@ def small_wan_cfg(env="autoresearcher", enabled=True, **over):
 
 @pytest.fixture
 def wan_env(tmp_path, monkeypatch):
-    """The real Wan22Backend.produce/run_workers, with wan22_generate.py swapped for the fake
-    worker (wan mode: it writes a synthetic 1280x704, --frames-frame mp4 and echoes the argv)."""
-    monkeypatch.setattr(rollouts, "WAN22_BRIDGE", FAKE)
+    """The real Wan22Backend, with wan22_generate.py swapped for the fake bridge (it writes a synthetic 1280x704
+    mp4 of the job's frames and echoes the job file)."""
+    monkeypatch.setattr(rollouts, "WAN22_BRIDGE", FAKE_BRIDGE)
     rec = Recorder(tmp_path / "run")
     reg = TokenRegistry(rec)
     q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
@@ -796,7 +843,7 @@ def test_wan_workers_get_one_gpu_each_from_the_configured_repo_and_weights(wan_e
 
 
 def test_wan_extra_args_can_disable_offload_and_t5_cpu(tmp_path, monkeypatch):
-    monkeypatch.setattr(rollouts, "WAN22_BRIDGE", FAKE)
+    monkeypatch.setattr(rollouts, "WAN22_BRIDGE", FAKE_BRIDGE)
     rec = Recorder(tmp_path / "run")
     reg = TokenRegistry(rec)
     q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
@@ -825,7 +872,7 @@ def test_wan_build_gpu_backends_includes_it_only_when_a_variant_is_enabled(tmp_p
 def test_wan_refuses_to_run_off_the_pinned_commit(tmp_path, monkeypatch, pin):
     """The backend's own git check, not the worker's: produce() must raise before any worker
     launches, so a silently-updated clone (or a config with no pin) fails the whole job."""
-    monkeypatch.setattr(rollouts, "WAN22_BRIDGE", FAKE)
+    monkeypatch.setattr(rollouts, "WAN22_BRIDGE", FAKE_BRIDGE)
     rec = Recorder(tmp_path / "run")
     reg = TokenRegistry(rec)
     q = JobQueue(rec, threading.Lock(), wait_cap_s=60)
@@ -845,7 +892,7 @@ def test_wan_refuses_to_run_off_the_pinned_commit(tmp_path, monkeypatch, pin):
 def test_wan_missing_clone_fails_the_job_with_a_clear_message(tmp_path, monkeypatch):
     """An uncloned third_party/Wan2.2 must say which path and where the setup is documented, not
     surface a bare CalledProcessError."""
-    monkeypatch.setattr(rollouts, "WAN22_BRIDGE", FAKE)
+    monkeypatch.setattr(rollouts, "WAN22_BRIDGE", FAKE_BRIDGE)
     rec = Recorder(tmp_path / "run")
     reg = TokenRegistry(rec)
     q = JobQueue(rec, threading.Lock(), wait_cap_s=60)
@@ -875,7 +922,7 @@ def test_finish_refuses_a_non_24fps_render(tmp_path):
     out.mkdir()
     make_mp4(out / "0.mp4", seconds=2, fps=30, width=1280, height=704)
     with pytest.raises(ValueError, match="fps"):
-        _wan_backend(tmp_path).finish(None, {"index": 0, "prompt": "p"}, out)
+        _wan_backend(tmp_path).finish(None, {"index": 0, "prompt": "p"}, {"video": out / "0.mp4"}, {}, out)
 
 
 def test_finish_refuses_a_render_off_the_1280x704_working_size(tmp_path):
@@ -886,14 +933,14 @@ def test_finish_refuses_a_render_off_the_1280x704_working_size(tmp_path):
     out.mkdir()
     make_mp4(out / "0.mp4", seconds=2, fps=24, width=800, height=1088)
     with pytest.raises(ValueError, match="1280x704"):
-        _wan_backend(tmp_path).finish(None, {"index": 0, "prompt": "p"}, out)
+        _wan_backend(tmp_path).finish(None, {"index": 0, "prompt": "p"}, {"video": out / "0.mp4"}, {}, out)
 
 
 def test_finish_crops_to_1248x704_and_passes_the_prompt_on(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
     make_mp4(out / "0.mp4", seconds=2, fps=24, width=1280, height=704)
-    res = _wan_backend(tmp_path).finish(None, {"index": 0, "prompt": "hello there"}, out)
+    res = _wan_backend(tmp_path).finish(None, {"index": 0, "prompt": "hello there"}, {"video": out / "0.mp4"}, {}, out)
     info = probe_video(res["video"])
     assert (info.width, info.height) == (1248, 704) and round(info.fps) == 24
     assert res["frames"] == info.frames
@@ -996,9 +1043,8 @@ def small_ltx_cfg(env="autoresearcher", enabled=True, **over):
 
 @pytest.fixture
 def ltx_env(tmp_path, monkeypatch):
-    """The real Ltx25Backend.produce/run_workers, with ltx25_generate.py swapped for the fake
-    worker (ltx mode)."""
-    monkeypatch.setattr(rollouts, "LTX25_BRIDGE", FAKE)
+    """The real Ltx25Backend, with ltx25_generate.py swapped for the fake bridge."""
+    monkeypatch.setattr(rollouts, "LTX25_BRIDGE", FAKE_BRIDGE)
     rec = Recorder(tmp_path / "run")
     reg = TokenRegistry(rec)
     q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
@@ -1148,7 +1194,7 @@ def test_ltx_finish_refuses_a_non_24fps_render(tmp_path):
     out.mkdir()
     make_mp4(out / "0.mp4", seconds=2, fps=30, width=1024, height=576)
     with pytest.raises(ValueError, match="fps"):
-        _ltx_backend(tmp_path).finish(_ltx_job(), {"index": 0, "prompt": "p"}, out)
+        _ltx_backend(tmp_path).finish(_ltx_job(), {"index": 0, "prompt": "p"}, {"video": out / "0.mp4"}, {}, out)
 
 
 def test_ltx_finish_refuses_a_render_of_the_wrong_frame_count(tmp_path):
@@ -1156,7 +1202,7 @@ def test_ltx_finish_refuses_a_render_of_the_wrong_frame_count(tmp_path):
     out.mkdir()
     make_mp4(out / "0.mp4", seconds=2, fps=24, width=1024, height=576)      # 48 frames, job asks 49
     with pytest.raises(ValueError, match="48 frames, not 49"):
-        _ltx_backend(tmp_path).finish(_ltx_job(), {"index": 0, "prompt": "p"}, out)
+        _ltx_backend(tmp_path).finish(_ltx_job(), {"index": 0, "prompt": "p"}, {"video": out / "0.mp4"}, {}, out)
 
 
 def test_ltx_finish_refuses_a_render_off_the_requested_size(tmp_path):
@@ -1164,7 +1210,7 @@ def test_ltx_finish_refuses_a_render_off_the_requested_size(tmp_path):
     out.mkdir()
     make_mp4(out / "0.mp4", seconds=2, fps=24, width=960, height=544)
     with pytest.raises(ValueError, match="1024x576"):
-        _ltx_backend(tmp_path).finish(_ltx_job(), {"index": 0, "prompt": "p"}, out)
+        _ltx_backend(tmp_path).finish(_ltx_job(), {"index": 0, "prompt": "p"}, {"video": out / "0.mp4"}, {}, out)
 
 
 def test_ltx_finish_passes_the_prompt_on(tmp_path):
@@ -1172,7 +1218,7 @@ def test_ltx_finish_passes_the_prompt_on(tmp_path):
     out.mkdir()
     make_mp4(out / "0.mp4", seconds=121 / 24, fps=24, width=1024, height=576)
     frames = probe_video(out / "0.mp4").frames
-    res = _ltx_backend(tmp_path).finish(_ltx_job(frames=frames), {"index": 0, "prompt": "A quiet forest path at dawn."}, out)
+    res = _ltx_backend(tmp_path).finish(_ltx_job(frames=frames), {"index": 0, "prompt": "A quiet forest path at dawn."}, {"video": out / "0.mp4"}, {}, out)
     assert res["prompt"] == "A quiet forest path at dawn." and set(res) == {"video", "prompt", "frames"}
 
 

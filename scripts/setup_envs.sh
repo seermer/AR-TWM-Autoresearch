@@ -7,7 +7,7 @@
 #   CUDA_HOME=<env> CPATH=<env>/targets/x86_64-linux/include SGLANG_CACHE_DIR=.cache/sglang
 #   LIBRARY_PATH=<env>/targets/x86_64-linux/lib:<env>/targets/x86_64-linux/lib/stubs
 # An env that already exists is skipped; delete .envs/<name> to rebuild it. The panel's web app is rebuilt when its source changed.
-# Needs: conda, git and an NVIDIA driver; no CUDA toolkit (the envs that compile bring their own nvcc).
+# Needs: conda and an NVIDIA driver (git comes from the autoresearcher env, built first); no CUDA toolkit (the envs that compile bring their own nvcc).
 # CUDA code is compiled for the detected card only: RTX 4090 (8.9), A100 (8.0) or H100 (9.0), one kind per machine.
 # Run from anywhere; run one copy at a time.
 set -euo pipefail
@@ -23,6 +23,7 @@ ROOT=$PWD
 
 ALL="autoresearcher bwrap agent vllm alayaworld wbench-main wbench-vp gen-zimage gen-wan22 gen-ltx25 gen-lightx2v"
 run() { conda run --no-capture-output -p ".envs/$1" "${@:2}"; }
+git() { "$ROOT/.envs/autoresearcher/bin/git" "$@"; }   # the autoresearcher env's git, never the host's
 # `configs/kernel.yaml` pins the Wan2.2, LTX-2 and LightX2V revisions; read them with the autoresearcher env's yaml
 pin() { .envs/autoresearcher/bin/python -c "import yaml; print(yaml.safe_load(open('configs/kernel.yaml'))['generators']['$1']['commit'])"; }
 
