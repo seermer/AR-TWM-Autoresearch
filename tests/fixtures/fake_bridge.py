@@ -80,7 +80,19 @@ def ltx(job, item, out):
                             "keyframes": item.get("keyframes")}
 
 
-OUTPUTS = {"rollout_fake": copy_src, "rollout_keyed": placeholder, "generate_images": image,
+def h3(job, item, out):
+    """h3_generate.py without a model (and without torchrun): an mp4 of the job's size and the item's requested
+    frames with an audio track."""
+    import json
+    p = job["paths"]
+    request = json.loads(Path(p["requests"]).read_text(encoding="utf-8"))[str(item["index"])]
+    height, width = p["size"]
+    dst = mp4(out / f"{item['index']}.mp4", width, height, request["frames"], item.get("fps", 24), audio=True)
+    return {"video": dst}, {"weights": p["weights"], "frames": request["frames"], "prompt": request["prompt"],
+                            "config": json.loads(Path(p["config"]).read_text(encoding="utf-8")), "image": item.get("image")}
+
+
+OUTPUTS = {"rollout_fake": copy_src, "rollout_h3": h3, "rollout_keyed": placeholder, "generate_images": image,
            "annotate_camera": poses, "rollout_wan22": wan, "rollout_ltx25": ltx}
 
 

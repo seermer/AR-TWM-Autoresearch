@@ -1,24 +1,28 @@
-"""rollout_h3 worker (runs in the gen-lightx2v conda-prefix env, under torchrun with one rank per
-GPU): MiniMax H3 through LightX2V's shared block offload recipe.
+"""rollout_h3 bridge (runs in the gen-lightx2v conda-prefix env): MiniMax H3 through LightX2V's shared block
+offload recipe, one rank per GPU.
 
-torchrun --standalone --nproc_per_node=N h3_generate.py --items items.json --requests requests.json \
-    --out DIR --weights <weights/minimax-h3> --config <LightX2V json> --height H --width W
+python h3_generate.py --job <work>/job.json (bridges/protocol.py) starts torchrun on itself with a rank per GPU.
+Job file: paths.weights, paths.requests ({index: {"prompt": the model prompt, "frames": the clip's frame count}}),
+paths.config (the LightX2V json), paths.size ([height, width]).
 
-requests.json: {index: {"prompt": the model prompt, "frames": the clip's frame count}}.
-
-The ranks render every item together (sequence parallel over one host copy of the weights), in
-index order; rank 0 writes <out>/<index>.mp4 then <out>/<index>.json ({"ok": true, "seconds": t}).
+The ranks render every item together (sequence parallel over one host copy of the weights), in index order;
+each rank's output goes to logs/<index>.rank<r>.log, and rank 0 writes <out>/<index>.mp4 and sends the messages.
 An error ends the job: the ranks cannot stay in step past it.
 """
 from __future__ import annotations
 
-import argparse
 import json
 import os
+import subprocess
+import sys
 import time
+import traceback
 from pathlib import Path
 
 from PIL import Image
+
+import protocol
+
 
 def request_of(item: dict, request: dict, height: int, width: int) -> dict:
     # the kernel has checked that a first frame is exactly width x height, so the runner uses it as it is
@@ -28,41 +32,58 @@ def request_of(item: dict, request: dict, height: int, width: int) -> dict:
             "image_path": image, "last_frame_path": None}
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    for name in ("--items", "--requests", "--out", "--weights", "--config"):
-        ap.add_argument(name, required=True)
-    for name in ("--height", "--width"):
-        ap.add_argument(name, type=int, required=True)
-    a = ap.parse_args()
-    out = Path(a.out)
-    requests = json.loads(Path(a.requests).read_text(encoding="utf-8"))
-    items = json.loads(Path(a.items).read_text(encoding="utf-8"))
+def main() -> int:
+    job = protocol.load_job()
+    if "RANK" not in os.environ:             # the bridge itself: torchrun sets RANK in each rank
+        return subprocess.run([sys.executable, "-m", "torch.distributed.run", "--standalone",
+                               f"--nproc_per_node={len(job['gpus'])}", os.path.abspath(__file__),
+                               "--job", job["file"]]).returncode
+    rank, ranks, p = int(os.environ["RANK"]), len(job["gpus"]), job["paths"]
+    out, (height, width) = Path(job["out"]), p["size"]
+    requests = json.loads(Path(p["requests"]).read_text(encoding="utf-8"))
+    messages = protocol.messages(job) if rank == 0 else None
 
     import torch.distributed as dist
     from lightx2v.models.runners.runner_factory import build_runner
     from lightx2v.utils.set_config import build_startup_config, init_parallel
     from lightx2v_platform.registry_factory import PLATFORM_DEVICE_REGISTER
 
+    t0 = time.monotonic()
     # the fl2av variant is the base transformer: it serves t2av and i2av too
-    startup = build_startup_config({"model_cls": "minimax_h3", "model_variant": "fl2av", "model_path": a.weights,
-                                    "config_json": a.config})
+    startup = build_startup_config({"model_cls": "minimax_h3", "model_variant": "fl2av", "model_path": p["weights"],
+                                    "config_json": p["config"]})
     if startup["parallel"]:
         PLATFORM_DEVICE_REGISTER.get(os.getenv("PLATFORM", "cuda"), None).init_parallel_env()
         init_parallel(startup)
     runner = build_runner(startup)
-    rank0 = not dist.is_initialized() or dist.get_rank() == 0
+    if messages:
+        messages.send("ready", info={"load_s": round(time.monotonic() - t0, 2)})
 
-    for item in items:
-        index, t0 = item["index"], time.monotonic()
-        request = request_of(item, requests[str(index)], a.height, a.width)
-        runner.run_request(runner.prepare_request({**request, "save_result_path": str(out / f"{index}.mp4")}))
-        if rank0:
-            (out / f"{index}.json").write_text(json.dumps({"ok": True, "seconds": round(time.monotonic() - t0, 2)}),
-                                               encoding="utf-8")
+    for item in job["items"]:
+        index, started = item["index"], time.time()
+        logs = [str(protocol.log_path(job, f"{index}.rank{r}")) for r in range(ranks)]
+        if messages:
+            messages.send("item_started", index=index, log=logs)
+        path = out / f"{index}.mp4"
+        try:
+            with protocol.item_log(job, f"{index}.rank{rank}"):
+                request = request_of(item, requests[str(index)], height, width)
+                runner.run_request(runner.prepare_request({**request, "save_result_path": str(path)}))
+        except Exception as exc:
+            if messages:
+                messages.send("item", index=index, ok=False, error=f"{type(exc).__name__}: {exc}",
+                              traceback=traceback.format_exc(), started=started, ended=time.time(), log=logs)
+            raise
+        if messages:
+            messages.send("item", index=index, ok=True, outputs={"video": str(path)},
+                          info={"seconds": round(time.time() - started, 2)}, started=started, ended=time.time(),
+                          log=logs)
+    if messages:
+        messages.send("job_done")
     if dist.is_initialized():
         dist.destroy_process_group()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

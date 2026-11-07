@@ -156,12 +156,8 @@ def build_prompt(item: dict, starts: list[int]) -> str:
             f"overall_soundscape: {SOUNDSCAPE}\n\nnon_diegetic_music: {MUSIC}")
 
 
-def launcher(ranks: int) -> list[str]:
-    return ["python", "-m", "torch.distributed.run", "--standalone", f"--nproc_per_node={ranks}"]
-
-
 class H3Backend(GpuJob):
-    """rollout_h3: one torchrun worker with a rank on every GPU of the run (sequence parallel)."""
+    """rollout_h3: a bridge that runs torchrun with a rank on every GPU of the run (sequence parallel)."""
     name = tool = "rollout_h3"
     kind = "rollout"
     generator = "minimax-h3"
@@ -205,7 +201,7 @@ class H3Backend(GpuJob):
         frames = clip_frames(item.get("seconds"), self.default_frames, self.max_frames)
         return frames, turn_starts(frames, len(item["turns"]))
 
-    def produce(self, job, items, work, out, cancel, report):
+    def prepare(self, job, items, work):
         requests = {}
         for item in items:
             frames, starts = self._layout(item)
@@ -220,19 +216,17 @@ class H3Backend(GpuJob):
         config["attn_type"] = self.block["attn_type"]
         config["parallel"]["seq_p_size"] = len(self.gpus)
         (work / "lightx2v.json").write_text(json.dumps(config), encoding="utf-8")
-        return self.run_workers(self.block["env"], lambda r, world: [
-            *launcher(len(self.gpus)), str(H3_BRIDGE), "--items", str(work / "items.json"),
-            "--requests", str(work / "requests.json"), "--out", str(out),
-            "--weights", str(self.cfg.repo_root / self.block["weights"]), "--config", str(work / "lightx2v.json"),
-            "--height", str(SIZE[1]), "--width", str(SIZE[0])],
-            [self.gpus], job=job, work=work, out=out, total=len(items), cancel=cancel, report=report,
-            extra_env={"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True", "DTYPE": "BF16",
-                       "TOKENIZERS_PARALLELISM": "false", "HF_HUB_OFFLINE": "1"})
+        return {"bridge": H3_BRIDGE, "env": self.block["env"],
+                "env_vars": {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True", "DTYPE": "BF16",
+                             "TOKENIZERS_PARALLELISM": "false", "HF_HUB_OFFLINE": "1"},
+                "job": {"paths": {"weights": str(self.cfg.repo_root / self.block["weights"]),
+                                  "requests": str(work / "requests.json"), "config": str(work / "lightx2v.json"),
+                                  "size": [SIZE[1], SIZE[0]]}}}
 
-    def finish(self, job, item, out):
+    def finish(self, job, item, outputs, info, out):
         frames, starts = self._layout(item)
         silent = out / f"{item['index']}.silent.mp4"
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(out / f"{item['index']}.mp4"), "-an",
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(outputs["video"]), "-an",
                         "-c:v", "copy", str(silent)], check=True)
         info = probe_video(silent)
         if (info.width, info.height) != SIZE:
