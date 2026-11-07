@@ -144,10 +144,20 @@ def _envs(cfg: KernelConfig) -> list[Finding]:
     return out
 
 
-def _tools() -> list[Finding]:
-    return [Finding("ok", f"tool.{t}", shutil.which(t)) if shutil.which(t)
-            else Finding("fail", f"tool.{t}", "not on PATH")
-            for t in ("ffprobe", "ffmpeg", "conda", "git", "curl", "wget", "unzip", "gcc")]   # + the agent's host tools
+ENV_TOOLS = {"autoresearcher": ("ffprobe", "ffmpeg", "git"), "vllm": ("ffprobe", "ffmpeg"),
+             "agent": ("ffprobe", "ffmpeg", "git")}
+
+
+def _tools(cfg: KernelConfig) -> list[Finding]:
+    out = []
+    for e, tools in ENV_TOOLS.items():
+        for t in tools:
+            path = cfg.repo_root / ".envs" / e / "bin" / t
+            out.append(Finding("ok", f"tool.{e}.{t}", str(path)) if os.access(path, os.X_OK)
+                       else Finding("fail", f"tool.{e}.{t}", f"not in .envs/{e}/bin: rebuild the env (scripts/setup_envs.sh {e})"))
+    return out + [Finding("ok", f"tool.{t}", shutil.which(t)) if shutil.which(t)
+                  else Finding("fail", f"tool.{t}", "not on PATH")
+                  for t in ("conda", "curl", "wget", "unzip", "gcc")]   # + the agent's host tools
 
 
 def _in_sandbox(cfg: KernelConfig, command: list[str], gpus=()) -> subprocess.CompletedProcess:
@@ -343,7 +353,7 @@ def run_checks(cfg: KernelConfig | None = None) -> list[Finding]:
     findings: list[Finding] = []
     findings += _rel_paths(cfg)
     findings += _siblings(cfg)
-    findings += _tools()
+    findings += _tools(cfg)
     findings += _sandbox(cfg)
     findings += _fit(cfg)
     findings += _envs(cfg)
