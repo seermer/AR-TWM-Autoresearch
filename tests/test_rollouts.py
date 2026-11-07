@@ -29,6 +29,7 @@ from tests.conftest import make_mp4
 
 REAL = KernelConfig.load()
 FAKE = Path(__file__).parent / "fixtures" / "fake_gen_worker.py"
+FAKE_BRIDGE = Path(__file__).parent / "fixtures" / "fake_bridge.py"
 
 
 def small_cfg(env="autoresearcher", enabled=True):
@@ -711,9 +712,9 @@ def small_wan_cfg(env="autoresearcher", enabled=True, **over):
 
 @pytest.fixture
 def wan_env(tmp_path, monkeypatch):
-    """The real Wan22Backend.produce/run_workers, with wan22_generate.py swapped for the fake
-    worker (wan mode: it writes a synthetic 1280x704, --frames-frame mp4 and echoes the argv)."""
-    monkeypatch.setattr(rollouts, "WAN22_BRIDGE", FAKE)
+    """The real Wan22Backend, with wan22_generate.py swapped for the fake bridge (it writes a synthetic 1280x704
+    mp4 of the job's frames and echoes the job file)."""
+    monkeypatch.setattr(rollouts, "WAN22_BRIDGE", FAKE_BRIDGE)
     rec = Recorder(tmp_path / "run")
     reg = TokenRegistry(rec)
     q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
@@ -796,7 +797,7 @@ def test_wan_workers_get_one_gpu_each_from_the_configured_repo_and_weights(wan_e
 
 
 def test_wan_extra_args_can_disable_offload_and_t5_cpu(tmp_path, monkeypatch):
-    monkeypatch.setattr(rollouts, "WAN22_BRIDGE", FAKE)
+    monkeypatch.setattr(rollouts, "WAN22_BRIDGE", FAKE_BRIDGE)
     rec = Recorder(tmp_path / "run")
     reg = TokenRegistry(rec)
     q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
@@ -825,7 +826,7 @@ def test_wan_build_gpu_backends_includes_it_only_when_a_variant_is_enabled(tmp_p
 def test_wan_refuses_to_run_off_the_pinned_commit(tmp_path, monkeypatch, pin):
     """The backend's own git check, not the worker's: produce() must raise before any worker
     launches, so a silently-updated clone (or a config with no pin) fails the whole job."""
-    monkeypatch.setattr(rollouts, "WAN22_BRIDGE", FAKE)
+    monkeypatch.setattr(rollouts, "WAN22_BRIDGE", FAKE_BRIDGE)
     rec = Recorder(tmp_path / "run")
     reg = TokenRegistry(rec)
     q = JobQueue(rec, threading.Lock(), wait_cap_s=60)
@@ -845,7 +846,7 @@ def test_wan_refuses_to_run_off_the_pinned_commit(tmp_path, monkeypatch, pin):
 def test_wan_missing_clone_fails_the_job_with_a_clear_message(tmp_path, monkeypatch):
     """An uncloned third_party/Wan2.2 must say which path and where the setup is documented, not
     surface a bare CalledProcessError."""
-    monkeypatch.setattr(rollouts, "WAN22_BRIDGE", FAKE)
+    monkeypatch.setattr(rollouts, "WAN22_BRIDGE", FAKE_BRIDGE)
     rec = Recorder(tmp_path / "run")
     reg = TokenRegistry(rec)
     q = JobQueue(rec, threading.Lock(), wait_cap_s=60)
@@ -875,7 +876,7 @@ def test_finish_refuses_a_non_24fps_render(tmp_path):
     out.mkdir()
     make_mp4(out / "0.mp4", seconds=2, fps=30, width=1280, height=704)
     with pytest.raises(ValueError, match="fps"):
-        _wan_backend(tmp_path).finish(None, {"index": 0, "prompt": "p"}, out)
+        _wan_backend(tmp_path).finish(None, {"index": 0, "prompt": "p"}, {"video": out / "0.mp4"}, {}, out)
 
 
 def test_finish_refuses_a_render_off_the_1280x704_working_size(tmp_path):
@@ -886,14 +887,14 @@ def test_finish_refuses_a_render_off_the_1280x704_working_size(tmp_path):
     out.mkdir()
     make_mp4(out / "0.mp4", seconds=2, fps=24, width=800, height=1088)
     with pytest.raises(ValueError, match="1280x704"):
-        _wan_backend(tmp_path).finish(None, {"index": 0, "prompt": "p"}, out)
+        _wan_backend(tmp_path).finish(None, {"index": 0, "prompt": "p"}, {"video": out / "0.mp4"}, {}, out)
 
 
 def test_finish_crops_to_1248x704_and_passes_the_prompt_on(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
     make_mp4(out / "0.mp4", seconds=2, fps=24, width=1280, height=704)
-    res = _wan_backend(tmp_path).finish(None, {"index": 0, "prompt": "hello there"}, out)
+    res = _wan_backend(tmp_path).finish(None, {"index": 0, "prompt": "hello there"}, {"video": out / "0.mp4"}, {}, out)
     info = probe_video(res["video"])
     assert (info.width, info.height) == (1248, 704) and round(info.fps) == 24
     assert res["frames"] == info.frames
@@ -996,9 +997,8 @@ def small_ltx_cfg(env="autoresearcher", enabled=True, **over):
 
 @pytest.fixture
 def ltx_env(tmp_path, monkeypatch):
-    """The real Ltx25Backend.produce/run_workers, with ltx25_generate.py swapped for the fake
-    worker (ltx mode)."""
-    monkeypatch.setattr(rollouts, "LTX25_BRIDGE", FAKE)
+    """The real Ltx25Backend, with ltx25_generate.py swapped for the fake bridge."""
+    monkeypatch.setattr(rollouts, "LTX25_BRIDGE", FAKE_BRIDGE)
     rec = Recorder(tmp_path / "run")
     reg = TokenRegistry(rec)
     q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
@@ -1148,7 +1148,7 @@ def test_ltx_finish_refuses_a_non_24fps_render(tmp_path):
     out.mkdir()
     make_mp4(out / "0.mp4", seconds=2, fps=30, width=1024, height=576)
     with pytest.raises(ValueError, match="fps"):
-        _ltx_backend(tmp_path).finish(_ltx_job(), {"index": 0, "prompt": "p"}, out)
+        _ltx_backend(tmp_path).finish(_ltx_job(), {"index": 0, "prompt": "p"}, {"video": out / "0.mp4"}, {}, out)
 
 
 def test_ltx_finish_refuses_a_render_of_the_wrong_frame_count(tmp_path):
@@ -1156,7 +1156,7 @@ def test_ltx_finish_refuses_a_render_of_the_wrong_frame_count(tmp_path):
     out.mkdir()
     make_mp4(out / "0.mp4", seconds=2, fps=24, width=1024, height=576)      # 48 frames, job asks 49
     with pytest.raises(ValueError, match="48 frames, not 49"):
-        _ltx_backend(tmp_path).finish(_ltx_job(), {"index": 0, "prompt": "p"}, out)
+        _ltx_backend(tmp_path).finish(_ltx_job(), {"index": 0, "prompt": "p"}, {"video": out / "0.mp4"}, {}, out)
 
 
 def test_ltx_finish_refuses_a_render_off_the_requested_size(tmp_path):
@@ -1164,7 +1164,7 @@ def test_ltx_finish_refuses_a_render_off_the_requested_size(tmp_path):
     out.mkdir()
     make_mp4(out / "0.mp4", seconds=2, fps=24, width=960, height=544)
     with pytest.raises(ValueError, match="1024x576"):
-        _ltx_backend(tmp_path).finish(_ltx_job(), {"index": 0, "prompt": "p"}, out)
+        _ltx_backend(tmp_path).finish(_ltx_job(), {"index": 0, "prompt": "p"}, {"video": out / "0.mp4"}, {}, out)
 
 
 def test_ltx_finish_passes_the_prompt_on(tmp_path):
@@ -1172,7 +1172,7 @@ def test_ltx_finish_passes_the_prompt_on(tmp_path):
     out.mkdir()
     make_mp4(out / "0.mp4", seconds=121 / 24, fps=24, width=1024, height=576)
     frames = probe_video(out / "0.mp4").frames
-    res = _ltx_backend(tmp_path).finish(_ltx_job(frames=frames), {"index": 0, "prompt": "A quiet forest path at dawn."}, out)
+    res = _ltx_backend(tmp_path).finish(_ltx_job(frames=frames), {"index": 0, "prompt": "A quiet forest path at dawn."}, {"video": out / "0.mp4"}, {}, out)
     assert res["prompt"] == "A quiet forest path at dawn." and set(res) == {"video", "prompt", "frames"}
 
 

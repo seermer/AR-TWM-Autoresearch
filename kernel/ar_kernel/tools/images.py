@@ -46,18 +46,13 @@ class ImageBackend(GpuJob):
             raise ToolError("prompt must be a non-empty string")
         check_item_seed(item)
 
-    def produce(self, job, items, work, out, cancel, report):
+    def prepare(self, job, items, work):
         i = self.block
-        width, height = job.args["width"], job.args["height"]
-        weights = self.cfg.repo_root / i["weights"]
-        return self.run_workers(i["env"], lambda r, w: [
-            "python", str(BRIDGE), "--items", str(work / "items.json"), "--out", str(out), "--rank", str(r),
-            "--world", str(w), "--weights", str(weights), "--width", str(width), "--height", str(height),
-            "--steps", str(i["steps"]), "--offload", i["offload"]], split_gpus(self.gpus, 1, i["workers"]),
-            job=job, work=work, out=out, total=len(items), cancel=cancel, report=report)
+        return {"bridge": BRIDGE, "env": i["env"], "job": {"groups": split_gpus(self.gpus, 1, i["workers"]),
+                                                           "paths": {"weights": str(self.cfg.repo_root / i["weights"])}}}
 
-    def finish(self, job, item, out):
-        png = out / f"{item['index']}.png"
+    def finish(self, job, item, outputs, info, out):
+        png = outputs["image"]
         width, height = job.args["width"], job.args["height"]
         with Image.open(png) as im:
             if im.size != (width, height):

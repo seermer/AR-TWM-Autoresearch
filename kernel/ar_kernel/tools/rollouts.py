@@ -373,26 +373,19 @@ class Wan22Backend(GpuJob):
 
     check_item = staticmethod(check_clip_item)
 
-    def produce(self, job, items, work, out, cancel, report):
+    def prepare(self, job, items, work):
         repo = checked_repo(self.cfg, self.config_key, "Wan2.2")
-        ckpt = self.cfg.repo_root / self.block["weights"]
-        extra = self.block.get("extra_args") or {}
-        offload = "--offload-model" if extra.get("offload_model", True) else "--no-offload-model"
-        t5_cpu = "--t5-cpu" if extra.get("t5_cpu", True) else "--no-t5-cpu"
         groups = split_gpus(self.gpus, int(self.block.get("gpus_per_worker", 1)), self.block["workers"])
-        return self.run_workers(self.block["env"], lambda r, w: [
-            "python", str(WAN22_BRIDGE), "--items", str(work / "items.json"), "--out", str(out),
-            "--rank", str(r), "--world", str(w), "--repo", str(repo), "--ckpt-dir", str(ckpt),
-            "--frames", str(job.args["frames"]), offload, t5_cpu], groups,
-            job=job, work=work, out=out, total=len(items), cancel=cancel, report=report,
-            cwd=self.cfg.repo_root,
-            # the fit spike OOM'd at VAE decode with the default caching allocator even
-            # though sampling itself stayed under budget (fragmentation, not a real shortage --
-            # PyTorch's own OOM message suggests exactly this flag).
-            extra_env={"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
+        return {"bridge": WAN22_BRIDGE, "env": self.block["env"], "cwd": self.cfg.repo_root,
+                # the fit spike OOM'd at VAE decode with the default caching allocator even
+                # though sampling itself stayed under budget (fragmentation, not a real shortage --
+                # PyTorch's own OOM message suggests exactly this flag).
+                "env_vars": {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"},
+                "job": {"groups": groups,
+                        "paths": {"repo": str(repo), "ckpt_dir": str(self.cfg.repo_root / self.block["weights"])}}}
 
-    def finish(self, job, item, out):
-        rendered = out / f"{item['index']}.mp4"
+    def finish(self, job, item, outputs, info, out):
+        rendered = outputs["video"]
         raw = probe_video(rendered)
         if (raw.width, raw.height) != (1280, 704):     # the bridge fits every first frame to this
             raise ValueError(f"rendered clip is {raw.width}x{raw.height}, not 1280x704")
@@ -457,23 +450,17 @@ class Ltx25Backend(GpuJob):
         if any(f >= frames for f in seen):
             raise ToolError(f"a keyframe frame is outside the clip: frames are 0..{frames - 1}, or -1 for the last")
 
-    def produce(self, job, items, work, out, cancel, report):
+    def prepare(self, job, items, work):
         repo = checked_repo(self.cfg, self.config_key, "LTX-2")
-        a = job.args
-        groups = split_gpus(self.gpus, 1, self.block["workers"])[:len(items)]
-        return self.run_workers(self.block["env"], lambda r, w: [
-            "python", str(LTX25_BRIDGE), "--items", str(work / "items.json"), "--out", str(out),
-            "--rank", str(r), "--world", str(w), "--weights", str(self.cfg.repo_root / self.block["weights"]),
-            "--frames", str(a["frames"]), "--height", str(a["height"]),
-            "--width", str(a["width"]), "--quantization", self.block.get("quantization", "fp8-cast"),
-            "--offload", self.block.get("offload", "cpu")], groups,
-            job=job, work=work, out=out, total=len(items), cancel=cancel, report=report, cwd=repo,
-            extra_env={"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
+        return {"bridge": LTX25_BRIDGE, "env": self.block["env"], "cwd": repo,
+                "env_vars": {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"},
+                "job": {"groups": split_gpus(self.gpus, 1, self.block["workers"])[:len(items)],
+                        "paths": {"weights": str(self.cfg.repo_root / self.block["weights"])}}}
 
-    def finish(self, job, item, out):
+    def finish(self, job, item, outputs, info, out):
         a = job.args
         silent = out / f"{item['index']}.silent.mp4"
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(out / f"{item['index']}.mp4"), "-an",
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(outputs["video"]), "-an",
                         "-c:v", "copy", str(silent)], check=True)
         info = probe_video(silent)
         if (info.width, info.height) != (a["width"], a["height"]):

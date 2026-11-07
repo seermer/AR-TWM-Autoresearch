@@ -1,11 +1,8 @@
 """annotate_camera worker (runs in `alayaworld`): mp4 -> per-frame camera poses via ViGeo.
 
-python vigeo_poses.py --items items.json --out DIR --rank R --world W \
-    --repo <ViGeo dir> --checkpoint <ViGeo1.1 dir> --max-frames N
-
-Bridge protocol: handles items with index % world == rank; per item writes
-<out>/<index>.npz (cam_c2w [N,4,4] float32, OpenCV camera-to-world, frame 0 = identity;
-intrinsics [3,3] in mp4 pixels) and then <out>/<index>.json.
+python vigeo_poses.py --job <work>/job.json (bridges/protocol.py): one worker per GPU group; per item
+<out>/<index>.npz (cam_c2w [N,4,4] float32, OpenCV camera-to-world, frame 0 = identity; intrinsics [3,3] in mp4
+pixels). Job file: paths.repo (ViGeo), paths.checkpoint (ViGeo1.1), config.max_frames.
 
 ViGeo facts used (third_party/ViGeo): frames are resized to a patch-14 grid of ~1369 tokens
 (vigeo.py `_resolve_model_size`); `pose_pred` is [T,3,4] camera-to-world; the focal
@@ -22,8 +19,6 @@ over one 450-frame clip whose true fx is 793).
 """
 from __future__ import annotations
 
-import argparse
-import json
 import sys
 import time
 from pathlib import Path
@@ -32,6 +27,8 @@ import av
 import cv2
 import numpy as np
 import torch
+
+import protocol
 
 CHUNK = 16            # ViGeo's default chunk size; clips of <= CHUNK frames run offline
 NUM_TOKENS = 1369     # ViGeo infer() default
@@ -90,35 +87,31 @@ def annotate(model, recover_focal, path: str, max_frames: int, device):
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
-    for name in ("--items", "--out", "--repo", "--checkpoint"):
-        ap.add_argument(name, required=True)
-    for name in ("--rank", "--world", "--max-frames"):
-        ap.add_argument(name, type=int, required=True)
-    args = ap.parse_args()
-    out = Path(args.out)
-    mine = [i for i in json.loads(Path(args.items).read_text(encoding="utf-8"))
-            if i["index"] % args.world == args.rank]
-    if not mine:
-        return 0
-    sys.path.insert(0, args.repo)
-    from vigeo import ViGeo
-    from vigeo.utils import recover_focal_from_xy
+    job = protocol.load_job()
+    if job["worker"] is None:
+        return protocol.spawn_workers(job)
+    out, max_frames = Path(job["out"]), job["config"]["max_frames"]
     device = torch.device("cuda")
-    model = ViGeo.from_pretrained(args.checkpoint).to(device).eval()
-    for item in mine:
-        index, t0 = item["index"], time.monotonic()
+
+    def load():
+        sys.path.insert(0, job["paths"]["repo"])
+        from vigeo import ViGeo
+        from vigeo.utils import recover_focal_from_xy
+        return ViGeo.from_pretrained(job["paths"]["checkpoint"]).to(device).eval(), recover_focal_from_xy
+
+    def one(model, item):
+        t0 = time.monotonic()
         torch.cuda.reset_peak_memory_stats()
         try:
-            c2w, k, intr = annotate(model, recover_focal_from_xy, item["video"], args.max_frames, device)
-            np.savez(out / f"{index}.npz", cam_c2w=c2w, intrinsics=k)
-            status = {"ok": True, "frames": len(c2w), "intrinsics": intr,
-                      "seconds": round(time.monotonic() - t0, 2),
-                      "peak_mem_mib": round(torch.cuda.max_memory_allocated() / 2**20)}
-        except Exception as exc:          # noqa: BLE001 -- a per-item error; move on (protocol)
-            status = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-        torch.cuda.empty_cache()
-        (out / f"{index}.json").write_text(json.dumps(status), encoding="utf-8")
+            c2w, k, intr = annotate(*model, item["video"], max_frames, device)
+            path = out / f"{item['index']}.npz"
+            np.savez(path, cam_c2w=c2w, intrinsics=k)
+            return {"pose": path}, {"frames": len(c2w), "intrinsics": intr, "seconds": round(time.monotonic() - t0, 2),
+                                    "peak_mem_mib": round(torch.cuda.max_memory_allocated() / 2**20)}
+        finally:
+            torch.cuda.empty_cache()
+
+    protocol.run_items(job, load, one)
     return 0
 
 

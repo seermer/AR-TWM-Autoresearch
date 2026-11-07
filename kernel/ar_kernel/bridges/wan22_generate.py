@@ -2,13 +2,9 @@
 once, renders each item's shard with the ti2v-5B pipeline (text-to-video, or image-to-video when
 the item carries a first frame).
 
-python wan22_generate.py --items items.json --out DIR --rank R --world W \
-    --repo <Wan2.2 checkout> --ckpt-dir <wan2.2-ti2v-5b dir> --frames N \
-    [--offload-model/--no-offload-model] [--t5-cpu/--no-t5-cpu]
-
-Bridge protocol: handles items with index % world == rank, in index order; per item
-writes <out>/<index>.mp4 then <out>/<index>.json ({"ok": true, "seconds": t} or
-{"ok": false, "error": "..."}). The model loads once, before the first item.
+python wan22_generate.py --job <work>/job.json (bridges/protocol.py): one worker per GPU group; per item
+<out>/<index>.mp4. Job file: paths.repo (the Wan2.2 checkout), paths.ckpt_dir, args.frames,
+config.extra_args (offload_model, t5_cpu; both default true). The model loads once per worker.
 
 Imports and the constructor/generate()/save_video() arguments are copied from generate.py's ti2v
 branch at the commit pinned in configs/kernel.yaml (generators.wan22.commit); Wan22Backend refuses
@@ -20,14 +16,15 @@ generate_images frame would otherwise render at 1248x704 and a portrait one at 8
 """
 from __future__ import annotations
 
-import argparse
 import gc
-import json
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 from PIL import Image, ImageOps
+
+import protocol
 
 SIZE = (1280, 704)
 
@@ -38,59 +35,48 @@ def fit_first_frame(img: Image.Image) -> Image.Image:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
-    for name in ("--items", "--out", "--repo", "--ckpt-dir"):
-        ap.add_argument(name, required=True)
-    for name in ("--rank", "--world", "--frames"):
-        ap.add_argument(name, type=int, required=True)
-    ap.add_argument("--offload-model", dest="offload_model", action="store_true", default=True)
-    ap.add_argument("--no-offload-model", dest="offload_model", action="store_false")
-    ap.add_argument("--t5-cpu", dest="t5_cpu", action="store_true", default=True)
-    ap.add_argument("--no-t5-cpu", dest="t5_cpu", action="store_false")
-    args = ap.parse_args()
+    job = protocol.load_job()
+    if job["worker"] is None:
+        return protocol.spawn_workers(job)
+    out, frames = Path(job["out"]), job["args"]["frames"]
+    extra = job["config"].get("extra_args") or {}
 
-    out = Path(args.out)
-    mine = [item for item in json.loads(Path(args.items).read_text(encoding="utf-8"))
-            if item["index"] % args.world == args.rank]
-    if not mine:
-        return 0
+    def load():
+        sys.path.insert(0, job["paths"]["repo"])
+        import torch
+        import wan
+        from wan.configs import MAX_AREA_CONFIGS, SIZE_CONFIGS, WAN_CONFIGS
+        from wan.utils.utils import save_video
+        cfg = WAN_CONFIGS["ti2v-5B"]
+        pipe = wan.WanTI2V(config=cfg, checkpoint_dir=job["paths"]["ckpt_dir"], device_id=0, rank=0,
+                           t5_cpu=extra.get("t5_cpu", True), convert_model_dtype=True)
+        return SimpleNamespace(torch=torch, cfg=cfg, pipe=pipe, save_video=save_video,
+                               size=SIZE_CONFIGS["1280*704"], area=MAX_AREA_CONFIGS["1280*704"])
 
-    sys.path.insert(0, args.repo)
-    import torch
-    import wan
-    from wan.configs import MAX_AREA_CONFIGS, SIZE_CONFIGS, WAN_CONFIGS
-    from wan.utils.utils import save_video
-
-    cfg = WAN_CONFIGS["ti2v-5B"]
-    pipe = wan.WanTI2V(config=cfg, checkpoint_dir=args.ckpt_dir, device_id=0, rank=0,
-                       t5_cpu=args.t5_cpu, convert_model_dtype=True)
-
-    for item in mine:
-        index, t0 = item["index"], time.monotonic()
-        status_path = out / f"{index}.json"
-        video = None
+    def one(m, item):
+        t0, torch, cfg, video = time.monotonic(), m.torch, m.cfg, None
         try:
             torch.cuda.reset_peak_memory_stats()
             img = fit_first_frame(Image.open(item["image"])) if item.get("image") else None
             with torch.inference_mode():
-                video = pipe.generate(
-                    item["prompt"], img=img, size=SIZE_CONFIGS["1280*704"],
-                    max_area=MAX_AREA_CONFIGS["1280*704"], frame_num=args.frames, shift=cfg.sample_shift,
+                video = m.pipe.generate(
+                    item["prompt"], img=img, size=m.size, max_area=m.area, frame_num=frames, shift=cfg.sample_shift,
                     sample_solver="unipc", sampling_steps=cfg.sample_steps, guide_scale=cfg.sample_guide_scale,
-                    seed=item["seed"], offload_model=args.offload_model)
-            save_video(tensor=video[None], save_file=str(out / f"{index}.mp4"), fps=cfg.sample_fps,
-                       nrow=1, normalize=True, value_range=(-1, 1))
-            status = {"ok": True, "seconds": round(time.monotonic() - t0, 2),
-                      "peak_allocated_gib": round(torch.cuda.max_memory_allocated() / 2**30, 2),
-                      "peak_reserved_gib": round(torch.cuda.max_memory_reserved() / 2**30, 2)}
-        except Exception as exc:          # noqa: BLE001 -- a per-item error; move on (protocol)
-            status = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-        # the 24 GB card has no headroom at 1280x704x121 (peak ~22.9 GiB): the previous clip
-        # (1.3 GB fp32 on the GPU) must not survive into the next item
-        del video
-        gc.collect()
-        torch.cuda.empty_cache()
-        status_path.write_text(json.dumps(status), encoding="utf-8")
+                    seed=item["seed"], offload_model=extra.get("offload_model", True))
+            path = out / f"{item['index']}.mp4"
+            m.save_video(tensor=video[None], save_file=str(path), fps=cfg.sample_fps, nrow=1, normalize=True,
+                         value_range=(-1, 1))
+            return {"video": path}, {"seconds": round(time.monotonic() - t0, 2),
+                                     "peak_allocated_gib": round(torch.cuda.max_memory_allocated() / 2**30, 2),
+                                     "peak_reserved_gib": round(torch.cuda.max_memory_reserved() / 2**30, 2)}
+        finally:
+            # the 24 GB card has no headroom at 1280x704x121 (peak ~22.9 GiB): the previous clip
+            # (1.3 GB fp32 on the GPU) must not survive into the next item
+            del video
+            gc.collect()
+            torch.cuda.empty_cache()
+
+    protocol.run_items(job, load, one)
     return 0
 
 

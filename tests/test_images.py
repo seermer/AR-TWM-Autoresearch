@@ -20,7 +20,7 @@ from ar_kernel.tools.server import ToolError
 
 REAL = KernelConfig.load()
 DEFAULT = tuple(reversed(REAL.get("images.default_size")))      # (width, height)
-FAKE = Path(__file__).parent / "fixtures" / "fake_gen_worker.py"
+FAKE = Path(__file__).parent / "fixtures" / "fake_bridge.py"
 
 
 def small_cfg(env="autoresearcher"):
@@ -31,8 +31,8 @@ def small_cfg(env="autoresearcher"):
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    """The real ImageBackend.produce/run_workers, with the Z-Image bridge swapped for the fake
-    worker (image mode: it writes a PNG of the requested size and echoes weights/steps/offload)."""
+    """The real ImageBackend, with the Z-Image bridge swapped for the fake bridge (it writes a PNG of the
+    requested size and echoes weights/steps/offload)."""
     monkeypatch.setattr(images, "BRIDGE", FAKE)
     rec = Recorder(tmp_path / "run")
     reg = TokenRegistry(rec)
