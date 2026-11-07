@@ -2,11 +2,15 @@
 (tests/fixtures/fake_vllm.py, no GPU)."""
 import json
 import os
+import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+
+import locate_vllm
 
 from conftest import job_result, make_mp4, job_folder
 from ar_kernel.config import KernelConfig
@@ -23,9 +27,24 @@ REAL = KernelConfig.load()
 def test_a_clip_is_decoded_at_24_frames_a_second(tmp_path):
     make_mp4(tmp_path / "a.mp4", seconds=2.5, fps=24, width=320, height=180)
     make_mp4(tmp_path / "b.mp4", seconds=1.0, fps=30, width=320, height=180)
-    frames = le.decode(tmp_path / "a.mp4", 160)
+    frames = locate_vllm.decode(str(tmp_path / "a.mp4"), 320, 180, 160, 24)
     assert len(frames) == 60 and frames[0].size == (160, 90)
-    assert len(le.decode(tmp_path / "b.mp4", 160)) == 24
+    assert len(locate_vllm.decode(str(tmp_path / "b.mp4"), 320, 180, 160, 24)) == 24
+
+
+def test_ask_parses_the_strict_answer_and_refuses_any_other_shape():
+    def stub(parsed, content="..."):
+        message = SimpleNamespace(parsed=parsed, content=content, reasoning_content="why")
+        return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+            parse=lambda **kw: calls.append(kw) or SimpleNamespace(choices=[SimpleNamespace(message=message)]))))
+    calls = []
+    answer = locate_vllm.Answer(happening_now=True, already_happened=False)
+    assert locate_vllm.ask(stub(answer), "data:x", "SYS", "Rain.", "low") == (
+        {"happening_now": True, "already_happened": False}, "why")
+    assert calls[0]["response_format"] is locate_vllm.Answer and calls[0]["model"] == "locator"
+    assert calls[0]["messages"][1]["content"][1] == {"type": "text", "text": "Event: Rain."}
+    with pytest.raises(ValueError, match="no answer in the asked shape"):
+        locate_vllm.ask(stub(None, "I cannot tell."), "data:x", "SYS", "Rain.", "low")
 
 
 @pytest.mark.parametrize("there, span", [
@@ -71,7 +90,7 @@ def env(tmp_path):
     reg = TokenRegistry(rec)
     q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
     q.register(FakeServer(fake_cfg(), tmp_path / "run", [0, 1, 2, 3], reg, rec,
-                          gpu_memory=lambda gpus: {g: 100 for g in gpus}, poll_s=0.2))
+                          gpu_memory=lambda gpus: {g: 100 for g in gpus}))
     ws, staging = tmp_path / "ws", tmp_path / "staging"
     ws.mkdir(); staging.mkdir()
     make_mp4(ws / "a.mp4", seconds=2.5, fps=24, width=320, height=180)
@@ -92,29 +111,26 @@ def test_a_job_asks_about_every_event_in_every_frame_and_returns_spans_only(env)
             {"event": "A dog walks in.", "start_s": 0.0, "end_s": 2.5, "disagreeing_s": 0.0},
             {"event": "NEVER a cat.", "start_s": None, "end_s": None, "disagreeing_s": 0}]},
         "/workspace/b.mp4": {"events": [{"event": "Rain.", "start_s": 0.0, "end_s": 1.0, "disagreeing_s": 0.0}]}}
-    asked = [e for e in rec.read_events("n1") if e["type"] == "locate.event"]
-    got = [rec.load_payload(e["payload"]) for e in asked]
-    assert sorted((p["video"], p["event"], len(p["answers"])) for p in got) == [  # each event on its own, every frame
-        ("/workspace/a.mp4", 0, 60), ("/workspace/a.mp4", 1, 60), ("/workspace/b.mp4", 0, 24)]
-    assert all(e["ok"] for e in asked)
-    assert all(r == "looked at one frame" for p in got for r in p["reasonings"])  # recorded, not returned
+    asked = {m["index"]: m for m in messages(run, out["id"]) if m["type"] == "item"}
+    assert [[len(e) for e in asked[i]["info"]["answers"]] for i in (0, 1)] == [[60, 60], [24]]  # every event, every frame
+    assert all(asked[i]["ok"] for i in (0, 1))
+    assert all(r == "looked at one frame" for m in asked.values() for e in m["info"]["reasonings"] for r in e)
+    assert out["progress"] == {"done": 2, "total": 2}
     argv = json.loads((job_folder(run, out["id"]) / "fake_vllm.argv.json").read_text())
     assert json.loads(argv[argv.index("--limit-mm-per-prompt") + 1]) == {"image": 1, "video": 0}
     assert not (job_folder(run, out["id"]) / "media").exists()
 
 
-def test_an_answer_off_the_asked_shape_is_that_clips_error_and_recorded(env):
-    q, caller, rec, _ = env
+def test_an_answer_off_the_asked_shape_is_that_clips_error_and_kept(env):
+    q, caller, rec, run = env
     out = q.wait(caller, le.submit(q, caller, [{"video": "a.mp4", "events": ["BROKEN."]},
                                                {"video": "b.mp4", "events": ["Rain."]}])["job_id"], 120)
     clips = job_result(out)["clips"]
-    assert "error" in clips["/workspace/a.mp4"] and "events" in clips["/workspace/b.mp4"]
-    asked = {rec.load_payload(e["payload"])["video"]: (e["ok"], rec.load_payload(e["payload"]))
-             for e in rec.read_events("n1") if e["type"] == "locate.event"}
-    ok, broken = asked["/workspace/a.mp4"]
-    assert not ok and broken["answers"] == [None] * 60
-    assert all(r.startswith("ValidationError") for r in broken["reasonings"])         # each frame's error
-    assert asked["/workspace/b.mp4"][0]
+    assert clips["/workspace/a.mp4"]["error"].startswith("ValidationError") and "events" in clips["/workspace/b.mp4"]
+    asked = {m["index"]: m for m in messages(run, out["id"]) if m["type"] == "item"}
+    assert not asked[0]["ok"] and asked[0]["info"]["answers"] == [[None] * 60]
+    assert all(r.startswith("ValidationError") for r in asked[0]["info"]["reasonings"][0])     # each frame's error
+    assert asked[1]["ok"]
 
 
 @pytest.mark.parametrize("items, message", [
@@ -131,32 +147,70 @@ def test_bad_items_are_refused_before_a_job_is_queued(env, items, message):
         le.submit(q, caller, items)
 
 
-def _server_gone(run, job_id):
-    pid_file = job_folder(run, job_id) / "fake_vllm.pid"
+def messages(run, job_id) -> list[dict]:
+    path = job_folder(run, job_id) / "messages.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def _server_gone(folder: Path) -> bool:
+    pid_file = folder / "fake_vllm.pid"
     if not pid_file.exists():                   # stopped before it wrote its pid (under load), or never started
         return True
-    pid = int(pid_file.read_text())
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return True
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        try:
+            os.kill(int(pid_file.read_text()), 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.2)
     return False
 
 
-def test_the_server_loads_while_the_frames_are_decoded(env, monkeypatch):
-    q, caller, _, run = env
-    real_decode, seen = le.decode, []
+def bridge_here(tmp_path, monkeypatch, videos: list[Path]) -> list[dict]:
+    """bridges/locate_vllm.py run in this process (so its decode can be swapped) against the fake server; its
+    messages."""
+    from ar_kernel.subproc import free_port
+    work, port = tmp_path / "work", free_port()
+    work.mkdir()
+    b = REAL.get("locate_events")
+    command = FakeServer(fake_cfg(), work, [0, 1, 2, 3], None, None).server_command(port)
+    job = {"work": str(work), "serve": {"argv": [sys.executable, *command[1:]], "env": {"HF_HUB_OFFLINE": "1"},
+                                        "port": port},
+           "system": le.SYSTEM, "fps": 24, "frame_width": 160, "concurrent_requests": 4, "request_timeout_s": 10,
+           "reasoning_effort": b["reasoning_effort"],
+           "items": [{"index": i, "video": str(v), "width": 320, "height": 180, "events": ["Rain."]}
+                     for i, v in enumerate(videos)]}
+    (work / "job.json").write_text(json.dumps(job))
+    monkeypatch.setattr(sys, "argv", ["locate_vllm.py", "--job", str(work / "job.json")])
+    monkeypatch.chdir(work)
+    assert locate_vllm.main() == 0
+    assert _server_gone(work)
+    return [json.loads(line) for line in (work / "messages.jsonl").read_text().splitlines()]
 
-    def decode(path, width):                             # the server process starts before any frame is decoded
-        argv = path.parent.parent / "fake_vllm.argv.json"
+
+def test_the_server_loads_while_the_frames_are_decoded(tmp_path, monkeypatch):
+    make_mp4(tmp_path / "a.mp4", seconds=1.0, fps=24, width=320, height=180)
+    real_decode, seen = locate_vllm.decode, []
+
+    def decode(*args):                                   # the server process starts before any frame is decoded
+        argv = tmp_path / "work" / "fake_vllm.argv.json"
         deadline = time.monotonic() + 30
         while not argv.exists() and time.monotonic() < deadline:
             time.sleep(0.1)
         seen.append(argv.exists())
-        return real_decode(path, width)
-    monkeypatch.setattr(le, "decode", decode)
-    out = q.wait(caller, le.submit(q, caller, [{"video": "a.mp4", "events": ["Rain."]}])["job_id"], 120)
-    assert out["state"] == "done" and seen == [True]
+        return real_decode(*args)
+    monkeypatch.setattr(locate_vllm, "decode", decode)
+    got = bridge_here(tmp_path, monkeypatch, [tmp_path / "a.mp4"])
+    assert seen == [True] and [m["ok"] for m in got if m["type"] == "item"] == [True]
+
+
+def test_a_clip_that_cannot_be_decoded_is_its_error_and_the_server_still_stops(tmp_path, monkeypatch):
+    make_mp4(tmp_path / "a.mp4", seconds=1.0, fps=24, width=320, height=180)
+    monkeypatch.setattr(locate_vllm, "decode", lambda *a: (_ for _ in ()).throw(ValueError("cannot decode")))
+    got = bridge_here(tmp_path, monkeypatch, [tmp_path / "a.mp4"])
+    [item] = [m for m in got if m["type"] == "item"]
+    assert not item["ok"] and item["error"] == "ValueError: cannot decode" and "cannot decode" in item["traceback"]
+    assert got[-1]["type"] == "job_done"
 
 
 def test_a_file_that_is_not_a_video_is_refused_at_submit(env, tmp_path):
@@ -166,45 +220,43 @@ def test_a_file_that_is_not_a_video_is_refused_at_submit(env, tmp_path):
         le.submit(q, caller, [{"video": "c.mp4", "events": ["Rain."]}])
 
 
-def test_a_job_whose_clips_all_fail_prep_still_stops_the_server(env, tmp_path, monkeypatch):
-    q, caller, rec, run = env
-    monkeypatch.setattr(le, "decode", lambda path, width: (_ for _ in ()).throw(ValueError("cannot decode")))
-    out = q.wait(caller, le.submit(q, caller, [{"video": "a.mp4", "events": ["Rain."]}])["job_id"], 120)
-    assert out["state"] == "done" and "cannot decode" in job_result(out)["clips"]["/workspace/a.mp4"]["error"]
-    assert [e for e in rec.read_events("n1") if e["type"] == "locate.server_stopped"]
-    assert not [e for e in rec.read_events("n1") if e["type"] == "locate.event"]
-    assert _server_gone(run, out["id"])
-
-
-def test_a_cancel_while_the_frames_are_decoded_asks_nothing(env, monkeypatch):
-    q, caller, rec, run = env
-    real_decode, drawing = le.decode, threading.Event()
-
-    def decode(path, width):
-        drawing.set()
-        time.sleep(3)
-        return real_decode(path, width)
-    monkeypatch.setattr(le, "decode", decode)
-    job_id = le.submit(q, caller, [{"video": "a.mp4", "events": ["Rain."]}])["job_id"]
-    assert drawing.wait(60)
-    q.cancel(caller, job_id)
-    out = q.wait(caller, job_id, 120)
+def test_a_cancel_before_the_server_is_ready_asks_nothing(tmp_path):
+    rec = Recorder(tmp_path / "run")
+    reg = TokenRegistry(rec)
+    q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
+    q.register(FakeServer(fake_cfg(captioner={"extra_args": ["--fake-mode", "hang"]}), tmp_path / "run", [0, 1, 2, 3],
+                          reg, rec, gpu_memory=lambda gpus: {g: 100 for g in gpus}))
+    ws = tmp_path / "ws"
+    make_mp4(ws / "a.mp4", seconds=1.0, fps=24, width=320, height=180)
+    (tmp_path / "st").mkdir()
+    caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=tmp_path / "st")
+    try:
+        job_id = le.submit(q, caller, [{"video": "a.mp4", "events": ["Rain."]}])["job_id"]
+        assert q.wait(caller, job_id, 6)["state"] == "running"
+        q.cancel(caller, job_id)
+        out = q.wait(caller, job_id, 120)
+    finally:
+        q.shutdown()
     assert out["state"] == "canceled"
-    assert not [e for e in rec.read_events("n1") if e["type"] == "locate.event"]
-    assert _server_gone(run, job_id)
+    assert job_result(out)["clips"] == {"/workspace/a.mp4": {"error": "canceled"}}
+    assert not [m for m in messages(tmp_path / "run", job_id) if m["type"] == "item"]
+    assert _server_gone(job_folder(tmp_path / "run", job_id))
 
 
-def test_a_server_that_dies_while_loading_fails_the_job(tmp_path):
+def test_a_server_that_dies_while_loading_fails_every_clip_with_its_log(tmp_path):
     rec = Recorder(tmp_path / "run")
     reg = TokenRegistry(rec)
     q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
     q.register(FakeServer(fake_cfg(captioner={"extra_args": ["--fake-mode", "exit"]}), tmp_path / "run", [0, 1, 2, 3],
-                          reg, rec, gpu_memory=lambda gpus: {g: 100 for g in gpus}, poll_s=0.2))
+                          reg, rec, gpu_memory=lambda gpus: {g: 100 for g in gpus}))
     ws = tmp_path / "ws"
     make_mp4(ws / "a.mp4", seconds=1.0, fps=24, width=320, height=180)
+    (tmp_path / "st").mkdir()
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=tmp_path / "st")
     try:
         out = q.wait(caller, le.submit(q, caller, [{"video": "a.mp4", "events": ["Rain."]}])["job_id"], 120)
     finally:
         q.shutdown()
-    assert out["state"] == "failed" and "exited during startup" in out["error"]
+    assert out["state"] == "done"
+    error = job_result(out)["clips"]["/workspace/a.mp4"]["error"]
+    assert error.startswith("not reached (bridge exit code 1)") and "exited during startup" in error
