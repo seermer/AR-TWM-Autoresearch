@@ -1,7 +1,10 @@
-import json, os, subprocess
+import json, os, subprocess, sys
 from pathlib import Path
 import numpy as np
 import pytest
+
+BRIDGES = Path(__file__).resolve().parents[1] / "kernel" / "ar_kernel" / "bridges"
+sys.path.insert(0, str(BRIDGES))          # bridges import `protocol` plainly, as when run as scripts
 
 from ar_kernel.telemetry import files
 from ar_kernel.telemetry.recorder import Recorder
