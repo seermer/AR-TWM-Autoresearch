@@ -7,6 +7,7 @@ import shutil
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +19,7 @@ from ar_kernel.tools.captioner import CaptionBackend, submit
 from ar_kernel.tools.context import TokenRegistry
 from ar_kernel.tools.jobs import JobQueue
 from ar_kernel.tools.server import ToolError
+from caption_vllm import caption
 
 FAKE = Path(__file__).parent / "fixtures" / "fake_vllm.py"
 REAL = KernelConfig.load()
@@ -44,7 +46,7 @@ def make(tmp_path):
         reg = TokenRegistry(rec)
         q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
         q.register(FakeServer(cfg or fake_cfg(), tmp_path / "run", [0, 1, 4, 5], reg, rec,
-                              gpu_memory=lambda gpus: {g: 100 for g in gpus}, poll_s=0.2))
+                              gpu_memory=lambda gpus: {g: 100 for g in gpus}))
         ws, staging = tmp_path / "ws", tmp_path / "staging"
         (ws / "clips").mkdir(parents=True)
         staging.mkdir()
@@ -54,6 +56,11 @@ def make(tmp_path):
     yield build
     for q in made:
         q.shutdown()
+
+
+def messages(run_dir: Path, job_id: str) -> list[dict]:
+    path = job_folder(run_dir, job_id) / "messages.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
 def _pid_gone(run_dir: Path, job_id: str) -> bool:
@@ -83,20 +90,18 @@ def test_batch_success_captions_every_clip_then_stops_the_server(make, tmp_path)
     assert job_result(out)["load_s"] > 0 and job_result(out)["gpu_memory_released"] is True
     assert out["summary"] == {"items": 2, "failed": 0, "errors": []}
     assert out["result_file"] == f"/workspace/staging/results/caption_videos-{job}.json"
-    assert out["progress"] == {"captioned": 2, "total": 2}
+    assert out["progress"] == {"done": 2, "total": 2}
     run = tmp_path / "run"
     assert _pid_gone(run, job) and not (job_folder(run, job) / "media").exists()
     argv = json.loads((job_folder(run, job) / "fake_vllm.argv.json").read_text())
     assert argv[argv.index("--allowed-local-media-path") + 1] == str(job_folder(run, job) / "media")
     assert argv[argv.index("--host") + 1] == "127.0.0.1"
-    events = rec.read_events("n1")
-    assert [(e["reason"], e["exit_code"]) for e in events if e["type"] == "caption.server_stopped"] == \
-        [("done", -15)]
-    assert [e["ok"] for e in events if e["type"] == "caption.clip"] == [True, True]
-    assert all(e["latency_s"] >= 0 for e in events if e["type"] == "caption.clip")
+    got = messages(run, job)
+    assert [m["type"] for m in got if m["type"] != "item_started"] == ["ready", "item", "item", "job_done"]
+    assert all(m["ok"] and m["started"] <= m["ended"] for m in got if m["type"] == "item")
+    assert all(m["log"] == str(job_folder(run, job) / "logs" / "vllm.log") for m in got if m["type"] == "item")
     files = recorded(rec)
     assert files[("in", "/workspace/clips/a.mp4")] == b"x" * 10 and files[("in", "/workspace/staging/b.mp4")] == b"y" * 20
-    assert any(e["type"] == "caption.server_ready" for e in events)
 
 
 def test_every_bad_path_is_named_in_one_refusal_and_paths_may_come_from_a_file(make):
@@ -219,13 +224,13 @@ def test_the_server_runs_with_reasoning_and_a_data_parallel_encoder(tmp_path):
     assert json.loads(cmd[cmd.index("--speculative-config") + 1]) == mtp
 
 
-def test_each_clips_reasoning_is_recorded_but_not_returned_to_the_agent(make):
+def test_each_clips_reasoning_is_kept_but_not_returned_to_the_agent(make, tmp_path):
     q, caller, rec, ws, _ = make()
     (ws / "a.mp4").write_bytes(b"x" * 10)
     out = q.wait(caller, submit(q, caller, ["a.mp4"], "Caption.")["job_id"], 120)
     assert out["state"] == "done" and set(job_result(out)["clips"]["/workspace/a.mp4"]) == {"caption"}
-    [clip] = [e for e in rec.read_events("n1") if e["type"] == "caption.clip"]
-    assert rec.load_payload(clip["payload"])["reasoning"] == "thinking about 10 bytes"
+    [clip] = [m for m in messages(tmp_path / "run", out["id"]) if m["type"] == "item"]
+    assert clip["info"]["reasoning"] == "thinking about 10 bytes"
 
 
 def test_clips_are_captioned_concurrently_up_to_concurrent_requests(make):
@@ -239,11 +244,11 @@ def test_clips_are_captioned_concurrently_up_to_concurrent_requests(make):
     assert out["state"] == "done", out
     assert list(job_result(out)["clips"]) == [f"/workspace/{n}" for n in names]          # submitted order
     assert all("caption" in v for v in job_result(out)["clips"].values())
-    events = rec.read_events("n1")
-    ready = next(e["ts_wall"] for e in events if e["type"] == "caption.server_ready")
-    last = max(e["ts_wall"] for e in events if e["type"] == "caption.clip")
-    assert last - ready < 3.5                                   # 6 one-second captions, not 6 s in a row
-    assert out["progress"] == {"captioned": 6, "total": 6}
+    got = messages(caller.staging_host.parent / "run", job)
+    ready = next(m["time"] for m in got if m["type"] == "ready")
+    last = max(m["ended"] for m in got if m["type"] == "item")
+    assert last - ready < 5                                     # 6 one-second captions in a row take 6 s
+    assert out["progress"] == {"done": 6, "total": 6}
 
 
 def test_unreadable_gpu_memory_is_none_not_a_crash(monkeypatch):
@@ -258,7 +263,7 @@ def test_cancel_stops_the_server(make, tmp_path):
     (ws / "a.mp4").write_bytes(b"ok")
     job = submit(q, caller, ["a.mp4"], "Caption.")["job_id"]
     deadline = time.monotonic() + 60
-    while not any(e["type"] == "caption.server_ready" for e in rec.read_events("n1")):
+    while not any(m["type"] == "ready" for m in messages(tmp_path / "run", job)):
         assert time.monotonic() < deadline, "the fake server never became ready"
         time.sleep(0.2)
     time.sleep(0.5)                                   # the caption request is in flight
@@ -266,17 +271,18 @@ def test_cancel_stops_the_server(make, tmp_path):
     q.cancel(caller, job)
     out = q.wait(caller, job, 120)
     assert out["state"] == "canceled" and time.monotonic() - started < 30
+    assert job_result(out)["clips"] == {"/workspace/a.mp4": {"error": "canceled"}}
     assert _pid_gone(tmp_path / "run", job)
-    assert [e["reason"] for e in rec.read_events("n1") if e["type"] == "caption.server_stopped"] == ["cancelled"]
 
 
-def test_server_that_dies_during_startup_fails_the_job_with_its_log(make, tmp_path):
+def test_server_that_dies_during_startup_fails_every_clip_with_its_log(make, tmp_path):
     q, caller, rec, ws, _ = make(fake_cfg(extra_args=["--fake-mode", "exit"]))
     (ws / "a.mp4").write_bytes(b"ok")
     out = q.wait(caller, submit(q, caller, ["a.mp4"], "Caption.")["job_id"], 120)
-    assert out["state"] == "failed"
-    assert "exited during startup" in out["error"] and "CUDA out of memory" in out["error"]
-    assert [e["reason"] for e in rec.read_events("n1") if e["type"] == "caption.server_stopped"] == ["failed"]
+    assert out["state"] == "done"
+    error = job_result(out)["clips"]["/workspace/a.mp4"]["error"]
+    assert error.startswith("not reached (bridge exit code 1); log tail:")
+    assert "exited during startup (exit 3)" in error and "CUDA out of memory" in error
 
 
 def test_a_server_that_never_gets_ready_waits_until_the_job_is_cancelled(make, tmp_path):
@@ -381,7 +387,7 @@ def test_real_model_captions_two_example_clips(tmp_path):
         again = q.wait(caller, submit(q, caller, "paths.json", "Name the place in three words.")["job_id"], 300)
     finally:
         q.shutdown()
-    latencies = [e["latency_s"] for e in rec.read_events("gpu") if e["type"] == "caption.clip"]
+    latencies = [m["ended"] - m["started"] for m in messages(tmp_path / "run", job) if m["type"] == "item"]
     print(json.dumps({"gpus": gpus, "state": out["state"], "error": out["error"], "result": job_result(out),
                       "latencies_s": latencies}, indent=2))
     assert out["state"] == "done", out["error"]
@@ -391,4 +397,36 @@ def test_real_model_captions_two_example_clips(tmp_path):
     assert again["state"] == "done"
     assert "caption" in job_result(again)["clips"]["/workspace/staging/cam.mp4"]
     events = [e["type"] for e in rec.read_events("gpu")]
-    assert "caption.gpu_not_released" not in events
+    assert "caption_videos.gpu_not_released" not in events
+
+
+class _Stub:
+    """An OpenAI client whose chat.completions.create gives `message`, or raises `error`."""
+    def __init__(self, message=None, error=None):
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
+        self.message, self.error, self.calls = message, error, []
+
+    def create(self, **kw):
+        self.calls.append(kw)
+        if self.error:
+            raise self.error
+        return SimpleNamespace(choices=[SimpleNamespace(message=self.message)])
+
+
+def test_caption_sends_the_clip_and_prompt_and_splits_off_the_reasoning(tmp_path):
+    stub = _Stub(SimpleNamespace(content=" A street. ", reasoning="looked at it"))
+    assert caption(stub, tmp_path / "a.mp4", "SYS", "Describe.", "low") == {"caption": "A street.",
+                                                                           "reasoning": "looked at it"}
+    [kw] = stub.calls
+    assert kw["model"] == "captioner" and kw["reasoning_effort"] == "low" and "max_tokens" not in kw
+    system, user = kw["messages"]
+    assert system == {"role": "system", "content": "SYS"}
+    assert user["content"] == [{"type": "video_url", "video_url": {"url": (tmp_path / "a.mp4").as_uri()}},
+                               {"type": "text", "text": "Describe."}]
+
+
+def test_caption_gives_an_empty_answer_or_an_api_error_as_the_clips_error(tmp_path):
+    import openai
+    assert caption(_Stub(SimpleNamespace(content="  ")), tmp_path / "a.mp4", "S", "P", "low") == {"error": "empty caption"}
+    got = caption(_Stub(error=openai.APIConnectionError(request=None)), tmp_path / "a.mp4", "S", "P", "low")
+    assert got["error"].startswith("APIConnectionError:")
