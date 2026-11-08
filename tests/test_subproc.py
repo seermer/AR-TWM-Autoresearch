@@ -85,6 +85,57 @@ def test_a_child_left_running_after_the_leader_exits_is_killed(tmp_path, logged)
     assert not _alive(int(pidfile.read_text()))
 
 
+def test_a_child_holding_the_output_open_does_not_hang_the_call(tmp_path):
+    """No pipe: a server the leader left running keeps its stdout open, and that once hung the wait."""
+    pidfile = tmp_path / "child.pid"
+    started = time.time()
+    proc = run_in_env(ENV, ["bash", "-c", f"sleep 120 & echo $! > {pidfile}; echo hi; exit 0"], cwd=tmp_path)
+    assert proc.returncode == 0 and proc.stdout == "hi\n" and time.time() - started < 60
+    assert not _alive(int(pidfile.read_text()))
+
+
+def test_stdout_and_stderr_stay_apart_and_large_output_comes_back_whole(tmp_path):
+    script = "import sys; sys.stdout.write('o' * 8_000_000); sys.stderr.write('to-err')"
+    proc = run_in_env(ENV, ["python", "-c", script], cwd=tmp_path)
+    assert proc.stdout == "o" * 8_000_000 and proc.stderr == "to-err"
+
+
+def test_the_leaders_exit_code_signal_and_rusage():
+    import subprocess
+    from ar_kernel.subproc import wait_leader
+    for script, code in (("exit 3", 3), ("kill -TERM $$", -15)):
+        proc = subprocess.Popen(["sh", "-c", script])
+        cancelled, usage = wait_leader(proc)
+        assert proc.returncode == code and not cancelled and usage.ru_maxrss > 0
+
+
+def test_an_exception_during_the_wait_kills_the_group(tmp_path):
+    pidfile = tmp_path / "child.pid"
+
+    class Interrupting:
+        def is_set(self):
+            if pidfile.exists() and pidfile.read_text().strip():
+                raise KeyboardInterrupt
+            return False
+    with pytest.raises(KeyboardInterrupt):
+        run_in_env(ENV, ["bash", "-c", f"sleep 600 & echo $! > {pidfile}; wait"], cwd=tmp_path,
+                   cancel=Interrupting(), poll_s=0.2)
+    child = int(pidfile.read_text())
+    deadline = time.time() + 15
+    while _alive(child) and time.time() < deadline:
+        time.sleep(0.2)
+    assert not _alive(child)
+
+
+def test_no_output_files_are_left_behind(tmp_path, monkeypatch):
+    from ar_kernel import subproc
+    monkeypatch.setattr(subproc, "TMP_LINK_DIR", tmp_path / "links")
+    (tmp_path / "links").mkdir()
+    monkeypatch.setenv("AR_CACHE_DIR", str(tmp_path / "cache"))
+    assert run_in_env(ENV, ["echo", "x"], cwd=tmp_path).stdout == "x\n"
+    assert list((tmp_path / "cache" / "tmp").iterdir()) == []
+
+
 def _wait_for(path, seconds=60):
     deadline = time.time() + seconds
     while not (path.exists() and path.read_text().strip()) and time.time() < deadline:
@@ -123,7 +174,7 @@ def test_an_interrupted_kill_keeps_the_group_record(tmp_path, monkeypatch):
 
     def interrupted(*a, **k):
         raise KeyboardInterrupt
-    monkeypatch.setattr(subproc, "_wait", interrupted)
+    monkeypatch.setattr(subproc, "wait_leader", interrupted)
     monkeypatch.setattr(subproc, "_kill_group", interrupted)
     with pytest.raises(KeyboardInterrupt):
         run_in_env(ENV, ["python", "-c", "import time; time.sleep(60)"], cwd=tmp_path)

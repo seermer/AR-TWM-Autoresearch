@@ -165,9 +165,9 @@ class Monitor:
         try:
             step()
         except Exception as exc:                               # noqa: BLE001 -- never kill the run
-            if repr(exc) not in self._errors:                  # the same failure every 5 s is logged once
+            if repr(exc) not in self._errors:                  # the same failure every 5 s alerts once
                 self._errors.add(repr(exc))
-                self.recorder.event("monitor.error", payload={"error": repr(exc)})
+                alert(self.recorder, "monitor_failed", f"a monitor step failed: {exc!r}")
 
     def poll(self) -> None:
         """One monitor step. A failing GPU sample never suppresses the checks (e.g. disk_low)."""

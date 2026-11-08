@@ -50,13 +50,13 @@ def preflight_metrics(cfg: KernelConfig, case_ids: list[str]) -> list[str]:
 
 def _head(repo: Path) -> str:
     return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
-                          capture_output=True, text=True).stdout.strip()
+                          stdout=subprocess.PIPE, text=True, check=True).stdout.strip()
 
 
 def _uncommitted(repo: Path) -> bool:
     """Modified or untracked (not ignored) files in the repo."""
     return bool(subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
-                               capture_output=True, text=True).stdout.strip())
+                               stdout=subprocess.PIPE, text=True, check=True).stdout.strip())
 
 class RunNotFound(FileNotFoundError):
     """No run with this id exists."""

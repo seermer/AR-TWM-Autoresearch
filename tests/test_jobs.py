@@ -392,3 +392,72 @@ def test_a_cancelled_job_ends_canceled_whatever_it_raised(tmp_path):
         assert q.status(caller, job)["state"] == "canceled" and not caller.fault.event.is_set()
     finally:
         q.shutdown()
+
+
+def _raise_once(exc, real):
+    """`real`, except that its first call raises `exc`."""
+    calls = []
+
+    def wrapped(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise exc
+        return real(*a, **k)
+    return wrapped
+
+
+def test_a_publish_that_cannot_serialize_fails_the_job_and_the_next_job_runs(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobs_module, "publish", _raise_once(TypeError("not JSON serializable"), jobs_module.publish))
+    q, caller, run, _ = _queue(tmp_path, [{"items": [{"clip": "a.mp4"}]}, {"items": [{"clip": "b.mp4"}]}])
+    try:
+        first = run()
+        assert first["state"] == "failed" and first["error"] == "TypeError: not JSON serializable"
+        assert run()["state"] == "done"
+        first_record = [e for e in q.recorder.read_events("n1") if e["type"] == "job.finished"][0]
+        assert first_record["state"] == "failed" and first_record["job_id"] == first["id"]
+        assert "TypeError" in q.recorder.load_payload(first_record["payload"])["traceback"]
+    finally:
+        q.shutdown()
+
+
+def test_a_raising_judge_fails_the_job_and_the_worker_lives(tmp_path):
+    q, caller, run, _ = _queue(tmp_path, [{"items": [{"clip": "a.mp4"}]}, {"items": [{"clip": "b.mp4"}]}])
+    q._judge = _raise_once(RuntimeError("judge broke"), q._judge)
+    try:
+        assert run()["state"] == "failed" and run()["state"] == "done"
+    finally:
+        q.shutdown()
+
+
+def test_a_raising_finished_record_leaves_the_job_done_and_the_worker_lives(tmp_path):
+    q, caller, run, _ = _queue(tmp_path, [{"items": [{"clip": "a.mp4"}]}, {"items": [{"clip": "b.mp4"}]}])
+    real = q.recorder.event
+    seen = []
+
+    def event(type, **kw):
+        if type == "job.finished" and not seen:
+            seen.append(type)
+            raise RuntimeError("disk full")
+        return real(type, **kw)
+    q.recorder.event = event
+    try:
+        first = run()
+        assert first["state"] == "done" and first["error"] is None and run()["state"] == "done"
+        records = [e for e in q.recorder.read_events("n1") if e["type"] == "job.finished"]
+        assert [(e["job_id"], e["state"]) for e in records][0] == (first["id"], "done")
+    finally:
+        q.shutdown()
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")     # the worker dies, as intended
+def test_a_base_exception_in_the_worker_still_ends_the_job_so_drain_returns(tmp_path):
+    q, caller, run, _ = _queue(tmp_path, [SystemExit(1)])
+    try:
+        job = q.submit(caller, "scripted", {})
+        done = threading.Event()
+        threading.Thread(target=lambda: (q.drain(caller.token), done.set()), daemon=True).start()
+        assert done.wait(10) and q.status(caller, job)["state"] == "failed"
+        q._worker.join(10)
+        assert not q._worker.is_alive()
+    finally:
+        q.shutdown()

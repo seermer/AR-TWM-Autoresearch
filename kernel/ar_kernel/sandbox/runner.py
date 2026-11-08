@@ -13,7 +13,7 @@ from pathlib import Path
 
 from ..faults import KernelFault
 from ..guards import device_minors
-from ..subproc import project_env
+from ..subproc import project_env, wait_leader
 
 # Env var names whose value must never reach telemetry, no matter which Recorder
 # is used (defense in depth: a Recorder that was never told about this run's
@@ -193,16 +193,8 @@ def run_container(*, name: str, mounts: Mounts, command: list[str], env: dict, e
             raise KernelFault(f"the sandbox could not start: {type(exc).__name__}: {exc}") from exc
         if on_start is not None:
             on_start(proc.pid)
-        cancelled = False
-        while True:
-            try:
-                exit_code = proc.wait(timeout=poll_s)
-                break
-            except subprocess.TimeoutExpired:
-                if cancel is not None and cancel.is_set():
-                    proc.kill()           # --die-with-parent ends everything inside
-                    exit_code, cancelled = proc.wait(), True
-                    break
+        cancelled, _ = wait_leader(proc, cancel, poll_s, kill=proc.kill)    # --die-with-parent ends everything inside
+        exit_code = proc.returncode
     finally:
         if proc is not None and proc.poll() is None:
             proc.kill()                   # --die-with-parent ends everything inside

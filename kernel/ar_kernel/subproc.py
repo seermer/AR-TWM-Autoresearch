@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib, os, pwd, signal, socket, subprocess, threading, time
+import hashlib, os, pwd, signal, socket, subprocess, tempfile, threading, time
 from pathlib import Path
 
 import psutil
@@ -104,7 +104,8 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
 
     `cancel`, any exception and the leader's exit kill the WHOLE process group:
     killing only `conda run` orphaned torchrun ranks that kept holding GPUs. With `log_path`,
-    output streams to that file and comes back as stdout. The result's `.cancelled` tells a
+    output streams to that file and comes back as stdout; without it, to two temporary files (never a
+    pipe: a child the leader leaves running would hold it open). The result's `.cancelled` tells a
     cancel apart from an exit code that happens to match. With `AR_PGID_DIR` set, the group
     is recorded there until the wait ends, so a resume can kill what a dead kernel left.
     Every exit path records subproc.end, subproc.cancelled or subproc.error.
@@ -116,16 +117,19 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
                        payload={"env": env, "args": args, "cwd": str(cwd),
                                 "extra_env": extra_env or {},
                                 "log_path": str(log_path) if log_path else None})
-    sink = None
+    sinks = []
     try:
         if log_path is not None:
             Path(log_path).parent.mkdir(parents=True, exist_ok=True)
-            sink = open(log_path, "w", encoding="utf-8")
-        proc = subprocess.Popen(command, cwd=str(cwd), env=process_env, text=True, start_new_session=True,
-                                stdout=subprocess.PIPE if sink is None else sink,
-                                stderr=subprocess.PIPE if sink is None else subprocess.STDOUT)
+            sinks = [open(log_path, "w+b")]
+        else:
+            tmp = cache_dir() / "tmp"
+            tmp.mkdir(parents=True, exist_ok=True)
+            sinks = [tempfile.TemporaryFile(dir=tmp), tempfile.TemporaryFile(dir=tmp)]
+        proc = subprocess.Popen(command, cwd=str(cwd), env=process_env, start_new_session=True,
+                                stdout=sinks[0], stderr=sinks[1] if len(sinks) > 1 else subprocess.STDOUT)
     except OSError as exc:
-        if sink is not None:
+        for sink in sinks:
             sink.close()
         _error(recorder, node, phase, f"launch failed: {exc}", "", "", log_path)
         raise
@@ -139,22 +143,26 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
     cancelled = False
     ended = False           # the wait or the kill sequence finished: the group is gone
     try:
-        stdout, stderr, cancelled = _wait(proc, cancel, poll_s)
+        cancelled, _ = wait_leader(proc, cancel, poll_s)
         kill_group(proc.pid)       # what the leader left running: its group outlives it
         ended = True
+        outputs = []
+        for sink in sinks:
+            sink.seek(0)
+            outputs.append(sink.read().decode("utf-8", errors="replace"))
     except BaseException:
-        _kill_group(proc)          # e.g. KeyboardInterrupt: never leave the job running
-        ended = True
+        if not ended:
+            _kill_group(proc)      # e.g. KeyboardInterrupt: never leave the job running
+            ended = True
         raise
     finally:
-        if sink is not None and not sink.closed:
+        for sink in sinks:
             sink.close()
         if marker is not None and ended:     # an interrupted kill keeps its record for resume
             marker.unlink(missing_ok=True)
 
-    if log_path is not None:
-        stdout, stderr = Path(log_path).read_text(encoding="utf-8", errors="replace"), ""
-    result = subprocess.CompletedProcess(command, proc.returncode, stdout or "", stderr or "")
+    stdout, stderr = outputs if len(outputs) == 2 else (outputs[0], "")
+    result = subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
     result.cancelled = cancelled
     if recorder is not None:
         recorder.event("subproc.cancelled" if cancelled else "subproc.end", node=node, phase=phase,
@@ -164,22 +172,34 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
     return result
 
 
-def _wait(proc: subprocess.Popen, cancel: "threading.Event | None",
-          poll_s: float) -> tuple[str, str, bool]:
-    """Wait for `proc`; returns (stdout, stderr, cancelled). With `cancel`, poll every `poll_s`
-    (a timed-out communicate() does not kill the child)."""
-    if cancel is None:
-        stdout, stderr = proc.communicate()
-        return stdout, stderr, False
-    while True:
-        try:
-            stdout, stderr = proc.communicate(timeout=poll_s)
-            return stdout, stderr, False
-        except subprocess.TimeoutExpired:
-            if cancel.is_set():
-                _kill_group(proc)
-                stdout, stderr = proc.communicate()
-                return stdout, stderr, True
+def wait_leader(proc: subprocess.Popen, cancel: "threading.Event | None" = None, poll_s: float = 1.0,
+                kill=None) -> tuple[bool, os.struct_rusage]:
+    """Wait for `proc` itself, not its children; returns (cancelled, rusage) and sets `proc.returncode`.
+    A set `cancel`, checked every `poll_s`, first runs `kill()` (default: kill the whole group).
+    Reaps with os.wait4: Popen.wait would reap behind its back and lose the rusage."""
+    usage = []
+
+    def reap(block: bool = False) -> None:
+        if not usage:
+            pid, status, rusage = os.wait4(proc.pid, 0 if block else os.WNOHANG)
+            if pid:
+                proc.returncode = os.waitstatus_to_exitcode(status)
+                usage.append(rusage)
+
+    cancelled = False
+    if cancel is not None:
+        reap()
+        while not usage and not cancel.is_set():
+            time.sleep(poll_s)
+            reap()
+        if not usage:
+            if kill is None:
+                kill_group(proc.pid, reap=reap)     # an unreaped leader would keep the group "alive"
+            else:
+                kill()
+            cancelled = True
+    reap(block=True)
+    return cancelled, usage[0]
 
 
 def kill_group(pgid: int, reap=None) -> bool:

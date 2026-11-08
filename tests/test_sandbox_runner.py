@@ -127,29 +127,20 @@ def test_snapshot_diff_reports_changes(tmp_path):
         "added": ["c.txt"], "removed": ["b.txt"], "changed": ["a.txt"]}
 
 
+_POPEN = subprocess.Popen
+
+
 class _FakePopen:
-    """Writes `out`/`err` to the files it was given; `wait` raises `raises` once, if set."""
-    def __init__(self, out="out", err="err", code=0, raises=None):
-        self.out, self.err, self.code, self.raises, self.killed, self.calls = out, err, code, raises, False, []
+    """Starts a shell in place of bwrap: it writes `out`/`err` and exits with `code`, or sleeps if `code` is None."""
+    def __init__(self, out="out", err="err", code=0):
+        self.out, self.err, self.code, self.calls, self.proc = out, err, code, [], None
 
     def __call__(self, argv, env, stdin, stdout, stderr, start_new_session):
         self.calls.append({"argv": argv, "env": env, "start_new_session": start_new_session})
-        stdout.write(self.out), stderr.write(self.err)
-        self.returncode = None
-        return self
-
-    def poll(self):
-        return self.returncode
-
-    def wait(self, timeout=None):
-        if self.raises is not None:
-            raises, self.raises = self.raises, None
-            raise raises
-        self.returncode = -9 if self.killed else self.code
-        return self.returncode
-
-    def kill(self):
-        self.killed = True
+        script = 'printf %s "$OUT"; printf %s "$ERR" >&2; ' + ("exec sleep 600" if self.code is None else f"exit {self.code}")
+        self.proc = _POPEN(["sh", "-c", script], env={"OUT": self.out, "ERR": self.err, "PATH": os.environ["PATH"]},
+                           stdin=stdin, stdout=stdout, stderr=stderr, start_new_session=start_new_session)
+        return self.proc
 
 
 @pytest.fixture
@@ -172,7 +163,7 @@ def test_exit_code_and_streams_come_from_the_output_files(tmp_path, mounts, monk
     recorder = Recorder(tmp_path / "run")
     res = _run(tmp_path, mounts, recorder=recorder)
     assert (res.exit_code, res.stdout, res.stderr) == (3, "hello\n", "oops\n")
-    assert (tmp_path / "sandbox.stdout").read_text() == "hello\n" and not fake.killed
+    assert (tmp_path / "sandbox.stdout").read_text() == "hello\n"
     assert fake.calls[0]["start_new_session"]                 # a Ctrl-C to the kernel's group misses it
     (end,) = [e for e in recorder.read_events("n1") if e["type"] == "sandbox.end"]
     assert end["exit_code"] == 3 and recorder.load_payload(end["payload"])["stderr"] == "oops\n"
@@ -180,13 +171,17 @@ def test_exit_code_and_streams_come_from_the_output_files(tmp_path, mounts, monk
 
 def test_an_exception_during_the_wait_kills_the_sandbox_and_restores_access(tmp_path, mounts, monkeypatch):
     from ar_kernel.control import ForceStop
-    fake = _FakePopen(raises=ForceStop("SIGTERM"))
+    fake = _FakePopen(code=None)
     monkeypatch.setattr(runner.subprocess, "Popen", fake)
+
+    def stopped(*a, **k):
+        raise ForceStop("SIGTERM")
+    monkeypatch.setattr(runner, "wait_leader", stopped)
     restored = []
     monkeypatch.setattr(runner, "restore_owner_access", restored.append)
     with pytest.raises(ForceStop):
         _run(tmp_path, mounts)
-    assert fake.killed and restored == [mounts.agent, mounts.workspace, mounts.staging]
+    assert fake.proc.returncode == -9 and restored == [mounts.agent, mounts.workspace, mounts.staging]
 
 
 def test_a_failed_launch_is_recorded_and_only_the_recorded_settings_are_redacted(tmp_path, mounts, monkeypatch):
@@ -226,12 +221,14 @@ def test_a_card_without_a_minor_is_a_kernel_fault(tmp_path, mounts, monkeypatch)
 
 
 def test_an_unreadable_output_file_is_recorded(tmp_path, mounts, monkeypatch):
-    class Unreadable(_FakePopen):
-        def wait(self, timeout=None):
-            (tmp_path / "sandbox.stderr").unlink()
-            (tmp_path / "sandbox.stderr").mkdir()
-            return super().wait()
-    monkeypatch.setattr(runner.subprocess, "Popen", Unreadable())
+    real_wait = runner.wait_leader
+
+    def unreadable(*a, **k):
+        (tmp_path / "sandbox.stderr").unlink()
+        (tmp_path / "sandbox.stderr").mkdir()
+        return real_wait(*a, **k)
+    monkeypatch.setattr(runner.subprocess, "Popen", _FakePopen())
+    monkeypatch.setattr(runner, "wait_leader", unreadable)
     recorder = Recorder(tmp_path / "run")
     res = _run(tmp_path, mounts, recorder=recorder)
     assert res.stdout == "out" and res.stderr.startswith("could not read the sandbox's stderr:")
@@ -249,26 +246,20 @@ def test_bwraps_own_error_is_a_kernel_fault_and_the_agents_exit_is_not(tmp_path,
 
 def test_on_start_gets_the_sandbox_pid(tmp_path, mounts, monkeypatch):
     fake, seen = _FakePopen(), []
-    fake.pid = 4242
     monkeypatch.setattr(runner.subprocess, "Popen", fake)
     run_container(name="c", mounts=mounts, command=["true"], env={}, env_dir=tmp_path / "env", shm_gb=8,
                   recorder=Recorder(tmp_path / "run"), node="n1", phase="test", attempt=1, on_start=seen.append)
-    assert seen == [4242]
+    assert seen == [fake.proc.pid]
 
 
 def test_cancel_kills_a_running_sandbox(tmp_path, mounts, monkeypatch):
-    class Sleeping(_FakePopen):
-        def wait(self, timeout=None):
-            if not self.killed:
-                raise subprocess.TimeoutExpired("bwrap", timeout)
-            return super().wait()
-    fake, cancel = Sleeping(), threading.Event()
+    fake, cancel = _FakePopen(code=None), threading.Event()
     monkeypatch.setattr(runner.subprocess, "Popen", fake)
     threading.Timer(0.3, cancel.set).start()
     res = run_container(name="c", mounts=mounts, command=["true"], env={}, env_dir=tmp_path / "env", shm_gb=8,
                         recorder=Recorder(tmp_path / "run"), node="n1", phase="test", attempt=1,
                         cancel=cancel, poll_s=0.05)
-    assert fake.killed and res.exit_code == -9
+    assert res.exit_code == -9
 
 
 def test_snapshot_skips_fifos_and_marks_unreadable_files(tmp_path):

@@ -129,7 +129,7 @@ def test_eval_work_is_progress_not_a_stall(tmp_path):
     assert "stall" not in kinds(rec)
 
 
-def test_a_failing_gpu_sample_does_not_stop_the_checks_and_is_logged_once(tmp_path):
+def test_a_failing_gpu_sample_does_not_stop_the_checks_and_alerts_once(tmp_path):
     raw = copy.deepcopy(CFG.raw)
     raw["disk"]["alert_below_gb"] = 10 ** 9
     cfg = type(CFG)(raw=raw, repo_root=CFG.repo_root)
@@ -141,7 +141,7 @@ def test_a_failing_gpu_sample_does_not_stop_the_checks_and_is_logged_once(tmp_pa
     m.poll()
     m.poll()
     assert "disk_low" in kinds(rec)
-    assert len([e for e in rec.read_events() if e["type"] == "monitor.error"]) == 1
+    assert kinds(rec).count("monitor_failed") == 1
 
 
 def test_tree_mark_sees_new_and_grown_files(tmp_path):

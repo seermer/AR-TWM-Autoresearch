@@ -206,52 +206,71 @@ class JobQueue:
                 return
             with self._cond:
                 job = self._jobs[job_id]
-            cancel = self._cancel[job_id]
+            try:
+                self._run_one(job)
+            except Exception as exc:                      # noqa: BLE001 -- fail this job, keep the worker
+                error = f"{type(exc).__name__}: {exc}"
+                self._end(job, error)
+                self.recorder.event("job.finished", node=job.node, component="tools", job_id=job.id, state=job.state,
+                                    gpu_seconds=job.finished - job.started if job.started else None,
+                                    payload={"error": error, "traceback": traceback.format_exc()})
+            finally:
+                self._end(job, "the GPU job worker stopped")   # a BaseException ends the thread: drain() must return
 
-            def report(progress: dict, _job=job) -> None:
-                with self._cond:
-                    _job.progress = dict(progress)
-                    self._cond.notify_all()
-
-            result, error, tb, failure = None, None, None, None
-            here = functools.partial(files.scope, self.recorder, node=job.node, phase=job.phase, attempt=job.attempt,
-                                     component="tools", tool=self._backends[job.backend].tool, job_id=job.id)
-            with self.gpu_lock:
-                # Running starts once the GPUs are held, so gpu_seconds excludes the lock
-                # wait; a job cancelled before or during that wait is already final.
-                with self._cond:
-                    if job.state != "queued":
-                        continue
-                    job.state, job.started = "running", time.time()
-                    self._cond.notify_all()
-                try:
-                    self.require_free(job.caller)
-                    with here():
-                        result = self._backends[job.backend].run(job, cancel, report)
-                    final = "done"
-                except Exception as exc:                  # noqa: BLE001 -- a job failure, not a crash
-                    final, error, tb, failure = "failed", f"{type(exc).__name__}: {exc}", traceback.format_exc(), exc
-            result_file = summary = None
-            if result is not None:
-                summary = summarize(result)
-                try:
-                    with here():
-                        result_file = publish(job.caller, f"{job.backend}-{job.id}", result)
-                except OSError as exc:                    # the phase ended and took its staging with it
-                    final, error = "failed", f"the result could not be written: {type(exc).__name__}: {exc}"
-                    failure = exc if disk_fault(exc) else None
-            if cancel.is_set():                           # its phase ended or the agent cancelled it
-                final = "canceled"
-            else:
-                self._judge(job, final, failure, result)
-            with self._cond:
-                job.state, job.error, job.finished = final, error, time.time()
-                job.result_file, job.summary = result_file, summary
+    def _end(self, job: Job, error: str) -> None:
+        """Fail `job` unless it is already final."""
+        with self._cond:
+            if job.state not in _TERMINAL:
+                job.state, job.error, job.finished = "failed", error, time.time()
                 self._cond.notify_all()
-            self.recorder.event("job.finished", node=job.node, component="tools", job_id=job.id,
-                                state=final, gpu_seconds=job.finished - job.started,
-                                payload={"result": result, "error": error,
-                                         "traceback": tb if final == "failed" else None})
+
+    def _run_one(self, job: Job) -> None:
+        cancel = self._cancel[job.id]
+
+        def report(progress: dict) -> None:
+            with self._cond:
+                job.progress = dict(progress)
+                self._cond.notify_all()
+
+        result, error, tb, failure = None, None, None, None
+        here = functools.partial(files.scope, self.recorder, node=job.node, phase=job.phase, attempt=job.attempt,
+                                 component="tools", tool=self._backends[job.backend].tool, job_id=job.id)
+        with self.gpu_lock:
+            # Running starts once the GPUs are held, so gpu_seconds excludes the lock
+            # wait; a job cancelled before or during that wait is already final.
+            with self._cond:
+                if job.state != "queued":
+                    return
+                job.state, job.started = "running", time.time()
+                self._cond.notify_all()
+            try:
+                self.require_free(job.caller)
+                with here():
+                    result = self._backends[job.backend].run(job, cancel, report)
+                final = "done"
+            except Exception as exc:                      # noqa: BLE001 -- a job failure, not a crash
+                final, error, tb, failure = "failed", f"{type(exc).__name__}: {exc}", traceback.format_exc(), exc
+        result_file = summary = None
+        if result is not None:
+            summary = summarize(result)
+            try:
+                with here():
+                    result_file = publish(job.caller, f"{job.backend}-{job.id}", result)
+            except OSError as exc:                        # the phase ended and took its staging with it
+                final, error = "failed", f"the result could not be written: {type(exc).__name__}: {exc}"
+                failure = exc if disk_fault(exc) else None
+        if cancel.is_set():                               # its phase ended or the agent cancelled it
+            final = "canceled"
+        else:
+            self._judge(job, final, failure, result)
+        with self._cond:
+            job.state, job.error, job.finished = final, error, time.time()
+            job.result_file, job.summary = result_file, summary
+            self._cond.notify_all()
+        self.recorder.event("job.finished", node=job.node, component="tools", job_id=job.id,
+                            state=final, gpu_seconds=job.finished - job.started,
+                            payload={"result": result, "error": error,
+                                     "traceback": tb if final == "failed" else None})
 
     def _judge(self, job: Job, final: str, failure: Exception | None, result: dict | None) -> None:
         """Counts toward "<tool> job" failures: a job that raised (not a ToolError), or one whose items all

@@ -79,6 +79,19 @@ def test_uncommitted_sees_modified_and_untracked_files(tmp_path):
     assert _uncommitted(tmp_path)
 
 
+@pytest.mark.real_preflight
+def test_a_repo_git_cannot_read_fails_the_start_and_the_resume_check(tmp_path, monkeypatch):
+    import subprocess
+    import ar_kernel.run as run
+    monkeypatch.setattr(KernelConfig, "runs_dir", property(lambda self: tmp_path / "runs"))
+    monkeypatch.setattr(KernelConfig, "wbench", property(lambda self: tmp_path / "missing"))
+    with pytest.raises(subprocess.CalledProcessError):
+        bootstrap_run(CFG, run_id="r", env={})
+    assert not (tmp_path / "runs" / "r").exists()
+    with pytest.raises(subprocess.CalledProcessError):
+        run.code_changes(CFG, {})
+
+
 def test_bootstrap_refuses_too_few_free_gpus(tmp_path, monkeypatch):
     from ar_kernel import guards
     from ar_kernel.config import GpuPolicyError
