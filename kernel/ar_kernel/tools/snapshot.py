@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 import threading
 import uuid
@@ -12,6 +11,8 @@ from typing import Annotated, Any, Callable
 from mcp.server.mcpserver import Context
 from pydantic import Field
 
+from .. import fs
+from ..archive.activity import add_activity
 from .server import ToolError
 
 DESCRIPTION = ("Store the work as it is now as an immutable snapshot and return its id. A result names "
@@ -31,9 +32,7 @@ def ref_prefix(node: str, phase: str, attempt: int) -> str:
 
 def clear(run_dir: Path, repo, node: str, phase: str, attempt: int) -> None:
     """Removes the attempt's snapshots from an earlier run."""
-    path = folder(run_dir, node, phase, attempt)
-    if path.exists():
-        shutil.rmtree(path)
+    fs.rmtree(folder(run_dir, node, phase, attempt))
     repo.delete_refs(ref_prefix(node, phase, attempt))
 
 
@@ -92,8 +91,8 @@ class SnapshotStore:
         body = {"has_result": all(given), "data_commit": data_commit, "recipe": recipe, "rationale": rationale}
         snapshot_id = uuid.uuid4().hex
         path = folder(self.run_dir, caller.node, caller.phase, caller.attempt)
-        path.mkdir(parents=True, exist_ok=True)
-        (path / f"{snapshot_id}.json").write_text(json.dumps(body, indent=1), encoding="utf-8")
+        fs.mkdir(path)
+        fs.write_text(path / f"{snapshot_id}.json", json.dumps(body, indent=1))
         return {"snapshot_id": snapshot_id}
 
 
@@ -106,4 +105,9 @@ def register_snapshot_tool(mcp, kit, store: SnapshotStore) -> None:
             rationale: Annotated[str | None, Field(description="improve_recipe: why the recipe and data are as they are")] = None) -> dict:
         args = {k: v for k, v in dict(data_commit=data_commit, recipe=recipe, rationale=rationale).items()
                 if v is not None}
-        return await kit.call(ctx, "snapshot", args, lambda c: store.take(c, data_commit, recipe, rationale))
+        def take(caller) -> dict:
+            out = store.take(caller, data_commit, recipe, rationale)
+            add_activity(store.run_dir, node=caller.node, phase=caller.phase, attempt=caller.attempt,
+                         kind="snapshot", name=out["snapshot_id"])
+            return out
+        return await kit.call(ctx, "snapshot", args, take)

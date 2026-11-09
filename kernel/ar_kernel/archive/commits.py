@@ -3,7 +3,7 @@ import json, math, os, re, shutil, sqlite3, time
 from pathlib import Path
 
 from .clips import hidden
-from .db import transaction
+from .db import transaction, write
 
 BUILTIN_NAMES = {"sekai_real_hq", "spatialvid_hq", "sekai_game_walking", "sekai_real_walking",
                  "mugen_v2", "RealEstate10K", "spatialvid", "veo3", "OpenVid", "mp4_frame_game_3",
@@ -96,8 +96,8 @@ class CommitStore:
         with transaction(self.conn):
             row = self.conn.execute("SELECT seq FROM sqlite_sequence WHERE name='data_commits'").fetchone()
             n = (row[0] if row else 0) + 1
-            self.conn.execute(
-                """INSERT INTO data_commits (n, commit_id, node_id, attempt, status, manifest, message, created_at)
+            write(
+                self.conn, """INSERT INTO data_commits (n, commit_id, node_id, attempt, status, manifest, message, created_at)
                    VALUES (?,?,?,?,'draft',?,?,?)""",
                 (n, f"dc{n}", node_id, attempt, json.dumps(manifest, sort_keys=True), message, time.time()))
         return f"dc{n}", new
@@ -120,7 +120,7 @@ class CommitStore:
         """An attempt's result named `accepted`: it is kept, the attempt's other drafts are obsolete."""
         changed = {"accepted": [], "obsolete": []}
         if accepted is not None and self.usable(accepted)["status"] != "accepted":
-            self.conn.execute("UPDATE data_commits SET status='accepted' WHERE commit_id=?", (accepted,))
+            write(self.conn, "UPDATE data_commits SET status='accepted' WHERE commit_id=?", (accepted,))
             changed["accepted"].append(accepted)
         changed["obsolete"] = self._mark("obsolete", "node_id=? AND attempt=? AND status='draft'", (node_id, attempt))
         return changed
@@ -133,12 +133,13 @@ class CommitStore:
 
     def _mark(self, status: str, where: str, args: tuple) -> list[str]:
         ids = [r[0] for r in self.conn.execute(f"SELECT commit_id FROM data_commits WHERE {where} ORDER BY n", args)]
-        self.conn.executemany("UPDATE data_commits SET status=? WHERE commit_id=?", [(status, i) for i in ids])
+        for i in ids:
+            write(self.conn, "UPDATE data_commits SET status=? WHERE commit_id=?", (status, i))
         return ids
 
     def remove(self, node_id: str, attempt: int) -> int:
         """Delete the commits a cleaned-up attempt made."""
-        return self.conn.execute("DELETE FROM data_commits WHERE node_id=? AND attempt=?", (node_id, attempt)).rowcount
+        return write(self.conn, "DELETE FROM data_commits WHERE node_id=? AND attempt=?", (node_id, attempt))
 
     def get(self, commit_id: str) -> dict:
         row = self.conn.execute("SELECT * FROM data_commits WHERE commit_id=?", (commit_id,)).fetchone()

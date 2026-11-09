@@ -8,7 +8,8 @@ from collections import Counter
 from functools import lru_cache
 from pathlib import Path
 
-from .process_digest import _payload
+from . import fs
+from .archive.activity import calls
 
 RUN_WORDS = 8               # this many consecutive words shared with an evaluation prompt is a copy
 SCRUBBED = "render"         # what a blocked name becomes in the kernel's own output, where it only occurs
@@ -104,9 +105,7 @@ def scrub_train_files(node_dir: Path, names: list[str], roots) -> None:
             text = path.read_text(encoding="utf-8", errors="surrogateescape")
             clean = scrub(text, names, roots)
             if clean != text:
-                tmp = path.with_name(path.name + ".tmp")
-                tmp.write_text(clean, encoding="utf-8", errors="surrogateescape")
-                tmp.replace(path)
+                fs.write_text(path, clean, atomic=True, errors="surrogateescape")
 
 
 def censor_names(cfg) -> list[str]:
@@ -156,17 +155,14 @@ def censor_request(body: dict, names: list[str]) -> dict:
     return out
 
 
-def audit(cfg, recorder, node: str, phase: str | None = None, attempt: int | None = None) -> list[str]:
+def audit(conn, node: str, phase: str | None = None, attempt: int | None = None) -> list[str]:
     """The audit patterns the model itself wrote in one attempt (or, without phase and attempt, anywhere
-    in the node): every string of every model response, whatever its shape, so reasoning, replies and
-    tool-call arguments (commands, files written through tools, queries, plans) are all read. Empty when
-    clean. Tool results are not read here: the gateway censors them before the model sees them."""
-    patterns = cfg.get("isolation.audit_patterns") or []
+    in the node), as the gateway found them in every string of every model response, whatever its shape:
+    reasoning, replies and tool-call arguments (commands, files written through tools, queries, plans). Ask
+    answers are left out. Empty when clean. Tool results are not read: the gateway censors them before the
+    model sees them."""
     hits: set[str] = set()
-    for e in recorder.read_events(node):
-        if e.get("type") != "llm.response" or e.get("tool"):
-            continue
-        if phase is not None and (e.get("phase") != phase or e.get("attempt") != attempt):
-            continue
-        hits.update(_found(patterns, " ".join(strings(_payload(recorder, e).get("body")))))
+    for call in calls(conn, node):
+        if call["tool"] is None and (phase is None or (call["phase"], call["attempt"]) == (phase, attempt)):
+            hits.update(call["audit_hits"])
     return sorted(hits)

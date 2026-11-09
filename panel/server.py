@@ -38,20 +38,21 @@ def reply(data) -> Response:
 
 
 def status(run: views.Run) -> dict:
-    events = run.log.events()
+    """LLM spend from the archive's llm_calls rows, the records' count and time from telemetry."""
+    records = run.records.all()
     pid = run.files.loop_pid()
-    responses = [e for e in events if e.get("type") == "llm.response"]
-    costs = [e["cost_usd"] for e in responses if e.get("cost_usd") is not None]
+    [spend] = run.files.query("SELECT count(*) AS calls, sum(input_tokens + cached_tokens + output_tokens) AS tokens, "
+                              "sum(cost_usd) AS usd FROM llm_calls") or [{"calls": 0, "tokens": 0, "usd": None}]
     config = run.files.read_json("config/run.json") or {}
     judge = config.get("judge")
     return {"name": run.name, "alive": pid is not None, "pid": pid, "state": run.files.read_json("control/state.json"),
             "max_nodes": (run.files.read_json("control/run_args.json") or {}).get("max_nodes"),
             "nodes": len(run.nodes()), "judge": f"{judge['kind']} {judge['model']}" if judge else None,
-            "calls": len(responses), "tokens": sum((e.get("usage") or {}).get("total_tokens") or 0 for e in responses),
-            "usd": round(sum(costs), 4) if costs else None,
+            "calls": spend["calls"], "tokens": spend["tokens"] or 0,
+            "usd": round(spend["usd"], 4) if spend["usd"] is not None else None,
             "disk_free_gb": round(shutil.disk_usage(run.files.root).free / 1e9, 1),
-            "events": len(events), "last_event": events[-1]["ts_wall"] if events else None,
-            "last_seq": max((e["_seq"] for e in events), default=None), "now": time.time(), "config": config}
+            "events": len(records), "last_event": max((r["ts"] for r in records), default=None),
+            "last_seq": len(records) - 1 if records else None, "now": time.time(), "config": config}
 
 
 def problem_id(p: dict) -> str:
@@ -133,10 +134,11 @@ def create_app(run_dir: Path | str) -> FastAPI:
 
     @app.get("/api/events")
     def get_events(node: str = "", phase: str = "", attempt: str = "", types: str = "", component: str = "",
-                   text: str = "", gpu: bool = False, offset: int = Query(0, ge=0), limit: int = Query(500, ge=1)):
+                   text: str = "", span: str = "", gpu: bool = False, offset: int = Query(0, ge=0),
+                   limit: int = Query(500, ge=1)):
         return reply(views.trace(run, node=node, phase=phase, attempt=int(attempt) if attempt not in ("", "any") else None,
                                  types=[t for t in types.split(",") if t], component=component, text=text,
-                                 include_gpu=gpu, offset=offset, limit=limit))
+                                 span=span or None, include_gpu=gpu, offset=offset, limit=limit))
 
     @app.get("/api/event/{seq}")
     def get_event(seq: int):

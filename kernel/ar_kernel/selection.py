@@ -4,14 +4,15 @@ score -- with a temperature set by the spread of values (floored at proxy noise)
 large subtrees, and a uniform floor. Continuous in the scores."""
 from __future__ import annotations
 
+import bisect
 import hashlib
-import json
+import itertools
 import math
 import random
 import statistics
-import time
 
-from .archive.nodes import NodeStore
+from . import telemetry
+from .archive.nodes import NodeStore, add_selection
 
 
 def candidates(nodes: list[dict], cfg) -> list[dict]:
@@ -62,13 +63,14 @@ def selection_seed(run_id: str, child_id: str) -> int:
     return int.from_bytes(hashlib.sha256(f"{run_id}:{child_id}".encode()).digest()[:4], "big")
 
 
-def select_parent(conn, cfg, child_id: str, seed: int, recorder) -> str:
+def select_parent(conn, cfg, child_id: str, seed: int) -> str:
     rows = candidates(NodeStore(conn).all(), cfg)
-    chosen = random.Random(seed).choices([r["node_id"] for r in rows], weights=[r["P"] for r in rows])[0]
-    conn.execute("INSERT INTO selection_events (child_id, chosen, seed, candidates, created_at) "
-                 "VALUES (?,?,?,?,?)", (child_id, chosen, seed, json.dumps(rows), time.time()))
-    recorder.event("select", payload={"child": child_id, "chosen": chosen, "seed": seed,
-                                      "candidates": rows}, chosen=chosen, child=child_id)
+    cumulative = list(itertools.accumulate(r["P"] for r in rows))
+    draw = random.Random(seed).random()                              # random.choices with k=1, step by step
+    chosen = rows[bisect.bisect(cumulative, draw * cumulative[-1], 0, len(rows) - 1)]["node_id"]
+    telemetry.decision("node.select", {"child": child_id, "seed": seed, "draw": draw}, rows, chosen,
+                       "a draw from the candidates' probabilities P")
+    add_selection(conn, child_id, chosen, seed, rows)
     return chosen
 
 

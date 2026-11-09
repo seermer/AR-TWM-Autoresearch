@@ -2,12 +2,14 @@ from __future__ import annotations
 import json, re, sqlite3, time
 from pathlib import Path
 
+from .db import write
+
 # running: being built, or left by a stopped run (resume restarts the phase it stopped in).
 # quarantined: an agent phase reached for the evaluation set; terminal, and hidden from every agent.
 STATUSES = {"running", "scored", "invalid_code", "invalid_recipe", "train_failed", "eval_failed",
             "quarantined"}
 NOT_SHOWN = ("running", "quarantined")       # nodes agents never see: no context entry, no /nodes mount
-# node_id becomes a directory name and a telemetry file name.
+# node_id becomes a directory name.
 NODE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 
@@ -22,8 +24,8 @@ class NodeStore:
     def create(self, node_id: str, parent_id: str | None, depth: int) -> None:
         if not NODE_ID_RE.match(node_id or ""):
             raise ValueError(f"node_id {node_id!r} must match {NODE_ID_RE.pattern}")
-        self.conn.execute(
-            "INSERT INTO nodes (node_id, parent_id, depth, created_at, status) VALUES (?,?,?,?,'running')",
+        write(
+            self.conn, "INSERT INTO nodes (node_id, parent_id, depth, created_at, status) VALUES (?,?,?,?,'running')",
             (node_id, parent_id, depth, time.time()),
         )
 
@@ -51,7 +53,7 @@ class NodeStore:
 
     def _update(self, sql: str, params: tuple, node_id: str) -> None:
         """An UPDATE matching no row would lose the write silently, so it raises."""
-        if self.conn.execute(sql, params).rowcount == 0:
+        if write(self.conn, sql, params) == 0:
             raise KeyError(f"no node {node_id!r}")
 
     @staticmethod
@@ -71,8 +73,8 @@ class NodeStore:
         return [self._row(r) for r in self.conn.execute("SELECT * FROM nodes ORDER BY created_at")]
 
     def add_attempt(self, node_id: str, phase: str, index: int, outcome: str, detail: dict) -> None:
-        self.conn.execute(
-            "INSERT INTO attempts (node_id, phase, idx, outcome, detail, created_at) VALUES (?,?,?,?,?,?)",
+        write(
+            self.conn, "INSERT INTO attempts (node_id, phase, idx, outcome, detail, created_at) VALUES (?,?,?,?,?,?)",
             (node_id, phase, index, outcome, json.dumps(detail), time.time()),
         )
 
@@ -80,3 +82,9 @@ class NodeStore:
         rows = self.conn.execute(
             "SELECT * FROM attempts WHERE node_id=? AND phase=? ORDER BY idx", (node_id, phase))
         return [{**dict(r), "detail": json.loads(r["detail"])} for r in rows]
+
+
+def add_selection(conn: sqlite3.Connection, child_id: str, chosen: str, seed: int, candidates: list[dict]) -> None:
+    """Which parent a new node got, and the candidates it was drawn from."""
+    write(conn, "INSERT INTO selection_events (child_id, chosen, seed, candidates, created_at) VALUES (?,?,?,?,?)",
+          (child_id, chosen, seed, json.dumps(candidates), time.time()))

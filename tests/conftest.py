@@ -6,23 +6,6 @@ import pytest
 BRIDGES = Path(__file__).resolve().parents[1] / "kernel" / "ar_kernel" / "bridges"
 sys.path.insert(0, str(BRIDGES))          # bridges import `protocol` plainly, as when run as scripts
 
-from ar_kernel.telemetry import files
-from ar_kernel.telemetry.recorder import Recorder
-
-
-@pytest.fixture(scope="session", autouse=True)
-def file_scope(tmp_path_factory):
-    """Kernel tools record their files only inside a tool call or job: a test that calls one directly
-    runs inside this one, which records into a run folder of its own."""
-    with files.scope(Recorder(tmp_path_factory.mktemp("file_scope")), node="test", tool="test"):
-        yield
-
-def recorded(rec, node="n1") -> dict[tuple[str, str], bytes]:
-    """(direction, path) -> the stored bytes of each file the kernel recorded for `node`."""
-    tel = rec.run_dir / "telemetry"
-    return {(e["direction"], e["path"]): next(p for p in (tel / "files" / e["digest"], tel / "files_hf" / e["digest"])
-                                              if p.exists()).read_bytes()
-            for e in rec.read_events(node) if e["type"] == "file"}
 
 def make_mp4(path, seconds=4.0, fps=30, width=736, height=414):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -100,6 +83,25 @@ def _all_gpus_free(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _telemetry_per_test(monkeypatch):
+    """No writer, root span or catch-all outlives a test (`ar run` installs them for the process)."""
+    import importlib, logging, threading, warnings
+    from ar_kernel.telemetry import capture
+    monkeypatch.setattr(importlib.import_module("ar_kernel.telemetry.writer"), "_writer", None)
+    monkeypatch.setattr(importlib.import_module("ar_kernel.telemetry.api"), "_root", None)
+    for name in ("excepthook", "unraisablehook", "stdout", "stderr"):
+        monkeypatch.setattr(sys, name, getattr(sys, name))
+    monkeypatch.setattr(threading, "excepthook", threading.excepthook)
+    monkeypatch.setattr(warnings, "showwarning", warnings.showwarning)
+    root = logging.getLogger()
+    level = root.level
+    yield
+    for handler in [h for h in root.handlers if isinstance(h, capture._Handler)]:
+        root.removeHandler(handler)
+    root.setLevel(level)
+
+
+@pytest.fixture(autouse=True)
 def _no_hf_token(monkeypatch):
     """No test uploads to Hugging Face or hands HFK to a sandbox; set first so a .env a test loads is undone."""
     monkeypatch.setenv("HFK", "")
@@ -134,3 +136,60 @@ def job_folder(run, job_id: str) -> Path:
 def client_dir(services) -> Path:
     """A short host path to a RunServices' sockets (AF_UNIX paths are capped at 107 bytes)."""
     return Path(f"/proc/{os.getpid()}/fd/{services._fd}")
+
+
+def telemetry_records(run) -> list[dict]:
+    """Every telemetry record of the run, in file order (one writer's segments in order)."""
+    out = []
+    for path in sorted((Path(run) / "telemetry" / "records").glob("*.jsonl")):
+        out += [json.loads(line) for line in path.read_text().splitlines()]
+    return out
+
+
+def telemetry_payload(run, digest: str):
+    import zstandard
+    path = Path(run) / "telemetry" / "payloads" / f"{digest}.json.zst"
+    return json.loads(zstandard.ZstdDecompressor().decompress(path.read_bytes()))
+
+
+# ---- `pytest --check-names`: every registered telemetry name is emitted somewhere in the suite ----
+
+# Names only GPU or sandbox tests emit (both left out of the default suite), each with its reason.
+UNEMITTED = {}
+
+
+def pytest_addoption(parser):
+    parser.addoption("--check-names", action="store_true",
+                     help="fail when a registered span, decision or alert name is never emitted by the tests run")
+
+
+def _emitted(root: Path) -> set[str]:
+    """Names in every record under `root`: the test folders of this session, the workers' and their children's."""
+    names = set()
+    for path in root.rglob("records/*.jsonl"):
+        for line in path.read_text(errors="replace").splitlines():
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(r, dict) and r.get("kind") in ("start", "decision", "alert") and r.get("name"):
+                names.add(r["name"])
+    return names
+
+
+def pytest_sessionfinish(session, exitstatus):
+    config = session.config
+    if not config.getoption("--check-names") or hasattr(config, "workerinput"):
+        return
+    from ar_kernel.telemetry import registry
+    names = _emitted(Path(config.option.basetemp))      # never getbasetemp(): its first call empties the folder
+    missing = []
+    for table in (registry.SPANS, registry.DECISIONS, registry.ALERTS):
+        for name in table:
+            seen = any(n.startswith(name[:-1]) and n not in table for n in names) if name.endswith(".*") \
+                else name in names
+            if not seen and name not in UNEMITTED:
+                missing.append(name)
+    if missing:
+        print(f"\nregistered telemetry names never emitted: {sorted(missing)}", file=sys.stderr)
+        session.exitstatus = 1

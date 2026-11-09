@@ -11,7 +11,6 @@ import pytest
 
 from ar_kernel.config import REPO_ROOT
 from ar_kernel.subproc import conda_command, host_memory_gib, memory_cgroup, memory_events, memory_limit, run_in_env
-from ar_kernel.telemetry.recorder import Recorder
 
 ENV = "autoresearcher"
 
@@ -142,6 +141,12 @@ def _wait_for(path, seconds=60):
         time.sleep(0.1)
 
 
+def test_carriage_returns_read_as_newlines_as_a_text_pipe_gave_them(tmp_path):
+    script = r"printf 'step 1\r\nprogress 10%%\rprogress 100%%\n'; printf 'e\r' 1>&2"
+    proc = run_in_env(ENV, ["bash", "-c", script], cwd=tmp_path)
+    assert proc.stdout == "step 1\nprogress 10%\nprogress 100%\n" and proc.stderr == "e\n"
+
+
 def test_log_path_streams_output_to_disk(tmp_path):
     """Long jobs (48 h of training) must not buffer everything in memory until exit."""
     log = tmp_path / "logs" / "job.log"
@@ -180,6 +185,7 @@ def test_an_interrupted_kill_keeps_the_group_record(tmp_path, monkeypatch):
         run_in_env(ENV, ["python", "-c", "import time; time.sleep(60)"], cwd=tmp_path)
     (marker,) = (tmp_path / "pgids").iterdir()
     os.killpg(int(marker.name), signal.SIGKILL)
+    assert not any(t.name == "ar-tail" for t in threading.enumerate())      # stopped before its files closed
 
 
 def _cgroup(tmp_path, lines, files):

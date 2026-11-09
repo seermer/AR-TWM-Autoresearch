@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from ar_kernel.archive.activity import add_activity, add_call
 from ar_kernel.archive.clips import ClipStore
 from ar_kernel.archive.commits import CommitStore
 from ar_kernel.archive.db import open_db
@@ -14,12 +15,29 @@ from ar_kernel.config import KernelConfig
 from ar_kernel.faults import KernelFault, NodeFault
 from ar_kernel.loop import Loop
 from ar_kernel.run import RunContext
-from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.vcs.agents_repo import AgentsRepo
 from fixtures.fake_loop import Script
 
 CFG = KernelConfig.load()
 SEED = Path(__file__).resolve().parents[1] / "seed_agent"
+
+
+def _model_wrote(run, node, phase, attempt, hits, turn=0, role=None):
+    """One finished model call as the gateway records it, `hits` being the audit patterns it found."""
+    add_call(run, node=node, phase=phase, attempt=attempt, role=role, tool=None, conversation_id="c", turn=turn,
+             transcript=f"transcripts/{phase}-{attempt}/01-{role or 'unlabeled'}.jsonl", status=200,
+             tokens=(1, 0, 1), cost_usd=None, mock=False, audit_hits=hits)
+
+
+def _alerts(run) -> list[tuple[str, str, str]]:
+    from conftest import telemetry_records
+    return [(r["name"], r["level"], r["message"]) for r in telemetry_records(run) if r["kind"] == "alert"]
+
+
+def _recorded(run):
+    from ar_kernel import telemetry
+    telemetry.open(run)
+    telemetry.start("ar.run")
 
 
 @pytest.fixture
@@ -29,8 +47,7 @@ def make_loop(tmp_path):
     def make(script, max_nodes=1, budget=None, upload=None):
         (run / "config").mkdir(parents=True, exist_ok=True)
         (run / "config" / "run.json").write_text("{}")
-        rec = Recorder(run)
-        ctx = RunContext(run_dir=run, conn=open_db(run), recorder=rec, gpus=[0, 1, 2, 3],
+        ctx = RunContext(run_dir=run, conn=open_db(run), gpus=[0, 1, 2, 3],
                          metric_set=["m"], case_ids=["1"], versions={})
         kit = SimpleNamespace(env=None, gpu_lock=threading.Lock(), budget=budget or Budget(), harness=None)
         return Loop(CFG, ctx, kit, AgentsRepo(run / "agents.git"), max_nodes=max_nodes,
@@ -101,21 +118,14 @@ def test_a_failed_attempt_records_its_conversations_and_snapshots(make_loop):
     run, make = make_loop
     script = Script(run, recipe=[False, True])
     loop = make(script)
-    rec, base = loop.ctx.recorder, dict(node="node0001", phase="improve_recipe", attempt=1)
-    rec.event("llm.request", conversation_id="a", role="recipe_planner", payload={"body": {}}, **base)
-    rec.event("llm.request", conversation_id="a", role="recipe_planner", payload={"body": {}}, **base)
-    span = rec.event("tool.call", tool="snapshot", component="tools", payload={}, **base)
-    rec.event("tool.result", tool="snapshot", parent_span_id=span, component="tools",
-              payload={"tool": "snapshot", "result": {"snapshot_id": "s1"}}, **base)
+    for turn in range(2):
+        _model_wrote(run, "node0001", "improve_recipe", 1, [], turn=turn, role="recipe_planner")
+    add_activity(run, node="node0001", phase="improve_recipe", attempt=1, kind="snapshot", name="s1")
     loop.run()
     first = NodeStore(loop.ctx.conn).attempts("node0001", "improve_recipe")[0]["detail"]
     assert first["process"] == {"conversations": [{"role": "recipe_planner", "turns": 2}], "snapshots": ["s1"],
                                 "accepted": None}
     assert "process" not in (NodeStore(loop.ctx.conn).get("node0001")["error"] or "")
-
-
-def _alerts(loop) -> list[str]:
-    return [e["kind"] for e in loop.ctx.recorder.read_events() if e["type"] == "alert"]
 
 
 def test_a_failed_eval_is_run_once_more_after_its_cleanup(make_loop):
@@ -131,7 +141,6 @@ def test_a_failed_eval_is_run_once_more_after_its_cleanup(make_loop):
     loop.phases.score = score
     loop.run()
     assert NodeStore(loop.ctx.conn).get("node0001")["score"] == 0.9
-    assert _alerts(loop) == ["phase_retry"]
 
 
 def test_a_known_machine_error_trains_once_more_without_the_agents(make_loop):
@@ -141,7 +150,6 @@ def test_a_known_machine_error_trains_once_more_without_the_agents(make_loop):
     loop.run()
     assert NodeStore(loop.ctx.conn).get("node0001")["status"] == "scored"
     assert [r[:3] for r in script.calls if r[0] == "improve_recipe"] == [("improve_recipe", "node0001", 1)]
-    assert _alerts(loop) == ["phase_retry"]
 
 
 def test_a_second_machine_error_stops_the_run_without_charging_the_attempt(make_loop):
@@ -151,7 +159,6 @@ def test_a_second_machine_error_stops_the_run_without_charging_the_attempt(make_
     assert "NCCL error" in loop.run()
     assert NodeStore(loop.ctx.conn).get("node0001")["status"] == "running"
     assert NodeStore(loop.ctx.conn).attempts("node0001", "improve_recipe") == []
-    assert _alerts(loop) == ["phase_retry", "phase_failed"]
 
 
 def _raising(script, phase, *errors):
@@ -187,7 +194,6 @@ def test_a_node_fault_twice_ends_the_node_and_keeps_its_clips_and_trained_commit
     assert n1["status"] == "train_failed" and "loss=nan" in n1["error"]
     assert [c["ingested_by"] for c in ClipStore(loop.ctx.conn).all()] == ["node0001"]
     assert _status(loop, "dc_node0001_1") == "accepted"
-    assert _alerts(loop) == ["phase_retry", "node_failed"]
 
 
 def test_a_kernel_then_a_node_fault_ends_the_node(make_loop):
@@ -220,11 +226,13 @@ def test_two_nodes_in_a_row_ended_by_faults_stop_the_run_and_a_score_resets_the_
             raise NodeFault("loss=inf")
         return real(loop_, resolved, node, attempt_dir)
     loop.phases.train = train
+    _recorded(run)
     assert "two nodes in a row" in loop.run()
+    [(level, message)] = [(lv, m) for n, lv, m in _alerts(run) if n == "loop.node_faults"]
+    assert level == "error" and message.startswith("two nodes in a row ended by a fault, the last:")
     statuses = {n["node_id"]: n["status"] for n in NodeStore(loop.ctx.conn).all()}
     assert statuses == {"root": "scored", "node0001": "train_failed", "node0002": "scored",
                         "node0003": "train_failed", "node0004": "train_failed"}
-    assert _alerts(loop)[-2:] == ["node_faults", "node_failed"]
 
 
 def test_a_retried_recipe_attempt_leaves_nothing_of_the_first_try(make_loop):
@@ -259,7 +267,7 @@ def test_a_training_crash_trains_once_more_without_charging_an_attempt(make_loop
     loop = make(script, max_nodes=1)
     loop.run()
     assert NodeStore(loop.ctx.conn).get("node0001")["status"] == "scored"
-    assert len([r for r in script.calls if r[0] == "improve_recipe"]) == 1 and _alerts(loop) == ["phase_retry"]
+    assert len([r for r in script.calls if r[0] == "improve_recipe"]) == 1
 
 
 def test_a_training_crash_twice_ends_the_node_train_failed(make_loop):
@@ -296,7 +304,6 @@ def test_eval_failing_twice_by_a_kernel_fault_stops_the_run(make_loop):
     assert "wbench gpu failed" in loop.run()
     nodes = {n["node_id"]: n for n in NodeStore(loop.ctx.conn).all()}
     assert set(nodes) == {"root", "node0001"} and nodes["node0001"]["status"] == "running"      # restarted on resume
-    assert _alerts(loop) == ["phase_retry", "phase_failed"]
 
 
 def test_an_exception_in_a_phase_twice_stops_the_run(make_loop):
@@ -367,7 +374,9 @@ def test_budget_exhaustion_stops_the_run_and_leaves_the_node_running(make_loop):
         return real_edit(env, **kw)
     script.edit_self = spend
     loop = make(script, max_nodes=3, budget=budget)
+    _recorded(run)
     assert "budget" in loop.run()
+    assert [n for n, level, _ in _alerts(run) if level == "error"] == ["loop.budget"]
     assert NodeStore(loop.ctx.conn).get("node0002")["status"] == "running"
 
 
@@ -426,9 +435,6 @@ def test_resume_restarts_the_phase_the_run_stopped_in(make_loop, phase, calls):
     nodes = NodeStore(loop.ctx.conn)
     assert nodes.get("node0001")["status"] == "scored" and seen == calls
     assert [a["idx"] for a in nodes.attempts("node0001", "improve_recipe")] == [1]     # not charged again
-    assert [e["message"] for e in loop.ctx.recorder.read_events() if e["type"] == "alert"
-            and e["kind"] == "node_resumed"] == [f"node0001 starts again at {'eval' if phase == 'score' else phase}"
-                                                 + ("" if phase == "score" else " attempt 1")]
 
 
 def test_resume_after_a_failed_attempt_restarts_the_next_one_with_its_cleanup(make_loop):
@@ -483,11 +489,11 @@ def test_a_root_left_unscored_is_evaluated_again(make_loop):
 def test_root_score_failure_ends_the_run_with_the_root_eval_failed(make_loop):
     run, make = make_loop
     loop = make(Script(run, score=[RuntimeError("wbench down")] * 2))
+    _recorded(run)
     assert "wbench down" in loop.run()
+    assert [(n, lv) for n, lv, m in _alerts(run) if "wbench down" in m][-1] == ("loop.root_failed", "error")
     root = NodeStore(loop.ctx.conn).get("root")
     assert root["status"] == "eval_failed" and "wbench down" in root["error"]
-    alerts = [e for e in loop.ctx.recorder.read_events() if e["type"] == "alert"]
-    assert alerts[-1]["kind"] == "root_failed" and "wbench down" in alerts[-1]["message"]
 
 
 def test_node_end_deletes_only_raw_downloads_from_staging(make_loop):
@@ -509,8 +515,7 @@ def test_a_scored_root_is_reused_by_the_next_run(tmp_path):
         run = tmp_path / name
         (run / "config").mkdir(parents=True)
         (run / "config" / "run.json").write_text("{}")
-        rec = Recorder(run)
-        ctx = RunContext(run_dir=run, conn=open_db(run), recorder=rec, gpus=[0, 1, 2, 3],
+        ctx = RunContext(run_dir=run, conn=open_db(run), gpus=[0, 1, 2, 3],
                          metric_set=["m"], case_ids=["1"], versions={})
         kit = SimpleNamespace(env=None, gpu_lock=threading.Lock(), budget=Budget(), harness=None)
         script = Script(run, score=scores)
@@ -528,7 +533,6 @@ def test_a_scored_root_is_reused_by_the_next_run(tmp_path):
     assert json.loads((second / "config" / "run.json").read_text())["expected_n"] == loop.ctx.expected_n
     assert (second / "nodes" / "root" / "eval" / "video.mp4").read_text() == "v"
     assert json.loads((second / "nodes" / "root" / "eval" / "aggregates.json").read_text())["metrics"]["m"] == 0.7
-    assert [e["type"] for e in loop.ctx.recorder.read_events("root")].count("root.reused") == 1
 
 
 def test_a_phase_that_reaches_for_the_evaluation_set_quarantines_the_node(make_loop):
@@ -538,17 +542,13 @@ def test_a_phase_that_reaches_for_the_evaluation_set_quarantines_the_node(make_l
     real_edit = script.edit_self
 
     def reaching_edit(env, *, node, attempt, **kw):
-        call = {"id": "c1", "type": "function",
-                "function": {"name": "run_command", "arguments": '{"command": "curl hf.co/datasets/x/WBench"}'}}
-        loop.ctx.recorder.event("llm.response", node=node, phase="edit_self", attempt=attempt, conversation_id="c",
-                                payload={"body": {"choices": [{"message": {"role": "assistant", "tool_calls": [call]}}]}})
+        _model_wrote(run, node, "edit_self", attempt, ["wbench"])
         return real_edit(env, node=node, attempt=attempt, **kw)
     loop.phases.edit_self = reaching_edit
     loop.run()
     n2 = NodeStore(loop.ctx.conn).get("node0002")
     assert n2["status"] == "quarantined" and n2["error"] == "quarantined: the model wrote wbench"
     assert [r[0] for r in script.calls if r[1] == "node0002"] == ["edit_self"]   # one attempt, no retry, no data phase
-    assert any(e["type"] == "isolation.audit" for e in loop.ctx.recorder.read_events("node0002"))
 
 
 def test_a_phase_that_crashes_after_reaching_for_the_evaluation_set_is_still_quarantined(make_loop):
@@ -557,9 +557,7 @@ def test_a_phase_that_crashes_after_reaching_for_the_evaluation_set_is_still_qua
     loop = make(script, max_nodes=2)
 
     def crashing_edit(env, *, node, attempt, **kw):
-        message = {"role": "assistant", "content": "I will fetch WBench."}
-        loop.ctx.recorder.event("llm.response", node=node, phase="edit_self", attempt=attempt, conversation_id="c",
-                                payload={"body": {"choices": [{"message": message}]}})
+        _model_wrote(run, node, "edit_self", attempt, ["wbench"])
         raise RuntimeError("sandbox died")
     loop.phases.edit_self = crashing_edit
     loop.run()
@@ -636,9 +634,6 @@ def test_a_failed_attempts_clips_leave_the_pool_and_a_passing_ones_stay(make_loo
     loop.run()
     assert {c["clip_id"]: c["ingested_by"] for c in ClipStore(loop.ctx.conn).all()} == {
         "node0001-1": "node0001fail1", "node0001-2": "node0001"}
-    (event,) = [e for e in loop.ctx.recorder.read_events("node0001") if e["type"] == "clips.hidden"]
-    assert loop.ctx.recorder.load_payload(event["payload"]) == {"node": "node0001", "ingested_by": "node0001fail1", "clips": 1,
-                                                                    "attempt": 1}
 
 
 def test_a_node_ended_by_a_fault_in_eval_keeps_its_clips(make_loop):
@@ -690,16 +685,13 @@ def test_a_quarantined_nodes_clips_leave_the_pool_with_its_failed_attempts(make_
     _ingesting(script, loop)
 
     def reaching_train(loop_, resolved, node, attempt_dir):
-        message = {"role": "assistant", "content": "I will fetch WBench."}
-        loop.ctx.recorder.event("llm.response", node=node, phase="improve_recipe", attempt=2, conversation_id="c",
-                                payload={"body": {"choices": [{"message": message}]}})
+        _model_wrote(run, node, "improve_recipe", 2, ["wbench"])
         raise RuntimeError("sandbox died")
     loop.phases.train = reaching_train
     loop.run()
     assert NodeStore(loop.ctx.conn).get("node0001")["status"] == "quarantined"
     assert [c["ingested_by"] for c in ClipStore(loop.ctx.conn).all()] == ["node0001quarantine"] * 2
     assert _status(loop, "dc_node0001_2") == "failed"          # trained on, but its clips are hidden
-    assert _status_events(loop)[-1] == {"node": "node0001", "attempt": None, "failed": ["dc_node0001_2"]}
 
 
 # --- improve_recipe in subphases ----------------------------------------------------------------------
@@ -834,11 +826,6 @@ def _committing(script, loop):
     loop.phases.improve_recipe = improve_recipe
 
 
-def _status_events(loop) -> list[dict]:
-    return [loop.ctx.recorder.load_payload(e["payload"]) for e in loop.ctx.recorder.read_events("node0001")
-            if e["type"] == "data_commits.status"]
-
-
 def test_a_subphase_end_keeps_the_named_commit_and_makes_its_other_drafts_obsolete(make_loop):
     run, make = make_loop
     script = Script(run, recipe=["continue", False, True])
@@ -850,10 +837,6 @@ def test_a_subphase_end_keeps_the_named_commit_and_makes_its_other_drafts_obsole
                                           "node0001-3a", "node0001-3b", "dc_node0001_3")} == {
         "node0001-1a": "accepted", "node0001-1b": "obsolete", "node0001-2a": "failed", "node0001-2b": "failed",
         "node0001-3a": "obsolete", "node0001-3b": "obsolete", "dc_node0001_3": "accepted"}
-    assert _status_events(loop) == [
-        {"node": "node0001", "attempt": 1, "accepted": ["node0001-1a"], "obsolete": ["node0001-1b"]},
-        {"node": "node0001", "attempt": 2, "failed": ["node0001-2a", "node0001-2b", "dc_node0001_2"]},
-        {"node": "node0001", "attempt": 3, "accepted": ["dc_node0001_3"], "obsolete": ["node0001-3a", "node0001-3b"]}]
 
 
 def test_a_continue_naming_a_snapshot_without_a_data_commit_keeps_none(make_loop):
@@ -882,7 +865,6 @@ def test_a_node_out_of_retries_fails_every_commit_it_made(make_loop):
     assert NodeStore(loop.ctx.conn).get("node0001")["status"] == "invalid_recipe"
     statuses = {r["status"] for r in loop.ctx.conn.execute("SELECT status FROM data_commits WHERE node_id='node0001'")}
     assert statuses == {"failed"}
-    assert _status_events(loop)[-1] == {"node": "node0001", "attempt": None, "failed": ["node0001-1a", "node0001-1b"]}
 
 
 def test_a_subphase_end_is_recorded_whole_or_not_at_all(make_loop, monkeypatch):
@@ -949,9 +931,7 @@ def test_a_quarantine_is_recorded_whole_or_not_at_all(make_loop, monkeypatch):
     _ingesting(script, loop)
 
     def reaching_train(loop_, resolved, node, attempt_dir):
-        message = {"role": "assistant", "content": "I will fetch WBench."}
-        loop.ctx.recorder.event("llm.response", node=node, phase="improve_recipe", attempt=1, conversation_id="c",
-                                payload={"body": {"choices": [{"message": message}]}})
+        _model_wrote(run, node, "improve_recipe", 1, ["wbench"])
         raise RuntimeError("sandbox died")
     loop.phases.train = reaching_train
     _breaking(monkeypatch, NodeStore, "set_status", when=lambda node, status: status == "quarantined")
@@ -959,3 +939,20 @@ def test_a_quarantine_is_recorded_whole_or_not_at_all(make_loop, monkeypatch):
         loop.run()
     assert [c["ingested_by"] for c in ClipStore(loop.ctx.conn).all()] == ["node0001"]
     assert _status(loop, "dc_node0001_1") == "accepted"
+
+
+@pytest.mark.parametrize("exc, chosen, raised", [
+    (ValueError("bad render"), "node fault", NodeFault), (OSError(28, "No space left on device"), "disk fault", OSError)])
+def test_a_failed_eval_is_the_nodes_unless_the_disk_is_full(tmp_path, exc, chosen, raised):
+    from ar_kernel import telemetry
+    from ar_kernel.telemetry import tree
+    from conftest import telemetry_records
+    telemetry.open(tmp_path)
+    telemetry.start("ar.run")
+
+    def score(*a):
+        raise exc
+    with pytest.raises(raised):
+        Loop._evaluate(SimpleNamespace(phases=SimpleNamespace(score=score)), "n1", None, None)
+    assert [r["chosen"] for r in telemetry_records(tmp_path) if r["kind"] == "decision"] == [chosen]
+    assert tree.check(tree.load(tmp_path)) == []

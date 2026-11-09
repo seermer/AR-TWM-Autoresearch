@@ -28,7 +28,6 @@ def test_the_root_renders_the_released_model(tmp_path):
 def test_the_cases_prompts_are_encoded_before_the_render(tmp_path, monkeypatch):
     import types
     from ar_kernel.eval import render
-    from ar_kernel.telemetry.recorder import Recorder
     calls = []
 
     def fake(env, args, **kwargs):
@@ -40,7 +39,7 @@ def test_the_cases_prompts_are_encoded_before_the_render(tmp_path, monkeypatch):
     monkeypatch.setattr(render, "run_in_env", fake)
     path = build_render_config(CFG, None, 0, tmp_path / "history_encoder.pt", tmp_path / "videos", ["1", "2"],
                                tmp_path / "node")
-    render.render_proxy(CFG, path, [0, 1, 2, 3], "root", Recorder(tmp_path / "run"), ["1", "2"])
+    render.render_proxy(CFG, path, [0, 1, 2, 3], ["1", "2"])
     (precache, env), (rollout, _) = calls
     assert precache[1:3] == ["-m", "scripts.tools.precache_wbench_text_embeds"] and str(path) in precache
     assert env["CUDA_VISIBLE_DEVICES"] == "0,1" and "scripts/tools/run_wbench.py" in rollout

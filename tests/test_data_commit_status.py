@@ -9,7 +9,6 @@ from ar_kernel.archive.commits import CommitStore
 from ar_kernel.archive.db import open_db
 from ar_kernel.config import KernelConfig, merged
 from ar_kernel.data.ingest import IngestResult
-from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools import data_tools
 from ar_kernel.tools.context import TokenRegistry
 from ar_kernel.tools.data_tools import DataTools, register_data_tools
@@ -29,9 +28,8 @@ def _clip(clip_id, node="n1", attempt=1):
 @pytest.fixture
 def env(tmp_path):
     conn = open_db(tmp_path)
-    rec = Recorder(tmp_path)
-    tools = DataTools(CFG, tmp_path, rec, [0], threading.Lock())
-    reg = TokenRegistry(rec)
+    tools = DataTools(CFG, tmp_path, [0], threading.Lock())
+    reg = TokenRegistry()
 
     def caller(attempt=2, node="n1"):
         ws = tmp_path / "nodes" / node / "attempts" / f"improve_recipe-{attempt}" / "workspace"
@@ -87,7 +85,7 @@ def test_clips_of_a_draft_count_as_new_even_when_included(env):
 
 
 class FakeIngestor:
-    def __init__(self, cfg, run_dir, conn, recorder, leakage):
+    def __init__(self, cfg, run_dir, conn, leakage):
         self.clips = ClipStore(conn)
 
     def ingest(self, candidates, node_id, attempt):
@@ -144,8 +142,8 @@ def test_settling_an_unknown_commit_raises(env):
 
 def test_only_data_commit_states_the_limit():
     mcp = new_mcp()
-    register_data_tools(mcp, ToolKit(None, None), DataTools(CFG, CFG.repo_root, None, [0], threading.Lock()))
-    register_snapshot_tool(mcp, ToolKit(None, None), SnapshotStore(CFG.repo_root, None, lambda c: None))
+    register_data_tools(mcp, ToolKit(None, CFG.repo_root), DataTools(CFG, CFG.repo_root, [0], threading.Lock()))
+    register_snapshot_tool(mcp, ToolKit(None, CFG.repo_root), SnapshotStore(CFG.repo_root, None, lambda c: None))
     tools = {t.name: t for t in asyncio.run(mcp.list_tools())}
     assert tools["data_commit"].description == (
         "Create an immutable data commit: the tentative whole training set of this node. It holds the datasets of the "
@@ -165,6 +163,6 @@ def test_only_data_commit_states_the_limit():
 
 def test_without_a_limit_data_commit_states_none():
     mcp = new_mcp()
-    register_data_tools(mcp, ToolKit(None, None), None)
+    register_data_tools(mcp, ToolKit(None, CFG.repo_root), None)
     text = {t.name: t.description for t in asyncio.run(mcp.list_tools())}["data_commit"]
     assert "new clips" not in text and text.endswith("Returns the commit id, each dataset's weight and clip counts.")

@@ -681,7 +681,6 @@ def kernel(tmp_path_factory):
     from ar_kernel.gateway.store import CallStore
     from ar_kernel.services import RunServices, socket_dir_for
     from ar_kernel.tools.captioner import register_caption_tool
-    from ar_kernel.telemetry.recorder import Recorder
     from ar_kernel.tools.context import TokenRegistry
     from ar_kernel.tools.data_tools import register_data_tools
     from ar_kernel.tools.hf_tools import register_hf_tools
@@ -691,7 +690,6 @@ def kernel(tmp_path_factory):
     from ar_kernel.tools.snapshot import SnapshotStore, register_snapshot_tool
     from ar_kernel.vcs.agents_repo import AgentsRepo
     run = tmp_path_factory.mktemp("run")
-    rec = Recorder(run)
     repo = AgentsRepo(run / "agents.git")
     repo.init(SEED)
     book = MockBook.default()
@@ -711,8 +709,16 @@ def kernel(tmp_path_factory):
                         item["arguments"] = item["arguments"].replace(f"SNAP{k}", out["snapshot_id"])
             return out
 
-    registry, queue = TokenRegistry(rec), JobQueue(rec, threading.Lock(), wait_cap_s=5.0)
-    kit, mcp = ToolKit(registry, rec), new_mcp()
+    class SeenStore(CallStore):
+        """Keeps each request as the gateway forwards it: (node, role label, body)."""
+        requests: list = []
+
+        def begin(self, caller, endpoint, body, tool=None, role=None):
+            self.requests.append((caller.node, role, body))
+            return super().begin(caller, endpoint, body, tool=tool, role=role)
+
+    registry, queue = TokenRegistry(), JobQueue(run, threading.Lock(), wait_cap_s=5.0)
+    kit, mcp = ToolKit(registry, run), new_mcp()
     register_data_tools(mcp, kit, _MockData())
     register_snapshot_tool(mcp, kit, NamingStore(run, repo, _MockData().usable))
     register_hf_tools(mcp, kit, _MockHf())
@@ -722,15 +728,16 @@ def kernel(tmp_path_factory):
     register_ask_tool(mcp, kit, MockAsk())
     register_knowledge_tool(mcp, kit)
     services = RunServices(socket_dir_for(run))
-    services.start(create_gateway_app(registry=registry, store=CallStore(rec), allowed_models={"mock-model"},
+    store = SeenStore(run)
+    services.start(create_gateway_app(registry=registry, store=store, allowed_models={"mock-model"},
                                       upstream=None, mocks=book), build_tool_app(mcp))
-    yield rec, registry, services, repo, run
+    yield store, registry, services, repo, run
     services.stop()
     queue.shutdown()
 
 
 def _run(kernel, tmp_path, kind, script, node, ctx):
-    rec, registry, services, repo, _ = kernel
+    store, registry, services, repo, _ = kernel
     agent = tmp_path / "agent_copy"
     shutil.copytree(SEED, agent, ignore=shutil.ignore_patterns("__pycache__"))
     ws, ctx_dir = tmp_path / "ws", tmp_path / "ctx"
@@ -749,25 +756,22 @@ def _run(kernel, tmp_path, kind, script, node, ctx):
     return proc, json.loads((ws / "result.json").read_text()), agent
 
 
-def _requests(rec, node) -> list[dict]:
-    return [e for e in rec.read_events(node) if e["type"] == "llm.request"]
-
-
-def _tool_outputs(rec, node) -> list[str]:
+def _tool_outputs(store, node) -> list[str]:
     """Every tool result the agent sent back to the model (Chat Completions `tool` messages)."""
     out = []
-    for event in _requests(rec, node):
-        body = rec.load_payload(event["payload"])["body"]
-        out += [m["content"] if isinstance(m["content"], str) else json.dumps(m["content"])
-                for m in body["messages"] if m.get("role") == "tool"]
+    for n, _, body in store.requests:
+        if n == node:
+            out += [m["content"] if isinstance(m["content"], str) else json.dumps(m["content"])
+                    for m in body["messages"] if m.get("role") == "tool"]
     return out
 
 
-def _by_role(rec, node) -> dict[str, list[dict]]:
-    """Request bodies by the role label the gateway recorded."""
+def _by_role(store, node) -> dict[str, list[dict]]:
+    """Request bodies by their role label."""
     out: dict[str, list[dict]] = {}
-    for event in _requests(rec, node):
-        out.setdefault(event.get("role"), []).append(rec.load_payload(event["payload"])["body"])
+    for n, role, body in store.requests:
+        if n == node:
+            out.setdefault(role, []).append(body)
     return out
 
 
@@ -800,7 +804,7 @@ def test_chat_model_works_sync_and_async_over_the_socket(kernel, tmp_path, monke
 @pytest.mark.parametrize("kind", ["edit_self", "improve_recipe"])
 def test_dry_run_against_the_kernel_services_returns_a_real_snapshot(kernel, tmp_path, kind):
     from ar_kernel.tools import snapshot
-    rec, _, _, repo, run = kernel
+    store, _, _, repo, run = kernel
     proc, body, _ = _run(kernel, tmp_path, kind, "smoke", f"dry-{kind}", {"dry_run": True})
     assert proc.returncode == 0 and body["ok"], (body, proc.stderr[-2000:])
     sid = body["result"]["snapshot_id"]
@@ -808,12 +812,12 @@ def test_dry_run_against_the_kernel_services_returns_a_real_snapshot(kernel, tmp
         assert snapshot.edit_snapshot(repo, "dry-edit_self", "edit_self", 1, sid) == sid
     else:
         assert snapshot.recipe_snapshot(run, "dry-improve_recipe", "improve_recipe", 1, sid)["data_commit"] == C0
-    assert set(_by_role(rec, f"dry-{kind}")) == {"ping"}
+    assert set(_by_role(store, f"dry-{kind}")) == {"ping"}
 
 
 def test_improve_recipe_full_flow(kernel, tmp_path):
     from ar_kernel.tools import snapshot
-    rec, _, _, _, run = kernel
+    store, _, _, _, run = kernel
     ctx = {"tunable_rules": {"optimizer.max_steps": {"type": "int"}, "optimizer.lr": {"type": "float"}},
            "lora_allowlist": [[48, 48]], "target_skill": {"name": "rain starting", "sentence": "rain begins",
                                                           "description": "d"}}
@@ -824,7 +828,7 @@ def test_improve_recipe_full_flow(kernel, tmp_path):
     assert snapshot.recipe_snapshot(run, "n-recipe", "improve_recipe", 1, result["snapshot_id"]) == {
         "has_result": True, "data_commit": C0, "recipe": {"optimizer.max_steps": 200, "optimizer.lr": 1e-5},
         "rationale": "fits the data"}                                                   # int coerced
-    outputs = _tool_outputs(rec, "n-recipe")
+    outputs = _tool_outputs(store, "n-recipe")
     for fragment in ("Error: invalid arguments for data_engineer:\ndata: ", "Not run: data_engineer ran in this turn",
                      "Error: no_such_tool is not a valid tool", "Give data_commit, recipe and rationale together",
                      "is not a snapshot handed back in this conversation with a data commit and a "
@@ -832,7 +836,7 @@ def test_improve_recipe_full_flow(kernel, tmp_path):
         assert any(fragment in o for o in outputs), fragment
     assert any(o.startswith("Error: ") and "ToolException" not in o and "downloads are disabled" in o
                for o in outputs)                                                 # kernel tool error reported
-    roles = _by_role(rec, "n-recipe")
+    roles = _by_role(store, "n-recipe")
     assert set(roles) == {"recipe_planner", "data_engineer", "recipe_reviewer"}
     planner_tools = _tools_of(roles["recipe_planner"])
     assert {"data_engineer", "hf_search", "data_query", "data_fetch", "ask", "read_knowledge", "run_command",
@@ -859,7 +863,7 @@ def test_improve_recipe_full_flow(kernel, tmp_path):
 
 
 def test_edit_self_plans_builds_reviews_and_accepts_a_snapshot(kernel, tmp_path):
-    rec, _, _, repo, _ = kernel
+    store, _, _, repo, _ = kernel
     from ar_kernel.tools import snapshot
     proc, body, agent = _run(kernel, tmp_path, "edit_self", "edit", "n-edit", {})
     assert proc.returncode == 0 and body["ok"], (body, proc.stderr[-2000:])
@@ -868,8 +872,8 @@ def test_edit_self_plans_builds_reviews_and_accepts_a_snapshot(kernel, tmp_path)
     assert snapshot.edit_snapshot(repo, "n-edit", "edit_self", 1, sid) == sid
     assert "SIBLINGS_SHOWN = 8" in repo.read_file(sid, "agent/briefing.py")
     assert not (agent / "agent" / "stray.py").exists() and "SIBLINGS_SHOWN = 8" in (agent / "agent" / "briefing.py").read_text()
-    assert not any("belongs to coder: agent/briefing.py" in o for o in _tool_outputs(rec, "n-edit"))
-    outputs = _tool_outputs(rec, "n-edit")
+    assert not any("belongs to coder: agent/briefing.py" in o for o in _tool_outputs(store, "n-edit"))
+    outputs = _tool_outputs(store, "n-edit")
     for fragment in (f"Error: run_command changed files in {agent}, which belongs to coder: agent/stray.py (reverted)",
                      "nope is not a snapshot handed back in this conversation. The ones you can accept: none yet.",
                      "Error: invalid arguments for coder:\nproblem: ",
@@ -878,7 +882,7 @@ def test_edit_self_plans_builds_reviews_and_accepts_a_snapshot(kernel, tmp_path)
         assert any(fragment in o for o in outputs), fragment
     planner_scratch = next(o for o in outputs if o.startswith("exit 0\n") and "/scratch/edit_planner-" in o)
     assert planner_scratch.split("\n")[1].startswith(str(tmp_path / "ws" / "scratch" / "edit_planner-"))
-    roles = _by_role(rec, "n-edit")
+    roles = _by_role(store, "n-edit")
     assert set(roles) == {"edit_planner", "coder", "edit_reviewer"}
     assert {"coder", "run_command", "ask", "read_knowledge", "arxiv_search", "submit_result"} <= _tools_of(roles["edit_planner"])
     assert not {"data_ingest", "hf_download", "caption_videos", "snapshot", "self_test"} & _tools_of(roles["edit_planner"])
@@ -895,11 +899,10 @@ def test_seed_agent_passes_contract_verification(tmp_path):
     from ar_contract.models import EditContext, RecipeContext
     from ar_kernel.config import KernelConfig
     from ar_kernel.contract.verify import ContractHarness, verify_contract
-    from ar_kernel.telemetry.recorder import Recorder
     from ar_kernel.vcs.agents_repo import AgentsRepo
     repo = AgentsRepo(tmp_path / "agents.git")
     commit = repo.init(SEED)
-    harness = ContractHarness(KernelConfig.load(), tmp_path / "run", Recorder(tmp_path / "run"), repo)
+    harness = ContractHarness(KernelConfig.load(), tmp_path / "run", repo)
     harness.start()
     try:
         common = dict(dry_run=True)
@@ -910,7 +913,7 @@ def test_seed_agent_passes_contract_verification(tmp_path):
                                recipe_guide={"optimizer.lr": {"base": 1e-4, "meaning": "peak rate"}},
                                lora_allowlist=[[64, 64]])
         report = verify_contract(cfg=KernelConfig.load(), run_dir=tmp_path / "run", run_id="seed", repo=repo,
-                                 commit=commit, harness=harness, recorder=Recorder(tmp_path / "run"),
+                                 commit=commit, harness=harness,
                                  node="root", attempt=1,
                                  contexts={"edit_self": edit.model_dump(mode="json"),
                                            "improve_recipe": recipe.model_dump(mode="json")})

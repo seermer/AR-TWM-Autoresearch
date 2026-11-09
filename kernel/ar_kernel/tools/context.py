@@ -1,7 +1,7 @@
 """Who is calling, and which host paths their container paths may name.
 
 Every container gets its own token. The gateway and the tool server resolve it
-to a Caller, which attributes telemetry (node, phase, attempt) and bounds every
+to a Caller, which attributes each call (node, phase, attempt) and bounds every
 path argument to that container's workspace. Anything else is refused.
 """
 from __future__ import annotations
@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Callable
 
+from .. import telemetry
+
 WORKSPACE = PurePosixPath("/workspace")
 STAGING = WORKSPACE / "staging"
 
@@ -25,8 +27,8 @@ class PathError(ValueError):
 class Fault:
     """Set once by a kernel thread when the caller's phase must stop; the loop then raises KernelFault."""
 
-    def __init__(self, recorder=None) -> None:
-        self.recorder, self.reason, self.event, self._lock = recorder, None, threading.Event(), threading.Lock()
+    def __init__(self) -> None:
+        self.reason, self.event, self._lock = None, threading.Event(), threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -44,22 +46,21 @@ class Caller:
     base_commit: str | None = None         # that tree's parent commit
     fault: Fault = field(default_factory=Fault, compare=False, repr=False)
     sandbox: dict = field(default_factory=dict, compare=False, repr=False)    # {"pid": bwrap's pid} once started
+    span: telemetry.Span | None = field(default=None, compare=False, repr=False)   # its requests' parent
 
     def fail(self, reason: str) -> None:
         """Stop this caller's phase: its sandbox is killed and the loop raises KernelFault(reason)."""
-        with self.fault._lock:
+        with telemetry.span("caller.fail", {"reason": reason}) as sp, self.fault._lock:
+            sp.output = {"first": not self.fault.event.is_set()}
             if self.fault.event.is_set():
                 return
             self.fault.reason = reason
             self.fault.event.set()
-        if self.fault.recorder is not None:
-            self.fault.recorder.event("phase.fault", node=self.node, phase=self.phase, attempt=self.attempt,
-                                      component="kernel", payload={"reason": reason})
 
 
 class TokenRegistry:
-    def __init__(self, recorder, scrub_names=(), host_roots=()) -> None:
-        self._recorder, self._scrub_names, self._host_roots = recorder, tuple(scrub_names), tuple(host_roots)
+    def __init__(self, scrub_names=(), host_roots=()) -> None:
+        self._scrub_names, self._host_roots = tuple(scrub_names), tuple(host_roots)
         self._by_token: dict[str, Caller] = {}
         self._lock = threading.Lock()
         self._idle = threading.Condition(self._lock)
@@ -70,10 +71,12 @@ class TokenRegistry:
               staging_host: Path, mock_script: str | None = None, agent_host: Path | None = None,
               base_commit: str | None = None) -> Caller:
         token = "ar-" + secrets.token_urlsafe(32)
-        self._recorder.add_redaction(token)
+        if (w := telemetry.writer()) is not None:
+            w.add_redaction(token)
         caller = Caller(token, node, phase, attempt, Path(workspace_host), Path(staging_host),
                         mock_script, self._scrub_names, self._host_roots,
-                        Path(agent_host) if agent_host is not None else None, base_commit, Fault(self._recorder))
+                        Path(agent_host) if agent_host is not None else None, base_commit, Fault(),
+                        span=telemetry.current())
         with self._lock:
             self._by_token[token] = caller
         return caller
@@ -126,11 +129,21 @@ def bearer(header: str | None) -> str | None:
 
 
 def to_host(caller: Caller, container_path: str) -> Path:
-    """Map a container path to the host, refusing anything outside the workspace.
+    """Map a container path to the host, refusing anything outside the workspace, as a decision.
 
     Resolution follows symlinks, so a link the agent planted inside /workspace
     cannot point the kernel at a host file.
     """
+    try:
+        host = _to_host(caller, container_path)
+    except PathError as exc:
+        telemetry.decision("tool.path", {"path": container_path}, ["resolve", "refuse"], "refuse", str(exc))
+        raise
+    telemetry.decision("tool.path", {"path": container_path}, ["resolve", "refuse"], "resolve", str(host))
+    return host
+
+
+def _to_host(caller: Caller, container_path: str) -> Path:
     if not container_path or not container_path.startswith("/"):
         raise PathError(f"{container_path!r} is not an absolute container path")
     path = PurePosixPath(container_path)

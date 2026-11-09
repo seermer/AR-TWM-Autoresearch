@@ -35,7 +35,6 @@ from ar_kernel.eval.lora import concat_eval_lora
 from ar_kernel.eval.render import build_render_config, render_proxy
 from ar_kernel.run import bootstrap_run
 from ar_kernel.subproc import cache_env, free_port, host_memory_gib
-from ar_kernel.telemetry import files
 from ar_kernel.tools import captioner, locate_events
 from ar_kernel.tools.annotate import AnnotateBackend
 from ar_kernel.tools.context import TokenRegistry
@@ -69,7 +68,7 @@ class Preflight:
     def __init__(self, cfg: KernelConfig) -> None:
         self.cfg = cfg
         self.ctx = bootstrap_run(cfg, run_id=f"preflight-{time.strftime('%Y%m%d-%H%M%S')}", env=os.environ)
-        self.run_dir, self.gpus, self.rec = self.ctx.run_dir, self.ctx.gpus, self.ctx.recorder
+        self.run_dir, self.gpus = self.ctx.run_dir, self.ctx.gpus
         self.ws, self.staging = self.run_dir / "workspace", self.run_dir / "staging"
         self.ws.mkdir(), self.staging.mkdir()
         self.examples = cfg.worldmodel / "data" / "examples" / "video_timed_prompts_camera"
@@ -79,9 +78,9 @@ class Preflight:
 
     # --- GPU jobs, through the same queue the agents use ---
     def job(self, backend_cls, tool: str, args: dict):
-        reg = TokenRegistry(self.rec)
-        q = JobQueue(self.rec, threading.Lock(), wait_cap_s=3600)
-        q.register(backend_cls(self.cfg, self.run_dir, self.gpus, reg, self.rec))
+        reg = TokenRegistry()
+        q = JobQueue(self.run_dir, threading.Lock(), wait_cap_s=3600)
+        q.register(backend_cls(self.cfg, self.run_dir, self.gpus, reg))
         caller = reg.issue(node="preflight", phase="improve_recipe", attempt=1, workspace_host=self.ws,
                            staging_host=self.staging)
         try:
@@ -142,7 +141,7 @@ class Preflight:
         names = command.index("--served-model-name") + 1
         command[names:names + 1] = ["captioner", "locator", judge]       # the names the three callers use
         server = VllmServer(c["env"], command, self.gpus, port, cwd=self.run_dir, log_path=self.run_dir / "vllm.log",
-                            recorder=self.rec, node="preflight", phase="vllm", label="vLLM server")
+                            label="vLLM server")
         effort = self.cfg.get("locate_events.reasoning_effort")
 
         def ask_judge(content):
@@ -213,7 +212,7 @@ class Preflight:
     def train(self):
         """A few optimizer steps of the config's base recipe on the WorldModel example clips (and re-encoded
         copies of them, enough for one optimizer step)."""
-        ing = Ingestor(self.cfg, self.run_dir, self.ctx.conn, self.rec)
+        ing = Ingestor(self.cfg, self.run_dir, self.ctx.conn)
         accum = yaml.safe_load(self.cfg.base_recipe.read_text())["optimizer"]["grad_accum_steps"]
         clip_ids = []
         for copy in range(-(-len(self.gpus) * accum // len(self.clips))):
@@ -229,11 +228,10 @@ class Preflight:
                 shutil.copy2(self.examples / "poses" / f"{video.stem}.npz", d / "pose.npz")
                 named = {k: f"/workspace/staging/train/{d.name}/{f}"
                          for k, f in (("video", "video.mp4"), ("annotation", "annotation.json"), ("pose", "pose.npz"))}
-                with files.scope(self.rec, node="preflight", phase="improve_recipe", attempt=1, tool="data_ingest"):
-                    res = ing.ingest([Candidate(video=d / "video.mp4", annotation=d / "annotation.json",
-                                                pose=d / "pose.npz", named=named,
-                                                derived_from={"kind": "dataset", "name": "WorldModel example clips"})],
-                                     node_id="preflight", attempt=1)[0]
+                res = ing.ingest([Candidate(video=d / "video.mp4", annotation=d / "annotation.json",
+                                            pose=d / "pose.npz", named=named,
+                                            derived_from={"kind": "dataset", "name": "WorldModel example clips"})],
+                                 node_id="preflight", attempt=1)[0]
                 if not res.accepted:
                     raise Failed(f"ingest refused {d.name}: {res.reasons}")
                 clip_ids.append(res.clip_id)
@@ -241,14 +239,14 @@ class Preflight:
         commit, _ = commits.commit({"examples": {"weight": 1.0, "clips": clip_ids}}, "preflight", node_id="preflight")
         node_dir = self.run_dir / "nodes" / "preflight"
         recipe = {"optimizer.max_steps": 3, "optimizer.epochs": 500}
-        failures = Gate(self.cfg, commits, self.rec).check(recipe, commit, None, "preflight", self.run_dir / "gate",
+        failures = Gate(self.cfg, commits).check(recipe, commit, None, "preflight", self.run_dir / "gate",
                                                           self.run_dir, self.gpus)
         if failures:
             raise Failed(f"gate: {failures}")
         resolved = resolve_config(self.cfg, commits, self.run_dir, recipe, commit, "preflight", node_dir)
-        runner = TrainRunner(self.cfg, self.rec)
-        runner.precache(resolved, self.gpus, "preflight")
-        self.checkpoint = runner.train(resolved, self.gpus, "preflight", node_dir)
+        runner = TrainRunner(self.cfg)
+        runner.precache(resolved, self.gpus)
+        self.checkpoint = runner.train(resolved, self.gpus, node_dir)
         self.rank = lora_of(resolved)[0]
         return {"clips": len(clip_ids), "checkpoint": str(self.checkpoint)}
 
@@ -262,11 +260,11 @@ class Preflight:
         node_dir = self.run_dir / "nodes" / "preflight-render"
         lora = None
         if self.checkpoint is not None:
-            lora = concat_eval_lora(self.cfg, self.checkpoint, node_dir, self.rec, "preflight-render")
+            lora = concat_eval_lora(self.cfg, self.checkpoint, node_dir)
         history = self.checkpoint / "history_encoder.pt" if self.checkpoint else \
             self.cfg.worldmodel / "weights/alaya-world-ar/history_encoder.pt"
         config = build_render_config(self.cfg, lora, self.rank or 0, history, node_dir / "videos", chosen, node_dir)
-        videos = render_proxy(self.cfg, config, self.gpus, "preflight-render", self.rec, chosen)
+        videos = render_proxy(self.cfg, config, self.gpus, chosen)
         return {"cases": chosen, "turns": [turns(c) for c in chosen], "trained": self.checkpoint is not None,
                 "videos": len(list(videos.glob("case_*_combined.mp4")))}
 

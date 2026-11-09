@@ -4,7 +4,6 @@ from __future__ import annotations
 import functools
 import os
 import re
-import shutil
 import uuid
 from collections import Counter
 from pathlib import Path, PurePosixPath
@@ -15,9 +14,9 @@ from huggingface_hub.utils import filter_repo_objects
 from mcp.server.mcpserver import Context
 from pydantic import Field
 
+from .. import fs, telemetry
 from ..faults import disk_fault
 from ..isolation import blocked
-from ..telemetry import files
 from .context import STAGING
 from .server import FROM_FILE, ToolError, listed
 
@@ -36,7 +35,7 @@ def clear_hf_tmp(run_dir: Path) -> list[str]:
     """Delete the partial downloads a stopped phase left; their names."""
     partial = sorted(p.name for p in hf_tmp(run_dir).iterdir()) if hf_tmp(run_dir).is_dir() else []
     for name in partial:
-        shutil.rmtree(hf_tmp(run_dir) / name)
+        fs.rmtree(hf_tmp(run_dir) / name)
     return partial
 
 
@@ -57,43 +56,6 @@ def _layout(names: list[str]) -> str:
     exts = Counter(PurePosixPath(n).suffix or "(none)" for n in names)
     return ("folders: " + ", ".join(f"{k} ({v} files)" for k, v in tops.most_common(12)) +
             "; extensions: " + ", ".join(f"{k}: {v}" for k, v in exts.most_common(12)))
-
-
-def _place(place, base: Path, rel: str) -> None:
-    """`place(name, dir_fd)` in base/rel's folder without following any link under `base`: each directory is
-    opened with O_NOFOLLOW and the file is placed relative to that directory's fd, so a link the agent plants
-    or swaps in (it owns staging, and its container runs meanwhile) raises instead of redirecting."""
-    *dirs, name = PurePosixPath(rel).parts
-    fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        for part in dirs:
-            try:
-                os.mkdir(part, dir_fd=fd)
-            except FileExistsError:
-                pass
-            sub = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-            os.close(fd)
-            fd = sub
-        place(name, fd)
-    finally:
-        os.close(fd)
-
-
-def move_into(src: Path, base: Path, rel: str) -> None:
-    """Move `src` to base/rel (see `_place`)."""
-    _place(lambda name, fd: os.replace(src, name, dst_dir_fd=fd), base, rel)
-
-
-def link_into(src: Path, base: Path, rel: str) -> None:
-    """Hard-link `src` as base/rel (see `_place`); `src` keeps its own name."""
-    _place(lambda name, fd: os.link(src, name, dst_dir_fd=fd, follow_symlinks=False), base, rel)
-
-
-def publish_file(src: Path, staging: Path, rel: str, folder: str = "files", link: bool = False) -> None:
-    """move_into (or with `link`, link_into) staging, after recording `src` as a kernel output."""
-    with open(src, "rb") as handle:
-        files.record(handle, direction="out", path=str(STAGING / rel), folder=folder)
-    (link_into if link else move_into)(src, staging, rel)
 
 
 class HfTools:
@@ -153,7 +115,8 @@ class HfTools:
         try:
             self.api.auth_check(repo, repo_type=kind)
             accessible = True
-        except (GatedRepoError, RepositoryNotFoundError):     # gated without access, or private
+        except (GatedRepoError, RepositoryNotFoundError) as exc:     # gated without access, or private
+            telemetry.error(exc, "accessible: false")
             accessible = False
         except HfHubHTTPError as exc:
             raise _hub(exc) from None
@@ -178,6 +141,8 @@ class HfTools:
             if p.is_absolute() or ".." in p.parts or "\\" in f:
                 raise ToolError(f"repo lists unsafe file path {f!r}; refusing to download")
         sizes = {s.rfilename: int(s.size or 0) for s in info.siblings}
+        sha256 = {s.rfilename: getattr(getattr(s, "lfs", None), "sha256", None) for s in info.siblings}
+        blob = {s.rfilename: getattr(s, "blob_id", None) for s in info.siblings}
         total = sum(sizes[f] for f in files)
         if max_bytes and total > int(max_bytes):
             largest = ", ".join(f"{f} ({sizes[f]} bytes)" for f in sorted(files, key=lambda f: -sizes[f])[:5])
@@ -190,23 +155,26 @@ class HfTools:
         if not (staging / rel).resolve().is_relative_to(staging):
             raise ToolError("download destination resolves outside staging; refusing")
         tmp = self.private_dir / uuid.uuid4().hex
-        tmp.mkdir(parents=True)
+        fs.mkdir(tmp)
         try:
-            try:
-                self.snapshot(repo_id=repo, repo_type=kind, revision=info.sha,
-                              allow_patterns=files, local_dir=str(tmp))
-            except HfHubHTTPError as exc:
-                raise _hub(exc) from None
+            with telemetry.span("hf.download", {"repo": repo, "kind": kind, "revision": info.sha, "files": [
+                    {"path": f, "size": sizes[f], "sha256": sha256[f], "blob_id": blob[f]} for f in files]}) as sp:
+                try:
+                    self.snapshot(repo_id=repo, repo_type=kind, revision=info.sha,
+                                  allow_patterns=files, local_dir=str(tmp))
+                except HfHubHTTPError as exc:
+                    raise _hub(exc) from None
+                sp.output = {"bytes": total}
             for f in files:
                 try:
-                    publish_file(tmp / f, staging, f"{rel}/{f}", folder="files_hf")
+                    fs.place(tmp / f, staging, f"{rel}/{f}")
                 except OSError as exc:
                     if disk_fault(exc):
                         raise
                     raise ToolError(f"cannot place {f} in staging (a link or non-directory in the way?): "
                                     f"{exc}") from None
         finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+            fs.rmtree(tmp, ignore_errors="a kernel-private partial download")
         return {"repo": repo, "revision": info.sha, "bytes": total,
                 "files": [str(STAGING / rel / f) for f in files]}
 

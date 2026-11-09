@@ -11,7 +11,7 @@ MARK = "===AR_JSON==="
 class CheckerError(RuntimeError):
     """The checker bridge did not return a report."""
 
-def check_clip(cfg: KernelConfig, clip_dir: Path, base_recipe: Path, recorder=None, node: str = "run") -> dict:
+def check_clip(cfg: KernelConfig, clip_dir: Path, base_recipe: Path) -> dict:
     """WorldModel's report on one clip root: {ok, errors, warnings}."""
     # `python <script>.py` puts the script's own directory on sys.path[0], not the
     # process cwd, so `alaya` would not be importable without this: point PYTHONPATH
@@ -20,7 +20,6 @@ def check_clip(cfg: KernelConfig, clip_dir: Path, base_recipe: Path, recorder=No
         "alayaworld",
         ["python", str(BRIDGE), "--config", str(base_recipe), "--root", str(clip_dir)],
         cwd=cfg.worldmodel, extra_env={"PYTHONPATH": str(cfg.worldmodel)},
-        recorder=recorder, node=node, phase="ingest",
     )
     if MARK not in proc.stdout:
         raise CheckerError(f"checker bridge failed (rc={proc.returncode}):\n{proc.stdout}\n{proc.stderr}")

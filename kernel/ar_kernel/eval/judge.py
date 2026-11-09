@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
+from .. import fs
 from ..config import KernelConfig
 from ..subproc import free_port
 from ..tools.vllm_server import VllmServer, serve_command
@@ -38,16 +39,14 @@ def judge_env(cfg: KernelConfig, judge: Judge, base_url: str | None, api_key: st
             "VLM_EXTRA_BODY": json.dumps(cfg.get("eval.judge.extra_body") or {})}
 
 
-def judge_server(cfg: KernelConfig, judge: Judge, gpus: list[int], cwd: Path, recorder=None,
-                 node: str = "run") -> VllmServer:
+def judge_server(cfg: KernelConfig, judge: Judge, gpus: list[int], cwd: Path) -> VllmServer:
     """An unstarted vLLM server for a local judge, on all of `gpus`. WBench sends each video inline
     (base64) and the interaction and causal metrics send frames as images, so no media directory is
     exposed and up to `eval.judge.max_images` images are allowed per prompt."""
     c = cfg.get("captioner")
     port = free_port()
     cwd = Path(cwd)
-    cwd.mkdir(parents=True, exist_ok=True)
+    fs.mkdir(cwd)
     return VllmServer(c["env"], serve_command(c, gpus, port, judge.model,
                                         mm_limits={"image": cfg.get("eval.judge.max_images"), "video": 1}), gpus, port, cwd=cwd,
-                      log_path=cwd / "judge_vllm.log", recorder=recorder, node=node, phase="judge",
-                      label="judge server")
+                      log_path=cwd / "judge_vllm.log", label="judge server")

@@ -1,4 +1,4 @@
-"""Agent conversations from the gateway's llm.request / llm.response events.
+"""Agent conversations from the gateway's llm.request spans (records.Records.calls).
 
 The gateway links a request to an earlier call when it resends that call's history, so a
 conversation id holds one uninterrupted history. Compaction replaces the history, so the
@@ -36,6 +36,8 @@ class Call:
     latency_s: float | None = None
     role: str | None = None
     done_ts: float | None = None
+    tool: str | None = None                     # the kernel tool that made the call (ask)
+    span: str | None = None                     # its llm.request span
 
 
 @dataclass
@@ -112,21 +114,9 @@ def _pretty(arguments) -> str:
         return str(arguments)
 
 
-def segments(events: list[dict], node: str, phase: str, attempt: int) -> list[Segment]:
-    calls: dict[str, Call] = {}
-    for e in events:
-        if (e.get("node"), e.get("phase"), e.get("attempt")) != (node, phase, attempt) or e.get("tool"):
-            continue                              # a kernel tool's own model call (ask) is no conversation
-        if e.get("type") == "llm.request" and e.get("call_id"):
-            calls[e["call_id"]] = Call(e["call_id"], e.get("conversation_id") or e["call_id"],
-                                       e.get("turn_index") or 0, e.get("ts_wall", 0.0), e.get("payload"),
-                                       role=e.get("role"))
-        elif e.get("type") == "llm.response" and e.get("call_id") in calls:
-            c = calls[e["call_id"]]
-            c.response, c.status, c.usage = e.get("payload"), e.get("status"), e.get("usage") or {}
-            c.cost_usd, c.latency_s, c.done_ts = e.get("cost_usd"), e.get("latency_s"), e.get("ts_wall")
+def segments(calls: list[Call]) -> list[Segment]:
     grouped: dict[str, list[Call]] = {}
-    for c in sorted(calls.values(), key=lambda c: c.ts):
+    for c in sorted(calls, key=lambda c: c.ts):
         grouped.setdefault(c.conversation_id, []).append(c)
     return sorted((Segment(k, v) for k, v in grouped.items()), key=lambda s: s.first_ts)
 

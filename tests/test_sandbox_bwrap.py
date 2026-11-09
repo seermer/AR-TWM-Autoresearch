@@ -12,7 +12,6 @@ import pytest
 
 from ar_kernel.config import KernelConfig
 from ar_kernel.sandbox.runner import Mounts, container_name, run_container
-from ar_kernel.telemetry.recorder import Recorder
 
 pytestmark = pytest.mark.sandbox
 CFG = KernelConfig.load()
@@ -30,8 +29,7 @@ def mounts(tmp_path):
 
 def _run(tmp_path, mounts, script, *args, env=None, gpus=()):
     return run_container(name=container_name("t", "n1", "test", 1), mounts=mounts,
-                         command=["python", "-c", script, *args], env=env or {}, env_dir=ENV_DIR, shm_gb=2,
-                         recorder=Recorder(tmp_path / "run"), node="n1", phase="test", attempt=1, gpus=gpus)
+                         command=["python", "-c", script, *args], env=env or {}, env_dir=ENV_DIR, shm_gb=2, gpus=gpus)
 
 
 def test_isolation_holds_from_inside(tmp_path, mounts):
@@ -149,10 +147,8 @@ def test_requirements_installed_in_one_sandbox_are_importable_in_the_next(tmp_pa
     (mounts.agent / "agent").mkdir()
     (mounts.agent / "agent" / "requirements.txt").write_text(f"--no-index\n/workspace/{wheel}\n")
     mounts.agent_readonly = True
-    rec = Recorder(tmp_path / "run")
     installed = install_requirements(run_container, name="ar-t-n1-install-1", mounts=mounts,
-                                     path="/agent/agent/requirements.txt", cfg=CFG, recorder=rec, node="n1",
-                                     phase="test", attempt=1)
+                                     path="/agent/agent/requirements.txt", cfg=CFG)
     assert installed.exit_code == 0, installed.stdout + installed.stderr
     assert (tmp_path / "install.stdout").exists()
     res = _run(tmp_path, mounts, "import ar_req_pkg; print(ar_req_pkg.__file__)")
@@ -178,12 +174,10 @@ _CHILD = r"""
 import json, signal, sys
 from pathlib import Path
 from ar_kernel.sandbox.runner import Mounts, run_container
-from ar_kernel.telemetry.recorder import Recorder
 signal.signal(signal.SIGINT, lambda *a: None)       # what drive() does on the first Ctrl-C: carry on
 d = json.loads(sys.argv[1])
 res = run_container(name="ar-t-n1-test-1", mounts=Mounts(**d["mounts"]), command=["bash", "-c", d["command"]],
-                    env={}, env_dir=Path(d["env_dir"]), shm_gb=1, recorder=Recorder(Path(d["run"])),
-                    node="n1", phase="test", attempt=1)
+                    env={}, env_dir=Path(d["env_dir"]), shm_gb=1)
 print(json.dumps({"exit_code": res.exit_code, "stdout": res.stdout}))
 """
 
@@ -259,8 +253,7 @@ def test_cancel_ends_a_real_sandbox(tmp_path, mounts):
     threading.Timer(2.0, cancel.set).start()
     started = time.monotonic()
     res = run_container(name=container_name("t", "n1", "test", 1), mounts=mounts, command=["sleep", "600"], env={},
-                        env_dir=ENV_DIR, shm_gb=2, recorder=Recorder(tmp_path / "run"), node="n1", phase="test",
-                        attempt=1, cancel=cancel)
+                        env_dir=ENV_DIR, shm_gb=2, cancel=cancel)
     assert res.exit_code == -9 and time.monotonic() - started < 30
 
 
@@ -268,5 +261,4 @@ def test_a_missing_command_is_a_kernel_fault(tmp_path, mounts):
     from ar_kernel.faults import KernelFault
     with pytest.raises(KernelFault, match="bwrap: execvp"):
         run_container(name=container_name("t", "n1", "test", 1), mounts=mounts, command=["/no/such/command"],
-                      env={}, env_dir=ENV_DIR, shm_gb=2, recorder=Recorder(tmp_path / "run"), node="n1",
-                      phase="test", attempt=1)
+                      env={}, env_dir=ENV_DIR, shm_gb=2)

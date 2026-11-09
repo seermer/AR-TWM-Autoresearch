@@ -53,8 +53,21 @@ def test_scrub_removes_this_machines_folders_wherever_the_project_sits(tmp_path,
 
 
 
-def _reply(rec, message, **where):
-    rec.event("llm.response", conversation_id="c", payload={"body": {"choices": [{"message": message}]}}, **where)
+def _reply(run, message=None, body=None, tool=None, node="n2", phase="improve_recipe", attempt=1,
+           request=()):
+    """One call through the gateway's store, which audits each response as it ends."""
+    from ar_kernel.gateway.store import CallStore
+    from ar_kernel.tools.context import TokenRegistry
+    caller = TokenRegistry().issue(node=node, phase=phase, attempt=attempt, workspace_host=run, staging_host=run)
+    store = CallStore(run, audit_patterns=CFG.get("isolation.audit_patterns"))
+    meta = store.begin(caller, "/v1/chat/completions", {"model": "m", "messages": list(request)}, tool=tool)
+    store.end(meta, caller, status=200, body=body or {"choices": [{"message": message}]})
+
+
+def _audit(run, *args):
+    from ar_kernel.archive.db import open_db
+    from ar_kernel.isolation import audit
+    return audit(open_db(run), "n2", *args)
 
 
 def _tool_call(name, arguments):
@@ -63,29 +76,23 @@ def _tool_call(name, arguments):
 
 
 def test_the_audit_reads_everything_the_model_wrote_in_one_attempt(tmp_path):
-    from ar_kernel.isolation import audit
-    from ar_kernel.telemetry.recorder import Recorder
-    rec = Recorder(tmp_path)
-    here = dict(node="n2", phase="improve_recipe", attempt=1)
-    _reply(rec, _tool_call("run_command", json.dumps({"command": "ls /workspace"})), **here)
-    assert audit(CFG, rec, "n2", "improve_recipe", 1) == []
-    _reply(rec, _tool_call("run_command", json.dumps(
-        {"command": "curl -L https://huggingface.co/datasets/meituan-longcat/WBench/resolve/main/x.json"})), **here)
-    _reply(rec, {"role": "assistant", "content": "done", "reasoning": "arXiv 2605.25874 describes the cases"}, **here)
-    _reply(rec, {"role": "assistant", "content": "The eval is WBench."}, node="n2", phase="edit_self", attempt=1)
-    assert audit(CFG, rec, "n2", "improve_recipe", 1) == ["2605.25874", "meituan-longcat", "wbench"]
-    assert audit(CFG, rec, "n2", "edit_self", 1) == ["wbench"]
-    assert audit(CFG, rec, "n2") == ["2605.25874", "meituan-longcat", "wbench"]          # the whole node
-    assert audit(CFG, rec, "n2", "improve_recipe", 2) == []
+    _reply(tmp_path, _tool_call("run_command", json.dumps({"command": "ls /workspace"})))
+    assert _audit(tmp_path, "improve_recipe", 1) == []
+    _reply(tmp_path, _tool_call("run_command", json.dumps(
+        {"command": "curl -L https://huggingface.co/datasets/meituan-longcat/WBench/resolve/main/x.json"})))
+    _reply(tmp_path, {"role": "assistant", "content": "done", "reasoning": "arXiv 2605.25874 describes the cases"})
+    _reply(tmp_path, {"role": "assistant", "content": "The eval is WBench."}, phase="edit_self")
+    assert _audit(tmp_path, "improve_recipe", 1) == ["2605.25874", "meituan-longcat", "wbench"]
+    assert _audit(tmp_path, "edit_self", 1) == ["wbench"]
+    assert _audit(tmp_path) == ["2605.25874", "meituan-longcat", "wbench"]          # the whole node
+    assert _audit(tmp_path, "improve_recipe", 2) == []
 
 
-def test_tool_results_are_not_audited(tmp_path):
-    from ar_kernel.isolation import audit
-    from ar_kernel.telemetry.recorder import Recorder
-    rec = Recorder(tmp_path)
-    rec.event("llm.request", node="n2", phase="improve_recipe", attempt=1, conversation_id="c", payload={"body": {
-        "messages": [{"role": "tool", "content": "a paper abstract that compares models on WBench"}]}})
-    assert audit(CFG, rec, "n2", "improve_recipe", 1) == []
+def test_tool_results_and_ask_answers_are_not_audited(tmp_path):
+    _reply(tmp_path, {"role": "assistant", "content": "ok"},
+           request=[{"role": "tool", "content": "a paper abstract that compares models on WBench"}])
+    _reply(tmp_path, {"role": "assistant", "content": "the WBench logo"}, tool="ask")
+    assert _audit(tmp_path, "improve_recipe", 1) == []
 
 
 NAMES = ["wbench", "meituan-longcat", "2605.25874"]
@@ -133,16 +140,12 @@ def test_a_name_that_only_ends_like_a_blocked_one_is_left_alone():
 
 
 def test_the_audit_reads_any_response_shape_and_ignores_lookalike_names(tmp_path):
-    from ar_kernel.isolation import audit
-    from ar_kernel.telemetry.recorder import Recorder
-    rec = Recorder(tmp_path)
-    here = dict(node="n2", phase="improve_recipe", attempt=1)
-    rec.event("llm.response", conversation_id="c", payload={"body": {"output": [
-        {"type": "message", "content": [{"type": "output_text", "text": "DrawBench has prompts"}]}]}}, **here)
-    assert audit(CFG, rec, "n2", "improve_recipe", 1) == []
-    rec.event("llm.response", conversation_id="c", payload={"body": {"output": [
-        {"type": "function_call", "name": "run_command", "arguments": '{"command": "git clone x/WBench"}'}]}}, **here)
-    assert audit(CFG, rec, "n2", "improve_recipe", 1) == ["wbench"]
+    _reply(tmp_path, body={"output": [
+        {"type": "message", "content": [{"type": "output_text", "text": "DrawBench has prompts"}]}]})
+    assert _audit(tmp_path, "improve_recipe", 1) == []
+    _reply(tmp_path, body={"output": [
+        {"type": "function_call", "name": "run_command", "arguments": '{"command": "git clone x/WBench"}'}]})
+    assert _audit(tmp_path, "improve_recipe", 1) == ["wbench"]
 
 
 import asyncio
@@ -158,7 +161,6 @@ def _agent_visible_texts(tmp_path):
     """Everything an agent can read that the kernel or the seed ships: the seed agent, the contract
     package, the knowledge files, and every kernel tool's description and schema."""
     from ar_kernel.contract.verify import _MockData, _MockHf
-    from ar_kernel.telemetry.recorder import Recorder
     from ar_kernel.tools.ask import MockAsk, register_ask_tool
     from ar_kernel.tools.captioner import register_caption_tool
     from ar_kernel.tools.context import TokenRegistry
@@ -173,13 +175,12 @@ def _agent_visible_texts(tmp_path):
         for path in root.rglob("*"):
             if path.is_file() and path.suffix in (".py", ".md", ".txt"):
                 texts[str(path.relative_to(REPO))] = path.read_text(encoding="utf-8")
-    rec = Recorder(tmp_path)
-    reg = TokenRegistry(rec)
-    queue = JobQueue(rec, threading.Lock(), wait_cap_s=5.0)
+    reg = TokenRegistry()
+    queue = JobQueue(tmp_path, threading.Lock(), wait_cap_s=5.0)
     try:
-        for backend in build_gpu_backends(CFG, tmp_path, [0, 1, 2, 3], reg, rec):
+        for backend in build_gpu_backends(CFG, tmp_path, [0, 1, 2, 3], reg):
             queue.register(backend)
-        kit, mcp = ToolKit(reg, rec), new_mcp()
+        kit, mcp = ToolKit(reg, tmp_path), new_mcp()
         register_data_tools(mcp, kit, _MockData())
         register_hf_tools(mcp, kit, _MockHf())
         register_job_tools(mcp, kit, queue)

@@ -1,4 +1,4 @@
-"""Run monitoring: GPU and host samples, and alerts. Alerts never stop anything."""
+"""Run monitoring: GPU and host samples, checks and alerts. Alerts never stop anything."""
 from __future__ import annotations
 
 import json
@@ -10,7 +10,8 @@ from pathlib import Path
 
 import psutil
 
-from .guards import alert, smi
+from . import telemetry
+from .guards import smi
 from .subproc import host_memory_gib, memory_events
 
 
@@ -86,10 +87,12 @@ def _descends_from(pid: int, ancestor: int) -> bool:
 
 
 class Monitor:
-    def __init__(self, cfg, run_dir: Path, recorder, gpus: list[int], budget, *,
+    """`idle_s()`: seconds since the agent's last gateway call, tool call or job progress (LastActivity)."""
+
+    def __init__(self, cfg, run_dir: Path, gpus: list[int], budget, idle_s, *,
                  usage=gpu_usage_detailed, memory=host_memory_gib, events=memory_events, processes=process_memory,
                  clock=time.time) -> None:
-        self.cfg, self.run_dir, self.recorder, self.gpus, self.budget = cfg, Path(run_dir), recorder, list(gpus), budget
+        self.cfg, self.run_dir, self.gpus, self.budget, self.idle_s = cfg, Path(run_dir), list(gpus), budget, idle_s
         self.usage, self.memory, self.events, self.processes, self.clock = usage, memory, events, processes, clock
         self._oom_kills: int | None = None
         self._ram_high = False
@@ -99,58 +102,78 @@ class Monitor:
         self._last_check = 0.0
         self._errors: set[str] = set()
 
-    def _once(self, key, kind: str, message: str, **payload) -> None:
-        if key not in self._raised:
-            self._raised.add(key)
-            alert(self.recorder, kind, message, **payload)
+    def _once(self, key, name: str, level: str, message: str, details=None) -> bool:
+        """The alert, unless `key` already raised one; whether it did."""
+        if key in self._raised:
+            return False
+        self._raised.add(key)
+        telemetry.alert(name, level, message, details)
+        return True
 
     def tick(self) -> None:
         usage = self.usage()
-        if usage is not None:
-            self.recorder.event("gpu.sample", node="gpu",
-                                gpus={str(g): {k: v for k, v in u.items() if k != "pids"} for g, u in usage.items()})
         mem = {**self.memory(), "dev_shm": shutil.disk_usage("/dev/shm").used / 2**30}
-        self.recorder.event("host.sample", node="gpu", memory_gib={k: v if v is None else round(v, 2) for k, v in mem.items()},
-                            disk_free_gib=round(shutil.disk_usage(self.run_dir).free / 2**30, 1),
-                            memory_events=(events := self.events()), processes=self.processes())
+        events = self.events()
+        telemetry.sample(gpus=None if usage is None else {str(g): u for g, u in usage.items()},
+                         memory_gib={k: v if v is None else round(v, 2) for k, v in mem.items()},
+                         disk_free_gib=round(shutil.disk_usage(self.run_dir).free / 2**30, 1),
+                         memory_events=events, processes=self.processes())
         kills = events.get("oom_kill", 0)
         if self._oom_kills is not None and kills > self._oom_kills:
-            alert(self.recorder, "host_oom_kill", f"the kernel killed {kills - self._oom_kills} process(es) at the "
-                  f"job's memory limit", level="error", memory_gib=mem)
+            telemetry.alert("monitor.host_oom_kill", "error", f"the kernel killed {kills - self._oom_kills} "
+                            "process(es) at the job's memory limit", {"memory_gib": mem})
         self._oom_kills = kills
         held = mem["anon"] + mem["shmem"] if "anon" in mem else mem["used"]     # not reclaimable page cache
         ram = float(self.cfg.get("host.ram_gib"))
         high = held > float(self.cfg.get("host.alert_fraction")) * ram
         if high and not self._ram_high:
-            alert(self.recorder, "host_memory_high", f"the job holds {held:.0f} GiB of host RAM (anon + shmem), "
-                  f"host.ram_gib is {ram:g}", level="warning", memory_gib=mem)
+            telemetry.alert("monitor.host_memory_high", "warning", f"the job holds {held:.0f} GiB of host RAM "
+                            f"(anon + shmem), host.ram_gib is {ram:g}", {"memory_gib": mem})
         self._ram_high = high
+
+    def _stall(self, now: float) -> None:
+        state_file = self.run_dir / "control" / "state.json"
+        state = json.loads(state_file.read_text()) if state_file.exists() else {}
+        node, phase, attempt = state.get("node"), state.get("phase"), state.get("attempt")
+        if not node or phase in (None, "idle"):
+            return
+        # Progress is agent activity, a growing training log or new eval output: a normal multi-hour
+        # training makes no gateway or tool calls but does write its log.
+        node_dir = self.run_dir / "nodes" / node
+        train_log = node_dir / "attempts" / f"improve_recipe-{attempt}" / "train" / "train.log"
+        marks = {"phase_start": state.get("since", 0), "agent_activity": now - self.idle_s(),
+                 "train_log_or_eval": tree_mark(train_log, node_dir / "eval")[2] / 1e9}
+        idle_min = (now - max(marks.values())) / 60
+        limit = float(self.cfg.get("alerts.stall_min"))
+        key = ("stall", node, phase, attempt)
+        if idle_min <= limit:
+            chosen, reason = "active", f"progress {idle_min:.0f} min ago, within {limit:g} min"
+        elif self._once(key, "monitor.stall", "warning", f"no progress from {node} {phase} for {idle_min:.0f} min"):
+            chosen, reason = "alert", f"no progress for {idle_min:.0f} min, over {limit:g} min"
+        else:
+            chosen, reason = "already alerted", "this phase attempt already had its stall alert"
+        telemetry.decision("monitor.stall_check", {"node": node, "phase": phase, "attempt": attempt, "now": now,
+                                                   "marks": marks}, ["active", "alert", "already alerted"],
+                           chosen, reason)
 
     def check(self) -> None:
         now = self.clock()
-        state_file = self.run_dir / "control" / "state.json"
-        if state_file.exists():
-            state = json.loads(state_file.read_text())
-            node = state.get("node")
-            if node and state.get("phase") not in (None, "idle"):
-                events = self.recorder.events_path(node)
-                # Progress is new events, a growing training log or new eval output: a normal
-                # multi-hour training writes no events but does write its log.
-                node_dir = self.run_dir / "nodes" / node
-                train_log = node_dir / "attempts" / f"improve_recipe-{state.get('attempt')}" / "train" / "train.log"
-                last = max(state.get("since", 0), events.stat().st_mtime if events.exists() else 0,
-                           tree_mark(train_log, node_dir / "eval")[2] / 1e9)
-                if now - last > 60 * float(self.cfg.get("alerts.stall_min")):
-                    self._once(("stall", node, state.get("phase"), state.get("attempt")), "stall",
-                               f"no events from {node} {state.get('phase')} for "
-                               f"{(now - last) / 60:.0f} min", level="warning")
+        self._stall(now)
         free = shutil.disk_usage(self.run_dir).free / (1024 ** 3)
         if free < float(self.cfg.get("disk.alert_below_gb")):
-            self._once(("disk", int(now // 3600)), "disk_low", f"{free:.0f} GB free under {self.run_dir}")
-        rate, calls = self.budget.error_rate(60 * float(self.cfg.get("alerts.gateway_error_window_min")))
-        if calls >= 5 and rate > float(self.cfg.get("alerts.gateway_error_rate")):
-            self._once(("gateway", int(now // 300)), "gateway_errors",
-                       f"{rate:.0%} of the last {calls} LLM calls failed")
+            self._once(("disk", int(now // 3600)), "monitor.disk_low", "warning", f"{free:.0f} GB free under {self.run_dir}")
+        window_min = float(self.cfg.get("alerts.gateway_error_window_min"))
+        rate, calls = self.budget.error_rate(60 * window_min)
+        limit = float(self.cfg.get("alerts.gateway_error_rate"))
+        if calls < 5 or rate <= limit:
+            chosen, reason = "quiet", f"{rate:.0%} of {calls} calls failed: alerts need 5 calls over {limit:.0%}"
+        elif self._once(("gateway", int(now // 300)), "monitor.gateway_errors", "warning",
+                        f"{rate:.0%} of the last {calls} LLM calls failed"):
+            chosen, reason = "alert", f"{rate:.0%} of {calls} calls failed, over {limit:.0%}"
+        else:
+            chosen, reason = "already alerted", "this 5-minute window already had its alert"
+        telemetry.decision("monitor.error_rate_check", {"window_min": window_min, "rate": rate, "calls": calls},
+                           ["quiet", "alert", "already alerted"], chosen, reason)
         usage = self.usage() or {}
         me = os.getpid()
         for gpu, u in usage.items():
@@ -158,7 +181,7 @@ class Monitor:
                 continue
             ours = [p for p in u["pids"] if _descends_from(p, me)]
             if ours:
-                self._once(("outside", gpu, tuple(ours)), "gpu_outside_list",
+                self._once(("outside", gpu, tuple(ours)), "monitor.gpu_outside_list", "warning",
                            f"kernel process(es) {ours} run on GPU {gpu}, outside the list {self.gpus}")
 
     def _guarded(self, step) -> None:
@@ -167,7 +190,8 @@ class Monitor:
         except Exception as exc:                               # noqa: BLE001 -- never kill the run
             if repr(exc) not in self._errors:                  # the same failure every 5 s alerts once
                 self._errors.add(repr(exc))
-                alert(self.recorder, "monitor_failed", f"a monitor step failed: {exc!r}")
+                telemetry.error(exc, "an alert; the monitor goes on")
+                telemetry.alert("monitor.failed", "warning", f"a monitor step failed: {exc!r}")
 
     def poll(self) -> None:
         """One monitor step. A failing GPU sample never suppresses the checks (e.g. disk_low)."""
@@ -183,7 +207,7 @@ class Monitor:
             while not self._stop.wait(sample_s):
                 self.poll()
 
-        self._thread = threading.Thread(target=loop, daemon=True, name="ar-monitor")
+        self._thread = telemetry.thread(loop, "ar-monitor")
         self._thread.start()
 
     def stop(self) -> None:

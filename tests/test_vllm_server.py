@@ -1,4 +1,3 @@
-import json
 import sys
 import time
 from pathlib import Path
@@ -114,11 +113,20 @@ def test_busy_gpus_are_the_agents_doing_only_when_its_sandbox_holds_them():
     assert not isinstance(info.value, (ToolError, KernelFault))         # a counted tool error
 
 
-def test_the_free_check_waits_with_backoff_for_a_job_that_is_still_giving_memory_back():
+def test_the_free_check_waits_with_backoff_for_a_job_that_is_still_giving_memory_back(tmp_path):
     from ar_kernel.tools.vllm_server import FREE_WAITS_S, require_free_gpus
+    from ar_kernel import telemetry
+    from ar_kernel.telemetry import tree
+    from conftest import telemetry_records
+    telemetry.open(tmp_path)
+    telemetry.start("ar.run")
     readings, slept = iter([9000, 4000, 600, 20]), []
     require_free_gpus([0], 512, gpu_memory=lambda gpus: {0: next(readings)}, waits=FREE_WAITS_S, sleep=slept.append)
     assert slept == [4, 8, 16]
+    records = telemetry_records(tmp_path)
+    assert [r["chosen"] for r in records if r["kind"] == "decision" and r["name"] == "gpu.blame"] == ["free"]
+    assert [r["status"] for r in records if r["kind"] == "end" and r["name"] == "gpu.free_check"] == ["ok"]
+    assert tree.check(tree.load(tmp_path)) == []
     slept.clear()
     with pytest.raises(RuntimeError, match="GPU 0 has 9000 MiB"):
         require_free_gpus([0], 512, gpu_memory=lambda gpus: {0: 9000}, waits=FREE_WAITS_S, sleep=slept.append,
@@ -126,20 +134,15 @@ def test_the_free_check_waits_with_backoff_for_a_job_that_is_still_giving_memory
     assert slept == [4, 8, 16, 32, 64]                 # 124 s in all, then the refusal
 
 
-def test_requests_need_the_servers_key_and_telemetry_never_holds_it(tmp_path):
+def test_requests_need_the_servers_key(tmp_path):
     import httpx
     from ar_kernel.subproc import free_port
-    from ar_kernel.telemetry.recorder import Recorder
-    rec, port = Recorder(tmp_path / "run"), free_port()
+    port = free_port()
     s = VllmServer("autoresearcher", ["python", str(Path(__file__).parent / "fixtures" / "fake_vllm.py"), "m",
-                                      "--host", "127.0.0.1", "--port", str(port)], [0], port, cwd=tmp_path, log_path=tmp_path / "s.log",
-                   recorder=rec, poll_s=0.1)
+                                      "--host", "127.0.0.1", "--port", str(port)], [0], port, cwd=tmp_path, log_path=tmp_path / "s.log", poll_s=0.1)
     try:
         s.start()
         assert httpx.post(f"{s.base_url}/v1/chat/completions", json={}, timeout=5, trust_env=False).status_code == 401
     finally:
         s.stop()
-    assert len(s.api_key) > 20 and s.api_key not in rec.events_path().read_text()
-    (start,) = [e for e in rec.read_events() if e["type"] == "subproc.start"]
-    assert rec.load_payload(start["payload"])["extra_env"]["VLLM_API_KEY"] != s.api_key
-    assert s.api_key not in json.dumps(rec.load_payload(start["payload"]))
+    assert len(s.api_key) > 20

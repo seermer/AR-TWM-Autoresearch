@@ -71,7 +71,7 @@ def caption(client, file: Path, system: str, prompt: str, reasoning_effort: str)
                       {"role": "user", "content": [{"type": "video_url", "video_url": {"url": Path(file).as_uri()}},
                                                    {"type": "text", "text": prompt}]}])
     except openai.OpenAIError as exc:
-        return {"error": f"{type(exc).__name__}: {exc}"[:2000]}
+        return {"error": f"{type(exc).__name__}: {exc}"}
     message = done.choices[0].message
     reasoning = getattr(message, "reasoning", None) or getattr(message, "reasoning_content", None)
     text = (message.content or "").strip()
@@ -92,7 +92,7 @@ def main() -> int:
         try:
             got = caption(c, item["path"], job["system"], job["prompt"], job["reasoning_effort"])
         except Exception as exc:          # noqa: BLE001 -- this clip's error; the others go on
-            messages.send("item", index=index, ok=False, error=f"{type(exc).__name__}: {exc}"[:2000],
+            messages.send("item", index=index, ok=False, error=f"{type(exc).__name__}: {exc}",
                           traceback=traceback.format_exc(), started=started, ended=time.time(), log=log)
             return
         fields = ({"ok": True, "outputs": {}, "info": got} if "caption" in got else

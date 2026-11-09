@@ -132,7 +132,8 @@ def test_an_edit_entry_carries_code_and_process_and_no_score(world):
     entry = lineage(conn, run, repo, "n1", "edit_self")[-1]
     assert sorted(entry) == ["code_diff_stats", "edit", "error", "node_id", "process", "status"]
     assert entry["edit"] == {"snapshot_id": "a" * 40, "summary": "s"}
-    assert entry["process"] == {"attempts": [{"phase": "edit_self", "attempt": 1, "outcome": "contract_failed"}]}
+    assert entry["process"]["attempts"] == [{"phase": "edit_self", "attempt": 1, "outcome": "contract_failed"}]
+    assert entry["process"]["phases"] == [] and entry["process"]["tools"] == {}
     ctx = build_edit_context(conn=conn, run_dir=run, repo=repo, parent_id="n1")
     assert "0.78" not in ctx.model_dump_json() and "0.81" not in ctx.model_dump_json()   # no score in an edit context
     assert ctx.archive == {"nodes": [{"node_id": "root", "parent_id": None, "status": "scored"},

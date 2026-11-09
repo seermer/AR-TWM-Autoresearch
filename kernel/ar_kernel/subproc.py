@@ -1,10 +1,12 @@
 from __future__ import annotations
-import hashlib, os, pwd, signal, socket, subprocess, tempfile, threading, time
+import hashlib, os, pwd, re, signal, socket, subprocess, tempfile, threading, time
 from pathlib import Path
 
 import psutil
 
+from . import telemetry
 from .config import REPO_ROOT
+from .faults import KernelFault
 
 KILL_GRACE_SECONDS = 30
 KILL_FORCE_GRACE_SECONDS = 10
@@ -63,6 +65,13 @@ def project_env(name: str, root: Path | None = None) -> Path | None:
     return path if (path / "conda-meta").is_dir() else None
 
 
+def env_path(env: str) -> Path:
+    """`env`'s prefix, existing or not: a path when it contains "/" (repo-relative unless absolute), otherwise
+    `.envs/<name>`."""
+    path = Path(env) if "/" in env else Path(".envs") / env
+    return path if path.is_absolute() else REPO_ROOT / path
+
+
 def conda_command(env: str, args: list[str]) -> list[str]:
     """`conda run` argv for `env`: a conda-prefix path when it contains "/" (repo-relative unless
     absolute), otherwise the project env `.envs/<name>`."""
@@ -96,8 +105,7 @@ def proc_running(pid: int, started: str | None) -> bool:
 
 
 def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None = None,
-               recorder=None, node: str = "run",
-               phase: str = "-", log_path: Path | None = None,
+               log_path: Path | None = None,
                cancel: "threading.Event | None" = None,
                poll_s: float = 1.0) -> subprocess.CompletedProcess:
     """Run `args` inside conda env `env`, in its own session.
@@ -108,15 +116,9 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
     pipe: a child the leader leaves running would hold it open). The result's `.cancelled` tells a
     cancel apart from an exit code that happens to match. With `AR_PGID_DIR` set, the group
     is recorded there until the wait ends, so a resume can kill what a dead kernel left.
-    Every exit path records subproc.end, subproc.cancelled or subproc.error.
     """
     command = conda_command(env, args)
     process_env = {**os.environ, **cache_env(), **(extra_env or {})}
-    if recorder is not None:
-        recorder.event("subproc.start", node=node, phase=phase,
-                       payload={"env": env, "args": args, "cwd": str(cwd),
-                                "extra_env": extra_env or {},
-                                "log_path": str(log_path) if log_path else None})
     sinks = []
     try:
         if log_path is not None:
@@ -128,48 +130,191 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
             sinks = [tempfile.TemporaryFile(dir=tmp), tempfile.TemporaryFile(dir=tmp)]
         proc = subprocess.Popen(command, cwd=str(cwd), env=process_env, start_new_session=True,
                                 stdout=sinks[0], stderr=sinks[1] if len(sinks) > 1 else subprocess.STDOUT)
-    except OSError as exc:
+    except OSError:
         for sink in sinks:
             sink.close()
-        _error(recorder, node, phase, f"launch failed: {exc}", "", "", log_path)
         raise
-    registry = os.environ.get("AR_PGID_DIR")
-    marker = None
-    if registry:
-        marker = Path(registry) / str(proc.pid)          # start_new_session: pgid == pid
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(proc_start_time(proc.pid) or "")
-
-    cancelled = False
-    ended = False           # the wait or the kill sequence finished: the group is gone
-    try:
-        cancelled, _ = wait_leader(proc, cancel, poll_s)
-        kill_group(proc.pid)       # what the leader left running: its group outlives it
-        ended = True
-        outputs = []
-        for sink in sinks:
-            sink.seek(0)
-            outputs.append(sink.read().decode("utf-8", errors="replace"))
-    except BaseException:
-        if not ended:
-            _kill_group(proc)      # e.g. KeyboardInterrupt: never leave the job running
+    with telemetry.span("process", _inputs(command, process_env, cwd, proc, log_path)) as sp:
+        tail = Tail([(sink.fileno(), stream) for sink, stream in zip(sinks, ("stdout", "stderr"))])
+        registry = os.environ.get("AR_PGID_DIR")
+        marker = None
+        cancelled = False
+        ended = False           # the wait or the kill sequence finished: the group is gone
+        try:
+            if registry:
+                marker = Path(registry) / str(proc.pid)          # start_new_session: pgid == pid
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text(proc_start_time(proc.pid) or "")
+            cancelled, usage = wait_leader(proc, cancel, poll_s)
+            kill_group(proc.pid, "leftover")       # what the leader left running: its group outlives it
             ended = True
-        raise
-    finally:
-        for sink in sinks:
-            sink.close()
-        if marker is not None and ended:     # an interrupted kill keeps its record for resume
-            marker.unlink(missing_ok=True)
+            tail.stop()
+            outputs = []
+            for sink in sinks:
+                sink.seek(0)
+                text = sink.read().decode("utf-8", errors="replace")
+                outputs.append(text.replace("\r\n", "\n").replace("\r", "\n"))   # as text mode reads it
+        except BaseException:
+            if not ended:
+                _kill_group(proc)      # e.g. KeyboardInterrupt: never leave the job running
+                ended = True
+            raise
+        finally:
+            tail.stop()                # before the close: its fds must not be reused under it
+            for sink in sinks:
+                sink.close()
+            if marker is not None and ended:     # an interrupted kill keeps its record for resume
+                marker.unlink(missing_ok=True)
+        _ended(sp, proc.returncode, usage)
 
     stdout, stderr = outputs if len(outputs) == 2 else (outputs[0], "")
     result = subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
     result.cancelled = cancelled
-    if recorder is not None:
-        recorder.event("subproc.cancelled" if cancelled else "subproc.end", node=node, phase=phase,
-                       returncode=proc.returncode,
-                       payload={"stdout": result.stdout, "stderr": result.stderr,
-                                "log_path": str(log_path) if log_path else None})
     return result
+
+
+def run_sandbox(argv: list[str], env: dict, *, out_path: Path, err_path: Path, inputs: dict,
+                cancel: "threading.Event | None" = None, poll_s: float = 1.0, on_start=None) -> int:
+    """bwrap `argv` in its own session as a `sandbox` span (`inputs` and the pid); stdout and stderr go to the files
+    and their lines to log records. `cancel` or an exception SIGKILLs bwrap, whose --die-with-parent ends the rest.
+    Returns the exit code (negative: the signal). A launch that fails raises KernelFault before any span."""
+    sinks = []
+    try:
+        sinks = [open(out_path, "w+b"), open(err_path, "w+b")]
+        proc = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=sinks[0], stderr=sinks[1],
+                                start_new_session=True)     # a Ctrl-C to the kernel is not the agent's
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        for sink in sinks:
+            sink.close()
+        raise KernelFault(f"the sandbox could not start: {type(exc).__name__}: {exc}") from exc
+    try:
+        with telemetry.span("sandbox", {**inputs, "pid": proc.pid}) as sp:
+            tail = Tail([(sinks[0].fileno(), "stdout"), (sinks[1].fileno(), "stderr")])
+            try:
+                if on_start is not None:
+                    on_start(proc.pid)
+                _, usage = wait_leader(proc, cancel, poll_s, kill=lambda: kill(proc, "cancel"))
+            except BaseException:
+                if proc.poll() is None:
+                    kill(proc, "exception")
+                    proc.wait()
+                raise
+            finally:
+                tail.stop()
+            _ended(sp, proc.returncode, usage)
+    finally:
+        for sink in sinks:
+            sink.close()
+    return proc.returncode
+
+
+def _inputs(command: list[str], env: dict | None, cwd, proc: subprocess.Popen, log_path=None) -> dict:
+    w = telemetry.writer()
+    return {"command": command, "env": w.redact_env(env) if w and env is not None else env,
+            "cwd": str(cwd) if cwd is not None else os.getcwd(), "log_path": log_path, "pid": proc.pid,
+            "pgid": os.getpgid(proc.pid) if proc.returncode is None else None}
+
+
+def _ended(sp, returncode: int, usage=None, **output) -> None:
+    """A process span's end: the exit code or the signal, and its resource use."""
+    if returncode < 0:
+        sp.status, output["signal"] = "killed", signal.Signals(-returncode).name
+    else:
+        sp.status, output["exit_code"] = ("ok" if returncode == 0 else "error"), returncode
+    if usage is not None:
+        output["rusage"] = {k: getattr(usage, k) for k in dir(usage) if k.startswith("ru_")}
+    sp.output = output
+
+
+class Tail:
+    """Each new complete line of the files becomes a `log` record under the creator's current span; the
+    rest when stopped. `files`: (fd of a regular file, stream name)."""
+
+    def __init__(self, files: list[tuple[int, str]], poll_s: float = 0.5) -> None:
+        self._files = [[fd, stream, 0, b""] for fd, stream in files]
+        self._poll_s, self._done = poll_s, threading.Event()
+        self._thread = telemetry.thread(self._run, "ar-tail")
+        self._thread.start()
+
+    def _read(self, final: bool) -> None:
+        for f in self._files:
+            fd, stream, offset, partial = f
+            while chunk := os.pread(fd, 1 << 20, offset):
+                offset, partial = offset + len(chunk), partial + chunk
+            *lines, partial = re.split(rb"\r\n|\r(?=.)|\n", partial, flags=re.S)
+            if final and partial:
+                lines.append(partial.rstrip(b"\r"))
+                partial = b""
+            for line in lines:
+                telemetry.log(stream, line.decode("utf-8", errors="replace"))
+            f[2], f[3] = offset, partial
+
+    def _run(self) -> None:
+        while not self._done.wait(self._poll_s):
+            self._read(False)
+
+    def stop(self) -> None:
+        if not self._done.is_set():
+            self._done.set()
+            self._thread.join()
+            self._read(True)
+
+
+def run(argv: list[str], *, cwd=None, env: dict | None = None, input: str | bytes | None = None,
+        timeout: float | None = None, check: bool = False, text: bool = True) -> subprocess.CompletedProcess:
+    """`subprocess.run(argv, capture_output=True, ...)` as a `process` span: the captured output goes on its
+    end. A launch that fails raises before any span."""
+    proc = subprocess.Popen(argv, cwd=cwd, env=env, text=text, stdin=subprocess.PIPE if input is not None else None,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    with telemetry.span("process", _inputs(argv, env, cwd, proc)) as sp:
+        try:
+            stdout, stderr = proc.communicate(input, timeout)
+        except subprocess.TimeoutExpired:
+            kill(proc, "timeout")
+            stdout, stderr = proc.communicate()
+            _ended(sp, proc.returncode, stdout=_shown(stdout), stderr=_shown(stderr))
+            sp.status = "timeout"
+            raise subprocess.TimeoutExpired(argv, timeout, stdout, stderr) from None
+        except BaseException:
+            kill(proc, "exception")
+            proc.wait()
+            raise
+        _ended(sp, proc.returncode, stdout=_shown(stdout), stderr=_shown(stderr))
+    result = subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
+    if check:
+        result.check_returncode()
+    return result
+
+
+def _shown(output: str | bytes):
+    """Captured output as recorded: bytes that are not UTF-8 text (a tar archive) by their size."""
+    if isinstance(output, bytes):
+        try:
+            return output.decode()
+        except UnicodeDecodeError:
+            return {"bytes": len(output)}
+    return output
+
+
+def kill(proc: subprocess.Popen, why: str) -> None:
+    """SIGKILL one process (not its group), as a `process.kill` span."""
+    with telemetry.span("process.kill", {"pid": proc.pid, "why": why}) as sp:
+        gone = proc.poll() is not None
+        if not gone:
+            proc.kill()
+        sp.output = {"signals": [] if gone else ["SIGKILL"], "already_gone": gone}
+
+
+def terminate(pid: int, why: str) -> bool:
+    """SIGTERM one process that is not our child, as a `process.kill` span. False if it was already gone."""
+    with telemetry.span("process.kill", {"pid": pid, "why": why}) as sp:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            sp.output = {"signals": [], "already_gone": True}
+            return False
+        sp.output = {"signals": ["SIGTERM"], "already_gone": False}
+        return True
 
 
 def wait_leader(proc: subprocess.Popen, cancel: "threading.Event | None" = None, poll_s: float = 1.0,
@@ -194,7 +339,7 @@ def wait_leader(proc: subprocess.Popen, cancel: "threading.Event | None" = None,
             reap()
         if not usage:
             if kill is None:
-                kill_group(proc.pid, reap=reap)     # an unreaped leader would keep the group "alive"
+                kill_group(proc.pid, "cancel", reap=reap)     # an unreaped leader would keep the group "alive"
             else:
                 kill()
             cancelled = True
@@ -202,36 +347,33 @@ def wait_leader(proc: subprocess.Popen, cancel: "threading.Event | None" = None,
     return cancelled, usage[0]
 
 
-def kill_group(pgid: int, reap=None) -> bool:
-    """SIGTERM process group `pgid`, then SIGKILL whatever is left. False if it was already gone.
-    `reap` runs while waiting: a direct child's zombie would otherwise keep the group "alive"."""
-    for sig, wait in ((signal.SIGTERM, KILL_GRACE_SECONDS), (signal.SIGKILL, KILL_FORCE_GRACE_SECONDS)):
-        try:
-            os.killpg(pgid, sig)
-        except (ProcessLookupError, PermissionError):
-            return sig != signal.SIGTERM
-        deadline = time.monotonic() + wait
-        while time.monotonic() < deadline:
-            if reap is not None:
-                reap()
+def kill_group(pgid: int, why: str, reap=None) -> bool:
+    """SIGTERM process group `pgid`, then SIGKILL whatever is left, as a `process.kill` span. False if it was
+    already gone. `reap` runs while waiting: a direct child's zombie would otherwise keep the group "alive"."""
+    with telemetry.span("process.kill", {"pgid": pgid, "why": why}) as sp:
+        sent = []
+        sp.output = {"signals": sent, "already_gone": False}
+        for sig, wait in ((signal.SIGTERM, KILL_GRACE_SECONDS), (signal.SIGKILL, KILL_FORCE_GRACE_SECONDS)):
             try:
-                os.killpg(pgid, 0)
+                os.killpg(pgid, sig)
             except (ProcessLookupError, PermissionError):
-                return True
-            time.sleep(0.2)
-    return True
+                sp.output["already_gone"] = not sent
+                return bool(sent)
+            sent.append(sig.name)
+            deadline = time.monotonic() + wait
+            while time.monotonic() < deadline:
+                if reap is not None:
+                    reap()
+                try:
+                    os.killpg(pgid, 0)
+                except (ProcessLookupError, PermissionError):
+                    return True
+                time.sleep(0.2)
+        return True
 
 
 def _kill_group(proc: subprocess.Popen) -> None:
-    kill_group(proc.pid, reap=proc.poll)       # start_new_session: pgid == pid, also once the leader is reaped
-
-
-def _error(recorder, node, phase, message, stdout, stderr, log_path) -> None:
-    if recorder is not None:
-        recorder.event("subproc.error", node=node, phase=phase,
-                       payload={"message": message, "stdout": stdout[-20000:],
-                                "stderr": stderr[-20000:],
-                                "log_path": str(log_path) if log_path else None})
+    kill_group(proc.pid, "exception", reap=proc.poll)    # start_new_session: pgid == pid, also once reaped
 
 
 def output_tail(proc, limit: int = 4000) -> str:
@@ -249,7 +391,8 @@ def file_tail(path: Path, limit: int) -> str:
     """The last `limit` characters of a text file; "" when it cannot be read."""
     try:
         return Path(path).read_text(encoding="utf-8", errors="replace")[-limit:]
-    except OSError:
+    except OSError as exc:
+        telemetry.error(exc, "an empty tail")
         return ""
 
 

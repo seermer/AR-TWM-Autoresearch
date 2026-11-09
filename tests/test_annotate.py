@@ -11,7 +11,6 @@ import pytest
 
 from ar_kernel.config import KernelConfig
 from ar_kernel.guards import choose_gpus
-from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools import annotate
 from ar_kernel.tools.annotate import AnnotateBackend
 from ar_kernel.tools.context import TokenRegistry
@@ -37,14 +36,13 @@ def env(tmp_path, monkeypatch):
     """The real AnnotateBackend, with the ViGeo bridge swapped for the fake bridge (it honors config.max_frames
     and echoes the repo and checkpoint paths)."""
     monkeypatch.setattr(annotate, "BRIDGE", FAKE)
-    rec = Recorder(tmp_path / "run")
-    reg = TokenRegistry(rec)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
+    reg = TokenRegistry()
+    q = JobQueue(tmp_path / "run", threading.Lock(), wait_cap_s=120)
     ws, staging = tmp_path / "ws", tmp_path / "staging"
     ws.mkdir(); staging.mkdir()
     make_mp4(ws / "a.mp4", seconds=2, fps=24)           # 48 frames
     make_mp4(ws / "long.mp4", seconds=3, fps=24)        # 72 frames > max_frames 60
-    q.register(AnnotateBackend(small_cfg(env="autoresearcher"), tmp_path / "run", [0, 1, 4, 5], reg, rec,
+    q.register(AnnotateBackend(small_cfg(env="autoresearcher"), tmp_path / "run", [0, 1, 4, 5], reg,
                                gpu_memory=lambda g: {i: 100 for i in g}))
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
     yield q, caller, staging
@@ -115,9 +113,8 @@ def test_non_mp4_is_refused_at_submit(env):
 
 
 def test_build_gpu_backends_includes_annotate_only_when_enabled(tmp_path):
-    rec = Recorder(tmp_path / "run")
     names = lambda cfg: [b.name for b in build_gpu_backends(cfg, tmp_path / "run", [0, 1, 2, 3],
-                                                             TokenRegistry(rec), rec)]
+                                                             TokenRegistry())]
     for enabled in (True, False):
         raw = copy.deepcopy(REAL.raw)
         raw["annotate"]["enabled"] = enabled
@@ -167,10 +164,9 @@ def test_real_vigeo_matches_the_example_poses(tmp_path):
     ws.mkdir(parents=True); staging.mkdir(parents=True)
     for c in clips:
         shutil.copy(examples / "videos" / f"{c}.mp4", ws / f"{c}.mp4")
-    rec = Recorder(run_dir)
-    reg = TokenRegistry(rec)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=600)
-    q.register(AnnotateBackend(REAL, run_dir, gpus, reg, rec))
+    reg = TokenRegistry()
+    q = JobQueue(run_dir, threading.Lock(), wait_cap_s=600)
+    q.register(AnnotateBackend(REAL, run_dir, gpus, reg))
     caller = reg.issue(node="gpu", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
     try:
         job = q.backends["annotate_camera"].submit(q, caller, {"items": [{"video": f"{c}.mp4"} for c in clips]})

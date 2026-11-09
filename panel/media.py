@@ -59,22 +59,37 @@ def clip_detail(run: Run, clip_id: str, leakage: dict | None = None) -> dict | N
             "leakage": leakage.get(clip_id)}
 
 
-def leakage_index(run: Run) -> dict[str, dict]:
-    """Clip id -> its leakage verdict, paired with its accept by the candidate's staged video."""
-    out: dict[str, dict] = {}
-    for name in sorted({e["_file"] for e in run.log.events()} - {"run"}):
-        by_video: dict[str, dict] = {}
-        for e in run.log.events(files=[name]):
-            kind = e.get("type")
-            if kind not in ("ingest.leakage", "ingest.accepted"):
+def _ingest_calls(run: Run) -> list[dict]:
+    """Each data_ingest call: its place, time, the rows of the result file it handed back (in the file store),
+    and per staged video (as the agent named it) its candidate span's inputs and leakage evidence."""
+    out = []
+    records, load = run.records, run.records.payload
+    for n in records.named("tool.data_ingest"):
+        rows, candidates = [], {}
+        for c in n.children:
+            if not hasattr(c, "start"):
                 continue
-            p = run.log.payload(e.get("payload")) or {}
-            video = (p.get("candidate") or {}).get("video")
-            if kind == "ingest.leakage":
-                by_video[video] = p
-            elif p.get("clip_id") and video in by_video:
-                found = by_video[video]
-                out[p["clip_id"]] = {"matches": found.get("matches"), "near": found.get("near")}
+            inputs = load(c.start.get("inputs")) or {}
+            if c.start["name"] == "file.kept" and inputs.get("how") == "handed" and c.end \
+                    and "/data_ingest-" in inputs.get("path", ""):
+                rows = records.kept((load(c.end.get("output")) or {}).get("sha256")) or []
+            elif c.start["name"] == "ingest.candidate":
+                leak = next(((load(d.get("inputs")) or {}).get("leakage") for d in c.children if isinstance(d, dict)
+                             and d["kind"] == "decision" and d["name"] == "ingest.check"
+                             and (load(d.get("inputs")) or {}).get("check") == "held-out cases"), None)
+                candidates[(inputs.get("named") or {}).get("video")] = {**inputs, "leakage": leak}
+        out.append({"where": records.where(n.id), "ts": n.start["ts"], "rows": rows, "candidates": candidates})
+    return out
+
+
+def leakage_index(run: Run) -> dict[str, dict]:
+    """Clip id -> the leakage evidence of the candidate it was ingested from."""
+    out = {}
+    for call in _ingest_calls(run):
+        for r in call["rows"]:
+            leak = (call["candidates"].get(r.get("video")) or {}).get("leakage")
+            if r.get("clip_id") and leak is not None:
+                out[r["clip_id"]] = {"matches": leak.get("matches"), "near": leak.get("near_matches")}
     return out
 
 
@@ -84,19 +99,22 @@ def origin(derived_from) -> str:
 
 
 def ingest_calls(run: Run, node_id: str) -> list[dict]:
-    """One row per candidate of every data_ingest call: the kernel records them as `ingest.result`."""
+    """One row per candidate of every data_ingest call of the node."""
     rows = []
-    for e in run.log.events(files=[node_id]):
-        if e.get("type") != "ingest.result":
+    for call in _ingest_calls(run):
+        node, phase, attempt = call["where"]
+        if node != node_id:
             continue
-        for r in (run.log.payload(e.get("payload")) or {}).get("rows") or []:
+        for r in call["rows"]:
             video = r.get("video") or ""
-            rows.append({"time": fmt_ts(e["ts_wall"]), "phase": e.get("phase"), "attempt": e.get("attempt"),
-                         "video": video, "annotation": r.get("annotation"), "pose": r.get("pose"),
-                         "derived_from": origin(r.get("derived_from")),
+            cand = call["candidates"].get(video) or {}
+            named = cand.get("named") or {}
+            rows.append({"time": fmt_ts(call["ts"]), "phase": phase, "attempt": attempt,
+                         "video": video, "annotation": named.get("annotation"), "pose": named.get("pose"),
+                         "derived_from": origin(cand.get("derived_from")),
                          "outcome": "accepted" if r.get("accepted") else "rejected", "clip_id": r.get("clip_id"),
                          "reasons": "; ".join(r.get("reasons") or []),
-                         "host_video": run.files.host_path(node_id, e.get("phase"), e.get("attempt"), video)})
+                         "host_video": run.files.host_path(node_id, phase, attempt, video)})
     return rows
 
 

@@ -60,10 +60,10 @@ export default function Cost() {
               <Section title="By role" note="role = the agent's own label; ask calls excluded"><Table rows={c.by_role} cols={["role", "conversations", "calls", "tokens", "usd"].map((key) => ({ key }))} /></Section>
             </div>
             <Section title={`Non-200 responses (${c.errors.length})`} collapsed={!c.errors.length}><Table rows={c.errors} cols={["time", "node", "phase", "status"].map((key) => ({ key }))} /></Section>
-            <Section title={`Every model call (${c.calls.length})`} note="click one for its event">
+            <Section title={`Every model call (${c.calls.length})`} note="click one for its record">
               <Table rows={c.calls} rowKey={(r: any) => String(r.seq)} onRowClick={(r: any) => setSeq(r.seq)} sort={["ts", "desc"]} maxHeight={600} cols={[
                 { key: "ts", label: "time", width: "150px", render: (r: any) => fmtTs(r.ts) }, { key: "node", width: "90px" }, { key: "phase", width: "110px" },
-                { key: "attempt", width: "60px" }, { key: "role", width: "minmax(110px, 1fr)" }, { key: "turn_index", label: "turn", width: "60px" }, { key: "model", width: "minmax(100px, 1fr)" },
+                { key: "attempt", width: "60px" }, { key: "role", width: "minmax(110px, 1fr)" }, { key: "turn_index", label: "turn", width: "60px" },
                 { key: "prompt_tokens", label: "in", width: "90px" }, { key: "completion_tokens", label: "out", width: "80px" }, { key: "usd", width: "80px" },
                 { key: "latency_s", label: "s", width: "70px" }, { key: "status", width: "60px" }]} />
             </Section>

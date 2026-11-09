@@ -8,7 +8,6 @@ from ar_contract.models import EditContext, RecipeContext
 from ar_kernel.config import KernelConfig
 from ar_kernel.contract.verify import ContractHarness, verify_contract
 from ar_kernel.sandbox.runner import RunResult
-from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.vcs.agents_repo import AgentsRepo
 
 CFG = KernelConfig.load()
@@ -23,7 +22,7 @@ def test_each_container_token_is_revoked_and_its_jobs_cancelled(tmp_path, monkey
     The sandbox is faked."""
     run = tmp_path / "run"
     repo = AgentsRepo(tmp_path / "agents.git")
-    h = ContractHarness(CFG, run, Recorder(run), repo)
+    h = ContractHarness(CFG, run, repo)
     cancelled, tokens = [], []
     monkeypatch.setattr(h.queue, "cancel_for_token", lambda t: cancelled.append(t) or 0)
 
@@ -37,7 +36,7 @@ def test_each_container_token_is_revoked_and_its_jobs_cancelled(tmp_path, monkey
 
     try:
         report = verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo,
-                                 commit=repo.init(FIXTURES / "good"), harness=h, recorder=Recorder(run),
+                                 commit=repo.init(FIXTURES / "good"), harness=h,
                                  node="n1", attempt=1, contexts=SMOKE, runner=runner)
     finally:
         h.queue.shutdown()
@@ -52,9 +51,13 @@ def test_non_utf8_entry_py_fails_static_instead_of_raising(tmp_path, monkeypatch
     """entry.read_text() defaults to UTF-8; a non-UTF-8 agent/entry.py is an agent
     fault and must fail the `static` step, not raise out of
     verify_contract. The runner is never even called."""
+    from ar_kernel import telemetry
+    from conftest import telemetry_records
     run = tmp_path / "run"
+    telemetry.open(run)
+    telemetry.start("ar.run")
     repo = AgentsRepo(tmp_path / "agents.git")
-    h = ContractHarness(CFG, run, Recorder(run), repo)
+    h = ContractHarness(CFG, run, repo)
     agent_src = tmp_path / "agent_src" / "agent"
     agent_src.mkdir(parents=True)
     (agent_src / "__init__.py").write_text("")
@@ -65,12 +68,15 @@ def test_non_utf8_entry_py_fails_static_instead_of_raising(tmp_path, monkeypatch
 
     try:
         report = verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo,
-                                 commit=repo.init(agent_src.parent), harness=h, recorder=Recorder(run),
+                                 commit=repo.init(agent_src.parent), harness=h,
                                  node="n1", attempt=1, contexts=SMOKE, runner=runner)
     finally:
         h.queue.shutdown()
     failed = next(s for s in report.steps if not s.ok)
     assert not report.ok and failed.name == "static" and "utf-8" in failed.detail.lower()
+    steps = [(r["chosen"], r["reason"][:20]) for r in telemetry_records(run)
+             if r["kind"] == "decision" and r["name"] == "contract.step"]
+    assert [c for c, _ in steps] == ["pass", "fail"] and steps[1][1].startswith("cannot read agent/")
 
 
 @pytest.mark.parametrize("write_result_json,fragment", [
@@ -86,7 +92,7 @@ def test_malformed_result_json_fails_the_smoke_step_instead_of_raising(
     smoke:<kind> step, not raise out of verify_contract. The runner is faked."""
     run = tmp_path / "run"
     repo = AgentsRepo(tmp_path / "agents.git")
-    h = ContractHarness(CFG, run, Recorder(run), repo)
+    h = ContractHarness(CFG, run, repo)
 
     def runner(*, mounts, command, **kw):
         if command[-1] == "edit_self":
@@ -97,7 +103,7 @@ def test_malformed_result_json_fails_the_smoke_step_instead_of_raising(
 
     try:
         report = verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo,
-                                 commit=repo.init(FIXTURES / "good"), harness=h, recorder=Recorder(run),
+                                 commit=repo.init(FIXTURES / "good"), harness=h,
                                  node="n1", attempt=1, contexts=SMOKE, runner=runner)
     finally:
         h.queue.shutdown()
@@ -110,7 +116,7 @@ def _verify_tree(tmp_path, monkeypatch, mutate, runner=None):
     import shutil
     run = tmp_path / "run"
     repo = AgentsRepo(tmp_path / "agents.git")
-    h = ContractHarness(CFG, run, Recorder(run), repo)
+    h = ContractHarness(CFG, run, repo)
     src = tmp_path / "src"
     shutil.copytree(FIXTURES / "good", src)
     mutate(src / "agent")
@@ -119,8 +125,7 @@ def _verify_tree(tmp_path, monkeypatch, mutate, runner=None):
         pytest.fail("the runner must not be invoked")
 
     try:
-        return verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo, commit=repo.init(src), harness=h,
-                               recorder=Recorder(run), node="n1", attempt=1, contexts=SMOKE, runner=runner or no_runner)
+        return verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo, commit=repo.init(src), harness=h, node="n1", attempt=1, contexts=SMOKE, runner=runner or no_runner)
     finally:
         h.queue.shutdown()
 
@@ -161,64 +166,12 @@ def test_smoke_result_json_symlink_or_fifo_is_not_followed(tmp_path, monkeypatch
     assert not report.ok and failed.name == "smoke:edit_self" and "no result.json" in failed.detail
 
 
-def test_container_token_printed_by_agent_is_redacted_from_telemetry(tmp_path, monkeypatch):
-    """verify_contract's own telemetry (the sandbox run and the final
-    contract.report) goes through the `recorder` argument, which in real usage
-    (and in `test_each_container_token_is_revoked_and_its_jobs_cancelled` above)
-    is a *different* Recorder instance from `harness.recorder` -- the one
-    TokenRegistry.issue() already redacts on. If verify_contract only relied on
-    that, a token an agent printed to stdout/stderr would leak into whatever
-    `recorder` records. The runner is faked, standing in for what a
-    real run_container would record via `recorder.event("sandbox.end", ...)`."""
-    run = tmp_path / "run"
-    repo = AgentsRepo(tmp_path / "agents.git")
-    h = ContractHarness(CFG, run, Recorder(run), repo)
-    recorder = Recorder(run)
-    seen_tokens: list[str] = []
-
-    def runner(*, mounts, command, env, recorder, node, phase, attempt, **kw):
-        token = env["AR_TOKEN"]
-        seen_tokens.append(token)
-        if command[-1] == "edit_self":
-            stderr = f"agent stderr leaked its own token: {token}"
-            recorder.event("sandbox.end", node=node, phase=phase, attempt=attempt,
-                           component="sandbox", payload={"stdout": "", "stderr": stderr})
-            return RunResult(1, "", stderr, 0.1, "c")
-        (mounts.workspace / "result.json").write_text(json.dumps({"ok": True, "result": {}}))
-        return RunResult(0, "", "", 0.1, "c")
-
-    try:
-        report = verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo,
-                                 commit=repo.init(FIXTURES / "good"), harness=h, recorder=recorder,
-                                 node="n1", attempt=1, contexts=SMOKE, runner=runner)
-    finally:
-        h.queue.shutdown()
-
-    failed = next(s for s in report.steps if not s.ok)
-    assert not report.ok and failed.name == "smoke:edit_self"
-    assert seen_tokens and all(len(t) > 10 for t in seen_tokens)
-
-    events = recorder.read_events("n1")
-    assert events, "expected telemetry events to have been recorded for node n1"
-    saw_redacted = False
-    for event in events:
-        assert all(token not in json.dumps(event) for token in seen_tokens), \
-            f"a container token leaked into an unscrubbed event: {event}"
-        if event.get("payload"):
-            body = recorder.load_payload(event["payload"])
-            dumped = json.dumps(body)
-            assert all(token not in dumped for token in seen_tokens), \
-                f"a container token leaked into a recorded payload: {body}"
-            saw_redacted = saw_redacted or "[REDACTED]" in dumped
-    assert saw_redacted, "expected the scrubbed placeholder to appear where the token was"
-
-
 @pytest.fixture(scope="module")
 def harness(tmp_path_factory):
     run = tmp_path_factory.mktemp("run")
     repo = AgentsRepo(run / "agents.git")
     repo.init(FIXTURES / "good")
-    h = ContractHarness(CFG, run, Recorder(run), repo)
+    h = ContractHarness(CFG, run, repo)
     h.start()
     yield h, run, repo
     h.stop()
@@ -227,8 +180,7 @@ def harness(tmp_path_factory):
 def _verify(harness, tmp_path, fixture):
     h, run, repo = harness
     commit = repo.commit_tree(FIXTURES / fixture, None, fixture)
-    return verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo, commit=commit, harness=h,
-                           recorder=Recorder(run), node="n1", attempt=1, contexts=SMOKE)
+    return verify_contract(cfg=CFG, run_dir=run, run_id="t", repo=repo, commit=commit, harness=h, node="n1", attempt=1, contexts=SMOKE)
 
 
 def _failed_step(report):

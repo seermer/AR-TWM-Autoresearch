@@ -3,15 +3,13 @@ from ar_kernel.archive.db import open_db
 from ar_kernel.config import KernelConfig
 from ar_kernel.data.annotation import THIRD_PERSON_VIEW, caption_file
 from ar_kernel.data.ingest import Candidate, Ingestor
-from ar_kernel.telemetry.recorder import Recorder
-from conftest import DERIVED, NAMED, make_mp4, recorded, staged_clip, write_poses
-from ar_kernel.telemetry import files
+from conftest import DERIVED, NAMED, make_mp4, staged_clip, write_poses
 
 CFG = KernelConfig.load()
 FP, TP = "first_person", "third_person"
 
 def _ingestor(tmp_path):
-    return Ingestor(CFG, tmp_path, open_db(tmp_path), Recorder(tmp_path))
+    return Ingestor(CFG, tmp_path, open_db(tmp_path))
 
 def _candidate(tmp_path, name="c1", seconds=4.0, fps=30, width=960, height=544, turns=None):
     video, annotation, pose = staged_clip(tmp_path / "staging" / name, seconds, fps, width, height, turns)
@@ -130,7 +128,7 @@ def test_swapping_the_staged_file_mid_check_cannot_change_what_is_stored(tmp_pat
 
 def test_corrupt_video_is_rejected_and_the_batch_continues(tmp_path):
     """A non-video file raised out of ffprobe and aborted the batch,
-    with no ingest.rejected event and later candidates never processed."""
+    with no rejection recorded and later candidates never processed."""
     ing = _ingestor(tmp_path)
     bad = _candidate(tmp_path, "bad")
     bad.video.write_bytes(b"this is not an mp4")
@@ -139,8 +137,8 @@ def test_corrupt_video_is_rejected_and_the_batch_continues(tmp_path):
     assert not results[0].accepted
     assert any("could not read" in r for r in results[0].reasons)
     assert results[1].accepted
-    events = [e for e in ing.recorder.read_events("n1") if e["type"] == "ingest.rejected"]
-    assert events, "a rejected candidate must leave an ingest.rejected event"
+    from ar_kernel.archive.activity import activity
+    assert [r["ok"] for r in activity(open_db(tmp_path), "n1")] == [0, 1]
 
 
 def test_a_checker_crash_rejects_only_its_candidate(tmp_path, monkeypatch):
@@ -335,31 +333,13 @@ def test_turns_of_exactly_the_shortest_lengths_are_accepted(tmp_path):
     assert result.accepted, result.reasons
 
 
-def test_every_ingest_event_names_its_candidate(tmp_path):
-    ing = _ingestor(tmp_path)
-    good, wide = _candidate(tmp_path, "good"), _candidate(tmp_path, "wide", width=640, height=480)
-    bare = _candidate(tmp_path, "bare")
-    bare.derived_from = {}
-    ing.ingest([good, wide, bare], node_id="n1", attempt=1)
-    events = [e for e in ing.recorder.read_events("n1") if e["type"].startswith("ingest.")]
-    named = [(e["type"], ing.recorder.load_payload(e["payload"])["candidate"]["video"]) for e in events]
-    assert ("ingest.leakage", str(good.video)) in named and ("ingest.accepted", str(good.video)) in named
-    assert ("ingest.rejected", str(wide.video)) in named and ("ingest.rejected", str(bare.video)) in named
-    assert len(named) == 4
-    [accepted] = [ing.recorder.load_payload(e["payload"])["candidate"] for e in events if e["type"] == "ingest.accepted"]
-    assert accepted == {"video": str(good.video), "annotation": str(good.annotation), "pose": str(good.pose)}
-
-
-def test_a_reingest_records_where_a_hidden_clip_moved_from(tmp_path):
+def test_a_reingest_takes_a_hidden_clip_but_not_a_visible_one(tmp_path):
     ing = _ingestor(tmp_path)
     cand = _candidate(tmp_path)
     [first] = ing.ingest([cand], node_id="n1", attempt=1)
     ing.clips.hide("n1", "fail1")
     ing.ingest([cand], node_id="n2", attempt=1)
     ing.ingest([cand], node_id="n3", attempt=1)                                   # visible now: n2 keeps it
-    for node, moved_from in (("n2", "n1fail1"), ("n3", None)):
-        [event] = [e for e in ing.recorder.read_events(node) if e["type"] == "ingest.accepted"]
-        assert ing.recorder.load_payload(event["payload"])["moved_from"] == moved_from
     assert ing.clips.get(first.clip_id)["ingested_by"] == "n2"
 
 
@@ -426,11 +406,6 @@ from ar_kernel.isolation import EXCLUDED_CLIP
 COPIED = "Torch sconces on both walls cast flickering orange light."     # from an evaluation prompt
 
 
-def _rejected_events(tmp_path):
-    rec = Recorder(tmp_path)
-    return [rec.load_payload(e["payload"]) for e in rec.read_events("n1") if e["type"] == "ingest.rejected"]
-
-
 @pytest.mark.parametrize("annotation", [
     {"scene_prompt": f"A corridor. {COPIED}", "turns": [{"start_s": 0, "perspective": FP}]},
     {"scene_prompt": "A corridor.", "character_prompt": COPIED, "turns": [{"start_s": 0, "perspective": FP}]},
@@ -442,7 +417,6 @@ def test_excluded_candidates_get_one_neutral_reason(tmp_path, annotation):
     c.annotation.write_text(json.dumps(annotation))
     [result] = ing.ingest([c], node_id="n1", attempt=1)
     assert result.accepted is False and result.reasons == [EXCLUDED_CLIP]
-    assert _rejected_events(tmp_path)[-1]["excluded"] == "text"
 
 
 def test_reasons_and_warnings_name_the_candidates_files_not_the_kernels_paths(tmp_path):
@@ -459,11 +433,38 @@ def test_reasons_and_warnings_name_the_candidates_files_not_the_kernels_paths(tm
     assert rejected.reasons[0].startswith("the pose file: 100 poses for 120 video frames")
 
 
-def test_the_bytes_ingest_checks_are_recorded(tmp_path):
+def test_each_candidate_is_an_activity_row_with_its_reasons_shaped(tmp_path):
+    from ar_kernel.archive.activity import activity
     ing = _ingestor(tmp_path)
-    cand = _candidate(tmp_path)
-    with files.scope(ing.recorder, node="n1", tool="data_ingest"):
-        [result] = ing.ingest([cand], node_id="n1", attempt=1)
-    assert result.accepted, result.reasons
-    staged = {"video": cand.video, "annotation": cand.annotation, "pose": cand.pose}
-    assert recorded(ing.recorder) == {("in", NAMED[k]): p.read_bytes() for k, p in staged.items()}   # as the agent named them
+    accepted, rejected = ing.ingest([_candidate(tmp_path), _candidate(tmp_path, "c2", width=1280, height=720)],
+                                    node_id="n1", attempt=1)
+    rows = activity(open_db(tmp_path), "n1")
+    assert [(r["attempt"], r["kind"], r["name"], r["ok"]) for r in rows] == [(1, "ingest", None, 0),
+                                                                              (1, "ingest", accepted.clip_id, 1)]
+    assert rows[0]["detail"].splitlines() == [" ".join(r.split()) for r in rejected.reasons]
+
+
+def test_each_candidate_is_a_span_of_check_decisions_and_its_files_are_kept(tmp_path):
+    from ar_kernel import telemetry
+    from ar_kernel.telemetry import tree
+    from conftest import telemetry_payload, telemetry_records
+    telemetry.open(tmp_path)
+    telemetry.start("ar.run")
+    ing = _ingestor(tmp_path)
+    good, small = _candidate(tmp_path, "a"), _candidate(tmp_path, "b", width=640, height=360)
+    with telemetry.span("tool.data_ingest") as sp:
+        accepted, rejected = ing.ingest([good, small], node_id="n1", attempt=1)
+        sp.output = {}
+    assert accepted.accepted and not rejected.accepted
+    records = telemetry_records(tmp_path)
+    candidates = [r for r in records if r["kind"] == "start" and r["name"] == "ingest.candidate"]
+    assert [c["parent"] for c in candidates] == [sp.id, sp.id]
+    checks = {c["span"]: [(d["chosen"], telemetry_payload(tmp_path, d["inputs"])["check"])
+                          for d in records if d["kind"] == "decision" and d["span"] == c["span"]] for c in candidates}
+    assert ("reject", "size") in [v for vs in checks.values() for v in vs]
+    assert all(chosen == "pass" for vs in checks.values() if ("reject", "size") not in vs for chosen, _ in vs)
+    kept = [r for r in records if r["kind"] == "start" and r["name"] == "file.kept"]
+    assert len(kept) == 6 and {telemetry_payload(tmp_path, r["inputs"])["how"] for r in kept} == {"read"}
+    video = ing.clips.get(accepted.clip_id)["video_digest"]
+    assert (tmp_path / "telemetry" / "files" / video).stat().st_nlink == 2     # a link to the stored blob
+    assert tree.check(tree.load(tmp_path)) == []

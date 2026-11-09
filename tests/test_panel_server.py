@@ -4,7 +4,8 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from fixtures.panel_run import make_run
+from ar_kernel import telemetry
+from fixtures.panel_run import Scripted, make_run
 from panel import server, timeline, views
 
 
@@ -41,6 +42,7 @@ def test_every_endpoint_answers_and_the_run_stays_untouched(client, run_dir):
         d = ok(f"/api/node/{node}")
         ok(f"/api/timeline?node={node}"), ok(f"/api/code/{node}"), ok(f"/api/data/{node}"), ok(f"/api/training/{node}")
         ok(f"/api/eval/{node}"), ok(f"/api/eval/{node}/7?other=root")
+        assert d["training_attempts"] == ([1] if node == "n1" else [])
         for a in d["agent_attempts"]:
             agents = ok(f"/api/agents/{node}/{a['phase']}/{a['attempt']}")
             for c in agents["conversations"]:
@@ -49,6 +51,8 @@ def test_every_endpoint_answers_and_the_run_stays_untouched(client, run_dir):
                 ok(f"/api/task/{node}/{a['phase']}/{a['attempt']}/{t['index']}")
             for log in agents["tool_logs"]:
                 ok(f"/api/preview?path={log}"), ok(f"/api/tail?path={log}&offset=-10")
+    tool = next(n for n in views.Run(run_dir).records.spans() if n.start["name"] == "tool.data_ingest")
+    assert ok(f"/api/events?span={tool.id}")["total"] > 2
     ok("/api/clips/n1/ds1"), ok("/api/clip/clip1")
     commit = ok("/api/code/n1")["agent_commit"]
     for path in ok(f"/api/agent/tree?commit={commit}"):
@@ -74,6 +78,9 @@ def test_node_agents_code_and_cost_carry_the_new_fields(client):
     outputs = [i for i in chat if i["kind"] in ("tool_output", "tool_error")]
     assert calls and {c["ref"] for c in calls} >= {o["ref"] for o in outputs}
     assert client.get("/api/cost").json()["calls"][0]["prompt_tokens"] is not None
+    status = client.get("/api/status").json()
+    assert (status["calls"], status["tokens"], status["usd"]) == (1, 110, 0.001)        # the archive's llm_calls row
+    assert status["events"] == status["last_seq"] + 1
 
 
 def test_errors_are_json_and_paths_stay_in_the_run(client):
@@ -94,8 +101,9 @@ def test_events_page_past_any_size_and_problem_ids_are_stable(client, run_dir):
     assert len(first["rows"]) + len(rest["rows"]) == total and rest["offset"] == 3
     ids = [p["id"] for p in client.get("/api/problems").json()]
     assert ids and len(set(ids)) == len(ids)
-    from ar_kernel.telemetry.recorder import Recorder
-    Recorder(run_dir).event("tool.error", node="n1", phase="improve_recipe", attempt=1, tool="t", payload={"error": "x"})
+    rec = Scripted(run_dir)
+    telemetry.alert("monitor.disk_low", "warning", "3 GB free")
+    rec.close()
     again = [p["id"] for p in client.get("/api/problems").json()]
     assert len(again) == len(ids) + 1 and set(ids) <= set(again)
 
@@ -149,30 +157,33 @@ def test_host_paths_are_found_only_where_a_container_path_starts():
 # ---- role graph ----
 
 def _req(*messages):
-    return {"body": {"messages": list(messages)}}
+    return {"messages": list(messages)}
 
 
 def _res(content="", tools=()):
     message = {"role": "assistant", "content": content}
     if tools:
         message["tool_calls"] = [{"id": f"t-{t}", "type": "function", "function": {"name": t, "arguments": "{}"}} for t in tools]
-    return {"body": {"choices": [{"message": message}]}}
+    return {"choices": [{"message": message}], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
 
 
-def _fake(run, calls):
-    """calls: (conversation, role, sent, answered, request, response)."""
-    events, payloads, seq = [], {}, 0
-    for k, (conv, role, sent, answered, request, response) in enumerate(calls):
-        payloads[f"q{k}"], payloads[f"r{k}"] = request, response
-        base = {"node": "n", "phase": "p", "attempt": 1, "call_id": f"c{k}", "conversation_id": conv, "role": role}
-        events.append({**base, "type": "llm.request", "ts_wall": sent, "payload": f"q{k}", "turn_index": 0})
-        events.append({**base, "type": "llm.response", "ts_wall": answered, "payload": f"r{k}", "status": 200,
-                       "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}})
-    events.sort(key=lambda e: e["ts_wall"])
-    for e in events:
-        e["_seq"], seq = seq, seq + 1
-    run.log.events = lambda **kw: events
-    run.log.payload = payloads.get
+def _fake(run_dir, calls) -> views.Run:
+    """calls: (conversation, role, sent, answered, request, response), in phase attempt n p 1 of a new writer."""
+    rec = Scripted(run_dir, t=0.0)
+    try:
+        attempt = telemetry.start("phase.attempt", {"node": "n", "phase": "p", "attempt": 1})
+        spans = {}
+        for t, answered, k in sorted([(c[2], False, k) for k, c in enumerate(calls)]
+                                     + [(c[3], True, k) for k, c in enumerate(calls)]):
+            conv, role, _, _, request, response = calls[k]
+            rec.at(t)
+            if answered:
+                rec.llm_end(spans[k], response)
+            else:
+                spans[k] = rec.llm_start(attempt, conv, 0, request, role=role)
+    finally:
+        rec.close()
+    return views.Run(run_dir)
 
 
 def _msgs(*pairs):
@@ -185,11 +196,10 @@ def _tool_turn(name, content=""):
 
 
 def test_each_task_is_a_node_and_follows_the_task_that_ended_last(run_dir):
-    run = views.Run(run_dir)
     s, go = ("system", "s"), ("user", "plan")
     first = _req(*_msgs(s, go))
     resumed = _req(*_msgs(s, go), _tool_turn("worker"), {"role": "tool", "tool_call_id": "t-worker", "content": "built"})
-    _fake(run, [
+    run = _fake(run_dir, [
         ("a", "planner", 0.0, 1.0, first, _res(tools=["worker"])),
         ("b", "worker", 2.0, 3.0, _req(*_msgs(s, ("user", "do it"))), _res(tools=["run_command"])),
         ("b", "worker", 4.0, 5.0, _req(*_msgs(s, ("user", "do it"))), _res("worker done")),
@@ -216,9 +226,8 @@ def test_each_task_is_a_node_and_follows_the_task_that_ended_last(run_dir):
 
 
 def test_tasks_running_in_parallel_are_listed_not_taken_as_callers(run_dir):
-    run = views.Run(run_dir)
     sys_, user = {"role": "system", "content": "s"}, {"role": "user", "content": "go"}
-    _fake(run, [
+    run = _fake(run_dir, [
         ("a", "planner", 0.0, 1.0, _req(sys_, user), _res(tools=["x", "y"])),
         ("b", "x", 2.0, 10.0, _req(sys_, user), _res(tools=["run"])),
         ("c", "y", 3.0, 4.0, _req(sys_, user), _res("y done")),
@@ -233,8 +242,8 @@ def test_tasks_running_in_parallel_are_listed_not_taken_as_callers(run_dir):
 
 def test_compaction_stitches_only_within_one_role():
     from panel.chat import Call, Segment, chains
-    payloads = {"a_req": _req({"role": "user", "content": "task"}), "a_res": _res("the summary"),
-                "b_req": _req({"role": "user", "content": "Summary: the summary"}), "b_res": _res("ok")}
+    payloads = {"a_req": {"body": _req({"role": "user", "content": "task"})}, "a_res": {"body": _res("the summary")},
+                "b_req": {"body": _req({"role": "user", "content": "Summary: the summary"})}, "b_res": {"body": _res("ok")}}
     seg = lambda cid, ts, req, res, role: Segment(cid, [Call(cid + "1", cid, 0, ts, req, res, role=role)])
     same = chains([seg("A", 1.0, "a_req", "a_res", "x"), seg("B", 2.0, "b_req", "b_res", "x")], payloads.get)
     other = chains([seg("A", 1.0, "a_req", "a_res", "x"), seg("B", 2.0, "b_req", "b_res", "y")], payloads.get)
@@ -244,34 +253,35 @@ def test_compaction_stitches_only_within_one_role():
 
 # ---- timeline ----
 
-def test_timeline_pairs_spans_and_marks_what_is_inferred(run_dir):
-    run = views.Run(run_dir)
-    base = {"node": "n", "phase": "x", "attempt": 1}
-    events = [
-        {**base, "type": "run.start", "ts_wall": 0.0, "span_id": "rs"},
-        {**base, "type": "phase.start", "ts_wall": 0.0, "span_id": "p0"},
-        {**base, "type": "subproc.start", "ts_wall": 1.0, "span_id": "s1", "payload": "a"},
-        {**base, "type": "subproc.start", "ts_wall": 2.0, "span_id": "s2", "payload": "b"},
-        {**base, "type": "subproc.end", "ts_wall": 3.0, "span_id": "s3", "returncode": 0, "payload": "e"},
-        {**base, "type": "subproc.end", "ts_wall": 4.0, "span_id": "s4", "returncode": 1, "payload": "e"},
-        {**base, "type": "train.start", "ts_wall": 5.0, "span_id": "t"},
-        {**base, "type": "train.end", "ts_wall": 9.0, "span_id": "t", "duration_s": 4.0},
-        {**base, "type": "render.start", "ts_wall": 9.5, "span_id": "r"},
-        {**base, "type": "alert", "ts_wall": 9.6, "span_id": "al", "level": "warning", "message": "stall"},
-        {**base, "type": "phase.end", "ts_wall": 10.0, "span_id": "p1", "ok": True},
-    ]
-    for i, e in enumerate(events):
-        e["_seq"] = i
-    payloads = {"a": {"args": ["python", "-m", "scripts.a"], "env": "e1"}, "b": {"args": ["python", "b.py"], "env": "e2"}, "e": {}}
-    run.log.events = lambda **kw: events
-    run.log.payload = payloads.get
-    got = timeline.timeline(run, "n")
+def test_timeline_has_a_lane_per_kind_of_span_and_marks(run_dir):
+    rec = Scripted(run_dir, t=0.0)
+    try:
+        with telemetry.span("phase.attempt", {"node": "n", "phase": "x", "attempt": 1}) as attempt:
+            rec.at(1)
+            a = telemetry.start("process", {"command": ["python", "-m", "scripts.a"]})
+            rec.at(2)
+            b = telemetry.start("process", {"command": ["python", "b.py"]})
+            rec.at(3)
+            a.end("ok", {"returncode": 0})
+            rec.at(4)
+            b.end("error", {"returncode": 1})
+            rec.at(5)
+            with telemetry.span("train") as train:
+                rec.at(9)
+                train.output = {}
+            rec.at(9.5)
+            telemetry.start("eval.render")                     # never ends
+            rec.at(9.6)
+            telemetry.alert("monitor.stall", "warning", "stall")
+            rec.at(10)
+            attempt.output = {}
+    finally:
+        rec.close()
+    got = timeline.timeline(views.Run(run_dir), "n")
     by_lane = {}
     for s in got["spans"]:
         by_lane.setdefault(s["lane"], []).append(s)
     assert [(s["label"], s["status"]) for s in by_lane["phase"]] == [("x-1", "ok")]
-    subs = by_lane["subprocess"]
-    assert [s["label"] for s in subs] == ["scripts.a (e1)", "b.py (e2)"] and subs[0]["inferred"] and not subs[1]["inferred"]
-    assert [s["status"] for s in subs] == ["ok", "error"]
+    assert [(s["label"], s["status"]) for s in by_lane["subprocess"]] == [("scripts.a", "ok"), ("b.py", "error")]
     assert by_lane["train"][0]["end"] == 9.0 and by_lane["render"][0]["status"] == "no end recorded"
-    assert "run" not in by_lane and [m["type"] for m in got["marks"]] == ["run.start", "alert"]
+    assert [(m["type"], m["level"]) for m in got["marks"]] == [("alert monitor.stall", "warning")]

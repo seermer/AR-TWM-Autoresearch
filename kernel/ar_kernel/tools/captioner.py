@@ -7,7 +7,6 @@ pass through the agent or the paid agent model.
 from __future__ import annotations
 
 import os
-import shutil
 import threading
 from pathlib import Path
 from typing import Annotated, Any
@@ -16,8 +15,8 @@ from mcp.server.mcpserver import Context
 from pydantic import Field
 
 from .context import WORKSPACE, PathError, open_file, to_host
+from .. import fs, telemetry
 from ..faults import disk_fault
-from ..telemetry import files
 from ..subproc import free_port
 from .jobs import job_dir
 from .server import FROM_FILE, ToolError, listed, refuse
@@ -63,18 +62,19 @@ def stage_clip(caller, path: str, dst: Path) -> None:
         info = os.fstat(fd)
         real = os.readlink(f"/proc/self/fd/{fd}")
         try:
-            os.link(real, dst, follow_symlinks=False)
-        except OSError:                                # e.g. another filesystem: copy the open file
-            with open(os.dup(fd), "rb") as fin, open(dst, "wb") as fout:
-                shutil.copyfileobj(fin, fout)
+            fs.link(real, dst, follow_symlinks=False)
+        except OSError as exc:                         # e.g. another filesystem: copy the open file
+            telemetry.error(exc, "a copy instead")
+            with open(os.dup(fd), "rb") as fin:
+                fs.write_bytes(dst, fin.read())
         else:
             linked = os.stat(dst, follow_symlinks=False)
             if (linked.st_dev, linked.st_ino) != (info.st_dev, info.st_ino):
-                dst.unlink()
+                fs.remove(dst)
                 raise PathError(f"{path} changed while it was being staged")
-        os.lseek(fd, 0, os.SEEK_SET)                   # a copy's dup moved the shared offset
         with open(os.dup(fd), "rb") as fin:
-            files.record(fin, direction="in", path=container_path(path))
+            fin.seek(0)
+            telemetry.keep(path, fin, "read")
     finally:
         os.close(fd)
 
@@ -84,9 +84,9 @@ class CaptionBackend:
     Result: {"clips": {path: {"caption"} | {"error"}}, "load_s", "gpu_memory_mib", "gpu_memory_released"}."""
     name = tool = TOOL
 
-    def __init__(self, cfg, run_dir: Path, gpus: list[int], registry, recorder, gpu_memory=gpu_memory_mib) -> None:
+    def __init__(self, cfg, run_dir: Path, gpus: list[int], registry, gpu_memory=gpu_memory_mib) -> None:
         self.cfg, self.run_dir, self.gpus = cfg, Path(run_dir), list(gpus)
-        self.registry, self.recorder, self.gpu_memory = registry, recorder, gpu_memory
+        self.registry, self.gpu_memory = registry, gpu_memory
         self.block = cfg.get("captioner") or {}
         self.max_items = self.block.get("max_items")
 
@@ -100,7 +100,7 @@ class CaptionBackend:
             raise RuntimeError("the phase that submitted this job has ended")
         work = job_dir(self.run_dir, job)
         media = work / "media"                    # the only directory the server may read
-        media.mkdir(parents=True)
+        fs.mkdir(media)
         clips: dict[str, Path] = {}
         results: dict[str, dict] = {}
         for i, path in enumerate(job.args["paths"]):
@@ -109,6 +109,7 @@ class CaptionBackend:
                 stage_clip(caller, path, dst)
                 clips[path] = dst
             except (PathError, OSError) as exc:
+                telemetry.error(exc, "the item's input error")
                 results[path] = {"error": input_error(exc)}
 
         if not clips:
@@ -127,13 +128,13 @@ class CaptionBackend:
                 "concurrent_requests", "clip_timeout_s", "reasoning_effort")}}}
 
         def row(m: dict) -> dict:           # the agent gets the caption; the reasoning stays in the messages
-            return {"caption": m["info"]["caption"]} if m["ok"] else {"error": m["error"]}
+            return {"caption": m["info"]["caption"]} if m["ok"] else {"error": m["error"][:2000]}   # whole in telemetry
 
         try:
             ran = run_bridge(self, job, work, spec, [{"index": i, "path": str(clips[p])} for i, p in enumerate(paths)],
                              cancel, report, row, done=len(results), poll=sample)
         finally:
-            shutil.rmtree(media, ignore_errors=True)
+            fs.rmtree(media, ignore_errors="the job's own links")
         for i, r in ran["rows"].items():
             results[paths[i]] = {"error": r["error"]} if "index" in r else r
         results = {p: results[p] for p in job.args["paths"] if p in results}     # the submitted order
@@ -158,6 +159,7 @@ def submit(q, caller, paths, prompt: str) -> dict:
         try:
             clip_host_path(caller, str(path))
         except PathError as exc:
+            telemetry.error(exc, "a bad item")
             bad[n] = str(exc)
     refuse(caller, TOOL, paths, bad)
     return {"job_id": q.submit(caller, TOOL, {"paths": [container_path(str(p)) for p in paths], "prompt": prompt})}

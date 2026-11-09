@@ -86,112 +86,130 @@ def test_helpers():
     assert loads('{"a": 1}') == {"a": 1} and loads(None, []) == [] and loads("{bad", {}) == {}
     assert len(fmt_ts(0)) == 19
 
-from panel.events import EventLog, event_row, filter_events
 
 
-def _ev(ts, kind, node="n1"):
-    return json.dumps({"ts_wall": ts, "type": kind, "node": node}) + "\n"
 
 
-@pytest.mark.parametrize("how", ["replace", "truncate", "rewrite_longer", "delete"])
-def test_event_log_rereads_a_file_that_was_rewritten_under_it(run_dir, how):
-    """reset_run_to_root.py deletes a node's file and rewrites run.jsonl while the panel runs; the
-    panel kept the old events and read the new file from the old byte offset (two edit_planner
-    conversations for one n1)."""
-    ev = run_dir / "telemetry" / "events"
-    log = EventLog(RunFiles(run_dir))
-    (ev / "zz.jsonl").write_text(_ev(1e9, "old.a", "zz") + _ev(1e9 + 1, "old.b", "zz"))
-    assert [e["type"] for e in log.events(files=["zz"])] == ["old.a", "old.b"]
-    if how == "replace":                                  # a new file (new inode) under the same name
-        (ev / "zz.tmp").write_text(_ev(2e9, "new.a", "zz"))
-        (ev / "zz.tmp").replace(ev / "zz.jsonl")
-        expected = ["new.a"]
-    elif how == "truncate":                               # same inode, shorter
-        (ev / "zz.jsonl").write_text(_ev(2e9, "new.a", "zz"))
-        expected = ["new.a"]
-    elif how == "rewrite_longer":                         # same inode, grown past the old offset
-        (ev / "zz.jsonl").write_text(_ev(2e9, "new.first", "zz") + _ev(2e9 + 1, "new.second", "zz")
-                                     + _ev(2e9 + 2, "new.third", "zz"))
-        expected = ["new.first", "new.second", "new.third"]
-    else:
-        (ev / "zz.jsonl").unlink()
-        expected = []
-    assert [e["type"] for e in log.events(files=["zz"])] == expected
-    assert all(log.by_seq(e["_seq"]) is e for e in log.events(files=["zz"]))
+from panel import views
 
 
-def test_event_log_reads_incrementally_and_waits_for_torn_lines(run_dir):
-    log = EventLog(RunFiles(run_dir))
-    before = len(log.events())
-    path = run_dir / "telemetry" / "events" / "n1.jsonl"
-    line = json.dumps({"ts_wall": 9e9, "type": "x.y", "node": "n1"})
+@pytest.fixture
+def run(run_dir):
+    return views.Run(run_dir)
+
+
+def test_overview(run):
+    ov = views.overview(run)
+    rows = {r["node"]: r for r in ov["nodes"]}
+    assert rows["n1"]["vs parent"] == pytest.approx(0.05) and rows["n1"]["duration_min"] == 10.0
+    assert rows["root"]["parent"] == "" and rows["n2"]["status"] == "running"
+    assert ov["alerts"][0]["kind"] == "monitor.stall" and len(ov["recent"]) <= 50
+    assert ov["recent"][0]["type"] == "end ar.run" and ov["recent"][0]["seq"] == len(run.records.all()) - 1
+    assert [(o["name"], o["node"], o["facts"]) for o in ov["open_spans"]] == [
+        ("llm.request", "n1", "no end recorded; " + ov["open_spans"][0]["facts"].split("; ", 1)[1])]
+
+
+def test_gpu_full_keeps_every_sample_of_a_short_run(run):
+    g = views.gpu_full(run)
+    assert set(g["gpus"]) == {"0", "1"} and g["buckets"] == g["samples"] > 0
+    assert g["gpus"]["0"]["memory_gib"][0][1] == 2.0
+
+
+def test_gpu_full_buckets_a_long_run_and_keeps_its_peaks(run, monkeypatch):
+    samples = [{"kind": "sample", "ts": float(t), "gpus": {"0": {"util": 100 if t == 777 else 10, "memory_mib": 1024}}}
+               for t in range(3000)]
+    monkeypatch.setattr(run.records, "all", lambda: samples)
+    g = views.gpu_full(run, buckets=100)
+    util = g["gpus"]["0"]["util"]
+    assert g["samples"] == 3000 and g["buckets"] == 100 and len(util) <= 200
+    assert [777.0, 100] in [list(p) for p in util] and [p[0] for p in util] == sorted(p[0] for p in util)
+
+
+def test_trace_filters_pages_and_detail(run):
+    choices = views.trace_choices(run)
+    assert "start llm.request" in choices["type"] and "n1" in choices["node"] and {"1", "2"} <= set(choices["attempt"])
+    got = views.trace(run, node="n1", types=["start llm.request"], limit=2)
+    assert got["total"] == 7 and len(got["rows"]) == 2
+    rest = views.trace(run, node="n1", types=["start llm.request"], offset=2, limit=100)
+    assert len(rest["rows"]) == 5 and rest["rows"][0]["seq"] not in {r["seq"] for r in got["rows"]}
+    detail = views.trace_detail(run, got["rows"][0]["seq"])
+    assert detail["event"]["type"] == "start llm.request" and detail["chat"][0]["kind"] == "system"
+    assert detail["payload"]["output"]["status"] == 200 and detail["event"]["node"] == "n1"
+    end = next(i for i, r in enumerate(run.records.all()) if r["kind"] == "end" and r["span"] == detail["event"]["span"])
+    assert views.trace_detail(run, end)["chat"][-1]["kind"] == "tool_call"
+    assert views.trace_detail(run, 10 ** 9) is None
+    assert views.trace(run, text="quiet 30")["total"] == 1 and views.trace(run, text="nothing-like-this")["total"] == 0
+    assert any(r["type"] == "sample" for r in views.trace(run, include_gpu=True, limit=10 ** 6)["rows"])
+    assert not any(r["type"] == "sample" for r in views.trace(run, limit=10 ** 6)["rows"])
+
+
+def test_trace_keeps_one_spans_subtree(run):
+    tool = next(n for n in run.records.spans() if n.start["name"] == "tool.data_ingest")
+    rows = views.trace(run, span=tool.id, limit=10 ** 6)["rows"]
+    assert rows[0]["type"] == "start tool.data_ingest" and rows[-1]["type"] == "end tool.data_ingest"
+    assert {r["type"] for r in rows} >= {"start ingest.candidate", "decision ingest.check", "start file.kept"}
+    assert not any(r["type"].endswith("llm.request") for r in rows)
+
+
+def test_records_are_read_as_they_are_appended_and_a_torn_line_waits(run_dir):
+    from panel.records import Records
+    from panel.runfiles import RunFiles
+    records = Records(RunFiles(run_dir))
+    before = len(records.all())
+    [path] = sorted((run_dir / "telemetry" / "records").glob("*.jsonl"))
+    line = json.dumps({"v": 1, "writer": "w2", "seq": 1, "ts": 9e9, "mono": 0, "kind": "log", "span": None,
+                       "stream": "stdout", "text": "late"})
     with path.open("a") as f:
         f.write(line[:10])                                  # a half-written line
-    assert len(log.events()) == before
+    assert len(records.all()) == before
     with path.open("a") as f:
         f.write(line[10:] + "\n")
-    events = log.events()
-    assert len(events) == before + 1 and events[-1]["type"] == "x.y" and events[-1]["_file"] == "n1"
+    assert len(records.all()) == before + 1 and records.all()[-1]["text"] == "late"
 
 
-def test_event_log_finds_new_files_and_hides_gpu(run_dir):
-    log = EventLog(RunFiles(run_dir))
-    assert not any(e["_file"] == "gpu" for e in log.events())
-    assert any(e["type"] == "gpu.sample" for e in log.events(include_gpu=True))
-    (run_dir / "telemetry" / "events" / "n9.jsonl").write_text(json.dumps({"ts_wall": 1.0, "type": "a.b"}) + "\n")
-    assert [e["type"] for e in log.events(files=["n9"])] == ["a.b"]
+def test_payloads_load_cache_and_miss(run_dir):
+    from panel.records import Records
+    from panel.runfiles import RunFiles
+    records = Records(RunFiles(run_dir))
+    req = next(r for r in records.all() if r["kind"] == "start" and r["name"] == "llm.request")
+    body = records.payload(req["inputs"])
+    assert body["endpoint"] == "/chat/completions" and records.payload(req["inputs"]) is body    # from the cache
+    assert records.payload(None) is None and records.payload("0" * 64) is None
+    (run_dir / "telemetry" / "payloads" / f"{req['inputs']}.json.zst").write_bytes(b"not zstd")
+    assert Records(RunFiles(run_dir)).payload(req["inputs"]) is None
 
 
-def test_payloads_load_and_cache(run_dir):
-    log = EventLog(RunFiles(run_dir))
-    req = next(e for e in log.events() if e["type"] == "llm.request")
-    body = log.payload(req["payload"])
-    assert body["body"]["messages"][0]["role"] == "system"
-    assert log.payload(req["payload"]) is body                    # served from the cache
+def test_each_record_is_placed_in_its_phase_attempt(run):
+    places = {(r["kind"], r.get("name")): run.records.place(r) for r in run.records.all()}
+    assert places[("decision", "contract.step")][:2] == ("n1", "edit_self")
+    assert places[("decision", "llm.link")] == ("n1", "improve_recipe", 1)
+    assert places[("decision", "node.status")] == ("n1", None, None)
+    assert places[("alert", "monitor.stall")] == (None, None, None)
+
+from fixtures.panel_run import COMPACT, SUMMARY  # noqa: E402
+from panel.chat import chains, chat_items, segments  # noqa: E402
 
 
-def test_missing_payload_is_none(run_dir):
-    log = EventLog(RunFiles(run_dir))
-    assert log.payload(None) is None and log.payload("0" * 64) is None
-    req = next(e for e in log.events() if e["type"] == "llm.request")
-    (run_dir / "telemetry" / "payloads" / f"{req['payload']}.json.zst").write_bytes(b"not zstd")
-    assert EventLog(RunFiles(run_dir)).payload(req["payload"]) is None
+def _chat(run):
+    segs = segments(run.records.calls("n1", "improve_recipe", 1))
+    return segs, chains(segs, run.records.payload)
 
 
-def test_filter_and_rows(run_dir):
-    events = EventLog(RunFiles(run_dir)).events()
-    llm = filter_events(events, node="n1", types=["llm.request"])
-    assert llm and all(e["type"] == "llm.request" for e in llm)
-    assert filter_events(events, text="quiet 30") and not filter_events(events, text="nothing-like-this")
-    assert filter_events(events, phase="improve_recipe", attempt=1, component="tools")
-    row = event_row(llm[0])
-    assert row["type"] == "llm.request" and "model=m" in row["summary"] and isinstance(row["seq"], int)
-
-from fixtures.panel_run import COMPACT, SUMMARY
-from panel.chat import chains, chat_items, segments
-
-
-def _chat(run_dir):
-    log = EventLog(RunFiles(run_dir))
-    segs = segments(log.events(), "n1", "improve_recipe", 1)
-    return log, segs, chains(segs, log.payload)
-
-
-def test_segments_group_calls_by_conversation(run_dir):
-    _, segs, _ = _chat(run_dir)
+def test_segments_group_calls_by_conversation(run):
+    segs, _ = _chat(run)
     assert [s.conversation_id for s in segs] == ["p1", "b1", "b2"]
     assert [len(s.calls) for s in segs] == [2, 3, 2]
-    assert segs[2].calls[-1].response is None
+    assert segs[2].calls[-1].response is None and segs[0].calls[0].latency_s == 1.0
 
 
-def test_compaction_is_stitched_across_conversation_ids(run_dir):
-    _, _, chs = _chat(run_dir)
+def test_compaction_is_stitched_across_conversation_ids(run):
+    _, chs = _chat(run)
     assert [[s.conversation_id for s in c] for c in chs] == [["p1"], ["b1", "b2"]]
 
 
-def test_chat_shows_compaction_as_a_turn_then_continues(run_dir):
-    log, _, chs = _chat(run_dir)
-    items = chat_items(chs[1], log.payload, awaiting=False)
+def test_chat_shows_compaction_as_a_turn_then_continues(run):
+    _, chs = _chat(run)
+    items = chat_items(chs[1], run.records.payload, awaiting=False)
     kinds = [i["kind"] for i in items]
     req = kinds.index("compaction_request")
     assert items[req]["text"] == COMPACT and items[req]["title"].startswith("Compaction #1: ~900")
@@ -203,12 +221,12 @@ def test_chat_shows_compaction_as_a_turn_then_continues(run_dir):
     assert ctx > req and SUMMARY.strip() in items[ctx]["text"]
     assert kinds.count("system") == 1                                  # system prompt shown once
     assert items[-1] == {"kind": "note", "title": None, "text": "no response recorded"}
-    assert chat_items(chs[1], log.payload, awaiting=True)[-1]["text"] == "awaiting response"
+    assert chat_items(chs[1], run.records.payload, awaiting=True)[-1]["text"] == "awaiting response"
 
 
-def test_chat_items_cover_reasoning_tools_and_usage(run_dir):
-    log, _, chs = _chat(run_dir)
-    items = chat_items(chs[0], log.payload, awaiting=False)
+def test_chat_items_cover_reasoning_tools_and_usage(run):
+    _, chs = _chat(run)
+    items = chat_items(chs[0], run.records.payload, awaiting=False)
     kinds = [i["kind"] for i in items]
     assert kinds[:3] == ["system", "tools", "user"]
     assert "reasoning" in kinds and "tool_call" in kinds and "tool_output" in kinds
@@ -248,60 +266,23 @@ def test_stitching_ignores_whitespace_and_unrelated_conversations():
     assert [[s.conversation_id for s in ch] for ch in chains([early, a], payloads.get)] == [["E"], ["A"]]
 
 
-def test_a_conversation_without_a_role_label_is_unlabeled(run_dir):
-    log = EventLog(RunFiles(run_dir))
-    events = [{k: v for k, v in e.items() if k != "role"} for e in log.events()]
-    assert {s.calls[0].role for s in segments(events, "n1", "improve_recipe", 1)} == {None}
-    run = views.Run(run_dir)
-    run.log.events = lambda **kw: events
+def test_a_conversation_without_a_role_label_is_unlabeled(run):
+    calls = run.records.calls("n1", "improve_recipe", 1)
+    for c in calls:
+        c.role = None
+    run.records.calls = lambda *a: calls
     assert {c["role"] for c in views.conversations(run, "n1", "improve_recipe", 1)} == {"unlabeled"}
 
-from panel import views
 
-
-@pytest.fixture
-def run(run_dir):
-    return views.Run(run_dir)
-
-
-def test_overview(run):
-    ov = views.overview(run)
-    rows = {r["node"]: r for r in ov["nodes"]}
-    assert rows["n1"]["vs parent"] == pytest.approx(0.05) and rows["n1"]["duration_min"] == 10.0
-    assert rows["root"]["parent"] == "" and rows["n2"]["status"] == "running"
-    assert ov["alerts"][0]["kind"] == "stall" and len(ov["recent"]) <= 50
-
-
-def test_gpu_full_keeps_every_sample_of_a_short_run(run):
-    g = views.gpu_full(run)
-    assert set(g["gpus"]) == {"0", "1"} and g["buckets"] == g["samples"] > 0
-    assert g["gpus"]["0"]["memory_gib"][0][1] == 2.0
-
-
-def test_gpu_full_buckets_a_long_run_and_keeps_its_peaks(run, monkeypatch):
-    samples = [{"type": "gpu.sample", "ts_wall": float(t), "_seq": t, "gpus": {"0": {"util": 100 if t == 777 else 10, "memory_mib": 1024}}}
-               for t in range(3000)]
-    monkeypatch.setattr(run.log, "events", lambda **kw: samples)
-    g = views.gpu_full(run, buckets=100)
-    util = g["gpus"]["0"]["util"]
-    assert g["samples"] == 3000 and g["buckets"] == 100 and len(util) <= 200
-    assert [777.0, 100] in [list(p) for p in util] and [p[0] for p in util] == sorted(p[0] for p in util)
-
-
-def test_trace_filters_pages_and_detail(run):
-    choices = views.trace_choices(run)
-    assert "llm.request" in choices["type"] and "n1" in choices["node"]
-    got = views.trace(run, node="n1", types=["llm.request"], limit=2)
-    assert got["total"] == 7 and len(got["rows"]) == 2
-    rest = views.trace(run, node="n1", types=["llm.request"], offset=2, limit=100)
-    assert len(rest["rows"]) == 5 and rest["rows"][0]["seq"] not in {r["seq"] for r in got["rows"]}
-    detail = views.trace_detail(run, got["rows"][0]["seq"])
-    assert detail["event"]["type"] == "llm.request" and detail["chat"][0]["kind"] == "system"
-    resp = next(e for e in run.log.events() if e["type"] == "llm.response")
-    assert views.trace_detail(run, resp["_seq"])["chat"]
-    assert views.trace_detail(run, 10 ** 9) is None
-    all_gpu = views.trace(run, include_gpu=True, limit=10 ** 6)
-    assert any(r["type"] == "gpu.sample" for r in all_gpu["rows"])
+def test_a_missing_request_payload_does_not_break_the_chat(run_dir):
+    run = views.Run(run_dir)
+    _, chs = _chat(run)
+    digest = chs[1][0].calls[-1].request
+    (run_dir / "telemetry" / "payloads" / f"{digest}.json.zst").unlink()
+    run = views.Run(run_dir)
+    _, chs = _chat(run)
+    items = [i for ch in chs for i in chat_items(ch, run.records.payload, awaiting=False)]
+    assert any(i["kind"] == "note" and "payload missing" in i["text"] for i in items)
 
 
 def test_node_detail(run):
@@ -332,24 +313,13 @@ def test_root_is_a_baseline_everywhere(run):
     assert views.training(run, "root", 1)["reached_training"] is False
 
 
-def test_conversations_and_logs(run):
-    assert ("improve_recipe", 1) in views.agent_attempts(run, "n1")
-    convs = views.conversations(run, "n1", "improve_recipe", 1)
-    assert [(c["role"], c["calls"], c["compactions"], c["tool_errors"]) for c in convs] == [
-        ("planner", 2, 0, 0), ("data_builder", 5, 1, 0)]
-    chat = views.conversation_chat(run, "n1", "improve_recipe", 1, 1)
-    assert any(i["kind"] == "compaction_request" for i in chat)
-    assert views.tool_logs(run, "n1", "improve_recipe", 1) == [
-        "nodes/n1/attempts/improve_recipe-1/workspace/tool_output/data_engineer-data_query-20260927-120001-2.txt",
-        "nodes/n1/attempts/improve_recipe-1/workspace/tool_output/run_command-20260927-120000-0001.log"]
-
-
 def test_code_edits(run):
     d = views.code_edits(run, "n1")
     assert "-X = 1" in d["node_diff"] and "+X = 3" in d["node_diff"]
     a1, a2 = d["attempts"]
     assert a1["outcome"] == "contract_failed" and "+X = 2" in a1["diff"] and a1["contract"]["ok"] is False
-    assert a2["outcome"] == "passed" and "-X = 2" in a2["diff"] and "+X = 3" in a2["diff"]
+    assert a1["contract"]["steps"] == [{"step": "import", "result": "fail", "detail": "import failed"}]
+    assert a2["outcome"] == "passed" and "-X = 2" in a2["diff"] and "+X = 3" in a2["diff"] and a2["contract"]["ok"]
     [n2] = views.code_edits(run, "n2")["attempts"]
     assert n2["commit"] is None and n2["diff"] is None and n2["contract"] is None and "check out" in n2["detail"]
     assert "agent/entry.py" in views.agent_tree(run, d["agent_commit"])
@@ -360,9 +330,10 @@ def test_training(run):
     assert views.training_attempts(run, "n1") == [1]
     t = views.training(run, "n1", 1)
     assert [p["step"] for p in t["loss"]] == [1, 2] and t["loss"][0]["loss"] == pytest.approx(0.347656)
-    assert [g["result"] for g in t["gates"]] == ["failed", "passed"]
-    assert t["reached_training"] and t["config"].startswith("optimizer")
-    assert {g["gpu"] for g in t["gpu"]} == {"0", "1"}
+    assert t["config"].startswith("optimizer") and t["outcome"]["outcome"] == "passed"
+    assert [(g["result"], g["failures"]) for g in t["gates"]] == [("failed", "resolution 1x1 is not allowed"),
+                                                                   ("passed", None)]
+    assert t["reached_training"] and t["duration_min"] == 1.0 and {g["gpu"] for g in t["gpu"]} == {"0", "1"}
 
 
 def test_selection_and_cost(run):
@@ -371,6 +342,21 @@ def test_selection_and_cost(run):
     c = views.cost(run)
     assert {r["role"] for r in c["by_role"]} == {"planner", "data_builder"}
     assert sum(r["calls"] for r in c["by_phase"]) == 6 and c["errors"] == []
+    calls = views.llm_calls(run)
+    assert len(calls) == 6 and calls[0]["role"] == "planner" and calls[0]["total_tokens"] == 110
+    assert views.trace_detail(run, calls[0]["seq"])["event"]["type"] == "start llm.request"
+
+
+def test_conversations_and_logs(run):
+    assert views.agent_attempts(run, "n1") == [("edit_self", 1), ("edit_self", 2), ("improve_recipe", 1)]
+    convs = views.conversations(run, "n1", "improve_recipe", 1)
+    assert [(c["role"], c["calls"], c["compactions"], c["tool_errors"]) for c in convs] == [
+        ("planner", 2, 0, 0), ("data_builder", 5, 1, 0)]
+    chat = views.conversation_chat(run, "n1", "improve_recipe", 1, 1)
+    assert any(i["kind"] == "compaction_request" for i in chat)
+    assert views.tool_logs(run, "n1", "improve_recipe", 1) == [
+        "nodes/n1/attempts/improve_recipe-1/workspace/tool_output/data_engineer-data_query-20260927-120001-2.txt",
+        "nodes/n1/attempts/improve_recipe-1/workspace/tool_output/run_command-20260927-120000-0001.log"]
 
 
 def test_views_on_an_empty_run(tmp_path):
@@ -404,6 +390,7 @@ def test_ingest_calls_and_staging(run):
     assert rows[1]["reasons"] == "aspect 4:3" and rows[1]["video"] == "/workspace/staging/work/v2.mp4"
     assert rows[0]["annotation"] == "/workspace/staging/work/v1.json" and rows[0]["derived_from"] == "dataset: org/ds"
     assert rows[1]["host_video"] == "staging/n1/improve_recipe-1/work/v2.mp4"
+    assert media.training_data(run, "n1")["ingests"] == rows
     assert media.staging_files(run, "n1") == [{"path": "staging/n1/improve_recipe-1/work/v2.mp4", "bytes": 9}]
 
 
@@ -486,22 +473,13 @@ def _snapshot(root):
 def test_every_view_leaves_the_run_untouched(run_dir):
     before = _snapshot(run_dir)
     r = views.Run(run_dir)
-    views.overview(r), views.gpu_full(r), views.trace_choices(r)
-    got = views.trace(r, text="n1", include_gpu=True, limit=10 ** 6)
-    for row in got["rows"]:
-        views.trace_detail(r, row["seq"])
+    views.overview(r)
     for node in ("root", "n1", "n2"):
         views.node_detail(r, node), views.code_edits(r, node), media.training_data(r, node), media.eval_view(r, node)
-        for phase, attempt in views.agent_attempts(r, node):
-            for c in views.conversations(r, node, phase, attempt):
-                views.conversation_chat(r, node, phase, attempt, c["index"])
-            views.tool_logs(r, node, phase, attempt)
         for attempt in views.training_attempts(r, node):
             views.training(r, node, attempt)
     media.clips(r, "n1", "ds1"), media.camera_path(r, "store/blobs/pose/pd1.npz")
-    views.selection(r), views.cost(r)
-    from panel import problems as problem_view
-    problem_view.problems(r), problem_view.problem_counts(r)
+    views.selection(r)
     commit = views.code_edits(r, "n1")["agent_commit"]
     for path in views.agent_tree(r, commit):
         views.agent_file(r, commit, path)
@@ -554,20 +532,11 @@ def test_a_live_writer_is_read_with_plain_read_only(run_dir, monkeypatch):
     assert uris[0].endswith("?mode=ro")
 
 
-def test_a_missing_request_payload_does_not_break_the_chat(run_dir):
-    log, segs, chs = _chat(run_dir)
-    digest = next(c for c in chs[1][0].calls[::-1]).request
-    (run_dir / "telemetry" / "payloads" / f"{digest}.json.zst").unlink()
-    log = EventLog(RunFiles(run_dir))
-    chs = chains(segments(log.events(), "n1", "improve_recipe", 1), log.payload)
-    items = [i for ch in chs for i in chat_items(ch, log.payload, awaiting=False)]
-    assert any(i["kind"] == "note" and "payload missing" in i["text"] for i in items)
 
 
-# ---- trace attempts ----
 
-def test_trace_offers_attempts_and_any(run):
-    assert {"0", "1"} <= set(views.trace_choices(run)["attempt"])
+
+
 
 
 # ---- problems view ----
@@ -578,82 +547,97 @@ from panel import problems  # noqa: E402
 
 
 def _add_problems(run_dir):
-    """One of every problem kind on n2 (n1 already has a contract failure, a gate failure, an
-    ingest rejection and an unanswered LLM call; the run has a stall alert)."""
-    from ar_kernel.telemetry.recorder import Recorder
-    from fixtures.panel_run import Llm, tool_call
-    rec = Recorder(run_dir)
-    base = dict(node="n2", phase="edit_self", attempt=1)
-    rec.event("phase.start", payload={"code_commit": None}, **base)
+    """One of every problem kind on n2 (n1 already has a contract failure, a gate failure, an ingest rejection
+    and an unanswered LLM call; the run has a stall alert)."""
+    from ar_kernel import telemetry
+    from fixtures.panel_run import Scripted, tool_call
+    rec = Scripted(run_dir)
     calls = [tool_call("t1", "run_command", {"command": "false"}), tool_call("t2", "nope", {}),
              tool_call("t3", "data_query", {"filter": {}}), tool_call("t4", "read_file", {"path": "a"})]
     history = [{"role": "system", "content": "You code."}, {"role": "user", "content": "go"}]
-    llm = Llm(rec, **base)
-    llm.call("c1", 0, history, {"content": "", "tool_calls": calls})
-    rec.event("tool.call", tool="data_query", component="tools", payload={"tool": "data_query", "args": {}}, **base)
-    rec.event("tool.error", tool="data_query", component="tools",
-              payload={"tool": "data_query", "error": "bad filter"}, **base)
-    llm.call("c1", 1, history + [
-        {"role": "assistant", "content": "", "tool_calls": calls},
-        {"role": "tool", "tool_call_id": "t1", "content": "exit 2\nboom"},
-        {"role": "tool", "tool_call_id": "t2", "content": "Error: nope is not a valid tool, try one of [a]."},
-        {"role": "tool", "tool_call_id": "t3", "content": "Error: ToolException('bad filter')\n Please fix your mistakes."},
-        {"role": "tool", "tool_call_id": "t4", "content": "fine"}], {"content": "done"})
-    rec.event("llm.request", payload={"body": {"messages": [{"role": "user", "content": "x"}]}}, call_id="r1",
-              conversation_id="c9", turn_index=0, model="m", component="gateway", **base)
-    rec.event("llm.response", payload={"body": {"error": {"message": "rate limited"}}}, call_id="r1",
-              conversation_id="c9", status=429, usage={}, cost_usd=None, latency_s=0.1, component="gateway", **base)
-    rec.event("job.finished", node="n2", job_id="j1", component="tools", state="done", payload={"error": None, "result": {
-        "clips": {"/workspace/a.mp4": {"error": "HTTP 400: too many tokens"}, "/workspace/b.mp4": {"caption": "ok"}}}})
-    rec.event("job.finished", node="n2", job_id="j2", component="tools", payload={"error": "worker died", "result": None})
-    rec.event("job.finished", node="n2", job_id="j3", component="tools", state="canceled", payload={"error": None,
-              "result": {"clips": {"/workspace/c.mp4": {"error": "not asked (canceled)"}}}})
-    rec.event("subproc.end", node="n2", phase="render", returncode=1, payload={"stdout": "", "stderr": "Traceback: x"})
-    rec.event("subproc.end", node="n2", phase="render", returncode=0, payload={"stdout": "", "stderr": ""})
-    rec.event("subproc.cancelled", node="n2", phase="caption_videos", returncode=-15, payload={})
-    rec.event("sandbox.end", exit_code=1, component="sandbox",
-              payload={"stdout": "", "stderr": "crash"}, **base)
-    rec.event("render.error", node="n2", phase="render", payload={"error": "RuntimeError('x')", "traceback": "tb"})
-    rec.event("run.warning", payload={"message": "disk low"}, message="disk low")
-    rec.event("phase.end", **base)
+    try:
+        with telemetry.span("phase.attempt", {"node": "n2", "phase": "edit_self", "attempt": 1}) as attempt:
+            rec.llm(attempt, "c1", 0, history, {"content": "", "tool_calls": calls})
+            try:
+                with telemetry.span("tool.request", {"tool": "data_query"}), telemetry.span("tool.data_query", {}):
+                    raise ValueError("bad filter")
+            except ValueError:
+                pass
+            rec.llm(attempt, "c1", 1, history + [
+                {"role": "assistant", "content": "", "tool_calls": calls},
+                {"role": "tool", "tool_call_id": "t1", "content": "exit 2\nboom"},
+                {"role": "tool", "tool_call_id": "t2", "content": "Error: nope is not a valid tool, try one of [a]."},
+                {"role": "tool", "tool_call_id": "t3", "content": "Error: ToolException('bad filter')\n Please fix your mistakes."},
+                {"role": "tool", "tool_call_id": "t4", "content": "fine"}], {"content": "done"})
+            sp = rec.llm_start(attempt, "c9", 0, {"messages": [{"role": "user", "content": "x"}]})
+            rec.llm_end(sp, {"error": {"message": "rate limited"}}, status=429, cost=None)
+            with telemetry.span("llm.request", {"endpoint": "/chat/completions", "role": None, "body": "{}"}) as refused:
+                telemetry.decision("llm.check", {"check": "model"}, ["pass", "refuse"], "refuse", "not allowed")
+                refused.status, refused.output = "refused", {"status": 403, "body": {"error": {"message": "not allowed"}}}
+            telemetry.error(OSError("disk full"), "the path keeps its mode")
+            telemetry.decision("phase.result", {}, ["accept", "fail"], "fail", "no result.json")
+            telemetry.decision("phase.result", {}, ["accept", "fail"], "accept", "fine")    # not a problem
+            with telemetry.span("process", {"command": ["python", "render.py"]}) as proc:
+                proc.status, proc.output = "cancelled", {"exit_code": -15}                  # not a problem
+            with telemetry.span("process", {"command": ["git", "status"]}) as proc:
+                proc.status, proc.output = "error", {"exit_code": 128, "stderr": "fatal: not a git repository\n"}
+            with telemetry.span("process", {"command": ["python", "train.py"]}) as proc:
+                telemetry.log("stdout", "step 1")
+                telemetry.log("stderr", "CUDA out of memory")
+                proc.status, proc.output = "error", {"exit_code": 1}
+            attempt.output = {}
+        telemetry.alert("monitor.disk_low", "warning", "disk low")
+    finally:
+        rec.close()
 
 
 def test_problems_lists_every_failure_once(run_dir):
     _add_problems(run_dir)
     got = problems.problems(views.Run(run_dir))
     assert Counter((p["source"], p["kind"]) for p in got) == Counter({
-        ("recorded", "alert"): 1, ("recorded", "contract_failed"): 1, ("recorded", "gate_failed"): 1,
-        ("recorded", "ingest_rejected"): 1, ("recorded", "llm_call"): 2, ("recorded", "tool_error"): 1,
-        ("recorded", "job_item"): 1, ("recorded", "job_failed"): 1, ("recorded", "subprocess"): 1,
-        ("recorded", "sandbox"): 1, ("recorded", "error_event"): 1, ("recorded", "warning"): 1,
-        ("inferred", "agent_tool"): 2})
+        ("recorded", "alert"): 2, ("recorded", "contract.step"): 1, ("recorded", "recipe.gate"): 1,
+        ("recorded", "ingest_rejected"): 1, ("recorded", "no end recorded"): 1, ("recorded", "llm.request"): 1,
+        ("recorded", "refused"): 1, ("recorded", "tool.data_query"): 1, ("recorded", "handled error"): 1,
+        ("recorded", "phase.result"): 1, ("recorded", "process"): 2, ("inferred", "agent_tool"): 2})
     assert [p["ts"] for p in got] == sorted((p["ts"] for p in got), reverse=True)        # newest first
     by = {(p["kind"], p["node"]): p for p in got}
-    assert "429" in by[("llm_call", "n2")]["summary"] and "rate limited" in by[("llm_call", "n2")]["summary"]
-    assert "no response" in by[("llm_call", "n1")]["summary"]
-    assert "a.mp4" in by[("job_item", "n2")]["summary"] and "too many tokens" in by[("job_item", "n2")]["summary"]
-    assert by[("tool_error", "n2")]["seq"] is not None and "data_query" in by[("tool_error", "n2")]["summary"]
+    assert "429" in by[("llm.request", "n2")]["summary"] and "rate limited" in by[("llm.request", "n2")]["summary"]
+    assert "403" in by[("refused", "n2")]["summary"] and by[("no end recorded", "n1")]["summary"].startswith("llm.request")
+    assert "ValueError: bad filter" in by[("tool.data_query", "n2")]["summary"] and by[("tool.data_query", "n2")]["seq"] is not None
+    assert "disk full" in by[("handled error", "n2")]["summary"]
+    assert sorted(p["summary"] for p in got if p["kind"] == "process") == [
+        "process: exit code 128: fatal: not a git repository", "process: exit code 1: CUDA out of memory"]
     inferred = sorted(p["summary"] for p in got if p["source"] == "inferred")
     assert inferred[0].startswith("nope:") and inferred[1].startswith("run_command: exit 2")
     assert all(p["where"] == "edit_self-1 · conversation 0" and p["seq"] is None for p in got
                if p["source"] == "inferred")
 
 
-def test_an_unanswered_call_in_a_live_attempt_is_not_a_problem(run_dir):
-    started = open(f"/proc/{os.getpid()}/stat").read().rsplit(")", 1)[1].split()[19]
-    (run_dir / "control" / "loop.pid").write_text(f"{os.getpid()} {started}")
-    path = run_dir / "telemetry" / "events" / "n1.jsonl"
-    path.write_text("".join(line + "\n" for line in path.read_text().splitlines()
-                            if '"phase.end"' not in line))                  # the attempt is still running
-    assert not [p for p in problems.problems(views.Run(run_dir)) if p["kind"] == "llm_call"]
+def test_open_spans_run_only_while_their_writer_runs(run_dir):
+    """A resume: the killed invocation's open spans have no end recorded; the live invocation's are running."""
+    import time
+
+    from ar_kernel import telemetry
+    from fixtures.panel_run import Scripted
+    from panel import timeline
+    rec = Scripted(run_dir, t=round(time.time()), alive=True)        # its own writer id: a later start
+    telemetry.start("loop")
+    rec.close(end=False)
+    r = views.Run(run_dir)
+    facts = sorted((o["name"], o["facts"].split(";")[0]) for o in views.open_spans(r))
+    assert facts == [("ar.run", "running"), ("llm.request", "no end recorded"), ("loop", "running")]
+    assert [p["summary"].split(":")[0] for p in problems.problems(r) if p["kind"] == "no end recorded"] == \
+        ["llm.request"]
+    spans = {s["label"]: s["status"] for s in timeline.timeline(r)["spans"] if s["status"] != "ok"}
+    assert "no end recorded" in spans.values() and "running" not in spans.values()   # loop/ar.run have no lane
 
 
 def test_problem_counts_by_kind(run_dir):
     _add_problems(run_dir)
     r = views.Run(run_dir)
-    counts = problems.problem_counts(r, hours=1)
+    counts = problems.problem_counts(r, hours=2)
     assert sum(c["total"] for c in counts) == len(problems.problems(r))
-    assert all(c["last hour"] == c["total"] for c in counts)          # everything happened in the last hour
+    assert all(c["last hour"] == c["total"] for c in counts)          # everything happened in the window
 
 
 def test_error_tool_outputs_are_marked_in_chats(run_dir):

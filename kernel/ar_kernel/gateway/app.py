@@ -5,16 +5,17 @@ import asyncio
 import json
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import NamedTuple
 
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from .. import telemetry
 from ..budget import Budget
+from ..faults import KernelFault
 from ..isolation import censor_request
-from ..telemetry.recorder import TelemetryError
 from ..tools.context import bearer
 from .mock import MockBook
 from .store import CallStore
@@ -111,7 +112,7 @@ class Upstream:
 
     def __init__(self, base_url: str | None, api_key: str, *, timeout_s: float, wait_s: float,
                  effort: str | None = None, transport: httpx.AsyncBaseTransport | None = None,
-                 sleep=asyncio.sleep, recorder=None) -> None:
+                 sleep=asyncio.sleep) -> None:
         # Used as given; the endpoint path ("/chat/completions", "/responses") is appended.
         # Providers differ: OpenAI's base includes "/v1", others have no version segment.
         self._base = (base_url or DEFAULT_BASE_URL).rstrip("/")
@@ -121,7 +122,6 @@ class Upstream:
         self._wait_s = float(wait_s)
         self._transport = transport
         self._sleep = sleep
-        self._recorder = recorder
         self._probes: dict[tuple, tuple[float, bool]] = {}     # (path, model) -> (when, the provider answered)
 
     @classmethod
@@ -141,38 +141,42 @@ class Upstream:
         return {**body, "reasoning": {**reasoning, "effort": self.effort}}
 
     async def _send(self, client: httpx.AsyncClient, path: str, body: dict) -> tuple[int, dict]:
-        try:
-            r = await client.post(self._base + path, json=body, headers=self._headers)
-        except httpx.HTTPError as exc:
-            return 599, {"error": f"{type(exc).__name__}: {exc}"}
-        status = r.status_code
-        try:
-            payload = r.json() if r.content else {}
-        except ValueError:        # e.g. an HTML error page from a proxy in front of the API
-            # No truncation of telemetry: the full body is recorded,
-            # even though it never reaches the agent JSON-encoded verbatim either way.
-            payload = {"error": {"message": f"upstream returned HTTP {status} with a "
-                                            f"non-JSON body", "body": r.text}}
-            status = status if status >= 400 else 502   # never pass garbage on as success
-        error = upstream_error(payload)
-        if status < 400 and error:                      # a router's 200 around the provider's error
-            code = error.get("code")
-            status = code if isinstance(code, int) and 400 <= code <= 599 else 502
-        return status, payload
+        with telemetry.span("llm.try", {"url": self._base + path}) as sp:
+            try:
+                r = await client.post(self._base + path, json=body, headers=self._headers)
+            except httpx.HTTPError as exc:
+                telemetry.error(exc, "HTTP 599")
+                sp.status, sp.output = "error", {"status": 599}
+                return 599, {"error": f"{type(exc).__name__}: {exc}"}
+            status = r.status_code
+            try:
+                payload = r.json() if r.content else {}
+            except ValueError as exc:     # e.g. an HTML error page from a proxy in front of the API
+                telemetry.error(exc, "an error body holding the text")
+                payload = {"error": {"message": f"upstream returned HTTP {status} with a "
+                                                f"non-JSON body", "body": r.text}}
+                status = status if status >= 400 else 502   # never pass garbage on as success
+            error = upstream_error(payload)
+            if status < 400 and error:                      # a router's 200 around the provider's error
+                code = error.get("code")
+                status = code if isinstance(code, int) and 400 <= code <= 599 else 502
+            sp.status = "ok" if status < 400 else "error"
+            sp.output = {"http_status": r.status_code, "status": status, "headers": dict(r.headers), "body": payload}
+            return status, payload
 
     async def _provider_answers(self, client: httpx.AsyncClient, path: str, model) -> bool:
         """Whether a tiny request with the same model and the enforced fields succeeds (cached)."""
         key, now = (path, model), time.monotonic()
-        if key in self._probes and now - self._probes[key][0] < PROBE_TTL_S:
-            return self._probes[key][1]
-        body = {"model": model, **({"messages": [{"role": "user", "content": PROBE_PROMPT}]}
-                                   if path == "/chat/completions" else {"input": PROBE_PROMPT})}
-        status, payload = await self._send(client, path, self.enforce(path, body))
-        self._probes[key] = (now, status < 400)
-        if self._recorder is not None:
-            self._recorder.event("gateway.probe", component="gateway", status=status,
-                                 payload={"path": path, "model": model, "status": status, "body": payload})
-        return status < 400
+        with telemetry.span("llm.probe", {"model": model}) as sp:
+            if key in self._probes and now - self._probes[key][0] < PROBE_TTL_S:
+                sp.output = {"answers": self._probes[key][1], "cached": True}
+                return self._probes[key][1]
+            body = {"model": model, **({"messages": [{"role": "user", "content": PROBE_PROMPT}]}
+                                       if path == "/chat/completions" else {"input": PROBE_PROMPT})}
+            status, payload = await self._send(client, path, self.enforce(path, body))
+            self._probes[key] = (now, status < 400)
+            sp.output = {"answers": status < 400, "cached": False}
+            return status < 400
 
     async def post(self, path: str, body: dict) -> Reply:
         started, slept, delay, attempts = time.monotonic(), 0.0, 1.0, 0
@@ -180,18 +184,41 @@ class Upstream:
             while True:
                 attempts += 1
                 status, payload = await self._send(client, path, body)
-                if status < 400 or (not waited_out(status)
-                                    and await self._provider_answers(client, path, body.get("model"))):
-                    return Reply(status, payload, attempts, False)
-                if max(slept, time.monotonic() - started) + delay > self._wait_s:
-                    return Reply(status, payload, attempts, True)
-                await self._sleep(delay)
+                if status < 400:
+                    chosen, why = "return", "a success"
+                elif not waited_out(status) and await self._provider_answers(client, path, body.get("model")):
+                    chosen, why = "return", "a probe with the same model succeeds: the request is the agent's"
+                elif max(slept, time.monotonic() - started) + delay > self._wait_s:
+                    chosen, why = "give up", f"the provider kept failing for the whole wait ({self._wait_s:.0f} s)"
+                else:
+                    chosen, why = "wait", ("a status the provider recovers from" if waited_out(status) else
+                                           "the probe failed too: the provider or the kernel's settings fail")
+                telemetry.decision("llm.upstream", {"status": status, "tries": attempts, "slept_s": slept},
+                                   ["return", "wait", "give up"], chosen, why)
+                if chosen != "wait":
+                    return Reply(status, payload, attempts, chosen == "give up")
+                with telemetry.span("llm.wait", {"delay_s": delay}) as sp:
+                    await self._sleep(delay)
+                    sp.output = {"slept_s": delay}
                 slept, delay = slept + delay, min(delay * 2, MAX_SLEEP_S)
+
+
+def _check(sp, name: str, refused: bool, status: int, message: str | None, **inputs) -> tuple[int, dict] | None:
+    """One check of a request, as a decision; a refusal ends `sp` refused with the response."""
+    telemetry.decision("llm.check", {"check": name, **inputs}, ["pass", "refuse"], "refuse" if refused else "pass",
+                       message if refused else "passed")
+    if not refused:
+        return None
+    payload = {"error": {"message": message}}
+    sp.status, sp.output = "refused", {"status": status, "body": payload}
+    return status, payload
 
 
 def create_gateway_app(*, registry, store: CallStore, allowed_models: set[str],
                        upstream: Upstream | None, mocks: MockBook,
-                       budget: Budget | None = None, censor: list[str] = ()) -> FastAPI:
+                       budget: Budget | None = None, censor: list[str] = (),
+                       touch: Callable[[], None] = lambda: None) -> FastAPI:
+    """`touch`: called as each call starts and ends."""
     # Bounds CallStore's memory to live containers: once a token is
     # revoked, its linking state is dropped along with it.
     registry.on_revoke(store.forget)
@@ -200,60 +227,76 @@ def create_gateway_app(*, registry, store: CallStore, allowed_models: set[str],
 
     async def handle(request: Request, endpoint: str, upstream_path: str) -> JSONResponse:
         caller = registry.lookup(bearer(request.headers.get("authorization")))
-        if caller is None:
-            return JSONResponse({"error": {"message": "unknown or revoked token"}}, status_code=401)
+        raw = await request.body()
+        role = request.headers.get("x-ar-role")
+        with telemetry.span("llm.request", {"endpoint": endpoint, "role": role,
+                                            "body": raw.decode("utf-8", errors="replace")},
+                            parent=caller.span if caller is not None else None) as sp:
+            status, payload = await answer(sp, caller, raw, role, endpoint, upstream_path)
+        return JSONResponse(payload, status_code=status)
+
+    async def answer(sp, caller, raw: bytes, role, endpoint: str, upstream_path: str) -> tuple[int, dict]:
+        """Rejected requests are never forwarded and leave no llm_calls row."""
+        if r := _check(sp, "token", caller is None, 401, "unknown or revoked token"):
+            return r
         try:
-            body = await request.json()
-        except ValueError:                    # malformed JSON or undecodable bytes
+            body = json.loads(raw)
+        except ValueError as exc:             # malformed JSON or undecodable bytes
+            telemetry.error(exc, "refused: not a JSON object")
             body = None
-        if not isinstance(body, dict):        # rejected like the checks below: not recorded, never forwarded
-            return JSONResponse({"error": {"message": "the request body must be a JSON object"}}, status_code=400)
-        if body.get("stream"):
-            return JSONResponse({"error": {"message": "streaming is not supported by the gateway; "
-                                                      "use non-streaming calls"}},
-                                status_code=400)
-        # Rejected like the checks above: not recorded, never forwarded. Images reach the model only
-        # through the ask tool, which caps their number and size.
-        for is_part, message in ((_is_video_part, NO_VIDEO_MESSAGE), (_is_image_part, NO_IMAGE_MESSAGE)):
-            if carries(body, is_part):
-                return JSONResponse({"error": {"message": message}}, status_code=400)
-        if body.get("model") not in allowed_models:
-            return JSONResponse({"error": {"message": f"model {body.get('model')!r} is not in the "
-                                                      f"allowlist {sorted(allowed_models)}"}},
-                                status_code=403)
+        if r := _check(sp, "json object", not isinstance(body, dict), 400, "the request body must be a JSON object"):
+            return r
+        if r := _check(sp, "stream", bool(body.get("stream")), 400,
+                       "streaming is not supported by the gateway; use non-streaming calls"):
+            return r
+        # Images reach the model only through the ask tool, which caps their number and size.
+        for name, is_part, message in (("video", _is_video_part, NO_VIDEO_MESSAGE),
+                                       ("image", _is_image_part, NO_IMAGE_MESSAGE)):
+            if r := _check(sp, name, carries(body, is_part), 400, message):
+                return r
+        if r := _check(sp, "model", body.get("model") not in allowed_models, 403,
+                       f"model {body.get('model')!r} is not in the allowlist {sorted(allowed_models)}",
+                       model=body.get("model"), allowed=sorted(allowed_models)):
+            return r
         mock = bool(caller.mock_script) or upstream is None
         if not mock and budget is not None:
             why = budget.exhausted()
-            if why:       # rejected like the checks above: not recorded, never forwarded
-                return JSONResponse({"error": {"message": why}}, status_code=402)
+            if r := _check(sp, "budget", why is not None, 402, why, usd=budget.usd, max_usd=budget.max_usd):
+                return r
         if not mock:
-            body = upstream.enforce(upstream_path, body)   # before begin: record what is forwarded
-        body = censor_request(body, list(censor))    # before begin: the model and the record get the same
-        try:
-            meta = store.begin(caller, endpoint, body, role=role_label(request.headers.get("x-ar-role")))
-        except TelemetryError as exc:
-            return JSONResponse({"error": {"message": f"telemetry unavailable: {exc}"}}, status_code=500)
-        started, gave_up = time.monotonic(), False
+            with telemetry.span("llm.enforce", {"effort": upstream.effort}) as step:
+                body = upstream.enforce(upstream_path, body)   # before begin: record what is forwarded
+                step.output = {"body": body}
+        with telemetry.span("llm.censor") as step:
+            body = censor_request(body, list(censor))    # before begin: the model and the record get the same
+            step.output = {"body": body}
+        meta = store.begin(caller, endpoint, body, role=role_label(role))
+        touch()
+        gave_up = False
         try:
             if mock:
                 render = MockBook.chat_response if upstream_path == "/chat/completions" else MockBook.response
-                status, payload, attempts = 200, render(
-                    body.get("model", ""), mocks.next(caller.mock_script or "smoke", caller.token)), 1
+                status, payload = 200, render(
+                    body.get("model", ""), mocks.next(caller.mock_script or "smoke", caller.token))
             else:
-                status, payload, attempts, gave_up = await upstream.post(upstream_path, body)
+                status, payload, _, gave_up = await upstream.post(upstream_path, body)
         except Exception as exc:  # noqa: BLE001 -- the request is recorded; its failure must be too
-            status, payload, attempts = 502, {"error": {"message": f"gateway: {type(exc).__name__}: {exc}"}}, 1
+            telemetry.error(exc, "HTTP 502 to the agent")
+            status, payload = 502, {"error": {"message": f"gateway: {type(exc).__name__}: {exc}"}}
         cost = budget.record(status, payload.get("usage") if isinstance(payload, dict) else None) \
             if (budget is not None and not mock) else None
         if gave_up:
             caller.fail(f"the LLM provider kept failing (last: HTTP {status}) for the whole wait")
         try:
-            store.end(meta, caller, status=status, body=payload,
-                      latency_s=time.monotonic() - started, attempts=attempts,
-                      cost_usd=cost, mock=mock)
-        except TelemetryError as exc:
-            return JSONResponse({"error": {"message": f"telemetry unavailable: {exc}"}}, status_code=500)
-        return JSONResponse(payload, status_code=status)
+            store.end(meta, caller, status=status, body=payload, cost_usd=cost, mock=mock)
+        except KernelFault as exc:            # the audit reads only what was recorded: the reply is withheld
+            telemetry.error(exc, "the reply is withheld (HTTP 500) and the phase stops")
+            caller.fail(f"gateway: {exc}")
+            payload, status = {"error": {"message": "the kernel could not record this call"}}, 500
+        touch()
+        sp.status = "ok" if status < 400 else "error"
+        sp.output = {"status": status, "body": payload, "cost_usd": cost, "mock": mock}
+        return status, payload
 
     @app.post("/v1/responses")
     async def responses(request: Request):

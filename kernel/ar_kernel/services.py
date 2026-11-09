@@ -8,6 +8,8 @@ from pathlib import Path
 
 import uvicorn
 
+from . import fs, telemetry
+
 
 def socket_dir_for(run_dir: Path) -> Path:
     return Path(run_dir) / "sockets"
@@ -23,30 +25,32 @@ class RunServices:
         self._servers: list[uvicorn.Server] = []
         self._threads: list[threading.Thread] = []
         self._names: list[str] = []
+        self._span: telemetry.Span | None = None
 
     def start(self, gateway_app, tools_app, ready_timeout_s: float = 20.0) -> None:
-        self.socket_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.chmod(self.socket_dir, 0o700)
-        self._fd = os.open(self.socket_dir, os.O_DIRECTORY)
-        for name, app in (("gateway.sock", gateway_app), ("tools.sock", tools_app)):
-            path = Path(f"/proc/self/fd/{self._fd}") / name
-            if path.exists():
-                path.unlink()
-            server = uvicorn.Server(uvicorn.Config(app, uds=str(path), log_level="warning",
-                                                    timeout_keep_alive=900))
-            thread = threading.Thread(target=server.run, name=f"ar-{name}", daemon=True)
-            thread.start()
-            self._servers.append(server)
-            self._threads.append(thread)
-            self._names.append(name)
-        deadline = time.monotonic() + ready_timeout_s
-        while not all(s.started for s in self._servers):
-            if time.monotonic() > deadline:
-                self.stop()
-                raise RuntimeError(f"services did not start within {ready_timeout_s}s")
-            time.sleep(0.05)
-        for name in ("gateway.sock", "tools.sock"):
-            os.chmod(name, 0o600, dir_fd=self._fd)
+        """Under a `services` span that `stop` ends: the servers' own log lines land in it."""
+        self._span = telemetry.start("services", {"socket_dir": str(self.socket_dir)})
+        with telemetry.use(self._span):
+            fs.mkdir(self.socket_dir)
+            fs.chmod(self.socket_dir, 0o700)
+            self._fd = os.open(self.socket_dir, os.O_DIRECTORY)
+            for name, app in (("gateway.sock", gateway_app), ("tools.sock", tools_app)):
+                fs.remove(self.socket_dir / name)
+                server = uvicorn.Server(uvicorn.Config(app, uds=f"/proc/self/fd/{self._fd}/{name}", log_level="warning",
+                                                        log_config=None, timeout_keep_alive=900))   # to the root logger
+                thread = telemetry.thread(server.run, f"ar-{name}")
+                thread.start()
+                self._servers.append(server)
+                self._threads.append(thread)
+                self._names.append(name)
+            deadline = time.monotonic() + ready_timeout_s
+            while not all(s.started for s in self._servers):
+                if time.monotonic() > deadline:
+                    self.stop()
+                    raise RuntimeError(f"services did not start within {ready_timeout_s}s")
+                time.sleep(0.05)
+            for name in ("gateway.sock", "tools.sock"):
+                fs.chmod(self.socket_dir / name, 0o600)
 
     def stop(self) -> None:
         for server in self._servers:
@@ -59,13 +63,14 @@ class RunServices:
         self._names.clear()
         # Clean up the sockets before raising, so a stuck thread never leaves one behind.
         if self._fd is not None:
-            for name in ("gateway.sock", "tools.sock"):
-                try:
-                    os.unlink(name, dir_fd=self._fd)
-                except FileNotFoundError:
-                    pass
+            with telemetry.use(self._span):
+                for name in ("gateway.sock", "tools.sock"):
+                    fs.remove(self.socket_dir / name)
             os.close(self._fd)
             self._fd = None
+        if self._span is not None:
+            self._span.end("error" if stuck else "ok", {"stuck": stuck})
+            self._span = None
         if stuck:
             raise RuntimeError(f"service thread(s) did not stop within the join timeout: "
                                f"{', '.join(stuck)}")

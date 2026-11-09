@@ -9,7 +9,6 @@ link the agent plants cannot redirect a kernel write. A per-item failure is an i
 from __future__ import annotations
 
 import json
-import shutil
 import threading
 import time
 from pathlib import Path
@@ -20,6 +19,7 @@ from mcp.server.mcpserver import Context
 from PIL import Image
 from pydantic import Field, WithJsonSchema
 
+from .. import fs, telemetry
 from ..data.annotation import ACTIONS, PERSPECTIVES
 from ..data.probe import TARGET_ASPECT
 from ..faults import disk_fault
@@ -27,7 +27,6 @@ from ..isolation import EXCLUDED_PROMPT, copies_held_out, strings
 from ..subproc import file_tail
 from .captioner import clip_host_path, container_path, input_error, stage_clip
 from .context import STAGING, PathError
-from .hf_tools import publish_file
 from .jobs import job_dir, run_cancellable
 from .server import FROM_FILE, ToolError, listed, refuse
 from .vllm_server import gpu_memory_mib, wait_gpu_release
@@ -254,7 +253,7 @@ def run_bridge(backend, job, work: Path, spec: dict, items: list[dict], cancel, 
     job_file = {"tool": backend.tool, "args": {k: v for k, v in job.args.items() if k != "items"}, "items": items,
                 "gpus": backend.gpus, "work": str(work), "out": str(work / "out"),
                 "config": getattr(backend, "block", None), **spec.get("job", {})}
-    (work / "job.json").write_text(json.dumps(job_file, ensure_ascii=False, indent=1), encoding="utf-8")
+    fs.write_text(work / "job.json", json.dumps(job_file, ensure_ascii=False, indent=1))
     before = backend.gpu_memory(backend.gpus)
     kill, code = threading.Event(), []
 
@@ -265,16 +264,17 @@ def run_bridge(backend, job, work: Path, spec: dict, items: list[dict], cancel, 
                 cwd=spec.get("cwd", work), log_path=work / "bridge.log",
                 cancel=SimpleNamespace(is_set=lambda: cancel.is_set() or kill.is_set()),
                 extra_env={**spec.get("env_vars", {}), "CUDA_VISIBLE_DEVICES": ",".join(map(str, backend.gpus)),
-                           "CUDA_DEVICE_ORDER": "PCI_BUS_ID"},
-                recorder=backend.recorder, node=job.node, phase=backend.tool))
+                           "CUDA_DEVICE_ORDER": "PCI_BUS_ID"}))
         except Exception as exc:                 # noqa: BLE001 -- every item gets it below
+            telemetry.error(exc, "every item's error")
             code.append(f"launch failed: {type(exc).__name__}: {exc}")
 
     rows: dict[int, dict] = {}
     started: dict[int, dict] = {}
+    spans: dict[int, telemetry.Span] = {}         # open job.item spans: from item_started to the item's row
     codes: dict[int, int] = {}                  # a spawned worker's exit code
     ready, offsets, polled = None, {}, 0.0
-    thread = threading.Thread(target=launch, name=f"ar-{backend.tool}-bridge", daemon=True)
+    thread = telemetry.thread(launch, f"ar-{backend.tool}-bridge")
     thread.start()
     try:
         while True:
@@ -284,10 +284,20 @@ def run_bridge(backend, job, work: Path, spec: dict, items: list[dict], cancel, 
                     ready = m
                 elif m["type"] == "item_started":
                     started[m["index"]] = m
+                    if m["index"] not in spans and m["index"] not in rows:
+                        spans[m["index"]] = telemetry.start("job.item", m)
                 elif m["type"] == "worker_exit":
                     codes[m["worker"]] = m["exit_code"]
+                    telemetry.log("bridge", json.dumps(m))
                 elif m["type"] == "item" and m["index"] not in rows:
-                    rows[m["index"]] = on_item(m)
+                    if m["index"] not in spans:
+                        spans[m["index"]] = telemetry.start("job.item", {"index": m["index"]})
+                    sp = spans[m["index"]]
+                    with telemetry.use(sp):
+                        rows[m["index"]] = on_item(m)
+                    del spans[m["index"]]
+                    sp.end("ok" if "error" not in rows[m["index"]] else "error",
+                           {"message": m, "row": rows[m["index"]]})
             report({"done": done + len(rows), "total": total})
             if poll and time.monotonic() - polled >= 2.0:
                 poll()
@@ -295,20 +305,24 @@ def run_bridge(backend, job, work: Path, spec: dict, items: list[dict], cancel, 
             if not alive:
                 break
             time.sleep(0.2)
-    except BaseException:
+    except BaseException as exc:
         kill.set()
         thread.join()
+        for sp in spans.values():               # ar saw the job end: no item span stays open
+            sp.fail(exc)
         raise
     thread.join()
     if cancel.is_set():
         rows.update({i["index"]: {"index": i["index"], "error": CANCELED} for i in items if i["index"] not in rows})
     rows.update(_unfinished(work, items, rows, started, codes, code[0] if code else None,
                             len(spec.get("job", {}).get("groups") or [])))
+    for index, sp in spans.items():             # started; the bridge ended without the item's result
+        sp.end("cancelled" if rows[index]["error"] == CANCELED else "error", {"row": rows[index]})
     timeout = 5.0 if cancel.is_set() else float(backend.cfg.get("captioner.memory_release_timeout_s", 120))
     after, released = wait_gpu_release(backend.gpu_memory, backend.gpus, before, timeout)
     if released is False:
-        backend.recorder.event(f"{backend.tool}.gpu_not_released", node=job.node, component="tools",
-                               job_id=job.id, payload={"before": before, "after": after})
+        telemetry.alert("job.gpu_memory_held", "warning", f"{backend.tool}: GPU memory was not given back",
+                        {"before": before, "after": after})
     return {"rows": rows, "ready": ready, "gpu_memory_mib": {"before": before, "after": after},
             "gpu_memory_released": released}
 
@@ -324,10 +338,9 @@ class GpuJob:
     frame_keys: tuple[str, ...] = ()
     takes_keyframes = False     # items may carry `keyframes` (check_keyframes)
 
-    def __init__(self, cfg, run_dir: Path, gpus: list[int], registry, recorder,
-                 gpu_memory=gpu_memory_mib) -> None:
+    def __init__(self, cfg, run_dir: Path, gpus: list[int], registry, gpu_memory=gpu_memory_mib) -> None:
         self.cfg, self.run_dir, self.gpus = cfg, Path(run_dir), list(gpus)
-        self.registry, self.recorder, self.gpu_memory = registry, recorder, gpu_memory
+        self.registry, self.gpu_memory = registry, gpu_memory
         self.block = (cfg.get(self.config_key) if self.config_key else None) or {}
         self.max_items = self.block.get("max_items")
 
@@ -348,11 +361,9 @@ class GpuJob:
                 self.check_item(item)
                 self.check_item_for(item, args)
             except ToolError as exc:
+                telemetry.error(exc, "a bad item")
                 bad[n] = str(exc)
             if copies_held_out(self.cfg, *strings(item)):       # before a GPU is scheduled
-                self.recorder.event("isolation.refused", node=caller.node, phase=caller.phase,
-                                    attempt=caller.attempt, component="tools", tool=self.name,
-                                    payload={"item": n})
                 bad.setdefault(n, EXCLUDED_PROMPT)
             for key in self.file_keys:
                 if isinstance(item.get(key), str):
@@ -361,8 +372,10 @@ class GpuJob:
                         if key in self.frame_keys:
                             check_frame_image(self.cfg, host, self.frame_size(args), key)
                     except PathError as exc:
+                        telemetry.error(exc, "a bad item")
                         bad.setdefault(n, f"{key}: {exc}")
                     except ToolError as exc:
+                        telemetry.error(exc, "a bad item")
                         bad.setdefault(n, str(exc))
                     item = {**item, key: container_path(item[key])}
             if self.takes_keyframes and n not in bad:
@@ -372,8 +385,10 @@ class GpuJob:
                         check_frame_image(self.cfg, clip_host_path(caller, k["image"]), self.frame_size(args),
                                           f"the keyframe at frame {k['frame']}")
                     except PathError as exc:
+                        telemetry.error(exc, "a bad item")
                         bad.setdefault(n, f"keyframes: {exc}")
                     except ToolError as exc:
+                        telemetry.error(exc, "a bad item")
                         bad.setdefault(n, str(exc))
                     frames.append({**k, "image": container_path(k["image"])})
                 item = {**item, "keyframes": frames}
@@ -401,8 +416,8 @@ class GpuJob:
             raise RuntimeError("the phase that submitted this job has ended")
         work = job_dir(self.run_dir, job)
         inp, out = work / "in", work / "out"
-        inp.mkdir(parents=True)
-        out.mkdir()
+        fs.mkdir(inp)
+        fs.mkdir(out)
         results: dict[int, dict] = {}
         memory = {"gpu_memory_mib": None, "gpu_memory_released": None}
         try:
@@ -411,6 +426,7 @@ class GpuJob:
                 try:
                     staged.append(self._stage(caller, index, item, inp, job.args))
                 except (PathError, OSError, ToolError) as exc:
+                    telemetry.error(exc, "the item's input error")
                     results[index] = {"index": index, "error": input_error(exc)}
             if staged and not cancel.is_set():
                 spec = self.prepare(job, staged, work)
@@ -425,8 +441,8 @@ class GpuJob:
             for item in staged:
                 results.setdefault(item["index"], {"index": item["index"], "error": CANCELED})
         finally:
-            shutil.rmtree(inp, ignore_errors=True)
-            shutil.rmtree(out, ignore_errors=True)
+            fs.rmtree(inp, ignore_errors="the job's own copies")
+            fs.rmtree(out, ignore_errors="the job's outputs, already linked into staging")
         return {"items": [results[i] for i in sorted(results)], **memory}
 
     def _stage(self, caller, index: int, item: dict, inp: Path, args: dict) -> dict:
@@ -479,12 +495,15 @@ class GpuJob:
                     # metadata files get their role in the name, so they never pass for a pose
                     name = "" if role in ("video", "pose", "image") else f".{role}"
                     rel = f"{self.kind}s/{job.id}/{index}{name}{src.suffix}"
-                    publish_file(src, caller.staging_host, rel, link=True)
+                    fs.place(src, caller.staging_host, rel, link=True)
+                    with src.open("rb") as handle:       # the kernel's own copy: the agent may edit the link
+                        telemetry.keep(str(STAGING / rel), handle, "handed")
                     published[role] = str(STAGING / rel)
         except Exception as exc:            # noqa: BLE001 -- a finish() bug must be this item's error,
             # not a job failure that orphans the others.
             if disk_fault(exc):                 # the machine's: the phase stops
                 raise
+            telemetry.error(exc, "the item's error")
             return {"index": index, "error": f"{type(exc).__name__}: {exc}"}
         extra = {k: v for k, v in files.items() if k not in ("video", "annotation", "pose", "commanded_camera")}
         if self.kind == "annotation":
@@ -501,7 +520,7 @@ class GpuJob:
 
     def write_annotation(self, out: Path, item: dict, annotation: dict) -> Path:
         path = out / f"{item['index']}.annotation.json"
-        path.write_text(json.dumps(annotation, ensure_ascii=False, indent=1), encoding="utf-8")
+        fs.write_text(path, json.dumps(annotation, ensure_ascii=False, indent=1))
         return path
 
 
@@ -576,7 +595,7 @@ def register_gpu_tools(mcp, kit, q) -> None:
             return await submit(ctx, "rollout_h3", items=items)
 
 
-def build_gpu_backends(cfg, run_dir: Path, gpus: list[int], registry, recorder) -> list:
+def build_gpu_backends(cfg, run_dir: Path, gpus: list[int], registry) -> list:
     """Every GPU data backend a run gets: the captioner and locate_events always, the others only when
     their `annotate`/`images`/`generators` config enables them. The caller registers each on the run's JobQueue, then calls `register_gpu_tools`
     `register_caption_tool` and `register_locate_tool`."""
@@ -595,4 +614,4 @@ def build_gpu_backends(cfg, run_dir: Path, gpus: list[int], registry, recorder) 
                (cfg.get("images.enabled"), ImageBackend), (generator_on("alayaworld"), AlayaWorldBackend),
                (generator_on("wan22"), Wan22Backend), (generator_on("ltx25"), Ltx25Backend),
                (generator_on("h3"), H3Backend)]
-    return [backend(cfg, run_dir, gpus, registry, recorder) for on, backend in enabled if on]
+    return [backend(cfg, run_dir, gpus, registry) for on, backend in enabled if on]

@@ -1,5 +1,5 @@
 """ask: one stateless question to the agent's model, with capped, downscaled images."""
-from conftest import client_dir, recorded
+from conftest import client_dir
 import base64
 import io
 import json
@@ -8,11 +8,11 @@ import httpx
 import pytest
 from PIL import Image
 
+from ar_kernel.archive.activity import calls
+from ar_kernel.archive.db import open_db
 from ar_kernel.budget import Budget
-from ar_kernel.telemetry import files
 from ar_kernel.config import KernelConfig
 from ar_kernel.gateway.store import CallStore
-from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools.ask import Ask
 from ar_kernel.tools.context import TokenRegistry
 from ar_kernel.tools.server import ToolError
@@ -32,13 +32,12 @@ def _answer(request):
 def make(tmp_path):
     def build(handler=_answer, budget=None, **limits):
         cfg = KernelConfig(raw={**REAL.raw, "ask": {**REAL.raw["ask"], **limits}}, repo_root=REAL.repo_root)
-        rec = Recorder(tmp_path / "run")
-        caller = TokenRegistry(rec).issue(node="n1", phase="edit_self", attempt=1, workspace_host=tmp_path,
+        caller = TokenRegistry().issue(node="n1", phase="edit_self", attempt=1, workspace_host=tmp_path,
                                           staging_host=tmp_path / "staging")
         seen = []
-        ask = Ask(cfg, _upstream_that(handler, seen), CallStore(rec), budget or Budget(), "gpt-x")
+        ask = Ask(cfg, _upstream_that(handler, seen), CallStore(tmp_path / "run"), budget or Budget(), "gpt-x")
         Image.new("RGB", (3000, 1500), (200, 30, 30)).save(tmp_path / "big.png")
-        return ask, caller, seen, rec
+        return ask, caller, seen, lambda: calls(open_db(tmp_path / "run"), "n1")
     return build
 
 
@@ -97,15 +96,13 @@ def test_a_failed_call_costs_no_images(make):
 
 def test_the_call_is_recorded_and_charged_like_a_gateway_call(make):
     budget = Budget(prices={"input": 1.0, "cached_input": 1.0, "output": 1.0})
-    ask, caller, _, rec = make(budget=budget)
+    ask, caller, seen, rows = make(budget=budget)
     ask.ask(caller, "q", ["big.png"])
-    request, response = rec.read_events("n1")
-    assert (request["type"], response["type"]) == ("llm.request", "llm.response")
-    assert request["tool"] == response["tool"] == "ask"       # not a conversation of a role
-    assert request["phase"] == "edit_self" and response["status"] == 200 and response["cost_usd"] == 12 / 1e6
+    [row] = rows()
+    assert row["tool"] == "ask" and row["transcript"] is None       # not a conversation of a role
+    assert row["phase"] == "edit_self" and row["status"] == 200 and row["cost_usd"] == 12 / 1e6
     assert budget.calls == 1 and budget.tokens == 12
-    body = rec.load_payload(request["payload"])["body"]
-    assert json.dumps(body).count("data:image/jpeg;base64") == 1
+    assert json.dumps(seen[0]).count("data:image/jpeg;base64") == 1
 
 
 def test_a_spent_budget_refuses_the_call(make):
@@ -136,13 +133,12 @@ def test_live_ask_over_the_tool_socket(tmp_path):
 
     env = dict(line.strip().split("=", 1) for line in (REAL.repo_root / ".env").read_text().splitlines()
                if "=" in line and not line.startswith("#"))
-    rec = Recorder(tmp_path / "run")
-    reg = TokenRegistry(rec)
+    reg = TokenRegistry()
     caller = reg.issue(node="n1", phase="edit_self", attempt=1, workspace_host=tmp_path,
                        staging_host=tmp_path / "staging")
     mcp = new_mcp()
-    register_ask_tool(mcp, ToolKit(reg, rec), Ask(REAL, Upstream.from_env(env, timeout_s=600, wait_s=3),
-                                                  CallStore(rec), Budget(), env["OPENAI_MODEL"]))
+    register_ask_tool(mcp, ToolKit(reg, tmp_path / "run"), Ask(REAL, Upstream.from_env(env, timeout_s=600, wait_s=3),
+                                                  CallStore(tmp_path / "run"), Budget(), env["OPENAI_MODEL"]))
     im = Image.new("RGB", (2000, 2000), "white")
     draw = ImageDraw.Draw(im)
     draw.rectangle([200, 200, 900, 900], fill="red")
@@ -197,8 +193,3 @@ def test_a_malformed_reply_is_a_counted_model_error(make):
         ask.ask(caller, "q", [])
 
 
-def test_each_image_is_recorded_as_read(make, tmp_path):
-    ask, caller, _, rec = make()
-    with files.scope(rec, node="n1", tool="ask"):
-        ask.ask(caller, "what is this?", ["big.png"])
-    assert recorded(rec) == {("in", "/workspace/big.png"): (tmp_path / "big.png").read_bytes()}

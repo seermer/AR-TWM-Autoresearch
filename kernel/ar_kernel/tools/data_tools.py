@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
-import tempfile
 import threading
 import uuid
 from pathlib import Path
@@ -13,6 +11,8 @@ from typing import Annotated, Any, TypedDict
 from mcp.server.mcpserver import Context
 from pydantic import Field
 
+from .. import fs, telemetry
+from ..archive.activity import add_activity
 from ..archive.blobs import KINDS, BlobStore
 from ..archive.clips import ClipStore, hidden
 from ..archive.commits import BadClips, CommitError, CommitStore, limit_text
@@ -26,9 +26,7 @@ from ..faults import disk_fault
 from ..train.gate import Gate
 from .context import STAGING, WORKSPACE, PathError, open_file, to_host
 from .gpu_jobs import items_schema
-from .hf_tools import move_into
 from ..process_digest import _shape
-from ..telemetry import files
 from .server import FROM_FILE, SHOWN, ToolError, listed, publish, refuse
 
 
@@ -41,9 +39,9 @@ def clip_id_list(caller, value) -> list[str]:
 
 
 class DataTools:
-    def __init__(self, cfg, run_dir: Path, recorder, gpus: list[int], gpu_lock: threading.Lock,
+    def __init__(self, cfg, run_dir: Path, gpus: list[int], gpu_lock: threading.Lock,
                  require_free=lambda caller: None) -> None:
-        self.cfg, self.run_dir, self.recorder = cfg, Path(run_dir), recorder
+        self.cfg, self.run_dir = cfg, Path(run_dir)
         self.gpus, self.gpu_lock, self.require_free = list(gpus), gpu_lock, require_free
         self._leakage: LeakageChecker | None = None
         self._leakage_lock = threading.Lock()
@@ -76,7 +74,7 @@ class DataTools:
                 raise
             raise ToolError(f"{path} cannot be read: {exc.strerror}") from exc
         with open(fd, "rb") as handle:
-            files.record(handle, direction="in", path=named)
+            telemetry.keep(named, handle, "read")
         try:
             info = readable_video(host)
         except ValueError as exc:
@@ -104,6 +102,7 @@ class DataTools:
                 try:
                     host[key] = to_host(caller, c[key])
                 except PathError as exc:
+                    telemetry.error(exc, "a bad item")
                     bad.setdefault(i, f"{key}: {exc}")
                     continue
                 if not host[key].is_relative_to(caller.staging_host):
@@ -117,7 +116,7 @@ class DataTools:
         refuse(caller, "data_ingest", candidates, bad)
         conn = open_db(self.run_dir)
         try:
-            ingestor = Ingestor(self.cfg, self.run_dir, conn, self.recorder, self._leakage_checker())
+            ingestor = Ingestor(self.cfg, self.run_dir, conn, self._leakage_checker())
             results = ingestor.ingest(built, node_id=caller.node, attempt=caller.attempt)
         finally:
             conn.close()
@@ -125,11 +124,6 @@ class DataTools:
             raise RuntimeError(f"the clip checker failed on every candidate: {results[0].reasons[0]}")
         rows = [{"index": i, "video": c["video"], "accepted": r.accepted, "clip_id": r.clip_id,
                  "warnings": r.warnings, "reasons": r.reasons} for i, (c, r) in enumerate(zip(candidates, results))]
-        # the panel's ingest table: one row per candidate, with what the agent staged
-        self.recorder.event("ingest.result", node=caller.node, phase=caller.phase, attempt=caller.attempt,
-                            component="tools", payload={"rows": [
-                                {**row, **{key: c.get(key) for key in ("annotation", "pose", "derived_from")}}
-                                for row, c in zip(rows, candidates)]})
         return {"accepted": sum(r["accepted"] for r in rows), "rejected": sum(not r["accepted"] for r in rows),
                 "rejected_for": _counted(r for row in rows if not row["accepted"] for r in row["reasons"]),
                 "warnings": _counted(w for row in rows for w in row["warnings"]),
@@ -171,16 +165,9 @@ class DataTools:
                 copies = [(blobs.path(clip[f"{kind}_digest"], kind), f"{kind}s/{clip['clip_id']}{suffix}")
                           for kind, suffix in KINDS.items()]
                 for blob, rel in copies:            # a copy: a hard link would let the agent change the archive's file
-                    with open(blob, "rb") as source:
-                        files.record(source, direction="out", path=str(STAGING / "pool_clips" / rel))
-                    # written through the open handle: the agent owns staging and could swap the name for a link
-                    with tempfile.NamedTemporaryFile(dir=caller.staging_host, suffix=".tmp", delete=False) as handle, \
-                            open(blob, "rb") as source:
-                        shutil.copyfileobj(source, handle)
-                    try:
-                        move_into(Path(handle.name), caller.staging_host, f"pool_clips/{rel}")
-                    finally:
-                        Path(handle.name).unlink(missing_ok=True)
+                    data = Path(blob).read_bytes()
+                    fs.place_bytes(data, caller.staging_host, f"pool_clips/{rel}")
+                    telemetry.keep(str(STAGING / "pool_clips" / rel), data, "handed")
         finally:
             conn.close()
         return {"folder": str(STAGING / "pool_clips"), "copied": sum(i in pool for i in wanted),
@@ -204,6 +191,7 @@ class DataTools:
                 commit_id, new = store.commit(datasets, message, node_id=caller.node, attempt=caller.attempt,
                                               cap=self.new_clips_per_commit)
             except BadClips as exc:
+                telemetry.error(exc, "a refusal naming each bad clip")
                 refuse(caller, f"data_commit-{exc.dataset}", exc.clips, exc.bad)
             except CommitError as exc:
                 raise ToolError(str(exc)) from exc
@@ -252,13 +240,17 @@ class DataTools:
                                 "call again once your jobs have finished (job_wait).")
             try:
                 self.require_free(caller)
-                failures = Gate(self.cfg, store, self.recorder).check(
+                failures = Gate(self.cfg, store).check(
                     recipe, data_commit, parent_commit, caller.node, scratch, self.run_dir, self.gpus)
             finally:
                 self.gpu_lock.release()
         finally:
             conn.close()
-            shutil.rmtree(scratch, ignore_errors=True)
+            fs.rmtree(scratch, ignore_errors="a check's scratch folder")
+        telemetry.decision("recipe.gate", {"recipe": recipe, "data_commit": data_commit, "parent_commit": parent_commit},
+                           ["pass", "refuse"], "refuse" if failures else "pass", "\n".join(failures) or "no findings")
+        add_activity(self.run_dir, node=caller.node, phase=caller.phase, attempt=caller.attempt, kind="gate",
+                     ok=not failures)
         return failures
 
 
@@ -286,7 +278,8 @@ def _parent_commit(conn, node_id: str) -> str | None:
     try:
         parent_id = nodes.get(node_id)["parent_id"]
         return nodes.get(parent_id)["data_commit"] if parent_id else None
-    except KeyError:
+    except KeyError as exc:
+        telemetry.error(exc, "no parent data commit")
         return None
 
 

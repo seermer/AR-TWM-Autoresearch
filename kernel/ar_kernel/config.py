@@ -73,6 +73,10 @@ class KernelConfig:
         return self._path("paths.wbench")
 
     @property
+    def dotenv_files(self) -> list[Path]:
+        return [self.repo_root / ".env", self.worldmodel / ".env", self.wbench / ".env"]
+
+    @property
     def eval_data(self) -> Path:
         """The scored benchmark: a folder of cases/, images/ and masks/."""
         return self._path("eval.data")

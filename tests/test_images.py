@@ -10,7 +10,6 @@ from PIL import Image
 
 from ar_kernel.config import KernelConfig
 from ar_kernel.guards import choose_gpus
-from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools import images
 from ar_kernel.tools.context import TokenRegistry
 from ar_kernel.tools.gpu_jobs import build_gpu_backends
@@ -34,12 +33,11 @@ def env(tmp_path, monkeypatch):
     """The real ImageBackend, with the Z-Image bridge swapped for the fake bridge (it writes a PNG of the
     requested size and echoes weights/steps/offload)."""
     monkeypatch.setattr(images, "BRIDGE", FAKE)
-    rec = Recorder(tmp_path / "run")
-    reg = TokenRegistry(rec)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
+    reg = TokenRegistry()
+    q = JobQueue(tmp_path / "run", threading.Lock(), wait_cap_s=120)
     ws, staging = tmp_path / "ws", tmp_path / "staging"
     ws.mkdir(); staging.mkdir()
-    q.register(ImageBackend(small_cfg(env="autoresearcher"), tmp_path / "run", [0, 1, 4, 5], reg, rec,
+    q.register(ImageBackend(small_cfg(env="autoresearcher"), tmp_path / "run", [0, 1, 4, 5], reg,
                             gpu_memory=lambda g: {i: 100 for i in g}))
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
     yield q, caller, staging
@@ -125,9 +123,8 @@ def test_workers_get_the_images_config_and_one_gpu_each(env):
 
 
 def test_build_gpu_backends_includes_images_only_when_enabled(tmp_path):
-    rec = Recorder(tmp_path / "run")
     names = lambda cfg: [b.name for b in build_gpu_backends(cfg, tmp_path / "run", [0, 1, 2, 3],
-                                                             TokenRegistry(rec), rec)]
+                                                             TokenRegistry())]
     for enabled in (True, False):
         raw = copy.deepcopy(REAL.raw)
         raw["images"]["enabled"] = enabled
@@ -143,10 +140,9 @@ def test_real_zimage_generates_plausible_images(tmp_path):
     run_dir, ws = tmp_path / "run", tmp_path / "ws"
     staging = run_dir / "staging"
     ws.mkdir(parents=True); staging.mkdir(parents=True)
-    rec = Recorder(run_dir)
-    reg = TokenRegistry(rec)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=1800)
-    q.register(ImageBackend(REAL, run_dir, gpus, reg, rec))
+    reg = TokenRegistry()
+    q = JobQueue(run_dir, threading.Lock(), wait_cap_s=1800)
+    q.register(ImageBackend(REAL, run_dir, gpus, reg))
     caller = reg.issue(node="gpu", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
     prompts = [f"a photorealistic first-person view, scene {i}: a kitchen counter with fruit" for i in range(8)]
     try:

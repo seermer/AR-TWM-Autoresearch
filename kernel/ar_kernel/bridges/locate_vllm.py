@@ -53,7 +53,7 @@ def ask(client, url: str, system: str, event: str, reasoning_effort: str) -> tup
                                                {"type": "text", "text": f"Event: {event}"}]}])
     message = done.choices[0].message
     if message.parsed is None:
-        raise ValueError(f"the model gave no answer in the asked shape: {message.content!r}"[:500])
+        raise ValueError(f"the model gave no answer in the asked shape: {message.content!r}")
     return message.parsed.model_dump(), getattr(message, "reasoning", None) or getattr(message, "reasoning_content", None)
 
 
@@ -67,7 +67,7 @@ def main() -> int:
         return [data_url(f) for f in decode(item["video"], item["width"], item["height"], job["frame_width"], job["fps"])]
 
     def failed(index, exc) -> None:
-        messages.send("item", index=index, ok=False, error=f"{type(exc).__name__}: {exc}"[:500],
+        messages.send("item", index=index, ok=False, error=f"{type(exc).__name__}: {exc}",
                       traceback="".join(traceback.format_exception(exc)), started=starts.get(index), ended=time.time(),
                       log=log)
 
@@ -104,7 +104,7 @@ def main() -> int:
             try:
                 answer, reasoning = ask(c, u, job["system"], items[index]["events"][n], job["reasoning_effort"])
             except Exception as exc:        # noqa: BLE001 -- one frame's failure is its clip's error
-                answer, reasoning = None, f"{type(exc).__name__}: {exc}"[:2000]
+                answer, reasoning = None, f"{type(exc).__name__}: {exc}"
             with lock:
                 answers[index][n][k], reasonings[index][n][k] = answer, reasoning
                 if answer is None:

@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from unittest.mock import Mock, MagicMock
+from unittest.mock import Mock
 from ar_kernel.config import KernelConfig
 from ar_kernel.eval.wbench import run_wbench_phases
 
@@ -25,7 +25,6 @@ def _make_test_env(tmp_path, monkeypatch):
     report_path.write_text(json.dumps(fake_report))
 
     gpus = [0, 1]
-    node_id = "n1"
 
     # Track which phases are called in order
     phases_called = []
@@ -43,19 +42,15 @@ def _make_test_env(tmp_path, monkeypatch):
         mock_proc.returncode = 0
         return mock_proc
 
-    # Mock the recorder
-    mock_recorder = MagicMock()
-    mock_recorder.span = MagicMock(return_value=MagicMock(__enter__=Mock(return_value=None), __exit__=Mock(return_value=None)))
-
     # Patch run_in_env
     monkeypatch.setattr(wbench_mod, "run_in_env", fake_run_in_env)
 
-    return cfg, work_dir, model, gpus, fake_report, mock_recorder, node_id, phases_called
+    return cfg, work_dir, model, gpus, fake_report, phases_called
 
 
 def _fake_judge_server(monkeypatch, wbench_mod, events, fail_vlm=False):
     class Server:
-        base_url, api_key = "http://127.0.0.1:1", "k"
+        base_url, api_key = "http://127.0.0.1:1", "judge-key-1"
 
         def start(self, **kw):
             events.append("server_start")
@@ -71,20 +66,28 @@ def _fake_judge_server(monkeypatch, wbench_mod, events, fail_vlm=False):
 def test_local_judge_phase_order_is_server_around_vlm_then_vp_then_report(tmp_path, monkeypatch):
     import ar_kernel.eval.wbench as wbench_mod
     from ar_kernel.eval.judge import Judge
-    cfg, work_dir, model, gpus, fake_report, rec, node_id, phases = _make_test_env(tmp_path, monkeypatch)
+    cfg, work_dir, model, gpus, fake_report, phases = _make_test_env(tmp_path, monkeypatch)
     real = wbench_mod.run_in_env
     def logged(env, args, **kw):
         if env == "wbench-vp":
             phases.append("vp")
             return Mock(returncode=0)
         if "vlm" in args:
-            assert kw["extra_env"]["VLM_API_KEY"] == "k"          # the judge server's own key
+            assert kw["extra_env"]["VLM_API_KEY"] == "judge-key-1"          # the judge server's own key
         return real(env, args, **kw)
     monkeypatch.setattr(wbench_mod, "run_in_env", logged)
     _fake_judge_server(monkeypatch, wbench_mod, phases)
-    out = run_wbench_phases(cfg, work_dir, model, gpus, ["test_metric"], rec, node_id,
+    from ar_kernel import telemetry
+    from ar_kernel.telemetry import tree
+    from conftest import telemetry_records
+    telemetry.open(tmp_path / "run")
+    telemetry.start("ar.run")
+    out = run_wbench_phases(cfg, work_dir, model, gpus, ["test_metric"],
                             Judge("local", "Qwen/x", None))
     assert out == fake_report
+    ends = {r["name"]: r["status"] for r in telemetry_records(tmp_path / "run") if r["kind"] == "end"}
+    assert ends["eval.wbench"] == "ok" and ends["eval.judge"] == "ok"
+    assert tree.check(tree.load(tmp_path / "run")) == []
     assert phases == ["precompute", "gpu", "gpu", "server_start", "vlm", "vlm", "server_stop", "vp", "report"]
 
 
@@ -92,24 +95,24 @@ def test_the_judge_server_is_stopped_when_the_vlm_phase_fails(tmp_path, monkeypa
     import pytest
     import ar_kernel.eval.wbench as wbench_mod
     from ar_kernel.eval.judge import Judge
-    cfg, work_dir, model, gpus, _, rec, node_id, phases = _make_test_env(tmp_path, monkeypatch)
+    cfg, work_dir, model, gpus, _, phases = _make_test_env(tmp_path, monkeypatch)
     def failing(env, args, **kw):
         phases.append(args[args.index("--phase") + 1] if "--phase" in args else "vp")
         return Mock(returncode=1 if "vlm" in args else 0, stdout="", stderr="boom")
     monkeypatch.setattr(wbench_mod, "run_in_env", failing)
     _fake_judge_server(monkeypatch, wbench_mod, phases)
     with pytest.raises(RuntimeError, match="vlm failed"):
-        run_wbench_phases(cfg, work_dir, model, gpus, ["test_metric"], rec, node_id, Judge("local", "Qwen/x", None))
+        run_wbench_phases(cfg, work_dir, model, gpus, ["test_metric"], Judge("local", "Qwen/x", None))
     assert phases[-1] == "server_stop" and "vp" not in phases
 
 
 def test_an_api_judge_starts_no_server(tmp_path, monkeypatch):
     import ar_kernel.eval.wbench as wbench_mod
     from ar_kernel.eval.judge import Judge
-    cfg, work_dir, model, gpus, _, rec, node_id, phases = _make_test_env(tmp_path, monkeypatch)
+    cfg, work_dir, model, gpus, _, phases = _make_test_env(tmp_path, monkeypatch)
     _fake_judge_server(monkeypatch, wbench_mod, phases)
     real = wbench_mod.run_in_env
     monkeypatch.setattr(wbench_mod, "run_in_env",
                         lambda env, args, **kw: Mock(returncode=0) if env == "wbench-vp" else real(env, args, **kw))
-    run_wbench_phases(cfg, work_dir, model, gpus, ["test_metric"], rec, node_id, Judge("api", "d", "u"))
+    run_wbench_phases(cfg, work_dir, model, gpus, ["test_metric"], Judge("api", "d", "u"))
     assert phases == ["precompute", "gpu", "gpu", "vlm", "vlm", "report"]

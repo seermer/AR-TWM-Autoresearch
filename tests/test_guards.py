@@ -1,15 +1,6 @@
 import pytest
 
 from ar_kernel.config import GpuPolicyError
-from ar_kernel.guards import alert
-from ar_kernel.telemetry.recorder import Recorder
-
-
-def test_alert_is_a_run_event(tmp_path):
-    rec = Recorder(tmp_path)
-    alert(rec, "node_failed", "n1 ended crashed", node_id="n1")
-    (event,) = [e for e in rec.read_events() if e["type"] == "alert"]
-    assert (event["kind"], event["level"], event["message"]) == ("node_failed", "error", "n1 ended crashed")
 
 
 @pytest.mark.gpu

@@ -6,7 +6,6 @@ from ar_kernel.archive.clips import ClipStore, hidden
 from ar_kernel.archive.commits import BadClips, CommitStore
 from ar_kernel.archive.db import open_db
 from ar_kernel.config import KernelConfig
-from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools.data_tools import pool_clips
 from ar_kernel.train.gate import Gate
 
@@ -81,5 +80,5 @@ def test_the_gate_refuses_a_data_commit_holding_hidden_clips(tmp_path):
     store = {i: {"ingested_by": "node0005fail1" if i == ids[0] else "node0005"} for i in ids}
     commits = SimpleNamespace(manifest=lambda c: {"datasets": {"d": {"weight": 1.0, "clips": ids}}},
                               clips=SimpleNamespace(get=store.__getitem__))
-    failures = Gate(CFG, commits, Recorder(tmp_path)).check({}, "c", None, "n1", tmp_path / "n1", tmp_path, [0, 1, 2, 3])
+    failures = Gate(CFG, commits).check({}, "c", None, "n1", tmp_path / "n1", tmp_path, [0, 1, 2, 3])
     assert failures and "dataset d has 1 clips that are not in the pool" in failures

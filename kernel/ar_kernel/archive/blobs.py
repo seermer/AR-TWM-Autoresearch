@@ -2,6 +2,9 @@ from __future__ import annotations
 import hashlib, os, shutil, sqlite3, time, uuid
 from pathlib import Path
 
+from .. import fs, telemetry
+from .db import write
+
 KINDS = {"video": ".mp4", "caption": ".json", "annotation": ".json", "pose": ".npz"}
 
 class BlobError(ValueError):
@@ -39,19 +42,18 @@ class BlobStore:
         if path.resolve().is_relative_to(self.root.resolve()):
             raise BlobError(f"{path} is inside the blob store; only staged files can be stored")
 
-        hexdigest = sha256_file(path)
-        target = self.path(hexdigest, kind)
-        nbytes = path.stat().st_size
-
-        if target.exists() and target.stat().st_size == nbytes:
-            path.unlink()
-        else:
-            self._install(path, target)
-
-        self.conn.execute(
-            "INSERT OR IGNORE INTO blobs (digest, kind, bytes, created_at) VALUES (?,?,?,?)",
-            (hexdigest, kind, nbytes, time.time()),
-        )
+        with telemetry.span("blob.put", {"path": str(path), "kind": kind, "size": path.stat().st_size}) as sp:
+            hexdigest = sha256_file(path)
+            target = self.path(hexdigest, kind)
+            nbytes = path.stat().st_size
+            stored = target.exists() and target.stat().st_size == nbytes
+            if stored:
+                path.unlink()
+            else:
+                self._install(path, target)
+            write(self.conn, "INSERT OR IGNORE INTO blobs (digest, kind, bytes, created_at) VALUES (?,?,?,?)",
+                  (hexdigest, kind, nbytes, time.time()))
+            sp.output = {"digest": hexdigest, "already_stored": stored}
         return hexdigest
 
     def remove_unreferenced(self) -> int:
@@ -61,8 +63,8 @@ class BlobStore:
             "SELECT caption_digest FROM clips UNION SELECT annotation_digest FROM clips UNION "
             "SELECT pose_digest FROM clips)").fetchall()
         for digest, kind in rows:
-            self.path(digest, kind).unlink(missing_ok=True)
-            self.conn.execute("DELETE FROM blobs WHERE digest=?", (digest,))
+            fs.remove(self.path(digest, kind))
+            write(self.conn, "DELETE FROM blobs WHERE digest=?", (digest,))
         return len(rows)
 
     def _install(self, path: Path, target: Path) -> None:

@@ -1,7 +1,9 @@
 from __future__ import annotations
-import shutil, sqlite3, tempfile
+import re, shutil, sqlite3, tempfile
 from contextlib import contextmanager
 from pathlib import Path
+
+from .. import telemetry
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS nodes (
@@ -44,6 +46,22 @@ CREATE TABLE IF NOT EXISTS selection_events (
   child_id TEXT NOT NULL, chosen TEXT NOT NULL, seed INTEGER NOT NULL,
   candidates TEXT NOT NULL, created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS llm_calls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  node_id TEXT NOT NULL, phase TEXT NOT NULL, attempt INTEGER NOT NULL,
+  role TEXT, tool TEXT, conversation_id TEXT NOT NULL, turn INTEGER NOT NULL, transcript TEXT,
+  status INTEGER NOT NULL, input_tokens INTEGER NOT NULL, cached_tokens INTEGER NOT NULL,
+  output_tokens INTEGER NOT NULL, cost_usd REAL, mock INTEGER NOT NULL, audit_hits TEXT NOT NULL,
+  created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS llm_calls_node ON llm_calls(node_id);
+CREATE TABLE IF NOT EXISTS activity (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  node_id TEXT NOT NULL, phase TEXT, attempt INTEGER,
+  kind TEXT NOT NULL CHECK (kind IN ('tool', 'gate', 'job', 'ingest', 'snapshot', 'accepted')),
+  name TEXT, ok INTEGER, detail TEXT, created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS activity_node ON activity(node_id);
 """
 
 def open_db(run_dir: Path) -> sqlite3.Connection:
@@ -61,15 +79,50 @@ def open_db(run_dir: Path) -> sqlite3.Connection:
 
 @contextmanager
 def transaction(conn: sqlite3.Connection):
-    """One atomic write on an autocommit connection."""
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        yield conn
-    except BaseException:
-        if conn.in_transaction:
-            conn.execute("ROLLBACK")
-        raise
-    conn.execute("COMMIT")
+    """One atomic write on an autocommit connection, as a `db.transaction` span."""
+    with telemetry.span("db.transaction") as sp:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield conn
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            sp.output = {"outcome": "rolled back"}
+            raise
+        conn.execute("COMMIT")
+        sp.output = {"outcome": "committed"}
+
+
+_TABLE = re.compile(r"^\s*(?:INSERT(?: OR IGNORE)? INTO|UPDATE|DELETE FROM)\s+(\w+)", re.I)
+
+
+def _rows(conn: sqlite3.Connection, table: str, where: str, args) -> list[dict]:
+    return [dict(r) for r in conn.execute(f"SELECT rowid AS rowid_, * FROM {table} WHERE {where}", tuple(args))]
+
+
+def write(conn: sqlite3.Connection, sql: str, params=()) -> int:
+    """One INSERT, UPDATE or DELETE as a `db.write` span: the rows it changes before and after (with their rowid),
+    enough to apply it again. An UPDATE or DELETE ends with `WHERE ...` whose placeholders come last. Returns
+    the rowcount."""
+    if telemetry.writer() is None:
+        return conn.execute(sql, params).rowcount
+    table = _TABLE.match(sql).group(1)
+    params = tuple(params)
+    if sql.lstrip().upper().startswith("INSERT"):
+        with telemetry.span("db.write", {"table": table, "sql": sql, "params": params, "before": []}) as sp:
+            cur = conn.execute(sql, params)
+            sp.output = {"rowcount": cur.rowcount,
+                         "after": _rows(conn, table, "rowid=?", [cur.lastrowid]) if cur.rowcount else []}
+            return cur.rowcount
+    where = re.split(r"\sWHERE\s", sql, flags=re.I)[-1]
+    args = params[len(params) - where.count("?"):]
+    before = _rows(conn, table, where, args)
+    with telemetry.span("db.write", {"table": table, "sql": sql, "params": params, "before": before}) as sp:
+        n = conn.execute(sql, params).rowcount
+        ids = [r["rowid_"] for r in before]
+        sp.output = {"rowcount": n, "after": _rows(conn, table, f"rowid IN ({', '.join('?' * len(ids))})", ids)
+                     if ids else []}
+        return n
 
 
 def open_db_readonly(run_dir: Path, writer_alive: bool) -> sqlite3.Connection:

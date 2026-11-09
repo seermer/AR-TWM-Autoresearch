@@ -3,6 +3,8 @@ import json, re, subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .. import subproc
+
 TARGET_ASPECT = 16 / 9
 
 @dataclass(frozen=True)
@@ -42,14 +44,12 @@ def _rotation(stream: dict) -> int:
 
 
 def probe_video(path: Path) -> VideoInfo:
-    proc = subprocess.run(
+    proc = subproc.run(
         ["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
          "-show_entries",
          "stream=nb_read_frames,avg_frame_rate,width,height,duration,sample_aspect_ratio"
          ":stream_tags=rotate:stream_side_data=rotation",
-         "-of", "json", str(path)],
-        capture_output=True, text=True, check=True,
-    )
+         "-of", "json", str(path)], check=True)
     if proc.stderr:     # damage ffprobe reads past, e.g. a truncated file, still exits 0
         reason = re.sub(r"^\[[^\]]*\] ", "", proc.stderr.splitlines()[0])     # ffmpeg's "[h264 @ 0x...] "
         raise ValueError(f"the video is damaged: {reason}")

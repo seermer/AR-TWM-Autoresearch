@@ -1,5 +1,5 @@
 from __future__ import annotations
-import subprocess, tempfile
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -7,6 +7,7 @@ import imagehash
 import numpy as np
 from PIL import Image
 
+from .. import subproc
 from ..config import KernelConfig
 from .probe import probe_video
 
@@ -31,8 +32,8 @@ def _entropy(image: Image.Image) -> float:
 def _extract(video: Path, timestamp: float) -> Image.Image:
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "frame.png"
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{timestamp:.3f}",
-                        "-i", str(video), "-frames:v", "1", str(out)], check=True)
+        subproc.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{timestamp:.3f}",
+                     "-i", str(video), "-frames:v", "1", str(out)], check=True)
         return Image.open(out).copy()
 
 class LeakageChecker:

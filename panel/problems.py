@@ -1,94 +1,85 @@
 """Every failure in a run, newest first: "recorded" by the kernel, or "inferred" from the seed's tool error text."""
 from __future__ import annotations
 
+from ar_kernel.telemetry import tree
+
 from .chat import chains, is_tool_error, request_messages, segments, text_of
 from .runfiles import fmt_ts
 from .views import Run, agent_attempts
 
-HANDLED_ERRORS = {"tool.error", "sandbox.error", "subproc.error"}
+# A decision is a problem when its choice is not one of these.
+FINE = {"contract.step": {"pass"}, "recipe.gate": {"pass"}, "phase.result": {"accept"}, "eval.score": {"score"},
+        "train.outcome": {"checkpoint"}, "train.nonfinite": {"keep"}, "phase.audit": {"go on"},
+        "phase.failure": set(), "eval.failure": set(), "node.fault": set(), "tool.fault": set()}
 
 
-def _row(ts, source, kind, e_or_where, summary, seq=None, detail=None) -> dict:
-    where = e_or_where if isinstance(e_or_where, dict) else {}
-    return {"ts": ts, "time": fmt_ts(ts), "source": source, "kind": kind,
-            "node": where.get("node"), "phase": where.get("phase"), "attempt": where.get("attempt"),
-            "where": e_or_where if isinstance(e_or_where, str) else "", "summary": summary[:300],
+def _row(ts, source, kind, where, summary, seq=None, detail=None) -> dict:
+    node, phase, attempt = where if isinstance(where, tuple) else (None, None, None)
+    return {"ts": ts, "time": fmt_ts(ts), "source": source, "kind": kind, "node": node, "phase": phase,
+            "attempt": attempt, "where": where if isinstance(where, str) else "", "summary": summary[:300],
             "seq": seq, "detail": detail}
 
 
-def _item_errors(result, prefix="") -> list[tuple[str, str]]:
-    """(item, error) pairs anywhere in a job result: {"clips": {path: {"error": ...}}} and alike."""
-    out = []
-    if isinstance(result, dict):
-        if result.get("error") and prefix:
-            out.append((prefix, str(result["error"])))
-        for key, value in result.items():
-            if isinstance(value, (dict, list)):
-                out += _item_errors(value, key if isinstance(value, dict) and "error" in value else prefix)
-    elif isinstance(result, list):
-        for i, value in enumerate(result):
-            out += _item_errors(value, f"{prefix}[{i}]" if isinstance(value, dict) and "error" in value else prefix)
-    return out
+def _said(error: dict | None) -> str:
+    return f"{(error or {}).get('type', '').rsplit('.', 1)[-1]}: {(error or {}).get('message', '')}"
 
 
 def recorded(run: Run) -> list[dict]:
-    events = run.log.events()
-    load = run.log.payload
-    alive = run.files.loop_pid() is not None
-    ended = {(e.get("node"), e.get("phase"), e.get("attempt")) for e in events if e.get("type") == "phase.end"}
-    answered = {e.get("call_id") for e in events if e.get("type") == "llm.response"}
+    """Spans that ended in an error (the innermost of one exception) or refused, handled errors, alerts, failing
+    decisions, rejected ingest candidates, and spans with no end whose writer is gone."""
+    records = run.records.all()
+    load = run.records.payload
+    index = {(r["writer"], r["seq"]): i for i, r in enumerate(records)}
     out = []
-    for e in events:
-        kind, ts, seq = e.get("type", ""), e.get("ts_wall", 0.0), e["_seq"]
-        add = lambda k, summary, detail=None: out.append(_row(ts, "recorded", k, e, summary, seq, detail))
-        if kind == "llm.response" and e.get("status") != 200:
-            body = (load(e.get("payload")) or {}).get("body") or {}
-            message = (body.get("error") or {}).get("message") if isinstance(body.get("error"), dict) else body.get("error")
-            add("llm_call", f"status {e.get('status')}: {message or ''}".strip())
-        elif kind == "llm.request" and e.get("call_id") not in answered:
-            key = (e.get("node"), e.get("phase"), e.get("attempt"))
-            if key in ended or not alive:
-                add("llm_call", "no response recorded (the call never returned)")
-        elif kind == "tool.error":
-            add("tool_error", f"{e.get('tool')}: {(load(e.get('payload')) or {}).get('error', '')}")
-        elif kind == "job.finished":
-            body = load(e.get("payload")) or {}
-            if body.get("error"):
-                add("job_failed", f"job {e.get('job_id')}: {body['error']}")
-            if e.get("state") != "canceled":            # whoever cancelled it did not want those items
-                for item_name, error in _item_errors(body.get("result")):
-                    add("job_item", f"job {e.get('job_id')}: {item_name}: {error}")
-        elif kind == "gate.failed":
-            add("gate_failed", "; ".join(map(str, (load(e.get("payload")) or {}).get("failures") or [])))
-        elif kind == "ingest.rejected":
-            p = load(e.get("payload")) or {}
-            video = (p.get("candidate") or {}).get("video") or ""
-            add("ingest_rejected", f"{video.rsplit('/', 1)[-1]}: " + "; ".join(p.get("reasons") or []))
-        elif kind == "contract.report":
-            p = load(e.get("payload")) or {}
-            if p.get("ok") is False:
-                add("contract_failed", f"{p.get('failed_step')}: {p.get('detail') or ''}")
-        elif kind in ("subproc.end", "subproc.error") and (kind == "subproc.error" or e.get("returncode") != 0):
-            p = load(e.get("payload")) or {}
-            add("subprocess", f"{e.get('phase')}: rc={e.get('returncode')} " + (p.get("stderr") or p.get("error") or "")[-200:])
-        elif kind in ("sandbox.end", "sandbox.error") and (kind == "sandbox.error" or e.get("exit_code") not in (0, None)):
-            add("sandbox", f"sandbox exit={e.get('exit_code')}")
-        elif kind.endswith(".error") and kind not in HANDLED_ERRORS:
-            add("error_event", f"{kind}: {(load(e.get('payload')) or {}).get('error', '')}")
-        elif kind.endswith(".warning"):
-            add("warning", e.get("message") or kind)
-        elif kind == "alert":
-            add("alert", f"{e.get('level')} {e.get('kind')}: {e.get('message')}")
+    for i, r in enumerate(records):
+        where = run.records.place(r)
+        add = lambda kind, summary, detail=None: out.append(_row(r["ts"], "recorded", kind, where, summary, i, detail))
+        if r["kind"] == "end" and r.get("status") in ("error", "refused") \
+                and (span := run.records.span(r["span"])) is not None:
+            name = span.start["name"]
+            error, output = load(r.get("error")), load(r.get("output")) or {}
+            if error is not None and any(isinstance(c, tree.Node) and c.end and c.end.get("status") == "error"
+                                         and _said(load(c.end.get("error"))) == _said(error) for c in span.children):
+                continue                              # the same exception, already listed at its inner span
+            body = output.get("body") if isinstance(output, dict) else None
+            message = (body.get("error") or {}).get("message") if isinstance(body, dict) \
+                and isinstance(body.get("error"), dict) else None
+            if error:
+                said = _said(error)
+            elif "exit_code" in output:
+                stderr = output.get("stderr") or "\n".join(      # captured, or streamed as log records
+                    c["text"] for c in span.children if isinstance(c, dict) and c.get("stream") == "stderr")
+                said = f"exit code {output['exit_code']}: {stderr.strip()[-300:]}".strip(": ")
+            else:
+                said = f"status {output.get('status')}: {message or ''}".strip()
+            add("refused" if r["status"] == "refused" else name, f"{name}: {said}")
+        elif r["kind"] == "error":
+            add("handled error", f"{_said(load(r.get('error')))} → {r.get('handled_as')}")
+        elif r["kind"] == "alert":
+            add("alert", f"{r.get('level')} {r.get('name')}: {r.get('message')}")
+        elif r["kind"] == "decision" and r["name"] in FINE and r.get("chosen") not in FINE[r["name"]]:
+            add(r["name"], f"{r['chosen']}: {r.get('reason') or ''}")
+    for n in run.records.spans():
+        if n.start["name"] == "ingest.candidate" and n.end and n.end.get("status") == "ok":
+            output = load(n.end.get("output")) or {}
+            if output.get("accepted") is False:
+                video = ((load(n.start.get("inputs")) or {}).get("named") or {}).get("video") or ""
+                out.append(_row(n.end["ts"], "recorded", "ingest_rejected", run.records.where(n.id),
+                                f"{video.rsplit('/', 1)[-1]}: " + "; ".join(output.get("reasons") or []),
+                                index.get((n.end["writer"], n.end["seq"]))))
+        elif n.end is None and not run.records.running(n):
+            out.append(_row(n.start["ts"], "recorded", "no end recorded", run.records.where(n.id),
+                            f"{n.start['name']}: {run.records.open_facts(n)}",
+                            index.get((n.start["writer"], n.start["seq"]))))
     return out
 
 
 def _inferred_attempt(run: Run, node: str, phase: str, attempt: int, kernel_tools: set[str]) -> list[dict]:
-    """Error tool outputs of the agent's own tools. A kernel tool's error is recorded as tool.error
-    already, so it is left out here. Each output is timed by the first request that carried it."""
-    load = run.log.payload
+    """Error tool outputs of the agent's own tools. A kernel tool's error is recorded on its span already, so it
+    is left out here. Each output is timed by the first request that carried it."""
+    load = run.records.payload
     out = []
-    events = run.log.events(files=[node])
-    for index, chain in enumerate(chains(segments(events, node, phase, attempt), load)):
+    for index, chain in enumerate(chains(segments(run.records.calls(node, phase, attempt)), load)):
         where = f"{phase}-{attempt} · conversation {index}"
         for seg in chain:
             messages = request_messages(load(seg.calls[-1].request))
@@ -111,15 +102,16 @@ def _inferred_attempt(run: Run, node: str, phase: str, attempt: int, kernel_tool
 
 def inferred(run: Run) -> list[dict]:
     out = []
+    kernel_tools = {n.start["name"].removeprefix("tool.") for n in run.records.spans()
+                    if n.start["name"].startswith("tool.") and n.start["name"] != "tool.request"}
     for n in run.nodes():
         node = n["node_id"]
-        events = run.log.events(files=[node])
-        kernel_tools = {e.get("tool") for e in events if e.get("type") in ("tool.call", "tool.error")}
-        last = tuple(e.get("call_id") for e in events if e.get("type") in ("llm.request", "llm.response"))
         for phase, attempt in agent_attempts(run, node):
+            calls = run.records.calls(node, phase, attempt)
+            last = tuple((c.call_id, c.done_ts) for c in calls)
             key = ("inferred", node, phase, attempt)
             stamp, cached = run.cache.get(key, (None, None))
-            if stamp != last:                          # the node had LLM traffic since: recompute
+            if stamp != last:                          # the attempt had LLM traffic since: recompute
                 cached = _inferred_attempt(run, node, phase, attempt, kernel_tools)
                 run.cache[key] = (last, cached)
             out += cached
@@ -131,10 +123,10 @@ def problems(run: Run) -> list[dict]:
 
 
 def problem_counts(run: Run, hours: float = 1.0) -> list[dict]:
-    """Problems per kind, in the run's last `hours` (ending at its latest event) and in total."""
+    """Problems per kind, in the run's last `hours` (ending at its latest record) and in total."""
     rows = problems(run)
-    events = run.log.events()
-    since = (events[-1].get("ts_wall", 0.0) if events else 0.0) - hours * 3600
+    records = run.records.all()
+    since = max((r["ts"] for r in records), default=0.0) - hours * 3600
     counts: dict[tuple, dict] = {}
     for p in rows:
         c = counts.setdefault((p["kind"], p["source"]), {"kind": p["kind"], "source": p["source"],

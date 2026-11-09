@@ -219,12 +219,25 @@ Run only one loop at a time on a machine.
 ## 8. Monitor
 
 ```bash
-ar status --run-id $RUN                 # nodes, scores, spend, alerts
+ar status --run-id $RUN                 # nodes, scores, spend, alerts, spans with no end
+ar trace --run-id $RUN --node <id>      # what the kernel did for a node, as a tree (below)
 tail -f runs/$RUN.console.log           # raw log
 nvidia-smi                              # GPU use
 ```
 
-Web panel (every conversation, tool call, code edit, training curve, video and score), on a second terminal:
+Everything the kernel does is recorded under `runs/$RUN/telemetry/`. `records/` holds spans (an action from its start
+to its end, nested), decisions (each choice with its inputs and reason), handled errors, output lines, alerts, and GPU
+and host samples; `payloads/` holds their inputs and outputs by content; `files/` holds the bytes of every file a kernel
+tool read from an agent or handed to one. A span with no end was still open when its process stopped; it is never
+closed afterwards.
+
+`ar trace --run-id $RUN` prints the records as trees of spans, in order. `--node N` narrows it to one node (with
+`--attempt K`, to its phase attempts numbered K), `--from SEQ` starts at a record, `--depth D` limits the nesting, and
+`--full` prints payloads whole. `ar trace --run-id $RUN --check` lists telemetry bugs instead (an end with neither
+output nor error, a record without a parent, an unregistered name, a span ended twice, a torn line) and exits 1 if
+there are any.
+
+Web panel (every conversation, tool call, record, code edit, training curve, video and score), on a second terminal:
 
 ```bash
 .envs/autoresearcher/bin/python -m panel --run-id $RUN --port 7860
@@ -260,7 +273,7 @@ nohup ar run --run-id $RUN --resume >> runs/$RUN.console.log 2>&1 &
 ```
 
 Resume keeps every finished node; a node that was still in progress starts again at the phase it stopped in (that phase from scratch, with the same attempt number).
-If WorldModel, WBench or AutoResearcher changed since the run started, resume prints a warning and records a `code_changed` alert: later nodes are then not built and scored like the earlier ones.
+If WorldModel, WBench or AutoResearcher changed since the run started, resume prints a warning and records a `run.code_changed` alert: later nodes are then not built and scored like the earlier ones.
 Do not delete files under `runs/$RUN` by hand.
 
 ## 10. Results
@@ -279,10 +292,10 @@ Do not delete files under `runs/$RUN` by hand.
 | `Hugging Face already holds uploads of a run named ...` | Another run of that name uploaded there (`HFK` set): use a new `--run-id`. |
 | `need 4 free GPUs` / GPU out of memory at start | Fewer idle cards than `gpus.num_gpus`. Check `nvidia-smi` for other processes. |
 | `unset CUDA_VISIBLE_DEVICES` | The run picks its own cards: `unset CUDA_VISIBLE_DEVICES` in that shell. |
-| `phase_failed` alert in `ar status`, and the run stopped | A phase failed twice for a reason that is not the agents' (machine, kernel or LLM provider); the alert carries the error. Fix it, then `--resume`: the phase starts again. |
-| `node_faults` alert in `ar status`, and the run stopped | Two nodes in a row ended because their training or evaluation failed twice (`train_failed` / `eval_failed`); the alert carries the last error. Fix it, then `--resume`. |
+| `loop.phase_failed` alert in `ar status`, and the run stopped | A phase failed twice for a reason that is not the agents' (machine, kernel or LLM provider); the alert carries the error. Fix it, then `--resume`: the phase starts again. |
+| `loop.node_faults` alert in `ar status`, and the run stopped | Two nodes in a row ended because their training or evaluation failed twice (`train_failed` / `eval_failed`); the alert carries the last error. Fix it, then `--resume`. |
 | `enabled tools do not fit this machine` | A tool needs more GPU memory than the run's cards have, in total (`min_total_gpu_gib` in `configs/kernel.yaml`) or on each card (`min_gpu_gib`). Give the run more or larger GPUs, or switch that generator off before starting a new run. |
-| `permission denied (publickey)` for the git remote | `ssh-add` your key in the shell that runs `ar`; check with `ssh -T git@github.com`. It shows up as a warning in `ar status`. |
+| `permission denied (publickey)` for the git remote | `ssh-add` your key in the shell that runs `ar`; check with `ssh -T git@github.com`. It shows up as a `git.push_failed` warning in `ar status`. |
 | `Resource temporarily unavailable` from ffmpeg/decord, `pthread_create failed` from OpenBLAS, or a `KeyboardInterrupt` nobody sent | The per-user process limit is too low (`ulimit -u`, some clusters set 512): run `ulimit -u "$(ulimit -Hu)"` in that shell first. `scripts/sbatch_run.sh` does it. |
 | `ar doctor` fails at `bwrap` | Run `scripts/setup_envs.sh bwrap`; if a sandbox does not start, an administrator must allow unprivileged user namespaces. |
 | Hugging Face `401` / `403` | Re-run `hf auth login` and accept the licences in step 3. |

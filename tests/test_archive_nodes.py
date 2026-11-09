@@ -55,7 +55,7 @@ def test_updating_an_unknown_node_raises_instead_of_silently_doing_nothing(tmp_p
 
 
 def test_node_id_that_is_unsafe_as_a_path_is_rejected(tmp_path):
-    """node_id becomes a directory and a telemetry file name."""
+    """node_id becomes a directory name."""
     import pytest
     from ar_kernel.archive.db import open_db
     from ar_kernel.archive.nodes import NodeStore

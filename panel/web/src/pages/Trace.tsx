@@ -16,9 +16,10 @@ export default function Trace() {
   const [component, setComponent] = useParam("component");
   const [text, setText] = useParam("text");
   const [gpu, setGpu] = useParam("gpu");
+  const [span, setSpan] = useParam("span");
   const [seq, setSeq] = useParam("seq");
   const [draft, setDraft] = useState(text);
-  const filters = q({ node, phase, attempt, types, component, text, gpu: gpu ? "true" : "", limit: PAGE });
+  const filters = q({ node, phase, attempt, types, component, text, span, gpu: gpu ? "true" : "", limit: PAGE });
   const query = useInfiniteQuery({
     queryKey: ["/api/events", filters], initialPageParam: 0,
     queryFn: ({ pageParam }) => get(`/api/events?${filters}&offset=${pageParam}`),
@@ -35,9 +36,9 @@ export default function Trace() {
     <div className="page">
       <Q query={choices} what="filters">{(c) => (
         <div className="filters">
-          {select("source (node, run, gpu)", node, setNode, c.node)}
+          {select("node", node, setNode, c.node)}
           {select("phase", phase, setPhase, c.phase)}
-          {select("attempt (0 = a kernel step)", attempt, setAttempt, c.attempt)}
+          {select("attempt", attempt, setAttempt, c.attempt)}
           {select("component", component, setComponent, c.component)}
           <label className="field">types
             <select value="" onChange={(e) => e.target.value && setTypes([...new Set([...typeList, e.target.value])].join(","))}>
@@ -45,24 +46,25 @@ export default function Trace() {
             </select>
           </label>
           {typeList.map((t) => <button key={t} className="chip active" onClick={() => setTypes(typeList.filter((x) => x !== t).join(","))}>{t} ✕</button>)}
-          <label className="field">search the event records
+          {span && <button className="chip active" onClick={() => setSpan(null)}>under span {span.slice(0, 8)} ✕</button>}
+          <label className="field">search the records
             <input value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => e.key === "Enter" && setText(draft)} onBlur={() => setText(draft)} placeholder="Enter to apply" />
           </label>
           <label className="small"><input type="checkbox" checked={!!gpu} onChange={(e) => setGpu(e.target.checked ? "1" : null)} /> include GPU samples</label>
-          <button className="btn small" onClick={() => { [setNode, setPhase, setAttempt, setTypes, setComponent, setText].forEach((f) => f(null)); setDraft(""); }}>clear</button>
+          <button className="btn small" onClick={() => { [setNode, setPhase, setAttempt, setTypes, setComponent, setText, setSpan].forEach((f) => f(null)); setDraft(""); }}>clear</button>
         </div>
       )}</Q>
       <div className={seq ? "split" : ""}>
-        <Q query={{ data, error: query.error, isLoading: query.isLoading }} what="events">{(d: any) => (
-          <Section title={`${fmtInt(d.total)} events`} note={d.total > d.rows.length ? `first ${fmtInt(d.rows.length)} loaded, oldest first` : "oldest first"}
+        <Q query={{ data, error: query.error, isLoading: query.isLoading }} what="records">{(d: any) => (
+          <Section title={`${fmtInt(d.total)} records`} note={d.total > d.rows.length ? `first ${fmtInt(d.rows.length)} loaded, oldest first` : "oldest first"}
             actions={query.hasNextPage ? <button className="btn small" disabled={query.isFetchingNextPage} onClick={() => query.fetchNextPage()}>
               {query.isFetchingNextPage ? "loading…" : `load ${fmtInt(Math.min(PAGE, d.total - d.rows.length))} more`}</button> : null}>
             <Table rows={d.rows} cols={eventCols} rowKey={(r: any) => String(r.seq)} selected={seq} onRowClick={(r: any) => setSeq(String(r.seq))} maxHeight={window.innerHeight - 260} />
           </Section>
         )}</Q>
-        {seq ? <Section title={`event ${seq}`} actions={<button className="btn small" onClick={() => setSeq(null)}>close</button>}><EventDetail seq={+seq} /></Section> : null}
+        {seq ? <Section title={`record ${seq}`} actions={<button className="btn small" onClick={() => setSeq(null)}>close</button>}><EventDetail seq={+seq} /></Section> : null}
       </div>
-      {!seq && <Empty>Click an event for its full record, its payload and, for model calls, the request or reply as a chat.</Empty>}
+      {!seq && <Empty>Click a record for all of it, its payloads and, for model calls, the request and reply as a chat.</Empty>}
     </div>
   );
 }

@@ -1,4 +1,4 @@
-"""Run alerts and the start-time GPU choice. There is deliberately no wait for idle GPUs."""
+"""The start-time GPU choice. There is deliberately no wait for idle GPUs."""
 from __future__ import annotations
 
 import re
@@ -7,19 +7,16 @@ from typing import Mapping
 
 import psutil
 
+from . import telemetry
 from .config import GpuPolicyError
 from .subproc import memory_cgroup, memory_limit
-
-
-def alert(recorder, kind: str, message: str, *, level: str = "error", **payload) -> None:
-    recorder.event("alert", payload={"kind": kind, "level": level, "message": message, **payload},
-                   kind=kind, level=level, message=message)
 
 
 def smi(args: list[str]) -> str | None:
     try:
         r = subprocess.run(["nvidia-smi", *args], capture_output=True, text=True)
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as exc:
+        telemetry.error(exc, "no reading")
         return None
     return r.stdout if r.returncode == 0 else None
 

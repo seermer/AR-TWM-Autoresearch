@@ -10,6 +10,7 @@ from pathlib import Path
 import yaml
 from ar_contract.models import EditContext, RecipeContext
 
+from . import fs
 from .archive.clips import ClipStore
 from .archive.nodes import NOT_SHOWN, NodeStore
 from .config import run_config_path
@@ -91,7 +92,7 @@ def _entry(conn, run_dir: Path, repo, node: dict, parent_commit: str | None, pha
     return {**entry, "edit": _read_json(_node_file(run_dir, nid, "edit.json")),
             "code_diff_stats": (repo.diff_stats(parent_commit, node["agent_commit"])
                                 if parent_commit and node["agent_commit"] else []),
-            "process": {**process_digest(run_dir, nid), "attempts": attempts}}
+            "process": {**process_digest(conn, nid), "attempts": attempts}}
 
 
 def lineage(conn, run_dir: Path, repo, node_id: str, phase: str) -> list[dict]:
@@ -185,8 +186,8 @@ def write_bundle(ctx, dest: Path, censor: list[str] = (), roots=()) -> Path:
     """`censor`: names replaced in everything written, as are the host folders `roots`. The context carries node and tool error
     texts, and it reaches the model as a user message, which the gateway does not censor."""
     dest = Path(dest)
-    dest.mkdir(parents=True, exist_ok=True)
+    fs.mkdir(dest)
     data = scrub(ctx.model_dump(mode="json"), list(censor), roots)
     path = dest / "context.json"
-    path.write_text(json.dumps(data, indent=1))
+    fs.write_text(path, json.dumps(data, indent=1))
     return path

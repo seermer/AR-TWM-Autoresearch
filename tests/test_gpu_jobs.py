@@ -1,5 +1,5 @@
 """GpuJob plumbing with a fake bridge (no GPU)."""
-from conftest import job_result, job_folder, recorded
+from conftest import job_result, job_folder
 import asyncio
 import json
 import threading
@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 
 from ar_kernel.config import KernelConfig
-from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools.context import TokenRegistry
 from ar_kernel.tools.gpu_jobs import GpuJob, register_gpu_tools, split_gpus
 from ar_kernel.tools.jobs import JobQueue
@@ -38,16 +37,15 @@ class FakeJob(GpuJob):
 
 @pytest.fixture
 def env(tmp_path):
-    rec = Recorder(tmp_path / "run")
-    reg = TokenRegistry(rec)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
+    reg = TokenRegistry()
+    q = JobQueue(tmp_path / "run", threading.Lock(), wait_cap_s=120)
     ws, staging = tmp_path / "ws", tmp_path / "staging"
     ws.mkdir(); staging.mkdir()
     make_mp4(ws / "a.mp4", seconds=2.5, fps=24, width=736, height=414)
-    q.register(FakeJob(KernelConfig.load(), tmp_path / "run", [0, 1, 4, 5], reg, rec,
+    q.register(FakeJob(KernelConfig.load(), tmp_path / "run", [0, 1, 4, 5], reg,
                        gpu_memory=lambda g: {i: 100 for i in g}))
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
-    yield q, caller, rec, ws, staging, tmp_path / "run"
+    yield q, caller, ws, staging, tmp_path / "run"
     q.shutdown()
 
 
@@ -76,7 +74,7 @@ def pids(run, job_id) -> list[int]:
 
 
 def test_items_fan_out_one_worker_per_gpu_and_publish_candidates(env):
-    q, caller, rec, ws, staging, run = env
+    q, caller, ws, staging, run = env
     items = [{"src": "a.mp4", "prompt": f"p{i}", "seed": i} for i in range(6)]
     out = q.wait(caller, submit(q, caller, items)["job_id"], 120)
     assert out["state"] == "done", out
@@ -99,31 +97,32 @@ def test_items_fan_out_one_worker_per_gpu_and_publish_candidates(env):
     assert (work / "logs" / "5.log").read_text() == "item 5\n" and (work / "logs" / "worker3.log").exists()
     assert json.loads((work / "job.json").read_text())["groups"] == [[0], [1], [4], [5]]
     assert job_result(out)["gpu_memory_released"] is True
-    files = recorded(rec)
-    assert {(e["tool"], e["job_id"]) for e in rec.read_events("n1") if e["type"] == "file"} == {("rollout_fake", job)}
-    assert files[("in", "/workspace/a.mp4")] == (ws / "a.mp4").read_bytes()
-    assert files[("out", c["video"])] == (staging / "rollouts" / job / "0.mp4").read_bytes()
-    assert json.loads(files[("out", out["result_file"])]) == job_result(out)
 
 
 def test_a_disk_error_placing_an_output_stops_the_phase_after_killing_the_bridge(env, monkeypatch):
-    q, caller, rec, ws, staging, run = env
+    q, caller, ws, staging, run = env
     import errno
+    from ar_kernel import telemetry
+    from ar_kernel.telemetry import tree
     from ar_kernel.tools import gpu_jobs
+    telemetry.open(run)
+    telemetry.start("ar.run")
 
     def full(*args, **kwargs):
         raise OSError(errno.ENOSPC, "No space left on device")
-    monkeypatch.setattr(gpu_jobs, "publish_file", full)
+    monkeypatch.setattr(gpu_jobs.fs, "place", full)
     t0 = time.monotonic()
     job_id = submit(q, caller, [{"src": "a.mp4"}, {"src": "a.mp4", "sleep": 300}])["job_id"]
     out = q.wait(caller, job_id, 120)
     assert out["state"] == "failed" and "No space left" in out["error"] and time.monotonic() - t0 < 60
     assert caller.fault.event.is_set()
     assert all(_dead(pid) for pid in pids(run, job_id))         # the GPU lock is released only after this
+    items = [n for n in tree.load(run).spans.values() if n.start["name"] == "job.item"]
+    assert items and all(n.end is not None for n in items)       # ar saw the job end: no item span stays open
 
 
 def test_item_failures_crashes_and_cut_messages_are_item_errors(env):
-    q, caller, rec, ws, staging, run = env
+    q, caller, ws, staging, run = env
     items = [{"src": "a.mp4"}, {"src": "a.mp4", "fail": True}, {"src": "a.mp4", "crash": True}, {"src": "a.mp4"},
              {"src": "a.mp4"}, {"src": "a.mp4"}, {"src": "a.mp4"}, {"src": "a.mp4", "truncate": True}]
     out = q.wait(caller, submit(q, caller, items)["job_id"], 120)
@@ -164,7 +163,7 @@ def test_a_log_tail_is_shown_once_and_later_rows_point_to_it(tmp_path):
 
 
 def test_a_bridge_that_fails_before_any_item_gives_every_item_its_error(env):
-    q, caller, rec, ws, staging, run = env
+    q, caller, ws, staging, run = env
     out = q.wait(caller, submit(q, caller, [{"src": "a.mp4"}] * 2, fake="exit_early")["job_id"], 120)
     assert out["state"] == "done"
     for row in job_result(out)["items"]:
@@ -173,14 +172,14 @@ def test_a_bridge_that_fails_before_any_item_gives_every_item_its_error(env):
 
 
 def test_what_the_bridge_leaves_running_is_killed(env):
-    q, caller, rec, ws, staging, run = env
+    q, caller, ws, staging, run = env
     out = q.wait(caller, submit(q, caller, [{"src": "a.mp4"}], fake="orphan")["job_id"], 120)
     assert out["state"] == "done" and "candidate" in job_result(out)["items"][0]
     assert _dead(int((job_folder(run, out["id"]) / "orphan.pid").read_text()))
 
 
 def test_only_files_under_the_jobs_output_folder_are_published(env, tmp_path):
-    q, caller, rec, ws, staging, run = env
+    q, caller, ws, staging, run = env
     backend = q.backends["rollout_fake"]
     elsewhere = tmp_path / "weights.bin"
     elsewhere.write_bytes(b"w")
@@ -191,7 +190,7 @@ def test_only_files_under_the_jobs_output_folder_are_published(env, tmp_path):
 
 
 def test_progress_counts_finished_items(env):
-    q, caller, rec, ws, staging, run = env
+    q, caller, ws, staging, run = env
     job_id = submit(q, caller, [{"src": "a.mp4"}, {"src": "a.mp4", "sleep": 300}])["job_id"]
     deadline = time.monotonic() + 60
     while q.status(caller, job_id)["progress"] != {"done": 1, "total": 2} and time.monotonic() < deadline:
@@ -202,7 +201,7 @@ def test_progress_counts_finished_items(env):
 
 
 def test_a_slow_job_runs_to_its_end(env):
-    q, caller, rec, ws, staging, run = env
+    q, caller, ws, staging, run = env
     assert not hasattr(q.backends["rollout_fake"], "timeout_s")
     job_id = submit(q, caller, [{"src": "a.mp4", "sleep": 3}])["job_id"]
     out = q.wait(caller, job_id, 60)
@@ -211,7 +210,7 @@ def test_a_slow_job_runs_to_its_end(env):
 
 
 def test_missing_or_escaping_input_is_refused_at_submit(env):
-    q, caller, rec, ws, staging, run = env
+    q, caller, ws, staging, run = env
     with pytest.raises(ToolError):
         submit(q, caller, [{"src": "nope.mp4"}])
     with pytest.raises(ToolError):
@@ -221,7 +220,7 @@ def test_missing_or_escaping_input_is_refused_at_submit(env):
 
 
 def test_a_planted_link_in_staging_fails_the_item_not_the_host(env, tmp_path):
-    q, caller, rec, ws, staging, run = env
+    q, caller, ws, staging, run = env
     outside = tmp_path / "outside"; outside.mkdir()
     job_id = submit(q, caller, [{"src": "a.mp4", "sleep": 2}])["job_id"]
     (staging / "rollouts").mkdir()
@@ -232,7 +231,7 @@ def test_a_planted_link_in_staging_fails_the_item_not_the_host(env, tmp_path):
 
 
 def test_cancel_kills_every_worker(env):
-    q, caller, rec, ws, staging, run = env
+    q, caller, ws, staging, run = env
     job_id = submit(q, caller, [{"src": "a.mp4", "sleep": 300} for _ in range(4)])["job_id"]
     deadline = time.monotonic() + 30
     while (not (job_folder(run, job_id) / "pids").is_dir() or len(pids(run, job_id)) < 5) \
@@ -248,14 +247,14 @@ def test_cancel_kills_every_worker(env):
 
 
 def test_registration_exposes_only_tools_for_backends_on_the_queue(env):
-    q, caller, rec, ws, staging, run = env
+    q, caller, ws, staging, run = env
 
     class Wan22Fake(FakeJob):
         name = tool = "rollout_wan22"
 
-    q.register(Wan22Fake(KernelConfig.load(), run, [0, 1, 4, 5], TokenRegistry(rec), rec,
+    q.register(Wan22Fake(KernelConfig.load(), run, [0, 1, 4, 5], TokenRegistry(),
                          gpu_memory=lambda g: {i: 100 for i in g}))
-    kit, mcp = ToolKit(TokenRegistry(rec), rec), new_mcp()
+    kit, mcp = ToolKit(TokenRegistry(), run), new_mcp()
     register_gpu_tools(mcp, kit, q)
     names = {t.name for t in asyncio.run(mcp.list_tools())}
     assert "rollout_wan22" in names                     # registered backend: the tool appears
@@ -265,7 +264,7 @@ def test_registration_exposes_only_tools_for_backends_on_the_queue(env):
 def test_commanded_camera_is_published_under_its_own_name_not_as_pose(env):
     """rollout_alayaworld's commanded camera path is metadata: its own file, never the pose role."""
     import numpy as np
-    q, caller, rec, ws, staging, run = env
+    q, caller, ws, staging, run = env
     backend = q.backends["rollout_fake"]
 
     def finish(job, item, outputs, info, out):
@@ -306,17 +305,15 @@ def toggled_cfg(annotate=True, images=True, alaya=True, wan=True, ltx=True, h3=T
 ])
 def test_build_gpu_backends_returns_exactly_the_enabled_backends_plus_the_captioner(tmp_path, kw, expected):
     from ar_kernel.tools.gpu_jobs import build_gpu_backends
-    rec = Recorder(tmp_path / "run")
     names = [b.name for b in build_gpu_backends(toggled_cfg(**kw), tmp_path / "run", [0, 1, 2, 3],
-                                                TokenRegistry(rec), rec)]
+                                                TokenRegistry())]
     assert sorted(names) == sorted(expected | {"caption_videos", "locate_events"})     # always present
 
 
 def test_the_default_config_has_wan_off_and_ltx_on(tmp_path):
     from ar_kernel.tools.gpu_jobs import build_gpu_backends
-    rec = Recorder(tmp_path / "run")
     cfg = KernelConfig.load()
-    backends = {b.name: b for b in build_gpu_backends(cfg, tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)}
+    backends = {b.name: b for b in build_gpu_backends(cfg, tmp_path / "run", [0, 1, 2, 3], TokenRegistry())}
     assert "rollout_wan22" not in backends and "rollout_alayaworld" in backends
     assert backends["rollout_ltx25"].generator == "ltx-2.5-dev"
 
@@ -324,14 +321,13 @@ def test_the_default_config_has_wan_off_and_ltx_on(tmp_path):
 def test_listed_tools_show_only_enabled_tools(tmp_path):
     from ar_kernel.tools.captioner import register_caption_tool
     from ar_kernel.tools.gpu_jobs import build_gpu_backends
-    rec = Recorder(tmp_path / "run")
-    reg = TokenRegistry(rec)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=60)
+    reg = TokenRegistry()
+    q = JobQueue(tmp_path / "run", threading.Lock(), wait_cap_s=60)
     try:
         for b in build_gpu_backends(toggled_cfg(images=False, wan=False, h3=False),
-                                    tmp_path / "run", [0, 1, 2, 3], reg, rec):
+                                    tmp_path / "run", [0, 1, 2, 3], reg):
             q.register(b)
-        kit, mcp = ToolKit(reg, rec), new_mcp()
+        kit, mcp = ToolKit(reg, tmp_path / "run"), new_mcp()
         register_gpu_tools(mcp, kit, q)
         register_caption_tool(mcp, kit, q)
         tools = {t.name: t for t in asyncio.run(mcp.list_tools())}
@@ -345,14 +341,13 @@ def test_listed_tools_show_only_enabled_tools(tmp_path):
 
 def _listed_tools(tmp_path):
     from ar_kernel.tools.gpu_jobs import build_gpu_backends
-    rec = Recorder(tmp_path / "run")
-    reg = TokenRegistry(rec)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=60)
+    reg = TokenRegistry()
+    q = JobQueue(tmp_path / "run", threading.Lock(), wait_cap_s=60)
     try:
-        backends = build_gpu_backends(toggled_cfg(), tmp_path / "run", [0, 1, 2, 3], reg, rec)
+        backends = build_gpu_backends(toggled_cfg(), tmp_path / "run", [0, 1, 2, 3], reg)
         for b in backends:
             q.register(b)
-        kit, mcp = ToolKit(reg, rec), new_mcp()
+        kit, mcp = ToolKit(reg, tmp_path / "run"), new_mcp()
         register_gpu_tools(mcp, kit, q)
         return {t.name: t for t in asyncio.run(mcp.list_tools())}, {b.name: b for b in backends}
     finally:
@@ -415,11 +410,10 @@ def test_a_prompt_copied_from_the_evaluation_is_refused_before_the_job_is_queued
     from ar_kernel.isolation import EXCLUDED_PROMPT
     from ar_kernel.tools.images import ImageBackend
     from ar_kernel.tools.server import ToolError
-    rec = Recorder(tmp_path / "run")
-    reg = TokenRegistry(rec)
+    reg = TokenRegistry()
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=tmp_path,
                        staging_host=tmp_path)
-    backend = ImageBackend(KernelConfig.load(), tmp_path / "run", [0], reg, rec)
+    backend = ImageBackend(KernelConfig.load(), tmp_path / "run", [0], reg)
 
     class Queue:
         submitted = 0
@@ -437,7 +431,6 @@ def test_a_prompt_copied_from_the_evaluation_is_refused_before_the_job_is_queued
     assert "item 2: prompt must be a non-empty string" in str(refused.value) and "item 3: seed is missing" in str(refused.value)
     assert q.submitted == 0
     assert backend.submit(q, caller, {"items": [{"prompt": "a quiet beach", "seed": 1}]}) == {"job_id": "job1"}
-    assert [e["type"] for e in rec.read_events("n1")].count("isolation.refused") == 1
 
 
 # ---- max_items: the optional per-job item cap ----
@@ -451,13 +444,12 @@ def _capped(tmp_path, cap):
     class CappedJob(FakeJob):
         name = tool = "rollout_capped"
         config_key = "annotate"
-    rec = Recorder(tmp_path / "run2")
-    return CappedJob(KernelConfig(raw=raw, repo_root=base.repo_root), tmp_path / "run2", [0], TokenRegistry(rec), rec)
+    return CappedJob(KernelConfig(raw=raw, repo_root=base.repo_root), tmp_path / "run2", [0], TokenRegistry())
 
 
 def test_a_job_over_max_items_is_refused_whole(env, tmp_path):
     from ar_kernel.tools.gpu_jobs import job_description
-    q, caller, rec, ws, staging, run = env
+    q, caller, ws, staging, run = env
     backend = _capped(tmp_path, 2)
     items = [{"src": "a.mp4", "seed": i} for i in range(3)]
     with pytest.raises(ToolError, match="at most 2 items per job: got 3"):
@@ -470,7 +462,7 @@ def test_a_job_over_max_items_is_refused_whole(env, tmp_path):
 
 def test_no_max_items_means_no_cap(env):
     from ar_kernel.tools.gpu_jobs import job_description
-    q, caller, rec, ws, staging, run = env
+    q, caller, ws, staging, run = env
     backend = q.backends["rollout_fake"]
     assert backend.max_items is None and "At most" not in job_description(backend)
 
@@ -496,10 +488,10 @@ class KeyframeJob(FakeJob):
 @pytest.fixture
 def keyed(env):
     from PIL import Image
-    q, caller, rec, ws, staging, run = env
+    q, caller, ws, staging, run = env
     Image.new("RGB", (64, 36), (1, 2, 3)).save(ws / "a.png")
     Image.new("RGB", (64, 36), (9, 9, 9)).save(ws / "b.png")
-    q.register(KeyframeJob(KernelConfig.load(), run, [0], q.backends["rollout_fake"].registry, rec,
+    q.register(KeyframeJob(KernelConfig.load(), run, [0], q.backends["rollout_fake"].registry,
                            gpu_memory=lambda g: {i: 100 for i in g}))
     return q, caller, q.backends["rollout_keyed"], run
 
@@ -551,13 +543,12 @@ def test_no_tool_description_names_another_generator_or_optional_tool(tmp_path):
     import re
     from ar_kernel.tools.captioner import register_caption_tool
     from ar_kernel.tools.gpu_jobs import build_gpu_backends
-    rec = Recorder(tmp_path / "run")
-    reg = TokenRegistry(rec)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=60)
+    reg = TokenRegistry()
+    q = JobQueue(tmp_path / "run", threading.Lock(), wait_cap_s=60)
     try:
-        for b in build_gpu_backends(toggled_cfg(), tmp_path / "run", [0, 1, 2, 3], reg, rec):
+        for b in build_gpu_backends(toggled_cfg(), tmp_path / "run", [0, 1, 2, 3], reg):
             q.register(b)
-        kit, mcp = ToolKit(reg, rec), new_mcp()
+        kit, mcp = ToolKit(reg, tmp_path / "run"), new_mcp()
         register_gpu_tools(mcp, kit, q)
         register_caption_tool(mcp, kit, q)
         tools = {t.name: t.description for t in asyncio.run(mcp.list_tools())}
@@ -581,3 +572,63 @@ def test_a_frame_image_with_an_exif_orientation_is_refused(tmp_path):
     check_frame_image(KernelConfig.load(), tmp_path / "plain.jpg", (64, 36), "image")
     with pytest.raises(ToolError, match="image carries an EXIF orientation"):
         check_frame_image(KernelConfig.load(), tmp_path / "turned.jpg", (64, 36), "image")
+
+
+def test_a_bridge_job_records_its_lock_wait_bridge_process_and_one_span_per_item(env):
+    from ar_kernel import telemetry
+    from ar_kernel.telemetry import tree
+    from conftest import telemetry_payload, telemetry_records
+    q, caller, ws, staging, run = env
+    telemetry.open(run)
+    telemetry.start("ar.run")
+    items = [{"src": "a.mp4", "prompt": "p0", "seed": 0}, {"src": "a.mp4", "prompt": "p1", "seed": 1, "fail": True}]
+    out = q.wait(caller, submit(q, caller, items)["job_id"], 120)
+    assert out["state"] == "done", out
+    records = telemetry_records(run)
+    [job] = [r for r in records if r["kind"] == "start" and r["name"] == "job.rollout_fake"]
+    under = [r["name"] for r in records if r["kind"] == "start" and r["parent"] == job["span"]]
+    assert {"job.gpu_lock", "process", "job.item"} <= set(under) and under.count("job.item") == 2
+    ends = {r["span"]: r for r in records if r["kind"] == "end"}
+    item_spans = [r for r in records if r["kind"] == "start" and r["name"] == "job.item"]
+    statuses = sorted(ends[r["span"]]["status"] for r in item_spans)
+    assert statuses == ["error", "ok"]
+    [failed] = [ends[r["span"]] for r in item_spans if ends[r["span"]]["status"] == "error"]
+    assert telemetry_payload(run, failed["output"])["message"]["error"]          # the bridge's whole error
+    handed = [r for r in records if r["kind"] == "start" and r["name"] == "file.kept"
+              and telemetry_payload(run, r["inputs"])["how"] == "handed"]
+    assert any(telemetry_payload(run, h["inputs"])["path"].endswith("/0.mp4") for h in handed)
+    assert ends[job["span"]]["status"] == "ok"
+    assert tree.check(tree.load(run)) == []
+
+
+def test_gpu_memory_not_given_back_after_a_job_is_an_alert(tmp_path):
+    import copy
+    from ar_kernel import telemetry
+    from ar_kernel.telemetry import tree
+    from conftest import telemetry_records
+    raw = copy.deepcopy(KernelConfig.load().raw)
+    raw.setdefault("captioner", {})["memory_release_timeout_s"] = 0
+    cfg = KernelConfig(raw=raw, repo_root=KernelConfig.load().repo_root)
+    used = [100]
+
+    class Holding(FakeJob):
+        def finish(self, job, item, outputs, info, out):
+            used[0] = 9000                                    # the worker left memory behind
+            return super().finish(job, item, outputs, info, out)
+    reg, run = TokenRegistry(), tmp_path / "run"
+    q = JobQueue(run, threading.Lock(), wait_cap_s=120)
+    ws, staging = tmp_path / "ws", tmp_path / "staging"
+    ws.mkdir(); staging.mkdir()
+    make_mp4(ws / "a.mp4", seconds=1, fps=24, width=736, height=414)
+    q.register(Holding(cfg, run, [0], reg, gpu_memory=lambda g: {i: used[0] for i in g}))
+    caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
+    telemetry.open(run)
+    telemetry.start("ar.run")
+    try:
+        out = q.wait(caller, submit(q, caller, [{"src": "a.mp4", "prompt": "p", "seed": 0}])["job_id"], 120)
+    finally:
+        q.shutdown()
+    assert job_result(out)["gpu_memory_released"] is False
+    [alert] = [r for r in telemetry_records(run) if r["kind"] == "alert"]
+    assert alert["name"] == "job.gpu_memory_held" and alert["details"]["after"] == {"0": 9000}
+    assert tree.check(tree.load(run)) == []

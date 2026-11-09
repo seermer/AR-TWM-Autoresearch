@@ -1,5 +1,3 @@
-import json
-
 import pytest
 
 from ar_kernel.budget import Budget, BudgetError, usage_tokens
@@ -46,26 +44,33 @@ def test_dollar_cap_needs_prices():
         Budget.from_config(cfg)
 
 
-def test_load_recounts_real_calls_only(tmp_path):
-    events = tmp_path / "telemetry" / "events"
-    events.mkdir(parents=True)
-    lines = [{"type": "llm.response", "usage": {"prompt_tokens": 10, "completion_tokens": 5}, "mock": False},
-             {"type": "llm.response", "usage": {"prompt_tokens": 999, "completion_tokens": 9}, "mock": True},
-             {"type": "tool.call"}]
-    (events / "n1.jsonl").write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+def _call(run, usage, mock=False, budget=Budget(prices=PRICES)):
+    from ar_kernel.archive.activity import add_call
+    add_call(run, node="n1", phase="improve_recipe", attempt=1, role=None, tool=None, conversation_id="c", turn=0,
+             transcript=None, status=200, tokens=usage_tokens(usage), cost_usd=None if mock else budget.cost(usage),
+             mock=mock, audit_hits=[])
+
+
+def test_load_counts_real_calls_only_and_twice_counts_once(tmp_path):
+    from ar_kernel.archive.db import open_db
+    _call(tmp_path, {"prompt_tokens": 10, "completion_tokens": 5})
+    _call(tmp_path, {"prompt_tokens": 999, "completion_tokens": 9}, mock=True)
     b = Budget(prices=PRICES)
-    b.load(tmp_path)
-    assert b.snapshot()["tokens"] == 15 and b.snapshot()["calls"] == 1
+    b.load(open_db(tmp_path)), b.load(open_db(tmp_path))
+    assert b.snapshot() == {"usd": (10 * 2.0 + 5 * 8.0) / 1e6, "tokens": 15, "calls": 1, "max_usd": None}
 
 
-def test_load_twice_does_not_double_count(tmp_path):
-    events = tmp_path / "telemetry" / "events"
-    events.mkdir(parents=True)
-    (events / "n1.jsonl").write_text(json.dumps({"type": "llm.response", "mock": False,
-                                                 "usage": {"prompt_tokens": 10, "completion_tokens": 5}}) + "\n")
-    b = Budget()
-    b.load(tmp_path), b.load(tmp_path)
-    assert b.snapshot()["tokens"] == 15 and b.snapshot()["calls"] == 1
+def test_the_spend_is_the_same_after_a_reopen(tmp_path):
+    """What the live budget counted is what a resumed run loads."""
+    from ar_kernel.archive.db import open_db
+    live = Budget(prices=PRICES)
+    for usage in ({"prompt_tokens": 1000, "completion_tokens": 50}, {"input_tokens": 7, "output_tokens": 3,
+                                                                       "input_tokens_details": {"cached_tokens": 4}}):
+        live.record(200, usage)
+        _call(tmp_path, usage)
+    resumed = Budget(prices=PRICES)
+    resumed.load(open_db(tmp_path))
+    assert resumed.snapshot() == live.snapshot()
 
 
 def test_error_rate_window():
@@ -87,13 +92,3 @@ def test_string_prices_and_cap_are_numbers():     # YAML loads "2e-6" (no dot) a
 def test_unparsable_or_negative_budget_values_are_rejected(max_usd, prices):
     with pytest.raises(BudgetError):
         Budget(max_usd=max_usd, prices=prices)
-
-
-def test_load_skips_a_torn_trailing_line(tmp_path):
-    events = tmp_path / "telemetry" / "events"
-    events.mkdir(parents=True)
-    good = json.dumps({"type": "llm.response", "mock": False, "usage": {"prompt_tokens": 10, "completion_tokens": 5}})
-    (events / "n1.jsonl").write_text(good + "\n" + good[:30])       # kill -9 / ENOSPC mid-write
-    b = Budget()
-    b.load(tmp_path)
-    assert b.snapshot()["calls"] == 1

@@ -7,7 +7,6 @@ import pytest
 
 from ar_kernel.config import KernelConfig
 from ar_kernel.faults import KernelFault, NodeFault
-from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.train import runner as runner_mod
 from ar_kernel.train.runner import TrainRunner, newest_checkpoint, nonfinite_tensors, outcome
 
@@ -120,28 +119,67 @@ def test_training_and_its_precache_run_without_a_time_limit(tmp_path, monkeypatc
         seen.append(kw)
         return train(env, args, **kw) if "log_path" in kw else subprocess.CompletedProcess(args, 0, "", "")
     monkeypatch.setattr(runner_mod, "run_in_env", fake_run)
-    runner = TrainRunner(KernelConfig.load(), Recorder(tmp_path))
-    runner.precache(resolved, [0, 1, 2, 3], "n1")
-    runner.train(resolved, [0, 1, 2, 3], "n1", tmp_path / "node")
+    from ar_kernel import telemetry
+    from ar_kernel.telemetry import tree
+    from conftest import telemetry_records
+    telemetry.open(tmp_path / "run")
+    telemetry.start("ar.run")
+    runner = TrainRunner(KernelConfig.load())
+    runner.precache(resolved, [0, 1, 2, 3])
+    runner.train(resolved, [0, 1, 2, 3], tmp_path / "node")
     assert len(seen) == 2 and not any("timeout" in kw or "liveness" in kw for kw in seen)
+    records = telemetry_records(tmp_path / "run")
+    ends = {r["name"]: r["status"] for r in records if r["kind"] == "end"}
+    assert ends["train.precache"] == "ok" and ends["train"] == "ok"
+    assert [r["chosen"] for r in records if r["kind"] == "decision" and r["name"] == "train.nonfinite"] == ["keep"]
+    assert tree.check(tree.load(tmp_path / "run")) == []
 
 
 def test_a_failed_precache_is_the_kernels(tmp_path, monkeypatch):
     resolved, _ = _resolved(tmp_path)
     monkeypatch.setattr(runner_mod, "run_in_env", lambda env, args, **kw: subprocess.CompletedProcess(args, 1, "", "OOM"))
     with pytest.raises(KernelFault, match="precache"):
-        TrainRunner(KernelConfig.load(), Recorder(tmp_path)).precache(resolved, [0, 1], "n1")
+        TrainRunner(KernelConfig.load()).precache(resolved, [0, 1])
 
 
 def test_trainer_state_is_deleted_after_success(tmp_path, monkeypatch):
     resolved, outputs = _resolved(tmp_path)
     monkeypatch.setattr(runner_mod, "run_in_env", _training(outputs, np.ones(2, np.float32).tobytes()))
-    checkpoint = TrainRunner(KernelConfig.load(), Recorder(tmp_path)).train(resolved, [0, 1, 2, 3], "n1", tmp_path / "node")
+    checkpoint = TrainRunner(KernelConfig.load()).train(resolved, [0, 1, 2, 3], tmp_path / "node")
     assert not (checkpoint / "trainer_state.pt").exists() and (checkpoint / "lora.safetensors").exists()
 
 
 def test_a_lora_holding_nan_is_the_nodes(tmp_path, monkeypatch):
     resolved, outputs = _resolved(tmp_path)
     monkeypatch.setattr(runner_mod, "run_in_env", _training(outputs, np.array([1, np.nan], np.float32).tobytes()))
+    from ar_kernel import telemetry
+    from conftest import telemetry_records
+    telemetry.open(tmp_path / "run")
+    telemetry.start("ar.run")
     with pytest.raises(NodeFault, match="NaN or inf in 1 tensors"):
-        TrainRunner(KernelConfig.load(), Recorder(tmp_path)).train(resolved, [0, 1, 2, 3], "n1", tmp_path / "node")
+        TrainRunner(KernelConfig.load()).train(resolved, [0, 1, 2, 3], tmp_path / "node")
+    assert [r["chosen"] for r in telemetry_records(tmp_path / "run") if r.get("name") == "train.nonfinite"] == [
+        "node fault"]
+
+
+@pytest.mark.parametrize("log, returncode, checkpoint, chosen, matched", [
+    ("step 10 loss=0.1\n", 0, True, "checkpoint", []),
+    ("step 3\nstep 4 loss=nan\n", 1, False, "node fault", [["loss=nan", 2, "step 4 loss=nan"]]),
+    ("ok\nCUDA out of memory here\n", 1, False, "kernel fault", [["CUDA out of memory", 2, "CUDA out of memory here"]]),
+    ("done\n", 0, False, "kernel fault", []),
+    ("Traceback\n", 1, False, "node fault", []),
+], ids=["checkpoint", "diverged", "machine", "no checkpoint", "crash"])
+def test_each_outcome_is_a_decision_naming_the_matched_line(tmp_path, log, returncode, checkpoint, chosen, matched):
+    from ar_kernel import telemetry
+    from conftest import telemetry_payload, telemetry_records
+    telemetry.open(tmp_path)
+    telemetry.start("ar.run")
+    try:
+        outcome(log, returncode, tmp_path if checkpoint else None, "train.log")
+    except (NodeFault, KernelFault):
+        pass
+    [d] = [r for r in telemetry_records(tmp_path) if r["kind"] == "decision"]
+    assert d["name"] == "train.outcome" and d["chosen"] == chosen
+    assert telemetry_payload(tmp_path, d["inputs"])["matched"] == matched
+    from ar_kernel.telemetry import tree
+    assert tree.check(tree.load(tmp_path)) == []

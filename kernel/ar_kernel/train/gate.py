@@ -31,10 +31,9 @@ def resolve_config(cfg: KernelConfig, commits, run_dir: Path, recipe: dict, data
 
 
 class Gate:
-    def __init__(self, cfg: KernelConfig, commits, recorder) -> None:
+    def __init__(self, cfg: KernelConfig, commits) -> None:
         self.cfg = cfg
         self.commits = commits
-        self.recorder = recorder
 
     def check(self, recipe: dict, commit_id: str, parent_commit: str | None, node_id: str,
               node_dir: Path, run_dir: Path, gpus: list[int]) -> list[str]:
@@ -44,7 +43,7 @@ class Gate:
         value_failures = validate_recipe_values(recipe)
         if value_failures:
             # Everything below does arithmetic on these values; stop before it can raise.
-            return self._failed(node_id, recipe, failures + value_failures)
+            return failures + value_failures
 
         manifest = self.commits.manifest(commit_id)
         base_recipe = run_config_path(self.cfg, run_dir, "base_recipe.yaml")
@@ -82,7 +81,7 @@ class Gate:
                 f"steps, fewer than optimizer.max_steps={max_steps}")
 
         if failures:
-            return self._failed(node_id, recipe, failures)
+            return failures
 
         resolved = resolve_config(self.cfg, self.commits, run_dir, recipe, commit_id, node_id, node_dir)
         gpu_list = ",".join(str(g) for g in gpus)
@@ -94,24 +93,13 @@ class Gate:
         ]
         for label, args in checks:
             proc = run_in_env("alayaworld", args, cwd=self.cfg.worldmodel,
-                              extra_env={"CUDA_VISIBLE_DEVICES": gpu_list},
-                              recorder=self.recorder, node=node_id, phase="gate")
+                              extra_env={"CUDA_VISIBLE_DEVICES": gpu_list})
             failures += findings(label, proc)
 
         describe = run_in_env(
             "alayaworld", ["bash", "scripts/finetune/lowcompute_4x4090.sh"],
             cwd=self.cfg.worldmodel,
             extra_env={"CONFIG_PATH": str(resolved), "CUDA_VISIBLE_DEVICES": gpu_list,
-                       "DESCRIBE": "1"},
-            recorder=self.recorder, node=node_id, phase="gate")
+                       "DESCRIBE": "1"})
         failures += list(dict.fromkeys(findings("describe", describe)))      # every rank prints its own
-
-        self.recorder.event("gate.failed" if failures else "gate.passed", node=node_id, phase="gate",
-                            payload={"failures": failures, "recipe": recipe,
-                                     "resolved": str(resolved)})
-        return failures
-
-    def _failed(self, node_id: str, recipe: dict, failures: list[str]) -> list[str]:
-        self.recorder.event("gate.failed", node=node_id, phase="gate",
-                            payload={"failures": failures, "recipe": recipe})
         return failures

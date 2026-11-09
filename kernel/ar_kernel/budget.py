@@ -4,10 +4,10 @@ reached; the loop reads the same ledger to stop the run. Mock calls never count.
 from __future__ import annotations
 
 import collections
-import json
 import threading
 import time
-from pathlib import Path
+
+from .archive.activity import spend
 
 PRICE_KEYS = ("input", "cached_input", "output")
 
@@ -94,25 +94,12 @@ class Budget:
         # connection errors, 599 in Upstream.post): a 400 caused by the agent's own request is not an outage.
         return sum(s in (401, 402, 403, 429) or s >= 500 for s in recent) / len(recent), len(recent)
 
-    def load(self, run_dir: Path) -> None:
-        """Re-count the real calls already recorded for this run (resume and `ar status`). Resets
-        the totals first, so calling it twice never double-counts. Statuses are not re-added: the
-        error-rate window is about the live process."""
+    def load(self, conn) -> None:
+        """The real calls this run already made, from the archive (resume and `ar status`). Statuses are not
+        re-added: the error-rate window is about the live process."""
+        calls, tokens, usd = spend(conn)
         with self._lock:
-            self.usd, self.tokens, self.calls = 0.0, 0, 0
-        for path in sorted((Path(run_dir) / "telemetry" / "events").glob("*.jsonl")):
-            for line in path.read_text(encoding="utf-8").splitlines():
-                if '"llm.response"' not in line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:            # a line torn by kill -9 or a full disk
-                    continue
-                if event.get("type") != "llm.response" or event.get("mock"):
-                    continue
-                cost = self.cost(event.get("usage"))
-                with self._lock:
-                    self._add(event.get("usage"), cost)
+            self.calls, self.tokens, self.usd = calls, tokens, usd
 
     def snapshot(self) -> dict:
         with self._lock:

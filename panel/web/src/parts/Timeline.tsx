@@ -13,7 +13,7 @@ const rank = (lane: string) => {
 const BAD = "#ff2d2d", WARN = "#f5a524", GREY = "#8b8d98";
 const LANES = PALETTE.filter((c) => !["#e8684a", "#ff99c3", "#ff9d4d", "#f6bd16"].includes(c));
 
-type Span = { lane: string; label: string; start: number; end: number; status: string; node?: string; phase?: string; attempt?: number; seq?: number; inferred?: boolean; [k: string]: any };
+type Span = { lane: string; label: string; start: number; end: number; status: string; node?: string; phase?: string; attempt?: number; seq?: number; [k: string]: any };
 
 function pack(spans: Span[]) {
   const lanes = [...new Set(spans.map((s) => s.lane))].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
@@ -31,7 +31,7 @@ function pack(spans: Span[]) {
   return { rows, placed, lanes };
 }
 
-/** Every recorded span (start/end pair) and mark of the run, or of one node, on one time axis. */
+/** The run's spans and marks (alerts, errors, failed checks), or one node's, on one time axis. */
 export function Timeline({ node, height = 520 }: { node?: string; height?: number }) {
   const query = useApi(`/api/timeline?${q({ node })}`);
   return <Q query={query} what="timeline">{(d) => <TimelineChart data={d} node={node} height={height} />}</Q>;
@@ -66,13 +66,13 @@ function TimelineChart({ data, node, height }: { data: any; node?: string; heigh
         formatter: (p: any) => {
           const s: Span | undefined = p.data?.span;
           const m = p.data?.mark;
-          if (m) return `<b>${m.type}</b><br/>${m.label ?? ""}<br/>${fmtTs(m.ts)}<br/>${m.node ?? ""} · ${m.phase ?? ""} · ${m.attempt ?? ""}<br/><i>click: open the event</i>`;
+          if (m) return `<b>${m.type}</b><br/>${m.label ?? ""}<br/>${fmtTs(m.ts)}<br/>${m.node ?? ""} · ${m.phase ?? ""} · ${m.attempt ?? ""}<br/><i>click: open the record</i>`;
           if (!s) return "";
-          const extra = Object.entries(s).filter(([k, v]) => !["lane", "label", "start", "end", "status", "node", "phase", "attempt", "seq", "end_seq", "inferred"].includes(k) && v !== null && v !== undefined)
+          const extra = Object.entries(s).filter(([k, v]) => !["lane", "label", "start", "end", "status", "node", "phase", "attempt", "seq", "end_seq"].includes(k) && v !== null && v !== undefined)
             .map(([k, v]) => `${k}: ${v}`).join("<br/>");
           return `<b>${s.label}</b> <span style="opacity:.7">(${s.lane})</span><br/>${s.node ?? ""} · ${s.phase ?? ""} · attempt ${s.attempt ?? ""}<br/>`
             + `${fmtTs(s.start)} → ${s.status === "running" ? "now" : fmtTs(s.end)}<br/>${fmtDur(s.end - s.start)} · <b>${s.status}</b>`
-            + `${s.inferred ? "<br/><i>start/end paired by order (inferred)</i>" : ""}${extra ? "<br/>" + extra : ""}<br/><i>click: ${s.lane === "node" ? "open the node" : "open the start event"}</i>`;
+            + `${extra ? "<br/>" + extra : ""}<br/><i>click: ${s.lane === "node" ? "open the node" : "open the span"}</i>`;
         },
       },
       grid: { left: 150, right: rows.length > 30 ? 40 : 20, top: 10, bottom: 60 },
@@ -93,7 +93,7 @@ function TimelineChart({ data, node, height }: { data: any; node?: string; heigh
               { x: params.coordSys.x, y: params.coordSys.y, width: params.coordSys.width, height: params.coordSys.height });
             const s: Span = placed[params.dataIndex][0];
             if (!shape) return null;
-            const rect = { type: "rect", shape, style: { fill: color(s), opacity: s.status === "running" ? 0.55 : 0.9, stroke: s.inferred ? "#fff" : undefined, lineDash: s.inferred ? [2, 2] : undefined } };
+            const rect = { type: "rect", shape, style: { fill: color(s), opacity: s.status === "running" ? 0.55 : 0.9 } };
             if (s.lane !== "node" || shape.width < 40) return rect;
             return { type: "group", children: [rect, { type: "text", style: { text: s.label, x: shape.x + 4, y: shape.y + shape.height / 2, verticalAlign: "middle", fill: "#000", font: "10px sans-serif" } }] };
           },
@@ -116,7 +116,7 @@ function TimelineChart({ data, node, height }: { data: any; node?: string; heigh
             const h = new Set(hidden); h.has(l) ? h.delete(l) : h.add(l); setHidden(h);
           }} /><span className="swatch" style={{ background: LANES[i % LANES.length] }} />{l} <span className="muted">({spans.filter((s) => s.lane === l).length})</span></label>
         ))}
-        <span className="muted">· red = error, orange = cancelled, grey = no end recorded, faded = running, dashed outline = pairing inferred</span>
+        <span className="muted">· red = error, orange = cancelled, grey = no end recorded, faded = running</span>
       </div>
       <Chart option={option} height={Math.min(height, 90 + (rows.length + 1) * 16)} onClick={(p) => {
         const s: Span | undefined = p.data?.span;

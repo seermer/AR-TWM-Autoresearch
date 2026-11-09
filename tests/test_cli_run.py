@@ -5,14 +5,21 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
+from conftest import telemetry_payload, telemetry_records
 
-from ar_kernel import cli
+from ar_kernel import cli, telemetry
 from ar_kernel.archive.db import open_db
 from ar_kernel.archive.nodes import NodeStore
 from ar_kernel.config import GpuPolicyError
 from ar_kernel.control import Control
 
 REPO = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _no_env_lists(monkeypatch):
+    """`conda list` of each env takes seconds; record_envs has its own test."""
+    monkeypatch.setattr(cli, "record_envs", lambda cfg: None)
 
 
 def test_run_refuses_an_existing_run_without_resume(tmp_path, monkeypatch, capsys):
@@ -40,7 +47,7 @@ def test_a_new_run_without_max_nodes_creates_nothing(tmp_path, monkeypatch, caps
 def _existing_run(tmp_path, monkeypatch, num_gpus=4, root="scored"):
     monkeypatch.setattr(cli.KernelConfig, "runs_dir", property(lambda self: tmp_path))
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key")
     monkeypatch.setenv("OPENAI_MODEL", "m")
     run = tmp_path / "r1"
     (run / "config").mkdir(parents=True)
@@ -52,12 +59,14 @@ def _existing_run(tmp_path, monkeypatch, num_gpus=4, root="scored"):
     (run / "config" / "kernel.yaml").write_text(yaml.safe_dump(raw))
     Control(run).save_args(max_nodes=1)
     if root is not None:
-        nodes = NodeStore(open_db(run))
+        conn = open_db(run)
+        nodes = NodeStore(conn)
         nodes.create("root", None, 0)
         if root == "scored":
             nodes.record_score("root", 0.78, ["m"], {"m": 0.78})
         elif root != "running":
             nodes.set_status("root", root)
+        conn.close()
     return run
 
 
@@ -94,7 +103,7 @@ def test_resume_chooses_gpus_by_the_runs_frozen_config(tmp_path, monkeypatch):
 
 def test_a_run_with_cuda_visible_devices_set_creates_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.KernelConfig, "runs_dir", property(lambda self: tmp_path))
-    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key")
     monkeypatch.setenv("OPENAI_MODEL", "m")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3")
     with pytest.raises(GpuPolicyError, match="unset CUDA_VISIBLE_DEVICES"):
@@ -116,7 +125,7 @@ def test_a_new_run_without_the_llm_settings_creates_nothing(tmp_path, monkeypatc
 def test_a_resume_without_the_llm_settings_is_refused_before_claiming(tmp_path, monkeypatch):
     run = _existing_run(tmp_path, monkeypatch)
     monkeypatch.setattr(cli, "load_dotenv", lambda path, env: [])
-    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key")
     monkeypatch.setenv("OPENAI_MODEL", "")
     with pytest.raises(ValueError, match="OPENAI_MODEL"):
         cli.main(["run", "--run-id", "r1", "--resume"])
@@ -126,7 +135,7 @@ def test_a_resume_without_the_llm_settings_is_refused_before_claiming(tmp_path, 
 def test_a_new_run_without_free_gpus_creates_nothing(tmp_path, monkeypatch):
     from ar_kernel import guards
     monkeypatch.setattr(cli.KernelConfig, "runs_dir", property(lambda self: tmp_path))
-    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key")
     monkeypatch.setenv("OPENAI_MODEL", "m")
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.setattr(guards, "gpu_memory_used", lambda: {0: 1, 1: 1, 2: 1, 3: 20000})
@@ -148,7 +157,7 @@ def test_a_new_run_with_an_unreachable_git_remote_creates_nothing(tmp_path, monk
     monkeypatch.setattr(cli.KernelConfig, "runs_dir", property(lambda self: tmp_path))
     monkeypatch.setattr(cli, "load_dotenv", lambda path, env: [])
     monkeypatch.setattr(cli, "check_tools_fit", lambda cfg, gpus: None)
-    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key")
     monkeypatch.setenv("OPENAI_MODEL", "m")
     missing = tmp_path / "no_such_repo.git"
     assert cli.main(["run", "--run-id", "r2", "--max-nodes", "1", "--git-remote", str(missing)]) == 2
@@ -160,7 +169,7 @@ def test_a_new_run_named_like_a_run_on_its_git_remote_creates_nothing(tmp_path, 
     monkeypatch.setattr(cli.KernelConfig, "runs_dir", property(lambda self: tmp_path))
     monkeypatch.setattr(cli, "load_dotenv", lambda path, env: [])
     monkeypatch.setattr(cli, "check_tools_fit", lambda cfg, gpus: None)
-    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key")
     monkeypatch.setenv("OPENAI_MODEL", "m")
     remote, work = tmp_path / "remote.git", tmp_path / "work"
     subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
@@ -211,25 +220,25 @@ def _patch_until_drive(monkeypatch, drive):
     monkeypatch.setattr(cli, "check_tools_fit", lambda cfg, gpus: None)
     monkeypatch.setattr(cli, "build_run_kit", lambda *a, **k: SimpleNamespace(budget=None))
     monkeypatch.setattr(cli, "Loop", lambda *a, **k: None)
-    monkeypatch.setattr(cli, "Monitor", lambda *a, **k: None)
     monkeypatch.setattr(cli, "drive", drive)
     exits = []
 
-    def exit_process(code, recorder):
+    def exit_process(code):
         exits.append(code)
         raise Reached
     monkeypatch.setattr(cli, "exit_process", exit_process)
     return exits
 
 
-@pytest.mark.parametrize("outcome,code", [("return", 0), ("raise", 1)])
+@pytest.mark.parametrize("outcome,code", [("max_nodes reached", 0), ("graceful stop", 1), ("force stop (SIGTERM)", 1),
+                                          ("budget exhausted", 1), ("raise", 1)])
 def test_run_always_ends_the_process_after_drive(tmp_path, monkeypatch, outcome, code):
     _existing_run(tmp_path, monkeypatch)
 
     def drive(*a, **k):
         if outcome == "raise":
             raise RuntimeError("service thread(s) did not stop within the join timeout: ar-tools")
-        return "force stop (SIGTERM)"
+        return outcome
     exits = _patch_until_drive(monkeypatch, drive)
     with pytest.raises(Reached):
         cli.main(["run", "--run-id", "r1", "--resume"])
@@ -237,7 +246,6 @@ def test_run_always_ends_the_process_after_drive(tmp_path, monkeypatch, outcome,
 
 
 def test_resume_clears_partial_downloads_left_in_hf_tmp(tmp_path, monkeypatch):
-    from ar_kernel.telemetry.recorder import Recorder
     run = _existing_run(tmp_path, monkeypatch)
     (run / "hf_tmp" / "6963b829").mkdir(parents=True)
     (run / "hf_tmp" / "6963b829" / "part.mp4").write_bytes(b"x")
@@ -245,9 +253,6 @@ def test_resume_clears_partial_downloads_left_in_hf_tmp(tmp_path, monkeypatch):
     with pytest.raises(Reached):
         cli.main(["run", "--run-id", "r1", "--resume"])
     assert exits == [0] and list((run / "hf_tmp").iterdir()) == []
-    cleanup = [Recorder(run).load_payload(e["payload"]) for e in Recorder(run).read_events()
-               if e["type"] == "run.resume_cleanup"]
-    assert cleanup and cleanup[-1]["hf_tmp"] == ["6963b829"]
 
 
 def _fake_loop(run, on_term):
@@ -293,7 +298,7 @@ def test_force_stop_says_when_the_process_outlives_the_wait(tmp_path, monkeypatc
 def test_a_new_run_whose_tools_do_not_fit_creates_nothing(tmp_path, monkeypatch):
     from ar_kernel.config import GpuPolicyError
     monkeypatch.setattr(cli.KernelConfig, "runs_dir", property(lambda self: tmp_path))
-    monkeypatch.setenv("OPENAI_API_KEY", "k"); monkeypatch.setenv("OPENAI_MODEL", "m")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key"); monkeypatch.setenv("OPENAI_MODEL", "m")
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
 
     def too_small(cfg, gpus):
@@ -309,7 +314,7 @@ def test_a_new_run_named_like_uploads_on_hugging_face_creates_nothing(tmp_path, 
     monkeypatch.setattr(cli.KernelConfig, "runs_dir", property(lambda self: tmp_path))
     monkeypatch.setattr(cli, "load_dotenv", lambda path, env: [])
     monkeypatch.setattr(cli, "check_tools_fit", lambda cfg, gpus: None)
-    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key")
     monkeypatch.setenv("OPENAI_MODEL", "m")
     monkeypatch.setenv("HFK", "tok")
     hub = SimpleNamespace(whoami=lambda: {"name": "me"},
@@ -339,3 +344,112 @@ def test_doctor_with_a_run_id_checks_under_the_runs_frozen_config(tmp_path, monk
         cli.main(["doctor", "--run-id", "r1", "--config", "configs/h100.yaml"])
     with pytest.raises(cli.RunNotFound):
         cli.main(["doctor", "--run-id", "nope"])
+
+
+def _tree(run) -> dict:
+    return {str(p.relative_to(run)): p.stat().st_mtime_ns for p in run.rglob("*")}
+
+
+def test_a_refused_start_creates_and_changes_no_file(tmp_path, monkeypatch, capsys):
+    run = _existing_run(tmp_path, monkeypatch)
+    (run / "control" / "run_args.json").write_text("{}")                # a resume that lost --max-nodes
+    before = _tree(run)
+    assert cli.main(["run", "--run-id", "r1", "--resume"]) == 2
+    assert "--max-nodes" in capsys.readouterr().err and _tree(run) == before
+    proc = _fake_loop(run, "exit")                                      # a live loop: said first
+    try:
+        before = _tree(run)
+        assert cli.main(["run", "--run-id", "r1", "--resume", "--max-nodes", "2"]) == 2
+        assert f"already running for this run (pid {proc.pid})" in capsys.readouterr().err
+    finally:
+        proc.kill()
+        proc.wait()
+    assert _tree(run) == before and not (run / "telemetry").exists()
+
+
+def test_ar_run_records_where_and_how_it_started(tmp_path, monkeypatch):
+    run = _existing_run(tmp_path, monkeypatch)
+    _patch_until_drive(monkeypatch, lambda *a, **k: "max_nodes reached")
+    with pytest.raises(Reached):
+        cli.main(["run", "--run-id", "r1", "--resume"])
+    [start] = [r for r in telemetry_records(run) if r["kind"] == "start" and r["name"] == "ar.run"]
+    inputs = telemetry_payload(run, start["inputs"])
+    assert inputs["cwd"] == os.getcwd() and inputs["gpus"] == [0, 1, 2, 3] and inputs["overlays"] == []
+    assert inputs["env"]["OPENAI_API_KEY"] == "<redacted>" and inputs["env"]["OPENAI_MODEL"] == "m"
+
+
+def test_a_resume_with_code_changes_warns_and_alerts_once_the_writer_opens(tmp_path, monkeypatch, capsys):
+    run = _existing_run(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli, "code_changes", lambda cfg, versions: ["kernel was at aaaaaaaa, is at bbbbbbbb"])
+    _patch_until_drive(monkeypatch, lambda *a, **k: "max_nodes reached")
+    with pytest.raises(Reached):
+        cli.main(["run", "--run-id", "r1", "--resume"])
+    assert "warning: the code differs" in capsys.readouterr().err
+    [alert] = [r for r in telemetry_records(run) if r["kind"] == "alert"]
+    assert alert["name"] == "run.code_changed" and alert["details"] == {"changes": ["kernel was at aaaaaaaa, is at bbbbbbbb"]}
+
+
+@pytest.mark.parametrize("reason,status", [("max_nodes reached", "ok"), ("graceful stop", "error")])
+def test_ar_run_ends_once_after_the_loop_with_the_exit_code(tmp_path, monkeypatch, reason, status):
+    run = _existing_run(tmp_path, monkeypatch)
+    _patch_until_drive(monkeypatch, lambda *a, **k: reason)
+    with pytest.raises(Reached):
+        cli.main(["run", "--run-id", "r1", "--resume"])
+    [end] = [r for r in telemetry_records(run) if r["kind"] == "end" and r["name"] == "ar.run"]
+    assert end["status"] == status and telemetry_payload(run, end["output"]) == {"exit_code": int(status != "ok")}
+
+
+def test_a_telemetry_failure_is_never_a_clean_exit(tmp_path, monkeypatch):
+    _existing_run(tmp_path, monkeypatch)
+
+    def drive(*a, **k):
+        telemetry.writer().failed = True               # as `Writer._fail` leaves it, after the loop's last record
+        return "max_nodes reached"
+    exits = _patch_until_drive(monkeypatch, drive)
+    with pytest.raises(Reached):
+        cli.main(["run", "--run-id", "r1", "--resume"])
+    assert exits == [1]
+
+
+def test_an_error_before_the_loop_ends_ar_run_with_it(tmp_path, monkeypatch):
+    run = _existing_run(tmp_path, monkeypatch)
+    exits = _patch_until_drive(monkeypatch, lambda *a, **k: "max_nodes reached")
+
+    def broken(*a, **k):
+        raise RuntimeError("no kit")
+    monkeypatch.setattr(cli, "build_run_kit", broken)
+    with pytest.raises(RuntimeError, match="no kit"):
+        cli.main(["run", "--run-id", "r1", "--resume"])
+    [end] = [r for r in telemetry_records(run) if r["kind"] == "end" and r["name"] == "ar.run"]
+    assert end["status"] == "error" and telemetry_payload(run, end["error"])["message"] == "no kit" and exits == []
+
+
+def test_stop_records_an_ar_stop_tree(tmp_path, monkeypatch):
+    run = _existing_run(tmp_path, monkeypatch)
+    assert cli.main(["stop", "--run-id", "r1"]) == 0
+    proc = _fake_loop(run, "exit")
+    try:
+        assert cli.main(["stop", "--run-id", "r1", "--force"]) == 0
+    finally:
+        proc.kill()
+        proc.wait()
+    records = telemetry_records(run)
+    starts = [r for r in records if r["kind"] == "start"]
+    ends = {r["span"]: r for r in records if r["kind"] == "end"}
+    assert [s["name"] for s in starts] == ["ar.stop", "fs.write", "ar.stop", "process.kill", "stop.wait"]
+    assert [s["parent"] for s in starts] == [None, starts[0]["span"], None, starts[2]["span"], starts[2]["span"]]
+    assert telemetry_payload(run, starts[1]["inputs"])["path"] == str(run / "control" / "stop")
+    assert telemetry_payload(run, starts[3]["inputs"]) == {"pid": proc.pid, "why": "ar stop --force"}
+    assert telemetry_payload(run, ends[starts[4]["span"]]["output"]) == {"ended": True}
+    assert [telemetry_payload(run, ends[s["span"]]["output"]) for s in (starts[0], starts[2])] == [{"exit_code": 0}] * 2
+
+
+def test_a_failed_push_of_the_agents_repo_is_a_warning_and_an_alert(tmp_path, capsys):
+    from ar_kernel import cli, telemetry
+    from conftest import telemetry_records
+    telemetry.open(tmp_path)
+    telemetry.start("ar.run")
+    cli._push_failed("git push failed: permission denied (publickey)")
+    assert "warning: git push failed" in capsys.readouterr().err
+    [alert] = [r for r in telemetry_records(tmp_path) if r["kind"] == "alert"]
+    assert (alert["name"], alert["level"]) == ("git.push_failed", "warning") and "publickey" in alert["message"]

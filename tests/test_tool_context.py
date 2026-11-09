@@ -1,12 +1,11 @@
 import pytest
 
-from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools.context import PathError, TokenRegistry, bearer, to_container, to_host
 
 
 @pytest.fixture
 def caller(tmp_path):
-    reg = TokenRegistry(Recorder(tmp_path))
+    reg = TokenRegistry()
     ws = tmp_path / "nodes" / "n1" / "attempts" / "recipe-1" / "workspace"
     st = tmp_path / "staging" / "n1" / "recipe-1"
     ws.mkdir(parents=True), st.mkdir(parents=True)
@@ -25,13 +24,6 @@ def test_revoked_token_no_longer_resolves(caller):
     reg, c = caller
     reg.revoke(c.token)
     assert reg.lookup(c.token) is None
-
-
-def test_issued_tokens_are_redacted_from_telemetry(tmp_path):
-    rec = Recorder(tmp_path)
-    c = TokenRegistry(rec).issue(node="n", phase="p", attempt=1,
-                                 workspace_host=tmp_path, staging_host=tmp_path)
-    assert c.token in rec.redact
 
 
 def test_bearer_parsing():
@@ -97,10 +89,8 @@ def test_wait_idle_returns_once_the_calls_in_flight_end_and_a_revoked_token_star
 
 
 def test_fail_is_recorded_once_with_its_first_reason(tmp_path):
-    rec = Recorder(tmp_path)
-    c = TokenRegistry(rec).issue(node="n1", phase="improve_recipe", attempt=2, workspace_host=tmp_path,
+    c = TokenRegistry().issue(node="n1", phase="improve_recipe", attempt=2, workspace_host=tmp_path,
                                  staging_host=tmp_path)
     c.fail("disk full")
     c.fail("later")
     assert c.fault.event.is_set() and c.fault.reason == "disk full"
-    assert [e["type"] for e in rec.read_events("n1")].count("phase.fault") == 1

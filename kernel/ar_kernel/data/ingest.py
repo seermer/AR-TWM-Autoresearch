@@ -1,17 +1,19 @@
 from __future__ import annotations
-import contextvars, hashlib, json, os, shutil, stat, subprocess, uuid
+import dataclasses, hashlib, json, os, stat, subprocess, uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 
+from .. import fs, subproc, telemetry
+from ..archive.activity import add_activity
 from ..archive.blobs import BlobStore
 from ..archive.clips import ClipStore
 from ..config import KernelConfig, run_config_path
 from ..faults import disk_fault
-from ..isolation import EXCLUDED_CLIP, copies_held_out
-from ..telemetry import files
+from ..isolation import EXCLUDED_CLIP, copies_held_out, host_roots, scrub
+from ..process_digest import _shape
 from . import annotation as ann
 from .checker import CheckerError, check_clip
 from .leakage import LeakageChecker
@@ -24,9 +26,9 @@ CUT_STEP_RATIO, CUT_TURN_DEG, CUT_PICTURE_RATIO, CUT_NEAR = 12.0, 10.0, 5.0, 3
 
 def picture_steps(video: Path) -> np.ndarray:
     """Mean absolute difference between consecutive frames, grey at 160x90."""
-    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(video), "-vf", "scale=160:90:flags=area,format=gray",
-                          "-fps_mode", "passthrough", "-f", "rawvideo", "-"],      # the clip's own frames, none repeated
-                         capture_output=True, check=True).stdout
+    raw = subproc.run(["ffmpeg", "-v", "error", "-i", str(video), "-vf", "scale=160:90:flags=area,format=gray",
+                       "-fps_mode", "passthrough", "-f", "rawvideo", "-"],      # the clip's own frames, none repeated
+                      check=True, text=False).stdout
     grey = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 90, 160).astype(np.float32)
     return np.abs(np.diff(grey, axis=0)).mean(axis=(1, 2))
 
@@ -67,13 +69,11 @@ class IngestResult:
     checker_failed: bool = False    # rejected because the clip checker itself failed
 
 class Ingestor:
-    def __init__(self, cfg: KernelConfig, run_dir: Path, conn, recorder,
-                 leakage: LeakageChecker | None = None) -> None:
+    def __init__(self, cfg: KernelConfig, run_dir: Path, conn, leakage: LeakageChecker | None = None) -> None:
         self.cfg = cfg
         self.run_dir = Path(run_dir)
         self.blobs = BlobStore(run_dir, conn)
         self.clips = ClipStore(conn)
-        self.recorder = recorder
         self.leakage = leakage or LeakageChecker(cfg)
         self.base_recipe = run_config_path(cfg, run_dir, "base_recipe.yaml")
         self.workers = int(cfg.get("ingest.workers"))
@@ -83,12 +83,16 @@ class Ingestor:
         is then written one clip at a time, in order. The kernel works on its own copy of each staged
         file and never writes or deletes in staging, which the agent owns and can relink meanwhile."""
         with ThreadPoolExecutor(self.workers) as pool:
-            checks = [pool.submit(contextvars.copy_context().run, self._check, c, node_id) for c in candidates]
+            checks = [telemetry.submit(pool, self._check, c, node_id, attempt) for c in candidates]
         results = []
         try:
             for candidate, check in zip(candidates, checks):
                 result, held, facts = check.result()
-                results.append(result or self._store(candidate, held, facts, node_id, attempt))
+                if result is None:
+                    result = self._store(candidate, held, facts, node_id, attempt)
+                else:
+                    _keep(candidate, held)
+                results.append(result)
         finally:
             for check in checks:
                 if not check.exception():
@@ -109,22 +113,36 @@ class Ingestor:
             real = Path(os.readlink(f"/proc/self/fd/{fd}"))
             if not stat.S_ISREG(os.fstat(fd).st_mode) or self._outside_staging(real):
                 raise OSError("the staged file changed while it was being read")
-            with open(dst, "wb") as fout:
-                shutil.copyfileobj(fin, fout)
+            fs.write_bytes(dst, fin.read())
         return dst
 
-    def _event(self, candidate: Candidate, kind: str, node_id: str, payload: dict) -> None:
-        """Every ingest event names its candidate by the paths the agent staged."""
-        staged = {k: str(v) if v is not None else None
-                  for k, v in (("video", candidate.video), ("annotation", candidate.annotation), ("pose", candidate.pose))}
-        self.recorder.event(kind, node=node_id, phase="ingest", payload={"candidate": staged, **payload})
+    def _row(self, node_id: str, attempt: int, clip_id: str | None, reasons: list[str] = ()) -> None:
+        """The candidate's activity row: accepted with its clip id, or rejected with its reasons."""
+        names, roots = self.cfg.get("isolation.blocked_names") or [], host_roots(self.cfg)
+        add_activity(self.run_dir, node=node_id, phase="ingest", attempt=attempt, kind="ingest", name=clip_id,
+                     ok=clip_id is not None,
+                     detail="\n".join(scrub(_shape(str(r)), names, roots) for r in reasons) or None)
 
-    def _reject(self, candidate: Candidate, node_id: str, reasons: list[str], **payload) -> IngestResult:
-        self._event(candidate, "ingest.rejected", node_id, {"reasons": reasons, **payload})
+    def _reject(self, node_id: str, attempt: int, reasons: list[str]) -> IngestResult:
+        self._row(node_id, attempt, None, reasons)
         return IngestResult(accepted=False, reasons=reasons)
 
-    def _check(self, candidate: Candidate, node_id: str) -> tuple[IngestResult | None, dict[str, Path], dict | None]:
+    def _passes(self, check: str, evidence: dict, reasons: list[str]) -> bool:
+        """One check of a candidate, as a decision with its evidence."""
+        telemetry.decision("ingest.check", {"check": check, **evidence}, ["pass", "reject"],
+                           "reject" if reasons else "pass", "\n".join(reasons) or "passed")
+        return not reasons
+
+    def _check(self, candidate: Candidate, node_id: str,
+               attempt: int) -> tuple[IngestResult | None, dict[str, Path], dict | None]:
         """(the rejection or None, the quarantined files, what `_store` records of a clip that passed)."""
+        with telemetry.span("ingest.candidate", {"named": candidate.named, "derived_from": candidate.derived_from}) as sp:
+            out = self._checked(candidate, node_id, attempt)
+            sp.output = {"accepted": out[0] is None, "reasons": out[0].reasons if out[0] else []}
+            return out
+
+    def _checked(self, candidate: Candidate, node_id: str,
+                 attempt: int) -> tuple[IngestResult | None, dict[str, Path], dict | None]:
         reasons: list[str] = []
         origin = candidate.derived_from
         if not isinstance(origin, dict) or origin.get("kind") not in ann.DERIVED_KINDS \
@@ -136,28 +154,28 @@ class Ingestor:
                 reasons.append(
                     f"{label} path {path} is outside the staging directory "
                     f"{self.run_dir / 'staging'}; ingest only accepts files staged there")
-        if reasons:
-            return self._reject(candidate, node_id, reasons), {}, None
+        if not self._passes("origin and paths", {"derived_from": origin}, reasons):
+            return self._reject(node_id, attempt, reasons), {}, None
 
         # Quarantine before ANY check, so every check and the store act on the same bytes (the
         # agent keeps running and could swap a staged file). quarantine/ is kernel-private.
         staged = {"video": candidate.video, "annotation": candidate.annotation, "pose": candidate.pose}
         qdir = self.run_dir / "quarantine" / uuid.uuid4().hex
-        qdir.mkdir(parents=True)
+        fs.mkdir(qdir)
         held = {k: qdir / f"{k}{Path(v).suffix}" for k, v in staged.items()}
         try:
             for key, qpath in held.items():
                 self._take(staged[key], qpath)
-                with qpath.open("rb") as held_file:
-                    files.record(held_file, direction="in", path=candidate.named[key])
-            checked = self._check_files(candidate, held, node_id)
+            checked = self._check_files(held, node_id, attempt)
         except (subprocess.SubprocessError, OSError, ValueError, IndexError, KeyError, CheckerError) as exc:
             # A file ffprobe, decoding or the checker bridge cannot handle: record a rejection
             # and carry on with the batch instead of failing the whole call. A full disk is the machine's.
             if disk_fault(exc):
                 _discard(held)
                 raise
-            checked = self._reject(candidate, node_id, [
+            telemetry.error(exc, "a rejected candidate")
+            self._passes("readable", {}, [f"{type(exc).__name__}: {exc}"])
+            checked = self._reject(node_id, attempt, [
                 f"could not read the candidate: {type(exc).__name__}: {exc}"[:500]])
             checked.checker_failed = isinstance(exc, CheckerError)
         except BaseException:
@@ -165,43 +183,45 @@ class Ingestor:
             raise
         return (checked, held, None) if isinstance(checked, IngestResult) else (None, held, checked)
 
-    def _check_files(self, candidate: Candidate, held: dict[str, Path], node_id: str) -> IngestResult | dict:
+    def _check_files(self, held: dict[str, Path], node_id: str,
+                     attempt: int) -> IngestResult | dict:
         video, pose = held["video"], held["pose"]
         info = probe_video(video)
-        if info.rotation:
-            return self._reject(candidate, node_id, [
-                f"video carries a {info.rotation} degree display rotation; WorldModel decodes "
-                f"frames in stored orientation, so they would train rotated. re-encode with "
-                f"the rotation applied (ffmpeg applies it when transcoding: "
-                f"ffmpeg -i in.mp4 -c:v libx264 -pix_fmt yuv420p out.mp4)"])
-        if (info.width, info.height) != SIZE:
-            return self._reject(candidate, node_id, [
-                f"the video is {info.width}x{info.height}; ingest takes {SIZE[0]}x{SIZE[1]} only. Crop or resize "
-                "it first, then measure the camera on the result"])
+        rotated = [f"video carries a {info.rotation} degree display rotation; WorldModel decodes "
+                   f"frames in stored orientation, so they would train rotated. re-encode with "
+                   f"the rotation applied (ffmpeg applies it when transcoding: "
+                   f"ffmpeg -i in.mp4 -c:v libx264 -pix_fmt yuv420p out.mp4)"] if info.rotation else []
+        if not self._passes("rotation", {"probe": dataclasses.asdict(info)}, rotated):
+            return self._reject(node_id, attempt, rotated)
+        size = [f"the video is {info.width}x{info.height}; ingest takes {SIZE[0]}x{SIZE[1]} only. Crop or resize "
+                "it first, then measure the camera on the result"] if (info.width, info.height) != SIZE else []
+        if not self._passes("size", {"width": info.width, "height": info.height}, size):
+            return self._reject(node_id, attempt, size)
         try:
             annotation = json.loads(held["annotation"].read_text(encoding="utf-8"))
         except ValueError as exc:
-            return self._reject(candidate, node_id, [f"the annotation is not valid JSON: {exc}"])
+            telemetry.error(exc, "a rejected candidate")
+            self._passes("annotation", {}, [f"the annotation is not valid JSON: {exc}"])
+            return self._reject(node_id, attempt, [f"the annotation is not valid JSON: {exc}"])
         problems = ann.check_annotation(annotation)
         duration = info.frames / info.fps if info.fps else info.duration        # to the frame, not ffprobe's rounding
         if not problems and annotation["turns"][-1]["start_s"] >= duration:
             problems = [f"turn {len(annotation['turns'])} starts at {annotation['turns'][-1]['start_s']} s, "
                         f"at or after the end of the video ({duration:.2f} s)"]
-        if problems:
-            return self._reject(candidate, node_id, [f"annotation: {p}" for p in problems])
+        if not self._passes("annotation", {"duration_s": duration}, [f"annotation: {p}" for p in problems]):
+            return self._reject(node_id, attempt, [f"annotation: {p}" for p in problems])
         caption_json = ann.caption_file(annotation, duration)
         held["caption"] = held["video"].with_name("caption.json")
-        held["caption"].write_text(json.dumps(caption_json, indent=1), encoding="utf-8")
+        fs.write_text(held["caption"], json.dumps(caption_json, indent=1))
 
         probe_root = self.run_dir / "tmp" / f"probe_{uuid.uuid4().hex}"     # parallel ingests never share it
-        shutil.rmtree(probe_root, ignore_errors=True)
         for sub, key, name in (("videos", "video", "c.mp4"), ("captions", "caption", "c.json"), ("poses", "pose", "c.npz")):
-            (probe_root / sub).mkdir(parents=True)
-            shutil.copy2(held[key], probe_root / sub / name)
+            fs.mkdir(probe_root / sub)
+            fs.copy(held[key], probe_root / sub / name)
         try:
-            report = check_clip(self.cfg, probe_root, self.base_recipe, recorder=self.recorder, node=node_id)
+            report = check_clip(self.cfg, probe_root, self.base_recipe)
         finally:
-            shutil.rmtree(probe_root, ignore_errors=True)
+            fs.rmtree(probe_root, ignore_errors="the checker's scratch copy")
 
         def named(text: str) -> str:
             """The checker's message about the candidate's files, without the kernel's own paths."""
@@ -210,7 +230,7 @@ class Ingestor:
                 text = text.replace(str(probe_root / kind), name)
             return text.replace(str(probe_root), "the clip")
 
-        if not report["ok"]:
+        if not self._passes("clip checker", {"report": report}, [] if report["ok"] else report["errors"]):
             frames = int(info.frames / (info.fps / ann.FPS)) if info.fps else 0     # the loader's 24 fps count
             reasons = set()
             for error in report["errors"]:
@@ -221,21 +241,21 @@ class Ingestor:
                     reasons.update(ann.short_turns(annotation, frames))
                 else:
                     reasons.add(named(error))
-            return self._reject(candidate, node_id, sorted(reasons), report=report)
+            return self._reject(node_id, attempt, sorted(reasons))
 
         texts = [caption_json["caption"], *[s["prompt"] for s in caption_json["segments"]]]
         verdict = self.leakage.check(video)
         excluded = ("image" if verdict.rejected else "text" if copies_held_out(self.cfg, *texts) else None)
-        self._event(candidate, "ingest.leakage", node_id,
-                    {"matches": verdict.matches, "near": verdict.near_matches, "excluded": excluded})
-        if excluded:                    # the agent gets one sentence; telemetry keeps the reason
-            return self._reject(candidate, node_id, [EXCLUDED_CLIP], excluded=excluded)
+        if not self._passes("held-out cases", {"leakage": dataclasses.asdict(verdict), "excluded": excluded},
+                            [f"it copies a held-out case's {excluded}"] if excluded else []):     # the agent gets one sentence
+            return self._reject(node_id, attempt, [EXCLUDED_CLIP])
 
         with np.load(pose) as arrays:
             has_intrinsics = "intrinsics" in arrays.files
             cut = find_cut(arrays["cam_c2w"], video)
-        if cut:
-            return self._reject(candidate, node_id, [f"the clip has {cut}; a training clip is one continuous shot"])
+        if not self._passes("one shot", {"has_intrinsics": has_intrinsics}, [cut] if cut else []):
+            return self._reject(node_id, attempt,
+                                [f"the clip has {cut}; a training clip is one continuous shot"])
         return {"metadata": {"frames": info.frames, "fps": info.fps, "width": info.width,
                              "height": info.height, "duration": info.duration,
                              "turns": len(annotation["turns"]), "has_intrinsics": has_intrinsics},
@@ -244,19 +264,27 @@ class Ingestor:
     def _store(self, candidate: Candidate, held: dict[str, Path], facts: dict, node_id: str,
                attempt: int) -> IngestResult:
         digests = {key: self.blobs.put(held[key], key) for key in ("video", "caption", "annotation", "pose")}
+        _keep(candidate, {key: self.blobs.path(digests[key], key) for key in digests})     # a link to each blob
         clip_id = hashlib.sha256(json.dumps(
             {key: digests[key] for key in ("video", "caption", "pose")}, sort_keys=True).encode()).hexdigest()
-        moved_from = self.clips.add({
+        self.clips.add({
             "clip_id": clip_id, **{f"{key}_digest": digest for key, digest in digests.items()}, **facts,
             "derived_from": {"kind": candidate.derived_from["kind"], "name": candidate.derived_from["name"]},
             "ingested_by": node_id, "attempt": attempt,
         })
-        self._event(candidate, "ingest.accepted", node_id,
-                    {"clip_id": clip_id, "warnings": facts["warnings"], "moved_from": moved_from})
+        self._row(node_id, attempt, clip_id)
         return IngestResult(accepted=True, clip_id=clip_id, warnings=facts["warnings"])
+
+
+def _keep(candidate: Candidate, files: dict[str, Path]) -> None:
+    """The candidate's files in the file store, as the agent named them."""
+    for key in ("video", "annotation", "pose"):
+        if key in files:
+            with files[key].open("rb") as handle:
+                telemetry.keep(candidate.named.get(key, str(getattr(candidate, key))), handle, "read")
 
 
 def _discard(held: dict[str, Path]) -> None:
     """Remove a candidate's quarantine folder: the archive took what it wanted, the originals are in staging."""
     for qdir in {qpath.parent for qpath in held.values()}:
-        shutil.rmtree(qdir, ignore_errors=True)
+        fs.rmtree(qdir, ignore_errors="a candidate's quarantine copy")

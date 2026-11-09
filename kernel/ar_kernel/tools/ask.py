@@ -9,7 +9,6 @@ import asyncio
 import base64
 import io
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated, Any
 
@@ -17,10 +16,10 @@ from mcp.server.mcpserver import Context
 from PIL import Image
 from pydantic import Field
 
+from .. import telemetry
 from ..faults import KernelFault
 from ..gateway.app import upstream_error
-from ..telemetry import files
-from .captioner import clip_host_path, container_path
+from .captioner import clip_host_path
 from .context import PathError, open_file
 from .server import ToolError
 
@@ -54,6 +53,7 @@ class Ask:
         try:
             with open(open_file(caller, clip_host_path(caller, path)), "rb") as handle:
                 data = handle.read()
+            telemetry.keep(path, data, "read")
             with Image.open(io.BytesIO(data)) as im:
                 im = im.convert("RGB")
                 im.thumbnail((self.max_side, self.max_side))
@@ -82,19 +82,16 @@ class Ask:
                 raise ToolError(f"{self.per_phase - used} of the {self.per_phase} images are left: "
                                 f"got {len(images)}")
             self._used[caller.token] = used + len(images)
-        for path, (_, data) in zip(images, read):
-            files.record(data, direction="in", path=container_path(path))
         body = self.upstream.enforce("/chat/completions", {
             "model": self.model, "messages": [{"role": "user", "content": parts}]})
         meta = self.store.begin(caller, ENDPOINT, body, tool="ask")
-        started = time.monotonic()
-        status, payload, attempts, gave_up = asyncio.run(self.upstream.post("/chat/completions", body))
+        status, payload, _, gave_up = asyncio.run(self.upstream.post("/chat/completions", body))
         usage = payload.get("usage") if isinstance(payload, dict) else None
-        self.store.end(meta, caller, status=status, body=payload, latency_s=time.monotonic() - started,
-                       attempts=attempts, cost_usd=self.budget.record(status, usage))
+        self.store.end(meta, caller, status=status, body=payload, cost_usd=self.budget.record(status, usage))
         try:
             answer = payload["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError):
+        except (KeyError, IndexError, TypeError) as exc:
+            telemetry.error(exc, "no answer")
             answer = None
         if status != 200 or not answer:
             with self._lock:                        # a failed call costs no images

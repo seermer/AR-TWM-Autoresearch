@@ -3,7 +3,6 @@ from ar_kernel.archive.commits import BadClips, CommitStore, CommitError
 from ar_kernel.archive.db import open_db
 from ar_kernel.config import KernelConfig
 from ar_kernel.data.ingest import Candidate, Ingestor
-from ar_kernel.telemetry.recorder import Recorder
 from conftest import DERIVED, NAMED, staged_clip
 
 CFG = KernelConfig.load()
@@ -11,7 +10,7 @@ CFG = KernelConfig.load()
 @pytest.fixture
 def store(tmp_path):
     conn = open_db(tmp_path)
-    ing = Ingestor(CFG, tmp_path, conn, Recorder(tmp_path))
+    ing = Ingestor(CFG, tmp_path, conn)
     ids = []
     for name, seconds in (("a", 4.0), ("b", 5.0)):
         video, annotation, pose = staged_clip(tmp_path / "staging" / name, seconds)

@@ -11,41 +11,32 @@ from .budget import Budget
 from .config import KernelConfig
 from .control import Control
 from .selection import candidates
-
-
-def _events(path: Path, kind: str) -> list[dict]:
-    if not path.exists():
-        return []
-    events = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        try:
-            events.append(json.loads(line))
-        except json.JSONDecodeError:                    # a line torn by kill -9 or a full disk
-            continue
-    return [e for e in events if e.get("type") == kind]
+from .telemetry import tree
 
 
 def run_status(run_dir: Path) -> dict:
     run_dir = Path(run_dir)
     control = Control(run_dir)
+    cfg = KernelConfig.for_run(run_dir)
+    budget = Budget.from_config(cfg)
     conn = open_db_readonly(run_dir, writer_alive=control.alive_pid() is not None)
     try:
         nodes = NodeStore(conn).all()
+        budget.load(conn)
     finally:
         conn.close()
-    cfg = KernelConfig.for_run(run_dir)
     try:      # the probabilities the NEXT draw would use, computed live from the current tree
         probs = {c["node_id"]: c["P"] for c in candidates(nodes, cfg)}
     except ValueError:                                         # no scored node yet
         probs = {}
     state_file = control.dir / "state.json"
-    budget = Budget.from_config(cfg)
-    budget.load(run_dir)
     scored = [n for n in nodes if n["status"] == "scored" and n["score"] is not None]
     best = max(scored, key=lambda n: n["score"], default=None)
-    alerts = _events(run_dir / "telemetry" / "events" / "run.jsonl", "alert")[-20:]
     meta_path = run_dir / "config" / "run.json"
     judge = json.loads(meta_path.read_text()).get("judge") if meta_path.exists() else None
+    trace = tree.load(run_dir)
+    alerts = [r for r in trace.records if r["kind"] == "alert"][-20:]
+    open_spans = [n for n in trace.spans.values() if n.end is None]
     return {
         "run_id": run_dir.name, "judge": judge, "loop_pid": control.alive_pid(),
         "state": json.loads(state_file.read_text()) if state_file.exists() else None,
@@ -56,9 +47,14 @@ def run_status(run_dir: Path) -> dict:
                   for n in nodes],
         "best": {"node_id": best["node_id"], "score": best["score"]} if best else None,
         "spend": budget.snapshot(),
-        "alerts": [{"ts": a["ts_wall"], "kind": a.get("kind"), "level": a.get("level"),
-                    "message": a.get("message")} for a in alerts],
+        "alerts": [{"ts": a["ts"], "name": a["name"], "level": a["level"], "message": a["message"]} for a in alerts],
+        "open_spans": [{"ts": n.start["ts"], "name": n.start["name"], "facts": tree.open_span_facts(trace, n)}
+                       for n in open_spans],
     }
+
+
+def _time(ts: float) -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
 
 
 def format_status(d: dict) -> str:
@@ -87,5 +83,8 @@ def format_status(d: dict) -> str:
         lines.append(f"  {'  ' * n['depth']}{n['node_id']:<8} {n['status']:<14} {score}{p}{err}")
     if d["alerts"]:
         lines.append("alerts (latest last):")
-        lines += [f"  {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(a['ts']))} [{a['level']}] {a['kind']}: {a['message']}" for a in d["alerts"]]
+        lines += [f"  {_time(a['ts'])} [{a['level']}] {a['name']}: {a['message']}" for a in d["alerts"]]
+    if d["open_spans"]:
+        lines.append("open spans:")
+        lines += [f"  {_time(o['ts'])} {o['name']}: {o['facts']}" for o in d["open_spans"]]
     return "\n".join(lines)

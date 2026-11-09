@@ -19,7 +19,6 @@ from ar_kernel.archive.nodes import NodeStore
 from ar_kernel.config import KernelConfig
 from ar_kernel.data.probe import probe_video
 from ar_kernel.subproc import run_in_env
-from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools import rollouts
 from ar_kernel.tools.context import TokenRegistry
 from ar_kernel.tools.jobs import JobQueue
@@ -171,9 +170,8 @@ def env(tmp_path, monkeypatch):
     measured output layout)."""
     monkeypatch.setattr(rollouts, "PRECACHE", [str(FAKE_WBENCH), "--precache"])
     monkeypatch.setattr(rollouts, "RUN_WBENCH", [str(FAKE_WBENCH)])
-    rec = Recorder(tmp_path / "run")
-    reg = TokenRegistry(rec)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
+    reg = TokenRegistry()
+    q = JobQueue(tmp_path / "run", threading.Lock(), wait_cap_s=120)
     ws, staging = tmp_path / "ws", tmp_path / "staging"
     ws.mkdir(); staging.mkdir()
     Image.new("RGB", (960, 544), (90, 120, 60)).save(ws / "frame.png")
@@ -181,7 +179,7 @@ def env(tmp_path, monkeypatch):
     mask.paste(255, (375, 150, 585, 510))
     mask.save(ws / "mask.png")
     (ws / "mask.txt").write_text("not an image")
-    q.register(AlayaWorldBackend(small_cfg(), tmp_path / "run", [0, 1, 4, 5], reg, rec,
+    q.register(AlayaWorldBackend(small_cfg(), tmp_path / "run", [0, 1, 4, 5], reg,
                                  gpu_memory=lambda g: {i: 100 for i in g}))
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
     yield q, caller, staging, tmp_path / "run"
@@ -224,8 +222,7 @@ def test_submit_refuses(env, item, params, match):
 
 def test_every_listed_action_is_accepted(tmp_path):
     from ar_kernel.data.annotation import ACTIONS
-    rec = Recorder(tmp_path / "run")
-    b = AlayaWorldBackend(small_cfg(), tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
+    b = AlayaWorldBackend(small_cfg(), tmp_path / "run", [0, 1, 2, 3], TokenRegistry())
     for action in ACTIONS:
         b.check_item(first_person(turns=[_turn(action=action)]))
     args = {"items": []}
@@ -234,8 +231,7 @@ def test_every_listed_action_is_accepted(tmp_path):
 
 
 def test_limits_come_from_the_generator_config_block(tmp_path):
-    rec = Recorder(tmp_path / "run")
-    b = AlayaWorldBackend(REAL, tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
+    b = AlayaWorldBackend(REAL, tmp_path / "run", [0, 1, 2, 3], TokenRegistry())
     assert b.max_turns == REAL.get("generators.alayaworld")["max_turns"]
 
 
@@ -260,8 +256,7 @@ def _job(**args):
 
 
 def _backend(tmp_path):
-    rec = Recorder(tmp_path / "run")
-    return AlayaWorldBackend(small_cfg(), tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
+    return AlayaWorldBackend(small_cfg(), tmp_path / "run", [0, 1, 2, 3], TokenRegistry())
 
 
 def test_finish_publishes_the_whole_clip_with_exact_turn_starts(tmp_path):
@@ -309,7 +304,7 @@ def test_finished_candidate_passes_the_real_ingestor(tmp_path):
     _render_output(out, 0, turns=2)
     res = _backend(tmp_path).finish(_job(), {"index": 0, **first_person()}, _outputs(out), {}, out)
     pose = write_poses(out / "vigeo.npz", n_frames=res["frames"], width=960, height=544)
-    ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
+    ing = Ingestor(REAL, run_dir, open_db(run_dir))
     [r] = ing.ingest([Candidate(video=Path(res["video"]), annotation=Path(res["annotation"]), pose=pose,
                                 derived_from={"kind": "model", "name": "alayaworld-ar30"}, named=NAMED)], node_id="n1", attempt=1)
     assert r.accepted, r.reasons
@@ -507,10 +502,9 @@ def test_a_node_job_renders_with_the_nodes_fine_tune(env):
 
 def test_build_gpu_backends_includes_alayaworld_only_when_enabled(tmp_path):
     from ar_kernel.tools.gpu_jobs import build_gpu_backends
-    rec = Recorder(tmp_path / "run")
     for enabled, present in ((False, False), (True, True)):
         names = [b.name for b in build_gpu_backends(small_cfg(enabled=enabled), tmp_path / "run", [0, 1, 2, 3],
-                                                    TokenRegistry(rec), rec)]
+                                                    TokenRegistry())]
         assert ("rollout_alayaworld" in names) is present
 
 
@@ -610,11 +604,10 @@ def test_real_alayaworld_rollout(tmp_path):
                     str(REAL.worldmodel / "data/examples/video_caption_camera/videos/clip_0001.mp4"),
                     "-frames:v", "1", "-vf", "scale=960:544", str(ws / "street.png")], check=True)
     _hiker_mask(ws / "hiker_mask.png")
-    rec = Recorder(run_dir)
-    reg = TokenRegistry(rec)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=3600)
+    reg = TokenRegistry()
+    q = JobQueue(run_dir, threading.Lock(), wait_cap_s=3600)
     for b in (ImageBackend, AlayaWorldBackend, AnnotateBackend):
-        q.register(b(cfg, run_dir, gpus, reg, rec))
+        q.register(b(cfg, run_dir, gpus, reg))
     caller = reg.issue(node="gpu", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
     host = lambda p: staging / Path(p).relative_to("/workspace/staging")
     try:
@@ -652,7 +645,7 @@ def test_real_alayaworld_rollout(tmp_path):
         assert ann["state"] == "done", ann.get("error")
     finally:
         q.shutdown()
-    ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
+    ing = Ingestor(REAL, run_dir, open_db(run_dir))
     rows, failures = [], []
     for i, c in enumerate(cands):
         assert "pose" not in c, c
@@ -714,10 +707,9 @@ def test_real_alayaworld_rollout_of_a_node(tmp_path):
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i",
                     str(REAL.worldmodel / "data/examples/video_caption_camera/videos/clip_0001.mp4"),
                     "-frames:v", "1", "-vf", "scale=960:544", str(ws / "street.png")], check=True)
-    rec = Recorder(run_dir)
-    reg = TokenRegistry(rec)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=3600)
-    q.register(AlayaWorldBackend(cfg, run_dir, gpus, reg, rec))
+    reg = TokenRegistry()
+    q = JobQueue(run_dir, threading.Lock(), wait_cap_s=3600)
+    q.register(AlayaWorldBackend(cfg, run_dir, gpus, reg))
     caller = reg.issue(node="gpu", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
     item = {"image": "street.png", "seed": 42,
             "scene_prompt": "A rainy city street lined with parked cars and trees.",
@@ -761,13 +753,12 @@ def wan_env(tmp_path, monkeypatch):
     """The real Wan22Backend, with wan22_generate.py swapped for the fake bridge (it writes a synthetic 1280x704
     mp4 of the job's frames and echoes the job file)."""
     monkeypatch.setattr(rollouts, "WAN22_BRIDGE", FAKE_BRIDGE)
-    rec = Recorder(tmp_path / "run")
-    reg = TokenRegistry(rec)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
+    reg = TokenRegistry()
+    q = JobQueue(tmp_path / "run", threading.Lock(), wait_cap_s=120)
     ws, staging = tmp_path / "ws", tmp_path / "staging"
     ws.mkdir(); staging.mkdir()
     Image.new("RGB", (640, 360), (10, 20, 30)).save(ws / "frame.png")
-    q.register(Wan22Backend(small_wan_cfg(), tmp_path / "run", [0, 1, 4, 5], reg, rec,
+    q.register(Wan22Backend(small_wan_cfg(), tmp_path / "run", [0, 1, 4, 5], reg,
                             gpu_memory=lambda g: {i: 100 for i in g}))
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
     yield q, caller, staging
@@ -844,13 +835,12 @@ def test_wan_workers_get_one_gpu_each_from_the_configured_repo_and_weights(wan_e
 
 def test_wan_extra_args_can_disable_offload_and_t5_cpu(tmp_path, monkeypatch):
     monkeypatch.setattr(rollouts, "WAN22_BRIDGE", FAKE_BRIDGE)
-    rec = Recorder(tmp_path / "run")
-    reg = TokenRegistry(rec)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
+    reg = TokenRegistry()
+    q = JobQueue(tmp_path / "run", threading.Lock(), wait_cap_s=120)
     ws, staging = tmp_path / "ws", tmp_path / "staging"
     ws.mkdir(); staging.mkdir()
     cfg = small_wan_cfg(extra_args={"offload_model": False, "t5_cpu": False})
-    q.register(Wan22Backend(cfg, tmp_path / "run", [0, 1, 2, 3], reg, rec, gpu_memory=lambda g: {i: 100 for i in g}))
+    q.register(Wan22Backend(cfg, tmp_path / "run", [0, 1, 2, 3], reg, gpu_memory=lambda g: {i: 100 for i in g}))
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
     try:
         _, by = run_wan(q, caller, [{"prompt": "p", "seed": 1}])
@@ -861,10 +851,9 @@ def test_wan_extra_args_can_disable_offload_and_t5_cpu(tmp_path, monkeypatch):
 
 def test_wan_build_gpu_backends_includes_it_only_when_a_variant_is_enabled(tmp_path):
     from ar_kernel.tools.gpu_jobs import build_gpu_backends
-    rec = Recorder(tmp_path / "run")
     for enabled, present in ((True, True), (False, False)):
         names = [b.name for b in build_gpu_backends(small_wan_cfg(enabled=enabled), tmp_path / "run",
-                                                     [0, 1, 2, 3], TokenRegistry(rec), rec)]
+                                                     [0, 1, 2, 3], TokenRegistry())]
         assert ("rollout_wan22" in names) is present
 
 
@@ -873,13 +862,12 @@ def test_wan_refuses_to_run_off_the_pinned_commit(tmp_path, monkeypatch, pin):
     """The backend's own git check, not the worker's: produce() must raise before any worker
     launches, so a silently-updated clone (or a config with no pin) fails the whole job."""
     monkeypatch.setattr(rollouts, "WAN22_BRIDGE", FAKE_BRIDGE)
-    rec = Recorder(tmp_path / "run")
-    reg = TokenRegistry(rec)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=60)
+    reg = TokenRegistry()
+    q = JobQueue(tmp_path / "run", threading.Lock(), wait_cap_s=60)
     ws, staging = tmp_path / "ws", tmp_path / "staging"
     ws.mkdir(); staging.mkdir()
     cfg = small_wan_cfg(repo=".", commit=pin)     # repo_root itself is a real git repo
-    q.register(Wan22Backend(cfg, tmp_path / "run", [0, 1, 2, 3], reg, rec, gpu_memory=lambda g: {i: 100 for i in g}))
+    q.register(Wan22Backend(cfg, tmp_path / "run", [0, 1, 2, 3], reg, gpu_memory=lambda g: {i: 100 for i in g}))
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
     try:
         job_id = q.backends["rollout_wan22"].submit(q, caller, {"items": [{"prompt": "p", "seed": 1}]})["job_id"]
@@ -893,14 +881,13 @@ def test_wan_missing_clone_fails_the_job_with_a_clear_message(tmp_path, monkeypa
     """An uncloned third_party/Wan2.2 must say which path and where the setup is documented, not
     surface a bare CalledProcessError."""
     monkeypatch.setattr(rollouts, "WAN22_BRIDGE", FAKE_BRIDGE)
-    rec = Recorder(tmp_path / "run")
-    reg = TokenRegistry(rec)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=60)
+    reg = TokenRegistry()
+    q = JobQueue(tmp_path / "run", threading.Lock(), wait_cap_s=60)
     ws, staging = tmp_path / "ws", tmp_path / "staging"
     ws.mkdir(); staging.mkdir()
     missing = tmp_path / "no_such_clone"
     cfg = small_wan_cfg(repo=str(missing))
-    q.register(Wan22Backend(cfg, tmp_path / "run", [0, 1, 2, 3], reg, rec, gpu_memory=lambda g: {i: 100 for i in g}))
+    q.register(Wan22Backend(cfg, tmp_path / "run", [0, 1, 2, 3], reg, gpu_memory=lambda g: {i: 100 for i in g}))
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
     try:
         job_id = q.backends["rollout_wan22"].submit(q, caller, {"items": [{"prompt": "p", "seed": 1}]})["job_id"]
@@ -913,8 +900,7 @@ def test_wan_missing_clone_fails_the_job_with_a_clear_message(tmp_path, monkeypa
 
 
 def _wan_backend(tmp_path, **over):
-    rec = Recorder(tmp_path / "run")
-    return Wan22Backend(small_wan_cfg(**over), tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
+    return Wan22Backend(small_wan_cfg(**over), tmp_path / "run", [0, 1, 2, 3], TokenRegistry())
 
 
 def test_finish_refuses_a_non_24fps_render(tmp_path):
@@ -971,11 +957,10 @@ def test_real_wan22_rollout(tmp_path):
     run_dir, ws = tmp_path / "run", tmp_path / "ws"
     staging = run_dir / "staging"
     ws.mkdir(parents=True); staging.mkdir(parents=True)
-    rec = Recorder(run_dir)
-    reg = TokenRegistry(rec)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=3600)
+    reg = TokenRegistry()
+    q = JobQueue(run_dir, threading.Lock(), wait_cap_s=3600)
     for b in (ImageBackend, Wan22Backend, AnnotateBackend):
-        q.register(b(cfg, run_dir, gpus, reg, rec))
+        q.register(b(cfg, run_dir, gpus, reg))
     caller = reg.issue(node="gpu", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
     host = lambda p: staging / Path(p).relative_to("/workspace/staging")
     try:
@@ -998,7 +983,7 @@ def test_real_wan22_rollout(tmp_path):
         print(json.dumps({"wan_wall_s": round(wall, 1), "items": by}, indent=1))
         assert all("candidate" in by[i] for i in range(4)), by
         cands = [by[i]["candidate"] for i in range(4)]
-        ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
+        ing = Ingestor(REAL, run_dir, open_db(run_dir))
         res = _ingest_as_an_agent(q, caller, ing, staging, cands[0], "wan0")
         failures = [] if res.accepted else [f"ingest: {res.reasons}"]
         print(json.dumps({"gpus": gpus, "wall_s": round(wall, 1), "gpu_memory_mib": job_result(out)["gpu_memory_mib"],
@@ -1045,16 +1030,15 @@ def small_ltx_cfg(env="autoresearcher", enabled=True, **over):
 def ltx_env(tmp_path, monkeypatch):
     """The real Ltx25Backend, with ltx25_generate.py swapped for the fake bridge."""
     monkeypatch.setattr(rollouts, "LTX25_BRIDGE", FAKE_BRIDGE)
-    rec = Recorder(tmp_path / "run")
-    reg = TokenRegistry(rec)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
+    reg = TokenRegistry()
+    q = JobQueue(tmp_path / "run", threading.Lock(), wait_cap_s=120)
     ws, staging = tmp_path / "ws", tmp_path / "staging"
     ws.mkdir(); staging.mkdir()
     Image.new("RGB", (1024, 576), (10, 20, 30)).save(ws / "frame.png")
     Image.new("RGB", (960, 544), (10, 20, 30)).save(ws / "small.png")
 
     def make(gpus=(0, 1, 4, 5), **over):
-        q.register(Ltx25Backend(small_ltx_cfg(**over), tmp_path / "run", list(gpus), reg, rec,
+        q.register(Ltx25Backend(small_ltx_cfg(**over), tmp_path / "run", list(gpus), reg,
                                 gpu_memory=lambda g: {i: 100 for i in g}))
         return q
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
@@ -1172,16 +1156,14 @@ def test_ltx_refuses_to_run_off_the_pinned_commit(ltx_env):
 
 def test_ltx_build_gpu_backends_includes_it_only_when_enabled(tmp_path):
     from ar_kernel.tools.gpu_jobs import build_gpu_backends
-    rec = Recorder(tmp_path / "run")
     for enabled, present in ((True, True), (False, False)):
         names = [b.name for b in build_gpu_backends(small_ltx_cfg(enabled=enabled), tmp_path / "run",
-                                                     [0, 1, 2, 3], TokenRegistry(rec), rec)]
+                                                     [0, 1, 2, 3], TokenRegistry())]
         assert ("rollout_ltx25" in names) is present
 
 
 def _ltx_backend(tmp_path, **over):
-    rec = Recorder(tmp_path / "run")
-    return Ltx25Backend(small_ltx_cfg(**over), tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
+    return Ltx25Backend(small_ltx_cfg(**over), tmp_path / "run", [0, 1, 2, 3], TokenRegistry())
 
 
 def _ltx_job(**args):
@@ -1246,11 +1228,10 @@ def test_real_ltx25_rollout(tmp_path):
     run_dir, ws = tmp_path / "run", tmp_path / "ws"
     staging = run_dir / "staging"
     ws.mkdir(parents=True); staging.mkdir(parents=True)
-    rec = Recorder(run_dir)
-    reg = TokenRegistry(rec)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=3600)
+    reg = TokenRegistry()
+    q = JobQueue(run_dir, threading.Lock(), wait_cap_s=3600)
     for b in (ImageBackend, Ltx25Backend, AnnotateBackend):
-        q.register(b(REAL, run_dir, gpus, reg, rec))
+        q.register(b(REAL, run_dir, gpus, reg))
     caller = reg.issue(node="gpu", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
     host = lambda p: staging / Path(p).relative_to("/workspace/staging")
     peak, stop = _peak_sampler(gpus)
@@ -1272,7 +1253,7 @@ def test_real_ltx25_rollout(tmp_path):
         assert out["state"] == "done", out.get("error")
         by = {i["index"]: i for i in job_result(out)["items"]}
         assert all("candidate" in by[i] for i in range(4)), by
-        ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
+        ing = Ingestor(REAL, run_dir, open_db(run_dir))
         res = _ingest_as_an_agent(q, caller, ing, staging, by[0]["candidate"], "ltx0")
         failures = [] if res.accepted else [f"ingest: {res.reasons}"]
         rows = [{"item": i, "video": by[i]["candidate"]["video"], "frames": by[i]["candidate"]["frames"],

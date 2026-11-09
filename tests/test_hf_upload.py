@@ -12,14 +12,13 @@ from huggingface_hub.hf_api import RepoFile
 
 from ar_kernel import hf_upload
 from ar_kernel.hf_upload import HfUpload, fetch, run_files
-from ar_kernel.telemetry.recorder import Recorder
 
 
 class FakeHub:
     """whoami / create_repo / create_commit / list_datasets / list_repo_tree / delete_repo / hf_hub_download over
     a dict of repos, each a dict of uploaded files. `lost_reply`: the commit lands, the caller sees an error."""
     def __init__(self, fail=False):
-        self.repos, self.created, self.fail, self.lost_reply = {}, [], fail, False
+        self.repos, self.created, self.messages, self.fail, self.lost_reply = {}, [], [], fail, False
 
     def whoami(self):
         return {"name": "me"}
@@ -31,6 +30,7 @@ class FakeHub:
     def create_commit(self, repo_id, operations, repo_type, commit_message):
         if self.fail:
             raise ConnectionError("hub down")
+        self.messages.append(commit_message)
         for op in operations:
             if isinstance(op, CommitOperationDelete):
                 del self.repos[repo_id][op.path_in_repo]
@@ -62,7 +62,7 @@ def _run(tmp_path):
     run = tmp_path / "myrun"
     for rel in ("config/run.json", "nodes/n1/eval/a.mp4", "nodes/n1/attempts/improve_recipe-1/workspace/.home/big",
                 "nodes/n1/attempts/improve_recipe-1/workspace/result.json", "staging/n1/improve_recipe-1/hf/raw",
-                "staging/n1/improve_recipe-1/pool/c.mp4", "cache/text_embed/e", "control/state.json"):
+                "staging/n1/improve_recipe-1/pool/c.mp4", "cache/text_embed/e", "control/state.json", "view/v.json"):
         (run / rel).parent.mkdir(parents=True, exist_ok=True)
         (run / rel).write_text(rel)
     with sqlite3.connect(run / "archive.db") as db:
@@ -78,28 +78,21 @@ def _members(data: bytes) -> list[str]:
 
 def test_each_upload_holds_the_changed_files_a_database_copy_and_the_file_list(tmp_path):
     run, hub = _run(tmp_path), FakeHub()
-    up = HfUpload(run, Recorder(run), "tok", api=hub)
+    up = HfUpload(run, "tok", api=hub)
     up("root", "eval", 0)
     assert hub.created == [("me/myrun-00001", "dataset", True)]
     assert _members(hub.repos["me/myrun-00001"]["0000.tar"]) == [
-        ".hf_manifest.json", "archive.db", "config/run.json", "control/state.json",
-        "nodes/n1/attempts/improve_recipe-1/workspace/result.json", "nodes/n1/eval/a.mp4",
-        "staging/n1/improve_recipe-1/pool/c.mp4"]
+        ".hf_manifest.json", "archive.db", "config/run.json", "control/state.json", "nodes/n1/eval/a.mp4"]
     (run / "nodes/n1/eval/b.mp4").write_text("new")
     up("n1", "eval", 0)
-    # the first upload's own event is in the second
-    assert [m for m in _members(hub.repos["me/myrun-00002"]["0000.tar"]) if not m.startswith("telemetry/payloads/")] == [
-        ".hf_manifest.json", "archive.db", "nodes/n1/eval/b.mp4", "telemetry/events/root.jsonl"]
-    assert [e["type"] for e in Recorder(run).read_events("n1")] == ["hf_upload"]
+    assert _members(hub.repos["me/myrun-00002"]["0000.tar"]) == [".hf_manifest.json", "archive.db", "nodes/n1/eval/b.mp4"]
 
 
-def test_a_failed_upload_is_an_alert_and_its_files_go_with_the_next(tmp_path):
+def test_a_failed_upload_is_a_warning_and_its_files_go_with_the_next(tmp_path, capsys):
     run, hub = _run(tmp_path), FakeHub(fail=True)
-    rec = Recorder(run)
-    up = HfUpload(run, rec, "tok", api=hub)
+    up = HfUpload(run, "tok", api=hub)
     up("root", "eval", 0)
-    alerts = [e for e in rec.read_events() if e["type"] == "alert"]
-    assert alerts[-1]["kind"] == "hf_upload_failed" and "hub down" in alerts[-1]["message"]
+    assert "warning: the upload after root eval failed: ConnectionError: hub down" in capsys.readouterr().err
     hub.fail = False
     up("n1", "edit_self", 1)
     assert list(hub.repos) == ["me/myrun-00001"] and "config/run.json" in _members(hub.repos["me/myrun-00001"]["0000.tar"])
@@ -107,16 +100,14 @@ def test_a_failed_upload_is_an_alert_and_its_files_go_with_the_next(tmp_path):
 
 def test_fetch_rebuilds_the_folder_and_drops_what_the_run_removed(tmp_path):
     run, hub = _run(tmp_path), FakeHub()
-    up = HfUpload(run, Recorder(run), "tok", api=hub)
+    up = HfUpload(run, "tok", api=hub)
     up("root", "eval", 0)
     (run / "nodes/n1/eval/a.mp4").unlink()
     (run / "nodes/n1/eval/b.mp4").write_text("b")
     up("n1", "eval", 0)
     there = tmp_path / "elsewhere" / "myrun"
     assert fetch(there, "tok", api=hub, download=hub.download) == f"fetched 2 uploads of myrun into {there}"
-    assert sorted(f for f in run_files(there) if not f.startswith("telemetry/payloads/")) == [
-        "config/run.json", "control/state.json", "nodes/n1/attempts/improve_recipe-1/workspace/result.json",
-        "nodes/n1/eval/b.mp4", "staging/n1/improve_recipe-1/pool/c.mp4", "telemetry/events/root.jsonl"]
+    assert sorted(run_files(there)) == ["config/run.json", "control/state.json", "nodes/n1/eval/b.mp4"]
     assert not (there / "nodes/n1/eval/a.mp4").exists() and (there / "nodes/n1/eval/b.mp4").read_text() == "b"
     assert sqlite3.connect(there / "archive.db").execute("SELECT x FROM t").fetchall() == [(1,)]
     assert fetch(there, "tok", api=hub, download=hub.download) == f"{there} is up to date"
@@ -128,23 +119,13 @@ def test_a_large_upload_is_split_into_parts_of_one_commit(tmp_path, monkeypatch)
     run, hub = _run(tmp_path), FakeHub()
     monkeypatch.setattr(hf_upload, "PART_BYTES", 40)
     monkeypatch.chdir(tmp_path)
-    HfUpload(run.relative_to(tmp_path), Recorder(run), "tok", api=hub)("root", "eval", 0)
+    HfUpload(run.relative_to(tmp_path), "tok", api=hub)("root", "eval", 0)
     parts = sorted(hub.repos["me/myrun-00001"])
     assert len(parts) > 1 and list(hub.repos) == ["me/myrun-00001"]
     assert ".hf_manifest.json" in _members(hub.repos["me/myrun-00001"][parts[-1]])
     there = tmp_path / "elsewhere" / "myrun"
     fetch(there, "tok", api=hub, download=hub.download)
-    assert (there / "staging/n1/improve_recipe-1/pool/c.mp4").read_text() == "staging/n1/improve_recipe-1/pool/c.mp4"
-
-
-def test_recorded_files_go_up_except_those_of_hf_download(tmp_path):
-    run, hub = _run(tmp_path), FakeHub()
-    for rel in ("telemetry/files/aaa", "telemetry/files_hf/bbb"):
-        (run / rel).parent.mkdir(parents=True, exist_ok=True)
-        (run / rel).write_text(rel)
-    HfUpload(run, Recorder(run), "tok", api=hub)("root", "eval", 0)
-    members = _members(hub.repos["me/myrun-00001"]["0000.tar"])
-    assert "telemetry/files/aaa" in members and "telemetry/files_hf/bbb" not in members
+    assert (there / "nodes/n1/eval/a.mp4").read_text() == "nodes/n1/eval/a.mp4"
 
 
 def test_ar_upload_sends_a_stopped_runs_changes_and_refuses_a_live_loop(tmp_path, monkeypatch):
@@ -163,8 +144,7 @@ def test_ar_upload_sends_a_stopped_runs_changes_and_refuses_a_live_loop(tmp_path
     Control(run).release()
     assert cli.main(["upload", "--run-id", "myrun"]) == 0
     assert "config/run.json" in _members(hub.repos["me/myrun-00001"]["0000.tar"])
-    (event,) = [e for e in Recorder(run).read_events("n1") if e["type"] == "hf_upload"]
-    assert (event["phase"], event["attempt"]) == ("manual", 2)
+    assert hub.messages == ["n1 manual 2"]
     hub.fail = True
     (run / "nodes/n1/eval/b.mp4").write_text("new")
     with pytest.raises(ConnectionError):                         # not an alert: the caller sees it
@@ -176,7 +156,7 @@ def test_ar_upload_sends_a_stopped_runs_changes_and_refuses_a_live_loop(tmp_path
 
 def _uploaded(tmp_path, hub, n):
     run = _run(tmp_path)
-    up = HfUpload(run, Recorder(run), "tok", api=hub)
+    up = HfUpload(run, "tok", api=hub)
     for i in range(n):
         (run / f"nodes/n1/eval/{i}.mp4").write_text(str(i))
         up("n1", "eval", 0)
@@ -258,15 +238,16 @@ def test_the_upload_record_is_fsynced_with_its_folder(tmp_path, monkeypatch):
     real = hf_upload.os.fsync
     monkeypatch.setattr(hf_upload.os, "fsync", lambda fd: synced.append(hf_upload.os.readlink(f"/proc/self/fd/{fd}"))
                         or real(fd))
-    HfUpload(run, Recorder(run), "tok", api=hub)("root", "eval", 0)
-    assert [f for f in synced if "/control" in f] == [str(run / "control/hf_upload.tmp"), str(run / "control")]
+    HfUpload(run, "tok", api=hub)("root", "eval", 0)
+    tmp, folder = [f for f in synced if "/control" in f]
+    assert tmp.startswith(str(run / "control/.hf_upload.json.")) and folder == str(run / "control")
     assert json.loads((run / "control/hf_upload.json").read_text())["seq"] == 1
 
 
 def test_a_retry_after_a_commit_that_landed_unnoticed_replaces_it_and_fetch_applies_it_again(tmp_path, monkeypatch):
     run, hub = _run(tmp_path), FakeHub()
     monkeypatch.setattr(hf_upload, "PART_BYTES", 40)
-    up = HfUpload(run, Recorder(run), "tok", api=hub)
+    up = HfUpload(run, "tok", api=hub)
     gone = [f"nodes/n1/eval/x{i}.mp4" for i in range(10)]
     for rel in gone:
         (run / rel).write_text("x" * 50)
@@ -289,7 +270,7 @@ def test_a_retry_after_a_commit_that_landed_unnoticed_replaces_it_and_fetch_appl
 
 def test_a_retry_into_a_repo_the_copy_already_deleted_is_applied_again(tmp_path):
     run, hub = _run(tmp_path), FakeHub()
-    up = HfUpload(run, Recorder(run), "tok", api=hub)
+    up = HfUpload(run, "tok", api=hub)
     hub.lost_reply = True
     up("root", "eval", 0)
     there = tmp_path / "elsewhere" / "myrun"
@@ -314,3 +295,65 @@ def test_an_older_upload_rewritten_after_its_record_reverted_is_applied_again_in
     assert fetch(there, "tok", api=hub, download=hub.download).endswith("(1 applied again: changed on Hugging Face since)")
     assert (there / "nodes/n1/eval/new.mp4").read_text() == "new" and (there / "nodes/n1/eval/2.mp4").read_text() == "2"
     assert fetch(there, "tok", api=hub, download=hub.download) == f"{there} is up to date"
+
+
+def test_mounted_folders_are_added_to_the_upload_state_and_kept_by_an_upload(tmp_path):
+    run = _run(tmp_path)
+    hf_upload.add_mounted(run, [run / "nodes" / "node0001"])
+    hf_upload.add_mounted(run, [run / "nodes" / "node0002" / "attempts" / "improve_recipe-1" / "workspace",
+                                run / "nodes" / "node0001"])
+    mounted = ["nodes/node0001", "nodes/node0002/attempts/improve_recipe-1/workspace"]
+    assert json.loads((run / "control" / "hf_upload.json").read_text()) == {"seq": 0, "files": {}, "mounted": mounted}
+    HfUpload(run, "tok", api=FakeHub())("root", "eval", 0)
+    state = json.loads((run / "control" / "hf_upload.json").read_text())
+    assert state["seq"] == 1 and state["mounted"] == mounted
+
+
+def test_an_attempt_folder_goes_up_once_after_a_sandbox_mounted_it_and_never_otherwise(tmp_path):
+    run, hub = _run(tmp_path), FakeHub()
+    for rel in ("nodes/n2/attempts/improve_recipe-1/agent/a.py", "nodes/n2/attempts/improve_recipe-1/code/c.py",
+                "nodes/n2/attempts/improve_recipe-1/context/x.md", "nodes/n2/attempts/improve_recipe-1/workspace/w",
+                "nodes/n2/attempts/improve_recipe-1/workspace/.home/h", "nodes/n2/recipe.yaml"):
+        (run / rel).parent.mkdir(parents=True, exist_ok=True)
+        (run / rel).write_text(rel)
+    up = HfUpload(run, "tok", api=hub)
+    up("n2", "improve_recipe", 1)
+    assert _members(hub.repos["me/myrun-00001"]["0000.tar"]) == [
+        ".hf_manifest.json", "archive.db", "config/run.json", "control/state.json", "nodes/n1/eval/a.mp4",
+        "nodes/n2/recipe.yaml"]
+    hf_upload.add_mounted(run, [run / "nodes/n2"])
+    up("n3", "improve_recipe", 1)
+    assert _members(hub.repos["me/myrun-00002"]["0000.tar"]) == [
+        ".hf_manifest.json", "archive.db", "nodes/n2/attempts/improve_recipe-1/agent/a.py",
+        "nodes/n2/attempts/improve_recipe-1/code/c.py", "nodes/n2/attempts/improve_recipe-1/context/x.md",
+        "nodes/n2/attempts/improve_recipe-1/workspace/w"]
+    up("n3", "train", 1)
+    assert _members(hub.repos["me/myrun-00003"]["0000.tar"]) == [".hf_manifest.json", "archive.db"]
+    assert "nodes/n1/attempts/improve_recipe-1/workspace/result.json" not in json.loads(
+        (run / "control/hf_upload.json").read_text())["files"]
+
+
+def test_an_upload_is_a_span_with_its_calls_and_files_and_a_failure_is_an_alert(tmp_path):
+    from conftest import telemetry_payload, telemetry_records
+    from ar_kernel import telemetry
+    from ar_kernel.telemetry import tree
+    run, hub = _run(tmp_path), FakeHub()
+    telemetry.open(run)
+    telemetry.start("ar.run")
+    up = HfUpload(run, "tok", api=hub)
+    up("root", "eval", 0)
+    hub.fail = True
+    up("n1", "eval", 0)
+    records = telemetry_records(run)
+    first, second = [r for r in records if r["kind"] == "start" and r["name"] == "hf.upload"]
+    calls = [telemetry_payload(run, r["inputs"])["call"] for r in records
+             if r["kind"] == "start" and r["name"] == "hf.call" and r["parent"] == first["span"]]
+    assert calls == ["whoami", "create_repo", "list_repo_tree", "create_commit"]
+    [end] = [r for r in records if r["kind"] == "end" and r["span"] == first["span"]]
+    output = telemetry_payload(run, end["output"])
+    assert end["status"] == "ok" and output["repo"] == "me/myrun-00001"
+    assert ["config/run.json", len("config/run.json")] in output["files"]
+    [end] = [r for r in records if r["kind"] == "end" and r["span"] == second["span"]]
+    [alert] = [r for r in records if r["kind"] == "alert"]
+    assert end["status"] == "error" and alert["name"] == "hf.upload_failed" and "hub down" in alert["message"]
+    assert tree.check(tree.load(run)) == []

@@ -217,3 +217,17 @@ def test_the_metric_guide_carries_dimension_weight_and_meaning_only():
     assert guide["frame_aesthetics"]["weight"] == 1.0
     text = " ".join(g["measures"] for g in guide.values()).lower()
     assert not any(word in text for word in ("judge", "question", "yes/no", "case", "frames per second"))
+
+
+def test_a_score_and_a_refusal_are_decisions(tmp_path):
+    from ar_kernel import telemetry
+    from conftest import telemetry_records
+    telemetry.open(tmp_path)
+    telemetry.start("ar.run")
+    score_from_report({"full": {"a": {"mean": 0.5, "n": 3}}}, ["a"])
+    with pytest.raises(ValueError):
+        score_from_report({"full": {"a": {"mean": float("nan"), "n": 3}}}, ["a"])
+    assert [(d["name"], d["chosen"]) for d in telemetry_records(tmp_path) if d["kind"] == "decision"] == [
+        ("eval.score", "score"), ("eval.score", "refuse")]
+    from ar_kernel.telemetry import tree
+    assert tree.check(tree.load(tmp_path)) == []

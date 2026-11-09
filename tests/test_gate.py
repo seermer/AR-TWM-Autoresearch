@@ -3,7 +3,6 @@ from ar_kernel.archive.commits import CommitStore
 from ar_kernel.archive.db import open_db
 from ar_kernel.config import KernelConfig
 from ar_kernel.data.ingest import Candidate, Ingestor
-from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.train.gate import Gate
 from conftest import DERIVED, NAMED, staged_clip
 
@@ -12,11 +11,10 @@ CFG = KernelConfig.load()
 @pytest.fixture(scope="module")
 def _gate_store(tmp_path_factory):
     """Ingesting 8 real clips costs ~40 s; the gate only reads the store, so build
-    it once per module. Each test still gets its own node dir and recorder."""
+    it once per module. Each test still gets its own node dir."""
     tmp_path = tmp_path_factory.mktemp("gate_store")
     conn = open_db(tmp_path)
-    rec = Recorder(tmp_path)
-    ing = Ingestor(CFG, tmp_path, conn, rec)
+    ing = Ingestor(CFG, tmp_path, conn)
     clip_ids = []
     for i in range(8):
         # Distinct durations: byte-identical inputs collapse to ONE content-addressed
@@ -35,7 +33,7 @@ def _gate_store(tmp_path_factory):
 @pytest.fixture
 def gate_env(_gate_store, tmp_path):
     commits, commit = _gate_store
-    return Gate(CFG, commits, Recorder(tmp_path)), commit, tmp_path
+    return Gate(CFG, commits), commit, tmp_path
 
 @pytest.mark.gpu
 def test_valid_recipe_passes_every_check(gate_env):
@@ -94,15 +92,14 @@ def test_epoch_budget_below_max_steps_is_rejected(gate_env):
 
 def test_fewer_clips_than_gpus_is_rejected(tmp_path):
     conn = open_db(tmp_path)
-    rec = Recorder(tmp_path)
-    ing = Ingestor(CFG, tmp_path, conn, rec)
+    ing = Ingestor(CFG, tmp_path, conn)
     video, annotation, pose = staged_clip(tmp_path / "staging" / "solo")
     clip_id = ing.ingest([Candidate(video=video, annotation=annotation, pose=pose, derived_from=DERIVED,
                                     named=NAMED)],
                          node_id="n1", attempt=1)[0].clip_id
     commits = CommitStore(conn, ing.blobs, ing.clips)
     commit, _ = commits.commit({"cam": {"weight": 1.0, "clips": [clip_id]}}, "v", node_id="n1")
-    failures = Gate(CFG, commits, rec).check({}, commit, None, "n1", tmp_path / "n1",
+    failures = Gate(CFG, commits).check({}, commit, None, "n1", tmp_path / "n1",
                                            tmp_path, [0, 1, 2, 3])
     assert failures and any("clips" in f for f in failures)
 

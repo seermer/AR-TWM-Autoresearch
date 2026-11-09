@@ -1,6 +1,6 @@
 """caption_videos: the vLLM caption job. Unit tests run a fake vLLM server
 (tests/fixtures/fake_vllm.py, no GPU); the `gpu` test runs the real model."""
-from conftest import client_dir, job_result, job_folder, recorded
+from conftest import client_dir, job_result, job_folder
 import json
 import os
 import shutil
@@ -13,7 +13,6 @@ import pytest
 
 from ar_kernel.config import KernelConfig
 from ar_kernel.guards import choose_gpus
-from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools import captioner, vllm_server
 from ar_kernel.tools.captioner import CaptionBackend, submit
 from ar_kernel.tools.context import TokenRegistry
@@ -42,17 +41,16 @@ def make(tmp_path):
     made = []
 
     def build(cfg=None):
-        rec = Recorder(tmp_path / "run")
-        reg = TokenRegistry(rec)
-        q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
-        q.register(FakeServer(cfg or fake_cfg(), tmp_path / "run", [0, 1, 4, 5], reg, rec,
+        reg = TokenRegistry()
+        q = JobQueue(tmp_path / "run", threading.Lock(), wait_cap_s=120)
+        q.register(FakeServer(cfg or fake_cfg(), tmp_path / "run", [0, 1, 4, 5], reg,
                               gpu_memory=lambda gpus: {g: 100 for g in gpus}))
         ws, staging = tmp_path / "ws", tmp_path / "staging"
         (ws / "clips").mkdir(parents=True)
         staging.mkdir()
         caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
         made.append(q)
-        return q, caller, rec, ws, staging
+        return q, caller, ws, staging
     yield build
     for q in made:
         q.shutdown()
@@ -76,7 +74,7 @@ def _pid_gone(run_dir: Path, job_id: str) -> bool:
 
 
 def test_batch_success_captions_every_clip_then_stops_the_server(make, tmp_path):
-    q, caller, rec, ws, staging = make()
+    q, caller, ws, staging = make()
     (ws / "clips" / "a.mp4").write_bytes(b"x" * 10)
     (staging / "b.mp4").write_bytes(b"y" * 20)
     job = submit(q, caller, ["clips/a.mp4", "/workspace/staging/b.mp4"], "Describe the camera motion.")["job_id"]
@@ -100,13 +98,11 @@ def test_batch_success_captions_every_clip_then_stops_the_server(make, tmp_path)
     assert [m["type"] for m in got if m["type"] != "item_started"] == ["ready", "item", "item", "job_done"]
     assert all(m["ok"] and m["started"] <= m["ended"] for m in got if m["type"] == "item")
     assert all(m["log"] == str(job_folder(run, job) / "logs" / "vllm.log") for m in got if m["type"] == "item")
-    files = recorded(rec)
-    assert files[("in", "/workspace/clips/a.mp4")] == b"x" * 10 and files[("in", "/workspace/staging/b.mp4")] == b"y" * 20
 
 
 def test_every_bad_path_is_named_in_one_refusal_and_paths_may_come_from_a_file(make):
     """A 100-path list is refused once, with every bad path named, not one path per refusal."""
-    q, caller, _, ws, _ = make()
+    q, caller, ws, _ = make()
     (ws / "a.mp4").write_bytes(b"x")
     with pytest.raises(ToolError) as refused:
         submit(q, caller, ["a.mp4", "missing1.mp4", "missing2.mp4"], "Caption.")
@@ -139,7 +135,7 @@ def test_every_bad_path_is_named_in_one_refusal_and_paths_may_come_from_a_file(m
 
 
 def test_a_clip_the_server_rejects_is_a_per_clip_error_not_a_failed_job(make):
-    q, caller, _, ws, _ = make()
+    q, caller, ws, _ = make()
     (ws / "good.mp4").write_bytes(b"ok")
     (ws / "bad.mp4").write_bytes(b"BAD video")
     job = submit(q, caller, ["good.mp4", "bad.mp4"], "Caption.")["job_id"]
@@ -152,7 +148,7 @@ def test_a_clip_the_server_rejects_is_a_per_clip_error_not_a_failed_job(make):
 
 
 def test_a_clip_swapped_for_a_link_after_submit_is_a_per_clip_error(make, tmp_path):
-    q, caller, _, ws, _ = make()
+    q, caller, ws, _ = make()
     (ws / "a.mp4").write_bytes(b"ok")
     (ws / "b.mp4").write_bytes(b"ok")
     outside = tmp_path / "secret.mp4"
@@ -170,7 +166,7 @@ def test_a_clip_swapped_for_a_link_after_submit_is_a_per_clip_error(make, tmp_pa
 def test_a_parent_directory_swapped_for_a_link_after_the_check_is_refused(make, tmp_path, monkeypatch):
     """The agent keeps running during the job: a directory on the path swapped for a link to a
     host directory between the check and the open must not get host videos captioned."""
-    q, caller, _, ws, _ = make()
+    q, caller, ws, _ = make()
     (ws / "clips" / "a.mp4").write_bytes(b"agent clip")
     host = tmp_path / "host_videos"
     host.mkdir()
@@ -225,7 +221,7 @@ def test_the_server_runs_with_reasoning_and_a_data_parallel_encoder(tmp_path):
 
 
 def test_each_clips_reasoning_is_kept_but_not_returned_to_the_agent(make, tmp_path):
-    q, caller, rec, ws, _ = make()
+    q, caller, ws, _ = make()
     (ws / "a.mp4").write_bytes(b"x" * 10)
     out = q.wait(caller, submit(q, caller, ["a.mp4"], "Caption.")["job_id"], 120)
     assert out["state"] == "done" and set(job_result(out)["clips"]["/workspace/a.mp4"]) == {"caption"}
@@ -235,7 +231,7 @@ def test_each_clips_reasoning_is_kept_but_not_returned_to_the_agent(make, tmp_pa
 
 def test_clips_are_captioned_concurrently_up_to_concurrent_requests(make):
     """Sequential requests left the server's batching unused (n1: 53 clips x 3.5 s)."""
-    q, caller, rec, ws, _ = make(fake_cfg(concurrent_requests=6, extra_args=["--fake-mode", "second"]))
+    q, caller, ws, _ = make(fake_cfg(concurrent_requests=6, extra_args=["--fake-mode", "second"]))
     names = [f"c{i}.mp4" for i in range(6)]
     for i, n in enumerate(names):
         (ws / n).write_bytes(b"v" * (i + 1))
@@ -259,7 +255,7 @@ def test_unreadable_gpu_memory_is_none_not_a_crash(monkeypatch):
 
 
 def test_cancel_stops_the_server(make, tmp_path):
-    q, caller, rec, ws, _ = make(fake_cfg(extra_args=["--fake-mode", "slow"], clip_timeout_s=120))
+    q, caller, ws, _ = make(fake_cfg(extra_args=["--fake-mode", "slow"], clip_timeout_s=120))
     (ws / "a.mp4").write_bytes(b"ok")
     job = submit(q, caller, ["a.mp4"], "Caption.")["job_id"]
     deadline = time.monotonic() + 60
@@ -276,7 +272,7 @@ def test_cancel_stops_the_server(make, tmp_path):
 
 
 def test_server_that_dies_during_startup_fails_every_clip_with_its_log(make, tmp_path):
-    q, caller, rec, ws, _ = make(fake_cfg(extra_args=["--fake-mode", "exit"]))
+    q, caller, ws, _ = make(fake_cfg(extra_args=["--fake-mode", "exit"]))
     (ws / "a.mp4").write_bytes(b"ok")
     out = q.wait(caller, submit(q, caller, ["a.mp4"], "Caption.")["job_id"], 120)
     assert out["state"] == "done"
@@ -286,7 +282,7 @@ def test_server_that_dies_during_startup_fails_every_clip_with_its_log(make, tmp
 
 
 def test_a_server_that_never_gets_ready_waits_until_the_job_is_cancelled(make, tmp_path):
-    q, caller, _, ws, _ = make(fake_cfg(extra_args=["--fake-mode", "hang"]))
+    q, caller, ws, _ = make(fake_cfg(extra_args=["--fake-mode", "hang"]))
     (ws / "a.mp4").write_bytes(b"ok")
     job = submit(q, caller, ["a.mp4"], "Caption.")["job_id"]
     assert q.wait(caller, job, 8)["state"] == "running"          # no start-up limit
@@ -303,13 +299,13 @@ def test_a_server_that_never_gets_ready_waits_until_the_job_is_cancelled(make, t
     (["clips"], "is not a file"),
 ])
 def test_paths_are_validated_before_a_job_is_queued(make, paths, message):
-    q, caller, _, _, _ = make()
+    q, caller, _, _ = make()
     with pytest.raises(ToolError, match=message):
         submit(q, caller, paths, "Caption.")
 
 
 def test_more_clips_than_max_items_are_refused(make):
-    q, caller, _, ws, _ = make(fake_cfg(max_items=1))
+    q, caller, ws, _ = make(fake_cfg(max_items=1))
     for name in ("a.mp4", "b.mp4"):
         (ws / name).write_bytes(b"ok")
     with pytest.raises(ToolError, match="at most 1 items per job: got 2"):
@@ -318,7 +314,7 @@ def test_more_clips_than_max_items_are_refused(make):
 
 
 def test_empty_prompt_is_refused(make):
-    q, caller, _, ws, _ = make()
+    q, caller, ws, _ = make()
     (ws / "a.mp4").write_bytes(b"ok")
     with pytest.raises(ToolError, match="prompt is empty"):
         submit(q, caller, ["a.mp4"], "  ")
@@ -334,10 +330,9 @@ def test_caption_videos_over_mcp_queues_a_job_and_reports_path_errors(tmp_path):
     from ar_kernel.tools.captioner import register_caption_tool
     from ar_kernel.tools.jobs import register_job_tools
     from ar_kernel.tools.server import ToolKit, build_tool_app, new_mcp
-    rec = Recorder(tmp_path / "run")
-    reg, q = TokenRegistry(rec), JobQueue(rec, threading.Lock(), wait_cap_s=5)
+    reg, q = TokenRegistry(), JobQueue(tmp_path / "run", threading.Lock(), wait_cap_s=5)
     q.register(_MockCaption())
-    kit, mcp = ToolKit(reg, rec), new_mcp()
+    kit, mcp = ToolKit(reg, tmp_path / "run"), new_mcp()
     register_job_tools(mcp, kit, q)
     register_caption_tool(mcp, kit, q)
     services = RunServices(socket_dir_for(tmp_path / "run"))
@@ -366,10 +361,9 @@ def test_caption_videos_over_mcp_queues_a_job_and_reports_path_errors(tmp_path):
 def test_real_model_captions_two_example_clips(tmp_path):
     """pytest -m gpu -k real_model (the first gpus.num_gpus free cards)."""
     gpus = choose_gpus(REAL, {})
-    rec = Recorder(tmp_path / "run")
-    reg = TokenRegistry(rec)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=300)
-    q.register(CaptionBackend(REAL, tmp_path / "run", gpus, reg, rec))
+    reg = TokenRegistry()
+    q = JobQueue(tmp_path / "run", threading.Lock(), wait_cap_s=300)
+    q.register(CaptionBackend(REAL, tmp_path / "run", gpus, reg))
     ws, staging = tmp_path / "ws", tmp_path / "staging"
     ws.mkdir(), staging.mkdir()
     examples = REAL.worldmodel / "data" / "examples"
@@ -396,8 +390,7 @@ def test_real_model_captions_two_example_clips(tmp_path):
     assert job_result(out)["gpu_memory_released"] is True
     assert again["state"] == "done"
     assert "caption" in job_result(again)["clips"]["/workspace/staging/cam.mp4"]
-    events = [e["type"] for e in rec.read_events("gpu")]
-    assert "caption_videos.gpu_not_released" not in events
+    assert job_result(again)["gpu_memory_released"] is True
 
 
 class _Stub:

@@ -5,21 +5,16 @@ import hashlib
 import os
 import re
 import secrets
-import subprocess
+import stat
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .. import fs, telemetry
 from ..faults import KernelFault
 from ..guards import device_minors
-from ..subproc import project_env, wait_leader
-
-# Env var names whose value must never reach telemetry, no matter which Recorder
-# is used (defense in depth: a Recorder that was never told about this run's
-# token via add_redaction must still not leak it through the recorded sandbox settings).
-_SECRET_ENV_KEYS = ("AR_TOKEN", "HF_TOKEN")
-
+from ..subproc import project_env, run_sandbox
 
 @dataclass
 class Mounts:
@@ -54,24 +49,24 @@ def container_name(run_id: str, node: str, phase: str, attempt: int) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "-", raw)
 
 
-def snapshot(root: Path, hash_files: bool) -> dict[str, str]:
-    """path -> fingerprint. Hash small code trees; use size+mtime for workspaces
+def snapshot(root: Path, hash_files: bool) -> dict[str, tuple]:
+    """path -> (size, fingerprint). Hash small code trees; use the mtime for workspaces
     that may hold gigabytes of video. Only regular files count (never a FIFO or
-    a symlink); a file the agent made unreadable is recorded as "unreadable"."""
+    a symlink); a file the agent made unreadable is fingerprinted "unreadable"."""
     out = {}
     root = Path(root)
     for p in sorted(root.rglob("*")):
         if p.is_file() and not p.is_symlink():
-            rel = str(p.relative_to(root))
+            st = p.stat()
+            mark = st.st_mtime_ns
             if hash_files:
                 try:
                     with p.open("rb") as f:
-                        out[rel] = hashlib.file_digest(f, "sha256").hexdigest()
-                except OSError:
-                    out[rel] = "unreadable"
-            else:
-                st = p.stat()
-                out[rel] = f"{st.st_size}:{st.st_mtime_ns}"
+                        mark = hashlib.file_digest(f, "sha256").hexdigest()
+                except OSError as exc:
+                    telemetry.error(exc, 'fingerprinted "unreadable"')
+                    mark = "unreadable"
+            out[str(p.relative_to(root))] = (st.st_size, mark)
     return out
 
 
@@ -81,10 +76,10 @@ def restore_owner_access(root: Path) -> None:
     break the kernel's later hash, copy, commit or delete of the tree."""
     def grant(path: str, bits: int) -> None:
         try:
-            if not os.path.islink(path):
-                os.chmod(path, os.lstat(path).st_mode | bits)
-        except OSError:
-            pass
+            if not os.path.islink(path) and (mode := os.lstat(path).st_mode) | bits != mode:
+                fs.chmod(path, stat.S_IMODE(mode | bits))
+        except OSError as exc:
+            telemetry.error(exc, "the path keeps its mode")
 
     grant(str(root), 0o700)
     for dirpath, dirnames, filenames in os.walk(root):     # top-down: a dir is fixed before it is entered
@@ -94,7 +89,7 @@ def restore_owner_access(root: Path) -> None:
             grant(os.path.join(dirpath, name), 0o600)
 
 
-def diff(before: dict[str, str], after: dict[str, str]) -> dict[str, list[str]]:
+def diff(before: dict[str, tuple], after: dict[str, tuple]) -> dict[str, list[str]]:
     return {"added": sorted(set(after) - set(before)),
             "removed": sorted(set(before) - set(after)),
             "changed": sorted(k for k in set(before) & set(after) if before[k] != after[k])}
@@ -152,60 +147,73 @@ def bwrap_args(mounts: Mounts, command, env, env_dir: Path, shm_gb: float,
     return argv, {**environment, **env}
 
 
-def _redacted(settings: dict) -> dict:
-    """Copy `settings` with the value of each secret env key replaced by a placeholder. Applied to the
-    settings the runner records, independent of the Recorder's own redaction list, so a sandbox
-    token never lands in telemetry even if this Recorder instance was never told about it."""
-    env = {k: "<redacted>" if k in _SECRET_ENV_KEYS else v for k, v in settings["environment"].items()}
-    return {**settings, "environment": env}
-
-
-def _read_output(path: Path, stream: str, recorder, name: str, base: dict) -> str:
+def _read_output(path: Path, stream: str) -> str:
     try:
         return path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
-        recorder.event("sandbox.error", container=name, payload={"stderr": f"could not read the sandbox's {stream}: {exc}"},
-                       **base)
+        telemetry.error(exc, f"the {stream} text says it could not be read")
         return f"could not read the sandbox's {stream}: {exc}\n"
 
 
+def _manifest(path: Path) -> list[list]:
+    """[relative path, size] of every file a /nodes mount shows: its eval/ is hidden."""
+    out = []
+    for d, dirs, files in os.walk(path):
+        if d == str(path):
+            dirs[:] = [x for x in dirs if x != "eval"]
+        out += [[os.path.relpath(os.path.join(d, f), path), os.lstat(os.path.join(d, f)).st_size] for f in files]
+    return sorted(out)
+
+
+def _inputs(name: str, argv: list[str], environment: dict, mounts: Mounts, gpus) -> dict:
+    if (w := telemetry.writer()) is None:
+        return {}
+    return {"name": name, "argv": argv, "env": w.redact_env(environment), "gpus": list(gpus),
+            "nodes": {node: _manifest(path) for node, path in mounts.nodes.items()}}
+
+
+def _writable(mounts: Mounts) -> dict[str, tuple[Path, bool]]:
+    """Each folder the sandbox can write: sandbox path -> (host path, whether its files are hashed)."""
+    return {"/workspace": (Path(mounts.workspace), False), "/workspace/staging": (Path(mounts.staging), False),
+            **({} if mounts.agent_readonly else {"/agent": (Path(mounts.agent), True)})}
+
+
+def files(mounts: Mounts) -> dict[str, dict]:
+    """The snapshot of each folder the sandbox can write."""
+    return {root: snapshot(path, hashed) for root, (path, hashed) in _writable(mounts).items()}
+
+
+def record_changes(mounts: Mounts, before: dict[str, dict]) -> None:
+    """Each file added, changed or removed since `before` (`files`), with its size."""
+    with telemetry.span("sandbox.changes", {root: str(path) for root, (path, _) in _writable(mounts).items()}) as sp:
+        after = files(mounts)
+        sp.output = {root: {kind: [[p, (before if kind == "removed" else after)[root][p][0]] for p in paths]
+                            for kind, paths in diff(before[root], after[root]).items()} for root in after}
+
+
 def run_container(*, name: str, mounts: Mounts, command: list[str], env: dict, env_dir: Path, shm_gb: float,
-                  recorder, node: str, phase: str, attempt: int, gpus=(), log_name: str = "sandbox",
+                  gpus=(), log_name: str = "sandbox",
                   cancel: threading.Event | None = None, on_start=None, poll_s: float = 1.0) -> RunResult:
     """stdout and stderr go to <log_name>.stdout / .stderr next to the workspace folder. `cancel` kills the
     sandbox; `on_start` gets bwrap's pid. Raises KernelFault when the sandbox itself fails (bwrap cannot
     start or set it up)."""
-    (Path(mounts.workspace) / ".home").mkdir(parents=True, exist_ok=True)
-    base = dict(node=node, phase=phase, attempt=attempt, component="sandbox")
+    fs.mkdir(Path(mounts.workspace) / ".home")
     started = time.monotonic()
     out_path, err_path = (Path(mounts.workspace).parent / f"{log_name}.{s}" for s in ("stdout", "stderr"))
-    proc = None
     try:
         try:
             argv, environment = bwrap_args(mounts, command, env, env_dir, shm_gb, device_minors(list(gpus)))
-            recorder.event("sandbox.start", container=name,
-                           payload={"settings": _redacted({"argv": argv, "environment": environment})}, **base)
-            with open(out_path, "w") as out, open(err_path, "w") as err:
-                proc = subprocess.Popen(argv, env=environment, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
-                                        start_new_session=True)     # a Ctrl-C to the kernel is not the agent's
-        except (OSError, ValueError, subprocess.SubprocessError) as exc:   # e.g. no bwrap, a card without a minor
-            recorder.event("sandbox.error", payload={"stderr": f"{type(exc).__name__}: {exc}"}, container=name, **base)
+        except (OSError, ValueError) as exc:          # e.g. no bwrap, a card without a minor
             raise KernelFault(f"the sandbox could not start: {type(exc).__name__}: {exc}") from exc
-        if on_start is not None:
-            on_start(proc.pid)
-        cancelled, _ = wait_leader(proc, cancel, poll_s, kill=proc.kill)    # --die-with-parent ends everything inside
-        exit_code = proc.returncode
+        exit_code = run_sandbox(argv, environment, out_path=out_path, err_path=err_path,
+                                inputs=_inputs(name, argv, environment, mounts, gpus), cancel=cancel,
+                                poll_s=poll_s, on_start=on_start)
     finally:
-        if proc is not None and proc.poll() is None:
-            proc.kill()                   # --die-with-parent ends everything inside
-            proc.wait()
         for root in (mounts.agent, mounts.workspace, mounts.staging):   # everything the agent can write
             restore_owner_access(root)
-    stdout = _read_output(out_path, "stdout", recorder, name, base)
-    stderr = _read_output(err_path, "stderr", recorder, name, base)
+    stdout = _read_output(out_path, "stdout")
+    stderr = _read_output(err_path, "stderr")
     result = RunResult(exit_code, stdout, stderr, time.monotonic() - started, name)
-    recorder.event("sandbox.end", container=name, exit_code=exit_code, duration_s=result.duration_s,
-                   cancelled=cancelled, payload={"stdout": stdout, "stderr": stderr}, **base)
     if exit_code != 0 and stderr.startswith("bwrap: "):        # bwrap's own error: the command never ran
         raise KernelFault(f"the sandbox could not be set up: {stderr.splitlines()[0]}")
     return result

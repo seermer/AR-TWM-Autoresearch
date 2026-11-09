@@ -1,20 +1,23 @@
 """Scripted loop phases and a runnable fake loop for the integration tests: the real
 `drive` in a subprocess, with no GPU, LLM or sandbox.
-Usage: python tests/fixtures/fake_loop.py RUN_DIR MAX_NODES none|pace|<phase>"""
+Usage: python tests/fixtures/fake_loop.py RUN_DIR MAX_NODES none|pace|crash|<phase>
+It records like `ar run` after the claim: the writer, `ar.run` and the exit code."""
 import sys
 import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
+from ar_kernel import telemetry
 from ar_kernel.agent_phase import PhaseOutcome
 from ar_kernel.archive.db import open_db
 from ar_kernel.budget import Budget
 from ar_kernel.config import KernelConfig
-from ar_kernel.control import Control, drive
+from ar_kernel.cli import drive_code
+from ar_kernel.control import Control, exit_process
 from ar_kernel.loop import Loop, Phases
 from ar_kernel.run import RunContext
-from ar_kernel.telemetry.recorder import Recorder
+from ar_kernel.telemetry import capture
 from ar_kernel.faults import KernelFault, NodeFault
 from ar_kernel.vcs.agents_repo import AgentsRepo
 
@@ -108,8 +111,7 @@ def build(run: Path, max_nodes: int, script):
     (run / "config").mkdir(parents=True, exist_ok=True)
     if not (run / "config" / "run.json").exists():
         (run / "config" / "run.json").write_text("{}")
-    rec = Recorder(run)
-    ctx = RunContext(run_dir=run, conn=open_db(run), recorder=rec, gpus=[0, 1, 2, 3],
+    ctx = RunContext(run_dir=run, conn=open_db(run), gpus=[0, 1, 2, 3],
                      metric_set=["m"], case_ids=["1"], versions={})
     kit = SimpleNamespace(env=None, gpu_lock=threading.Lock(), budget=Budget(), harness=None,
                           start=lambda: None, stop=lambda: None)
@@ -121,7 +123,19 @@ def main() -> None:
     run, max_nodes, slow = Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
     script = Script(run, slow=None if slow == "none" else slow, **(SCENARIO if slow == "none" else {}))
     loop, kit = build(run, max_nodes, script)
-    drive(loop, kit, Control(run), loop.ctx.recorder)
+    if slow == "crash":
+        def crash():
+            raise RuntimeError("a bug in the loop")
+        loop.ensure_root = crash
+    telemetry.open(run)
+    capture.install()
+    root = telemetry.start("ar.run", {})
+    code = 1
+    try:
+        code = drive_code(loop, kit, Control(run))
+    finally:
+        root.end("ok" if code == 0 else "error", {"exit_code": code})
+    exit_process(code)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,8 @@ import tempfile
 from pathlib import Path
 from typing import Callable
 
+from .. import subproc, telemetry
+
 _IDENT = ["-c", "user.name=AutoResearcher kernel", "-c", "user.email=kernel@autoresearcher.local"]
 
 
@@ -38,10 +40,10 @@ class AgentsRepo:
         cmd = ["git", *_IDENT, "--git-dir", str(self.path)]
         if work_tree is not None:
             cmd += ["--work-tree", str(work_tree)]
-        return subprocess.run(cmd + list(args), capture_output=True, env=env, input=input, check=check)
+        return subproc.run(cmd + list(args), env=env, input=input, check=check, text=False)
 
     def init(self, seed_dir: Path) -> str:
-        subprocess.run(["git", "init", "--bare", "-q", str(self.path)], check=True)
+        subproc.run(["git", "init", "--bare", "-q", str(self.path)], check=True)
         root = self.commit_tree(seed_dir, None, "seed agent")
         self.set_ref(self.branch_ref("root"), root)
         return root
@@ -55,25 +57,28 @@ class AgentsRepo:
         return self._git(*args).stdout.decode().strip()
 
     def set_ref(self, ref: str, commit: str, push: bool = True) -> None:
-        self._git("update-ref", ref, commit)
+        with telemetry.span("git.ref", {"ref": ref, "old": self.resolve(ref), "new": commit}) as sp:
+            self._git("update-ref", ref, commit)
+            sp.output = {"commit": self.resolve(ref)}
         if push:
             self.push()
 
     def delete_refs(self, prefix: str) -> None:
         for ref in self._git("for-each-ref", "--format=%(refname)", prefix).stdout.decode().split():
-            self._git("update-ref", "-d", ref)
+            with telemetry.span("git.ref", {"ref": ref, "old": self.resolve(ref), "new": None}) as sp:
+                self._git("update-ref", "-d", ref)
+                sp.output = {"commit": self.resolve(ref)}
 
     @staticmethod
     def check_remote(url: str) -> str | None:
         """None if `url` is a reachable git repo, else why not."""
-        r = subprocess.run(["git", "ls-remote", "--heads", url], capture_output=True, text=True, env=_remote_env())
+        r = subproc.run(["git", "ls-remote", "--heads", url], env=_remote_env())
         return None if r.returncode == 0 else r.stderr.strip() or f"git ls-remote exited {r.returncode}"
 
     @staticmethod
     def has_run(url: str, namespace: str) -> bool:
         """Whether `url` has branches under `namespace/`."""
-        out = subprocess.run(["git", "ls-remote", "--heads", url], capture_output=True, text=True,
-                             env=_remote_env(), check=True).stdout
+        out = subproc.run(["git", "ls-remote", "--heads", url], env=_remote_env(), check=True).stdout
         return any(line.split("\t")[-1].startswith(f"refs/heads/{namespace}/") for line in out.splitlines())
 
     def push(self) -> None:
@@ -84,7 +89,7 @@ class AgentsRepo:
                  f"refs/attempts/*:refs/heads/{self.namespace}/attempts/*",
                  f"refs/snapshots/*:refs/heads/{self.namespace}/snapshots/*"]
         cmd = ["git", "--git-dir", str(self.path), "push", "--quiet", self.remote, *specs]
-        r = subprocess.run(cmd, capture_output=True, text=True, env=_remote_env())
+        r = subproc.run(cmd, env=_remote_env())
         error = None if r.returncode == 0 else r.stderr.strip() or f"git push exited {r.returncode}"
         if error and self.on_push_error:
             self.on_push_error(f"push to {self.remote} failed: {error}")

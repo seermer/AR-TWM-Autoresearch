@@ -2,7 +2,6 @@ import asyncio
 import threading
 
 from ar_kernel.contract.verify import _MockCaption, _MockData, _MockHf
-from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools.ask import MockAsk, register_ask_tool
 from ar_kernel.tools.captioner import register_caption_tool
 from ar_kernel.tools.context import TokenRegistry
@@ -18,10 +17,9 @@ AGENT_TEXT_NEVER_SAYS = ("window", "per_chunk", "prompt_mode", "camera_motion", 
 
 
 def _tools(tmp_path):
-    rec = Recorder(tmp_path)
-    queue = JobQueue(rec, threading.Lock(), wait_cap_s=5.0)
+    queue = JobQueue(tmp_path, threading.Lock(), wait_cap_s=5.0)
     try:
-        kit, mcp = ToolKit(TokenRegistry(rec), rec), new_mcp()
+        kit, mcp = ToolKit(TokenRegistry(), tmp_path), new_mcp()
         register_data_tools(mcp, kit, _MockData())
         register_hf_tools(mcp, kit, _MockHf())
         register_job_tools(mcp, kit, queue)
@@ -90,13 +88,12 @@ def test_nothing_an_agent_reads_speaks_of_training_windows_rounds_or_removed_fie
     from ar_kernel.config import KernelConfig
     from ar_kernel.tools.gpu_jobs import build_gpu_backends, register_gpu_tools
     from ar_kernel.tools.locate_events import register_locate_tool
-    rec = Recorder(tmp_path / "run")
-    reg = TokenRegistry(rec)
-    queue = JobQueue(rec, threading.Lock(), wait_cap_s=5.0)
+    reg = TokenRegistry()
+    queue = JobQueue(tmp_path / "run", threading.Lock(), wait_cap_s=5.0)
     try:
-        for backend in build_gpu_backends(KernelConfig.load(), tmp_path / "run", [0, 1, 2, 3], reg, rec):
+        for backend in build_gpu_backends(KernelConfig.load(), tmp_path / "run", [0, 1, 2, 3], reg):
             queue.register(backend)
-        kit, mcp = ToolKit(reg, rec), new_mcp()
+        kit, mcp = ToolKit(reg, tmp_path / "run"), new_mcp()
         register_gpu_tools(mcp, kit, queue)
         register_locate_tool(mcp, kit, queue)
         gpu_tools = {t.name: t for t in asyncio.run(mcp.list_tools())}

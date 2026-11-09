@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .. import telemetry
 from ..config import KernelConfig
 from ..subproc import output_tail, run_in_env
 from ..tools.vllm_server import gpu_memory_mib, wait_gpu_release
@@ -9,15 +10,21 @@ from .judge import Judge, judge_env, judge_server
 
 
 def run_wbench_phases(cfg: KernelConfig, work_dir: Path, model: str, gpus: list[int],
-                      metric_set: list[str], recorder, node_id: str, judge: Judge | None = None) -> dict:
+                      metric_set: list[str], judge: Judge | None = None) -> dict:
     """precompute, gpu (twice), vlm (twice, behind a local judge server when `judge` is local),
     visual plausibility, report. Every phase runs whatever the metric set."""
+    with telemetry.span("eval.wbench", {"model": model, "work_dir": str(work_dir), "gpus": list(gpus),
+                                        "metric_set": list(metric_set),
+                                        "judge": None if judge is None else [judge.kind, judge.model]}) as sp:
+        sp.output = _phases(cfg, work_dir, model, gpus, judge)
+        return sp.output
+
+
+def _phases(cfg: KernelConfig, work_dir: Path, model: str, gpus: list[int], judge: Judge | None) -> dict:
     gpu_arg = ",".join(str(g) for g in gpus)
 
     def wbench(env: str, args: list[str], name: str, extra_env: dict | None = None) -> None:
-        with recorder.span(f"wbench.{name}", node=node_id, phase="eval"):
-            proc = run_in_env(env, args, cwd=cfg.wbench, extra_env=extra_env,
-                              recorder=recorder, node=node_id, phase="eval")
+        proc = run_in_env(env, args, cwd=cfg.wbench, extra_env=extra_env)
         if proc.returncode != 0:
             raise RuntimeError(f"wbench {name} failed (rc={proc.returncode}): {output_tail(proc)}")
 
@@ -39,7 +46,7 @@ def run_wbench_phases(cfg: KernelConfig, work_dir: Path, model: str, gpus: list[
     # and costs seconds when nothing failed.
     main_phase("gpu")
     if judge is not None and judge.kind == "local":
-        _vlm_with_local_judge(cfg, judge, gpus, Path(work_dir), recorder, node_id, vlm)
+        _vlm_with_local_judge(cfg, judge, gpus, Path(work_dir), vlm)
     else:
         vlm()
     wbench("wbench-vp", ["python", "tools/run_visual_plausibility.py", "--model", model,
@@ -51,18 +58,19 @@ def run_wbench_phases(cfg: KernelConfig, work_dir: Path, model: str, gpus: list[
     return json.loads(report_path.read_text())
 
 
-def _vlm_with_local_judge(cfg, judge, gpus, work_dir, recorder, node_id, vlm) -> None:
+def _vlm_with_local_judge(cfg, judge, gpus, work_dir, vlm) -> None:
     """Serve the judge on all the GPUs for the vlm phase only, then free them for what follows."""
-    server = judge_server(cfg, judge, gpus, work_dir.parent / "judge", recorder, node_id)
+    server = judge_server(cfg, judge, gpus, work_dir.parent / "judge")
     before = gpu_memory_mib(gpus)
-    try:
-        with recorder.span("wbench.judge_server", node=node_id, phase="eval"):
-            load_s = server.start()
-        recorder.event("judge.server_ready", node=node_id, component="eval", load_s=load_s,
-                       payload={"gpus": gpus, "model": judge.model})
-        vlm(judge_env(cfg, judge, server.base_url, server.api_key))
-    finally:
-        server.stop()
-        _, released = wait_gpu_release(gpu_memory_mib, gpus, before, float(cfg.get("captioner.memory_release_timeout_s")))
-        if released is False:
-            recorder.event("judge.gpu_not_released", node=node_id, component="eval", payload={"before": before})
+    with telemetry.span("eval.judge", {"model": judge.model, "gpus": list(gpus)}) as sp:
+        w = telemetry.writer()
+        if w is not None:
+            w.add_redaction(server.api_key)
+        try:
+            sp.output = {"load_s": server.start()}
+            vlm(judge_env(cfg, judge, server.base_url, server.api_key))
+        finally:
+            sp.output = {**(sp.output or {}), "exit": server.stop()}
+            after, released = wait_gpu_release(gpu_memory_mib, gpus, before,
+                                               float(cfg.get("captioner.memory_release_timeout_s")))
+            sp.output.update(gpu_memory_mib={"before": before, "after": after}, released=released)

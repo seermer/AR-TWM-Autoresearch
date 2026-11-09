@@ -108,6 +108,7 @@ export const eventCols = [
 export default function Overview() {
   const query = useApi("/api/overview");
   const [seq, setSeq] = useState<number | null>(null);
+  const navigate = useNavigate();
   return (
     <Q query={query} what="overview">{(ov) => (
       <div className="page">
@@ -122,7 +123,7 @@ export default function Overview() {
         <Section title={`Nodes (${ov.nodes.length})`}>
           <Table rows={ov.nodes} cols={nodeCols} rowKey={(r: any) => r.node} />
         </Section>
-        <Section title="Run timeline" note="every recorded span; click a bar for its event, a node bar for the node">
+        <Section title="Run timeline" note="phases, sandboxes, model and tool calls, jobs, processes, training and eval; click a bar for its span, a node bar for the node">
           <Timeline height={560} />
         </Section>
         <Section title="GPUs"><GpuChart /></Section>
@@ -136,7 +137,12 @@ export default function Overview() {
               { key: "source", render: (r: any) => <Badge>{r.source}</Badge> }, { key: "last hour" }, { key: "total" }]} filter={false} />
           </Section>
         </div>
-        <Section title="Latest 50 events" note="updates live · click one for its record and payload" actions={<Link to="/trace" className="btn small">all events</Link>}>
+        <Section title={`Open spans (${ov.open_spans.length})`} note="no end recorded: running while the loop is alive" collapsed={!ov.open_spans.length}>
+          <Table rows={ov.open_spans} filter={false} cols={[{ key: "time", width: "150px" }, { key: "name", width: "130px" }, { key: "node", width: "80px" },
+            { key: "phase", width: "110px" }, { key: "attempt", width: "60px" }, { key: "facts", width: "minmax(200px, 3fr)" }]}
+            onRowClick={(r: any) => navigate(`/trace?${new URLSearchParams({ span: r.span })}`)} />
+        </Section>
+        <Section title="Latest 50 records" note="updates live · click one for all of it" actions={<Link to="/trace" className="btn small">all records</Link>}>
           <Table rows={ov.recent} cols={eventCols} rowKey={(r: any) => String(r.seq)} onRowClick={(r: any) => setSeq(r.seq)} />
         </Section>
         <EventDrawer seq={seq} onClose={() => setSeq(null)} />

@@ -1,9 +1,10 @@
 from __future__ import annotations
-import json, math, shutil
+import json, math
 from pathlib import Path
 
 from ar_contract.metrics import METRICS
 
+from .. import fs, telemetry
 from ..config import KernelConfig
 
 DIMENSION_METRICS = [
@@ -103,20 +104,28 @@ def score_from_report(report: dict, metric_set: list[str], expected_n: dict[str,
     case set than every other node's.
     """
     full = report["full"]
+
+    def refuse(error: Exception, evidence: dict) -> Exception:
+        telemetry.decision("eval.score", evidence, ["score", "refuse"], "refuse", str(error))
+        return error
     missing = [m for m in metric_set if m not in full]
     if missing:
-        raise KeyError(f"metrics missing from the report: {missing}")
+        raise refuse(KeyError(f"metrics missing from the report: {missing}"), {"missing": missing})
     per_metric = {m: float(full[m]["mean"]) for m in metric_set}
     bad = [m for m, v in per_metric.items() if not math.isfinite(v)]
     if bad:
-        raise ScoreError(f"metric means not finite: {bad}")
+        raise refuse(ScoreError(f"metric means not finite: {bad}"), {"not_finite": bad})
     if expected_n:
         wrong = {m: (full[m].get("n"), expected_n[m]) for m in (*metric_set, *NAV_PARTS)
                  if m in expected_n and m in full and full[m].get("n") != expected_n[m]}
         if wrong:
-            raise ScoreError("metrics computed over the wrong number of cases (got vs expected): "
-                             + ", ".join(f"{m} {got} vs {want}" for m, (got, want) in wrong.items()))
-    return weighted_score(per_metric, weights), per_metric
+            raise refuse(ScoreError("metrics computed over the wrong number of cases (got vs expected): "
+                                    + ", ".join(f"{m} {got} vs {want}" for m, (got, want) in wrong.items())),
+                         {"wrong_counts": wrong})
+    score = weighted_score(per_metric, weights)
+    telemetry.decision("eval.score", {"per_metric": per_metric, "weights": weights}, ["score", "refuse"], "score",
+                       "every metric present and finite, over the expected cases")
+    return score, per_metric
 
 
 def case_counts(report: dict, metric_set: list[str]) -> dict[str, int]:
@@ -174,6 +183,6 @@ def cleanup_eval(work_dir: Path, model: str) -> list[str]:
     for name in REGENERABLE:
         target = Path(work_dir) / model / name
         if target.exists():
-            shutil.rmtree(target)
+            fs.rmtree(target)
             removed.append(name)
     return sorted(removed)

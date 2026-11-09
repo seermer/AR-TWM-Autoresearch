@@ -14,6 +14,7 @@ import httpx
 import psutil
 from openai import OpenAI
 
+from .. import telemetry
 from ..faults import KernelFault
 from ..subproc import file_tail
 from .jobs import run_cancellable
@@ -35,7 +36,8 @@ def gpu_memory_mib(gpus: list[int]) -> dict[int, int] | None:
         out = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used", "--format=csv,noheader,nounits"],
                              capture_output=True, text=True, check=True).stdout
         used = {int(i): int(m) for i, m in (line.split(",") for line in out.strip().splitlines())}
-    except (OSError, subprocess.SubprocessError, ValueError):    # ValueError: "[N/A]", "[Not Supported]"
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:    # ValueError: "[N/A]", "[Not Supported]"
+        telemetry.error(exc, "no reading")
         return None
     return {g: used[g] for g in gpus if g in used}
 
@@ -52,7 +54,8 @@ def gpu_processes(gpus: list[int]) -> set[int] | None:
     try:
         index = {uuid: int(i) for i, uuid in query("gpu=index,uuid")}
         return {int(pid) for pid, uuid in query("compute-apps=pid,gpu_uuid") if index.get(uuid) in gpus}
-    except (OSError, subprocess.SubprocessError, ValueError):
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        telemetry.error(exc, "no process list")
         return None
 
 
@@ -80,21 +83,35 @@ def require_free_gpus(gpus: list[int], limit_mib: int, gpu_memory=gpu_memory_mib
     agent's container sees the same GPUs, and a kernel job that starts beside the agent's own processes
     runs out of memory. ToolError when only `own()` processes (the caller's sandbox) hold them; KernelFault
     when another process does."""
-    for wait in (*waits, None):
-        busy = {g: used for g, used in (gpu_memory(gpus) or {}).items() if used > limit_mib}
-        if not busy or wait is None:
-            break
-        sleep(wait)
-    if not busy:
-        return
-    usage = ", ".join(f"GPU {g} has {used} MiB in use" for g, used in busy.items())
-    pids = processes(list(busy)) or set()
-    if outside := pids - own():
-        raise KernelFault(f"the run's GPUs are held by processes outside its sandbox: {usage}; pids {_names(outside)}")
-    if pids:
-        raise ToolError(f"the GPUs are not free: {usage} (limit {limit_mib} MiB). A kernel GPU job needs them "
-                        "empty: stop your own processes that hold GPU memory (`nvidia-smi` lists them), then call again.")
-    raise RuntimeError(f"the GPUs are not free and nvidia-smi lists no process on them: {usage} (limit {limit_mib} MiB)")
+    with telemetry.span("gpu.free_check", {"gpus": gpus, "limit_mib": limit_mib}) as sp:
+        readings = []
+        for wait in (*waits, None):
+            readings.append(gpu_memory(gpus))
+            busy = {g: used for g, used in (readings[-1] or {}).items() if used > limit_mib}
+            if not busy or wait is None:
+                break
+            sleep(wait)
+        sp.output = {"readings": readings}
+        if not busy:
+            telemetry.decision("gpu.blame", {"busy": {}}, ["free", "sandbox", "outside", "unknown"], "free",
+                               "every GPU is under the limit")
+            return
+        usage = ", ".join(f"GPU {g} has {used} MiB in use" for g, used in busy.items())
+        pids = processes(list(busy)) or set()
+        mine = own()
+        outside = pids - mine
+        chosen = "outside" if outside else "sandbox" if pids else "unknown"
+        telemetry.decision("gpu.blame", {"busy": busy, "pids": sorted(pids), "sandbox": sorted(mine)},
+                           ["free", "sandbox", "outside", "unknown"], chosen,
+                           {"outside": f"processes outside the sandbox: {_names(outside)}",
+                            "sandbox": "only the caller's sandbox holds them",
+                            "unknown": "nvidia-smi lists no process on them"}[chosen])
+        if outside:
+            raise KernelFault(f"the run's GPUs are held by processes outside its sandbox: {usage}; pids {_names(outside)}")
+        if pids:
+            raise ToolError(f"the GPUs are not free: {usage} (limit {limit_mib} MiB). A kernel GPU job needs them "
+                            "empty: stop your own processes that hold GPU memory (`nvidia-smi` lists them), then call again.")
+        raise RuntimeError(f"the GPUs are not free and nvidia-smi lists no process on them: {usage} (limit {limit_mib} MiB)")
 
 
 def wait_gpu_release(gpu_memory, gpus: list[int], before: dict | None,
@@ -155,14 +172,11 @@ class VllmServer:
     process group, waits for it, and returns its exit code."""
 
     def __init__(self, env: str, command: list[str], gpus: list[int], port: int, *, cwd: Path,
-                 log_path: Path, recorder=None, node: str = "run", phase: str = "vllm",
-                 poll_s: float = 2.0, label: str = "vLLM server") -> None:
+                 log_path: Path, poll_s: float = 2.0, label: str = "vLLM server") -> None:
         self.env, self.command, self.gpus, self.port = env, command, list(gpus), port
-        self.cwd, self.log_path, self.recorder, self.node, self.phase = Path(cwd), Path(log_path), recorder, node, phase
+        self.cwd, self.log_path = Path(cwd), Path(log_path)
         self.poll_s, self.label = poll_s, label
         self.api_key = secrets.token_urlsafe(24)
-        if recorder is not None:
-            recorder.add_redaction(self.api_key)
         self._stop, self._cancel, self._exit, self._thread = threading.Event(), None, [], None
 
     @property
@@ -176,14 +190,14 @@ class VllmServer:
                 cancel=SimpleNamespace(is_set=lambda: self._stop.is_set() or bool(self._cancel and self._cancel.is_set())),
                 extra_env={"CUDA_VISIBLE_DEVICES": ",".join(map(str, self.gpus)),
                            "CUDA_DEVICE_ORDER": "PCI_BUS_ID", "HF_HUB_OFFLINE": "1",
-                           "VLLM_API_KEY": self.api_key},       # not --api-key: a command line is public
-                recorder=self.recorder, node=self.node, phase=self.phase))
+                           "VLLM_API_KEY": self.api_key}))       # not --api-key: a command line is public
         except Exception as exc:              # noqa: BLE001 -- reported as a startup failure
+            telemetry.error(exc, "a startup failure")
             self._exit.append(f"launch failed: {type(exc).__name__}: {exc}")
 
     def start(self, cancel=None, on_poll=None) -> float | None:
         self._cancel = cancel
-        self._thread = threading.Thread(target=self._serve, name=f"ar-vllm-{self.port}", daemon=True)
+        self._thread = telemetry.thread(self._serve, f"ar-vllm-{self.port}")
         started = time.monotonic()
         self._thread.start()
         with httpx.Client(timeout=5, trust_env=False) as http:

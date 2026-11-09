@@ -14,13 +14,13 @@ annotate_camera (ViGeo) on the clip for the pose it ingests with.
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 
 import numpy as np
 import yaml
 from PIL import Image
 
+from .. import fs, subproc, telemetry
 from ..archive.db import open_db
 from ..archive.nodes import NodeStore
 from ..data.annotation import ACTIONS, FPS, PERSPECTIVES, SWITCH
@@ -146,7 +146,7 @@ def checked_repo(cfg, key: str, label: str) -> Path:
     there cannot change what a backend renders without a new review."""
     block = cfg.get(key)
     repo, pinned = cfg.repo_root / block["repo"], block.get("commit")
-    git = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True)
+    git = subproc.run(["git", "-C", str(repo), "rev-parse", "HEAD"])
     if git.returncode != 0:
         raise RuntimeError(f"no {label} checkout at {repo} (git: {git.stderr.strip()}); clone it at "
                            f"commit {pinned} into that folder")
@@ -243,7 +243,7 @@ class AlayaWorldBackend(GpuJob):
     def prepare(self, job, items, work):
         data = work / "in" / "data"              # removed with in/ after the job
         for sub in ("cases", "images", "masks"):
-            (data / sub).mkdir(parents=True, exist_ok=True)
+            fs.mkdir(data / sub)
         indices, rows = [], {}
         for item in items:
             i = item["index"]
@@ -259,10 +259,11 @@ class AlayaWorldBackend(GpuJob):
             except Exception as exc:            # noqa: BLE001 -- a bad image/mask (e.g. PIL raising
                 # DecompressionBombError, SyntaxError or ValueError on a broken file) must be this
                 # item's error, not a job failure that orphans the others.
+                telemetry.error(exc, "the item's input error")
                 rows[i] = {"index": i, "error": f"input: {type(exc).__name__}: {exc}"}
                 continue
-            (data / "cases" / f"case_{i}.json").write_text(
-                json.dumps(case_json(i, item, image, mask), ensure_ascii=False, indent=1), encoding="utf-8")
+            fs.write_text(data / "cases" / f"case_{i}.json",
+                          json.dumps(case_json(i, item, image, mask), ensure_ascii=False, indent=1))
             indices.append(i)
         if not indices:
             return {"rows": rows}
@@ -274,9 +275,9 @@ class AlayaWorldBackend(GpuJob):
             fine_tune = dict(node_lora=checkpoint, node_rank=node["lora_rank"],
                              history_encoder=checkpoint / "history_encoder.pt")
         config = work / "render_config.yaml"
-        config.write_text(yaml.safe_dump(render_config(
+        fs.write_text(config, yaml.safe_dump(render_config(
             self.cfg, indices=indices, work=work,
-            text_cache=self.run_dir / "cache" / "text_embed", **fine_tune), sort_keys=True), encoding="utf-8")
+            text_cache=self.run_dir / "cache" / "text_embed", **fine_tune), sort_keys=True))
         return {"bridge": ALAYAWORLD_BRIDGE, "env": self.block["env"], "cwd": wm, "rows": rows, "job": {
             "videos": str(work / "out" / "videos"),
             # The eval renders with the text encoder off (a 24 GB card cannot hold Gemma next to the
@@ -363,9 +364,9 @@ class Wan22Backend(GpuJob):
         if (raw.width, raw.height) != (1280, 704):     # the bridge fits every first frame to this
             raise ValueError(f"rendered clip is {raw.width}x{raw.height}, not 1280x704")
         cropped = out / f"{item['index']}.cropped.mp4"
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(rendered), "-vf",
-                        "crop=1248:704:16:0", "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p",
-                        "-an", str(cropped)], check=True)
+        subproc.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(rendered), "-vf",
+                     "crop=1248:704:16:0", "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p",
+                     "-an", str(cropped)], check=True)
         info = probe_video(cropped)
         check_published(info)
         return {"video": cropped, "prompt": item["prompt"], "frames": info.frames}
@@ -433,8 +434,8 @@ class Ltx25Backend(GpuJob):
     def finish(self, job, item, outputs, info, out):
         a = job.args
         silent = out / f"{item['index']}.silent.mp4"
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(outputs["video"]), "-an",
-                        "-c:v", "copy", str(silent)], check=True)
+        subproc.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(outputs["video"]), "-an",
+                     "-c:v", "copy", str(silent)], check=True)
         info = probe_video(silent)
         if (info.width, info.height) != (a["width"], a["height"]):
             raise ValueError(f"rendered clip is {info.width}x{info.height}, not {a['width']}x{a['height']}")

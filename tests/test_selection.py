@@ -6,7 +6,6 @@ from ar_kernel.archive.db import open_db
 from ar_kernel.archive.nodes import NodeStore
 from ar_kernel.config import KernelConfig
 from ar_kernel.selection import candidates, select_parent, selection_seed, update_values
-from ar_kernel.telemetry.recorder import Recorder
 
 CFG = KernelConfig(raw={"selection": {"decay": 0.5, "prior_weight": 1.0, "subtree_share": 0.3,
                                       "size_scale": 4, "temperature": 2.0, "noise_floor": 4.4e-4,
@@ -79,17 +78,17 @@ def test_failed_children_count_in_size_but_not_the_mean():
 
 
 def test_select_parent_is_seeded_and_recorded(tmp_path):
-    conn, rec = open_db(tmp_path), Recorder(tmp_path)
+    conn = open_db(tmp_path)
     nodes = NodeStore(conn)
     for nid, parent, score in (("root", None, 0.7), ("n1", "root", 0.8), ("n2", "root", 0.6)):
         nodes.create(nid, parent, 0 if parent is None else 1)
         nodes.record_score(nid, score, ["m"], {"m": score})
     seed = selection_seed("run1", "n3")
-    first = select_parent(conn, CFG, "n3", seed, rec)
-    assert all(select_parent(conn, CFG, "n3", seed, rec) == first for _ in range(5))
+    first = select_parent(conn, CFG, "n3", seed)
+    assert all(select_parent(conn, CFG, "n3", seed) == first for _ in range(5))
     row = conn.execute("SELECT * FROM selection_events ORDER BY id LIMIT 1").fetchone()
     assert (row["child_id"], row["chosen"], row["seed"]) == ("n3", first, seed)
-    assert [e["type"] for e in rec.read_events()].count("select") == 6
+    assert conn.execute("SELECT COUNT(*) FROM selection_events").fetchone()[0] == 6
 
 
 def test_update_values_writes_the_value(tmp_path):
@@ -123,14 +122,14 @@ def test_pure_noise_does_not_strongly_prefer_the_newest():
 
 
 def test_draw_frequencies_follow_the_recorded_probabilities(tmp_path):
-    conn, rec = open_db(tmp_path), Recorder(tmp_path)
+    conn = open_db(tmp_path)
     nodes = NodeStore(conn)
     for i, score in enumerate((0.7871, 0.7945, 0.7917, 0.7907)):
         nid = "root" if i == 0 else f"n{i}"
         nodes.create(nid, None if i == 0 else ("root" if i == 1 else f"n{i-1}"), i)
         nodes.record_score(nid, score, ["m"], {"m": score})
     expected = {r["node_id"]: r["P"] for r in candidates(NodeStore(conn).all(), CFG)}
-    picks = Counter(select_parent(conn, CFG, f"c{seed}", seed, rec) for seed in range(4000))
+    picks = Counter(select_parent(conn, CFG, f"c{seed}", seed) for seed in range(4000))
     for nid, p in expected.items():
         assert abs(picks[nid] / 4000 - p) < 0.03
 

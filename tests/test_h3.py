@@ -12,7 +12,6 @@ from PIL import Image
 from conftest import NAMED, job_result
 from ar_kernel.config import KernelConfig
 from ar_kernel.data.probe import probe_video
-from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools import h3
 from ar_kernel.tools.context import TokenRegistry
 from ar_kernel.tools.h3 import H3Backend, build_prompt, clip_frames, turn_starts
@@ -164,14 +163,13 @@ def h3_env(tmp_path, monkeypatch):
     (tmp_path / "adaln").mkdir()
     config = tmp_path / "lightx2v.json"
     config.write_text(json.dumps({"adaln_cache_dir": str(tmp_path / "adaln"), "parallel": {"seq_p_size": 8}}))
-    rec = Recorder(tmp_path / "run")
-    reg = TokenRegistry(rec)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
+    reg = TokenRegistry()
+    q = JobQueue(tmp_path / "run", threading.Lock(), wait_cap_s=120)
     ws, staging = tmp_path / "ws", tmp_path / "staging"
     ws.mkdir(); staging.mkdir()
     Image.new("RGB", DEFAULT, (10, 20, 30)).save(ws / "first.png")
     Image.new("RGB", OTHER, (30, 20, 10)).save(ws / "other.png")
-    q.register(H3Backend(h3_cfg(config=str(config)), tmp_path / "run", [0, 1, 4, 5], reg, rec,
+    q.register(H3Backend(h3_cfg(config=str(config)), tmp_path / "run", [0, 1, 4, 5], reg,
                          gpu_memory=lambda g: {i: 100 for i in g}))
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
     yield q, caller, staging
@@ -254,8 +252,7 @@ def test_h3_produces_a_silent_clip_with_its_annotation(h3_env):
 
 def test_h3_finish_refuses_a_render_of_the_wrong_size_or_length(tmp_path):
     from types import SimpleNamespace
-    rec = Recorder(tmp_path / "run")
-    b = H3Backend(h3_cfg(), tmp_path / "run", [0, 1, 2, 3], TokenRegistry(rec), rec)
+    b = H3Backend(h3_cfg(), tmp_path / "run", [0, 1, 2, 3], TokenRegistry())
     out = tmp_path / "out"
     out.mkdir()
     staged, job = {"index": 0, **item()}, SimpleNamespace(args={})
@@ -276,11 +273,10 @@ def test_h3_finished_candidate_passes_the_real_ingestor(tmp_path):
     out = run_dir / "staging" / "rollouts"
     out.mkdir(parents=True)
     make_mp4(out / "0.mp4", seconds=243 / 24, fps=24, width=960, height=544)
-    rec = Recorder(run_dir)
-    res = H3Backend(h3_cfg(), run_dir, [0, 1, 2, 3], TokenRegistry(rec), rec).finish(
+    res = H3Backend(h3_cfg(), run_dir, [0, 1, 2, 3], TokenRegistry()).finish(
         SimpleNamespace(args={}), {"index": 0, **item()}, {"video": out / "0.mp4"}, {}, out)
     pose = write_poses(out / "vigeo.npz", n_frames=res["frames"], width=960, height=544)
-    ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
+    ing = Ingestor(REAL, run_dir, open_db(run_dir))
     [r] = ing.ingest([Candidate(video=Path(res["video"]), annotation=Path(res["annotation"]), pose=pose,
                                 derived_from={"kind": "model", "name": "minimax-h3"}, named=NAMED)], node_id="n1", attempt=1)
     assert r.accepted, r.reasons                    # the planned turns are long enough to be trained on
@@ -291,9 +287,8 @@ def test_h3_finished_candidate_passes_the_real_ingestor(tmp_path):
 
 def test_descriptions_make_h3_the_default_rollout_tool(tmp_path):
     from ar_kernel.tools.gpu_jobs import build_gpu_backends
-    rec = Recorder(tmp_path / "run")
     d = {b.name: b.description for b in build_gpu_backends(h3_cfg(), tmp_path / "run", [0, 1, 2, 3],
-                                                           TokenRegistry(rec), rec) if b.name.startswith("rollout_")}
+                                                           TokenRegistry()) if b.name.startswith("rollout_")}
     assert d["rollout_h3"].startswith("MiniMax H3 is the most powerful video generation model of the rollout tools: "
                                       "use this tool for a new training clip unless")
     assert d["rollout_ltx25"].startswith("Use this tool when a clip has to show a given image at a frame other than "
@@ -303,10 +298,9 @@ def test_descriptions_make_h3_the_default_rollout_tool(tmp_path):
 
 def test_h3_is_registered_only_when_enabled(tmp_path):
     from ar_kernel.tools.gpu_jobs import build_gpu_backends
-    rec = Recorder(tmp_path / "run")
     for enabled, present in ((True, True), (False, False)):
         names = [b.name for b in build_gpu_backends(h3_cfg(enabled=enabled), tmp_path / "run", [0, 1, 2, 3],
-                                                     TokenRegistry(rec), rec)]
+                                                     TokenRegistry())]
         assert ("rollout_h3" in names) is present
 
 
@@ -328,11 +322,10 @@ def test_real_h3_rollout(tmp_path):
     run_dir, ws = tmp_path / "run", tmp_path / "ws"
     staging = run_dir / "staging"
     ws.mkdir(parents=True); staging.mkdir(parents=True)
-    rec = Recorder(run_dir)
-    reg = TokenRegistry(rec)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=3600)
+    reg = TokenRegistry()
+    q = JobQueue(run_dir, threading.Lock(), wait_cap_s=3600)
     for b in (ImageBackend, AnnotateBackend, H3Backend):
-        q.register(b(cfg, run_dir, gpus, reg, rec))
+        q.register(b(cfg, run_dir, gpus, reg))
     caller = reg.issue(node="gpu", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
     host = lambda p: staging / Path(p).relative_to("/workspace/staging")
     try:
@@ -361,7 +354,7 @@ def test_real_h3_rollout(tmp_path):
         assert ann["state"] == "done", ann.get("error")
     finally:
         q.shutdown()
-    ing = Ingestor(REAL, run_dir, open_db(run_dir), Recorder(run_dir))
+    ing = Ingestor(REAL, run_dir, open_db(run_dir))
     for i, c in enumerate(cands):
         a = job_result(ann)["items"][i]
         assert "error" not in a, a

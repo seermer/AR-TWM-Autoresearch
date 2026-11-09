@@ -6,7 +6,6 @@ import huggingface_hub.errors as hf_errors
 import pytest
 
 from ar_kernel.config import KernelConfig
-from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools.context import TokenRegistry
 from ar_kernel.tools.hf_tools import HfTools
 from ar_kernel.tools.server import ToolError
@@ -57,7 +56,7 @@ def fake_snapshot(repo_id, repo_type, revision, allow_patterns, local_dir, **_):
 
 @pytest.fixture
 def env(tmp_path):
-    reg = TokenRegistry(Recorder(tmp_path))
+    reg = TokenRegistry()
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1,
                        workspace_host=tmp_path / "ws", staging_host=tmp_path / "staging")
     (tmp_path / "staging").mkdir()
@@ -114,7 +113,7 @@ def test_repo_reported_paths_cannot_escape_dest(tmp_path):
         calls.append(kwargs)
         return kwargs["local_dir"]
 
-    reg = TokenRegistry(Recorder(tmp_path))
+    reg = TokenRegistry()
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1,
                        workspace_host=tmp_path / "ws", staging_host=tmp_path / "staging")
     (tmp_path / "staging").mkdir()
@@ -135,7 +134,7 @@ def test_download_refuses_a_staging_symlink_that_leaves_staging(tmp_path):
         calls.append(kwargs)
         return fake_snapshot(**kwargs)
 
-    reg = TokenRegistry(Recorder(tmp_path))
+    reg = TokenRegistry()
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1,
                        workspace_host=tmp_path / "ws", staging_host=tmp_path / "staging")
     (tmp_path / "staging").mkdir()
@@ -169,7 +168,7 @@ class DatasetInfoRaisesApi(FakeApi):
     (hf_errors.RevisionNotFoundError, "404 Client Error: revision not found"),
 ])
 def test_dataset_info_hub_errors_become_tool_errors(cls, message, tmp_path):
-    reg = TokenRegistry(Recorder(tmp_path))
+    reg = TokenRegistry()
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1,
                        workspace_host=tmp_path / "ws", staging_host=tmp_path / "staging")
     (tmp_path / "staging").mkdir()
@@ -181,7 +180,7 @@ def test_dataset_info_hub_errors_become_tool_errors(cls, message, tmp_path):
 
 
 def test_a_hub_5xx_is_a_counted_error_not_a_tool_error(tmp_path):
-    reg = TokenRegistry(Recorder(tmp_path))
+    reg = TokenRegistry()
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1,
                        workspace_host=tmp_path / "ws", staging_host=tmp_path / "staging")
     (tmp_path / "staging").mkdir()
@@ -240,7 +239,7 @@ class ManyFilesApi(FakeApi):
 
 @pytest.fixture
 def many(tmp_path):
-    reg = TokenRegistry(Recorder(tmp_path))
+    reg = TokenRegistry()
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1,
                        workspace_host=tmp_path / "ws", staging_host=tmp_path / "staging")
     (tmp_path / "staging").mkdir()
@@ -354,16 +353,32 @@ def test_download_has_no_cap_of_its_own_and_takes_patterns_from_a_file(env):
     assert out["bytes"] == 4000 and len(out["files"]) == 2
 
 
-def test_a_download_is_recorded_apart_from_other_files(tmp_path):
-    from ar_kernel.telemetry import files
-    rec = Recorder(tmp_path / "run")
-    caller = TokenRegistry(rec).issue(node="n1", phase="improve_recipe", attempt=1,
-                                      workspace_host=tmp_path / "ws", staging_host=tmp_path / "staging")
-    (tmp_path / "staging").mkdir()
-    tools = HfTools(CFG, tmp_path / "hf_tmp", api=FakeApi(), snapshot=fake_snapshot)
-    with files.scope(rec, node="n1", tool="hf_download"):
-        out = tools.download(caller, "org/walks", "main", ["videos/a.mp4"])
-    [event] = [e for e in rec.read_events("n1") if e["type"] == "file"]
-    assert (event["direction"], event["path"]) == ("out", out["files"][0])
-    assert (tmp_path / "run" / "telemetry" / "files_hf" / event["digest"]).is_file()
-    assert not (tmp_path / "run" / "telemetry" / "files").exists()
+
+
+def test_a_download_records_the_repo_revision_and_each_file_with_its_listed_checksum(env, tmp_path):
+    from ar_kernel import telemetry
+    from ar_kernel.telemetry import tree
+    from conftest import telemetry_payload, telemetry_records
+    tools, caller = env
+    telemetry.open(tmp_path)
+    telemetry.start("ar.run")
+    real = tools.api.dataset_info
+
+    def with_lfs(*a, **k):
+        info = real(*a, **k)
+        for s in info.siblings:
+            s.lfs = SimpleNamespace(sha256=f"sha-{s.rfilename}")
+        return info
+    tools.api.dataset_info = with_lfs
+    tools.download(caller, "org/walks", "main", ["videos/*.mp4"])
+    records = telemetry_records(tmp_path)
+    [start] = [r for r in records if r["kind"] == "start" and r["name"] == "hf.download"]
+    inputs = telemetry_payload(tmp_path, start["inputs"])
+    assert inputs["repo"] == "org/walks" and inputs["revision"] == SHA
+    assert [(f["path"], f["size"], f["sha256"]) for f in inputs["files"]] == [
+        ("videos/a.mp4", 1000, "sha-videos/a.mp4"), ("videos/b.mp4", 3000, "sha-videos/b.mp4")]
+    placed = [telemetry_payload(tmp_path, r["inputs"])["dst"] for r in records
+              if r["kind"] == "start" and r["name"] == "fs.rename"]
+    assert [p.rsplit("/", 2)[-2:] for p in placed] == [["videos", "a.mp4"], ["videos", "b.mp4"]]
+    assert not [r for r in records if r["kind"] == "start" and r["name"] == "file.kept"]     # no bytes kept
+    assert tree.check(tree.load(tmp_path)) == []

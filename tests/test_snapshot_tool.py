@@ -6,8 +6,9 @@ import json
 import pytest
 from fastapi import FastAPI
 
+from ar_kernel.archive.activity import activity
+from ar_kernel.archive.db import open_db
 from ar_kernel.services import RunServices, socket_dir_for
-from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools import snapshot
 from ar_kernel.tools.context import TokenRegistry
 from ar_kernel.tools.server import ToolError, ToolKit, build_tool_app, new_mcp
@@ -30,10 +31,9 @@ def live(tmp_path):
     (seed / "entry.py").write_text("v1\n")
     repo = AgentsRepo(run / "agents.git")
     root = repo.init(tmp_path / "seed")
-    rec = Recorder(run)
-    reg = TokenRegistry(rec)
+    reg = TokenRegistry()
     mcp = new_mcp()
-    register_snapshot_tool(mcp, ToolKit(reg, rec), SnapshotStore(run, repo, _usable))
+    register_snapshot_tool(mcp, ToolKit(reg, run), SnapshotStore(run, repo, _usable))
     services = RunServices(socket_dir_for(run))
     services.start(FastAPI(), build_tool_app(mcp))
     agent = tmp_path / "agent"
@@ -41,7 +41,7 @@ def live(tmp_path):
     edit = reg.issue(node="n1", phase="edit_self", attempt=2, workspace_host=tmp_path, staging_host=tmp_path,
                      agent_host=agent, base_commit=root)
     recipe = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=tmp_path, staging_host=tmp_path)
-    yield services, repo, run, rec, edit, recipe, agent, root
+    yield services, repo, run, edit, recipe, agent, root
     services.stop()
 
 
@@ -56,24 +56,24 @@ def _call(services, caller, args):
 
 
 def test_an_edit_snapshot_commits_the_tree_under_an_attempt_ref(live):
-    services, repo, run, rec, edit, _, agent, root = live
+    services, repo, run, edit, _, agent, root = live
     (agent / "agent" / "entry.py").write_text("v2\n")
     error, text = _call(services, edit, {})
     sha = json.loads(text)["snapshot_id"]
     assert not error and repo.read_file(sha, "agent/entry.py") == "v2\n"
     assert snapshot.edit_snapshot(repo, "n1", "edit_self", 2, sha) == sha
     assert snapshot.edit_snapshot(repo, "n1", "edit_self", 1, sha) is None
-    assert [e["type"] for e in rec.read_events("n1")] == ["tool.call", "tool.result"]
+    assert [(r["kind"], r["name"]) for r in activity(open_db(run), "n1")] == [("snapshot", sha), ("tool", "snapshot")]
 
 
 def test_an_edit_snapshot_takes_no_arguments(live):
-    services, _, _, _, edit, *_ = live
+    services, _, _, edit, *_ = live
     error, text = _call(services, edit, {"rationale": "r"})
     assert error and "no arguments" in text
 
 
 def test_a_recipe_snapshot_is_stored_for_its_attempt(live):
-    services, _, run, _, _, recipe, *_ = live
+    services, _, run, _, recipe, *_ = live
     error, text = _call(services, recipe, {"data_commit": KNOWN, "recipe": {"lr": 0.5}, "rationale": "why"})
     sid = json.loads(text)["snapshot_id"]
     assert not error
@@ -91,15 +91,15 @@ def test_a_recipe_snapshot_is_stored_for_its_attempt(live):
     ({"data_commit": "dc9", "recipe": {}, "rationale": "r"}, "unknown data commit"),
 ])
 def test_a_recipe_snapshot_is_refused_with_an_error(live, args, fragment):
-    services, _, run, rec, _, recipe, *_ = live
+    services, _, run, _, recipe, *_ = live
     error, text = _call(services, recipe, args)
     assert error and fragment in text
     assert not (run / "snapshots").exists()
-    assert [e["type"] for e in rec.read_events("n1")][-1] == "tool.error"
+    assert [(r["kind"], r["ok"]) for r in activity(open_db(run), "n1")][-1] == ("tool", 0)
 
 
 def test_clear_removes_an_attempts_snapshots_and_refs(live):
-    services, repo, run, _, edit, recipe, *_ = live
+    services, repo, run, edit, recipe, *_ = live
     sha = json.loads(_call(services, edit, {})[1])["snapshot_id"]
     sid = json.loads(_call(services, recipe, {})[1])["snapshot_id"]
     snapshot.clear(run, repo, "n1", "edit_self", 2)
@@ -116,7 +116,7 @@ def _direct(tmp_path, **checks):
     (seed / "entry.py").write_text("v1\n")
     repo = AgentsRepo(run / "agents.git")
     root = repo.init(tmp_path / "seed")
-    reg = TokenRegistry(Recorder(run))
+    reg = TokenRegistry()
     agent = tmp_path / "agent"
     repo.checkout(root, agent)
     edit = reg.issue(node="n1", phase="edit_self", attempt=1, workspace_host=tmp_path, staging_host=tmp_path,
@@ -172,3 +172,15 @@ def test_edit_snapshot_contract_checks_run_one_at_a_time(tmp_path):
     for t in threads:
         t.join()
     assert most[0] == 1
+
+
+def test_each_snapshot_handed_back_is_an_activity_row(live):
+    from ar_kernel.archive.activity import activity
+    from ar_kernel.archive.db import open_db
+    services, _, run, edit, recipe, agent, _ = live
+    (agent / "agent" / "entry.py").write_text("v2\n")
+    sids = [json.loads(_call(services, who, {})[1])["snapshot_id"] for who in (edit, recipe)]
+    assert _call(services, recipe, {"data_commit": KNOWN})[0]                       # refused: no row
+    assert [(r["phase"], r["attempt"], r["kind"], r["name"]) for r in activity(open_db(run), "n1")
+                                                                   if r["kind"] == "snapshot"] == [
+        ("edit_self", 2, "snapshot", sids[0]), ("improve_recipe", 1, "snapshot", sids[1])]

@@ -14,7 +14,6 @@ import locate_vllm
 
 from conftest import job_result, make_mp4, job_folder
 from ar_kernel.config import KernelConfig
-from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools import locate_events as le
 from ar_kernel.tools.context import TokenRegistry
 from ar_kernel.tools.jobs import JobQueue
@@ -86,22 +85,21 @@ class FakeServer(le.LocateEventsBackend):
 
 @pytest.fixture
 def env(tmp_path):
-    rec = Recorder(tmp_path / "run")
-    reg = TokenRegistry(rec)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
-    q.register(FakeServer(fake_cfg(), tmp_path / "run", [0, 1, 2, 3], reg, rec,
+    reg = TokenRegistry()
+    q = JobQueue(tmp_path / "run", threading.Lock(), wait_cap_s=120)
+    q.register(FakeServer(fake_cfg(), tmp_path / "run", [0, 1, 2, 3], reg,
                           gpu_memory=lambda gpus: {g: 100 for g in gpus}))
     ws, staging = tmp_path / "ws", tmp_path / "staging"
     ws.mkdir(); staging.mkdir()
     make_mp4(ws / "a.mp4", seconds=2.5, fps=24, width=320, height=180)
     make_mp4(ws / "b.mp4", seconds=1.0, fps=24, width=320, height=180)
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=ws, staging_host=staging)
-    yield q, caller, rec, tmp_path / "run"
+    yield q, caller, tmp_path / "run"
     q.shutdown()
 
 
 def test_a_job_asks_about_every_event_in_every_frame_and_returns_spans_only(env):
-    q, caller, rec, run = env
+    q, caller, run = env
     items = [{"video": "a.mp4", "events": ["A dog  walks in.", "NEVER a cat."]}, {"video": "b.mp4", "events": ["Rain."]}]
     out = q.wait(caller, le.submit(q, caller, items)["job_id"], 120)
     assert out["state"] == "done", out
@@ -122,7 +120,7 @@ def test_a_job_asks_about_every_event_in_every_frame_and_returns_spans_only(env)
 
 
 def test_an_answer_off_the_asked_shape_is_that_clips_error_and_kept(env):
-    q, caller, rec, run = env
+    q, caller, run = env
     out = q.wait(caller, le.submit(q, caller, [{"video": "a.mp4", "events": ["BROKEN."]},
                                                {"video": "b.mp4", "events": ["Rain."]}])["job_id"], 120)
     clips = job_result(out)["clips"]
@@ -142,7 +140,7 @@ def test_an_answer_off_the_asked_shape_is_that_clips_error_and_kept(env):
     ([{"video": "a.mp4", "events": ["x"]}, {"video": "/workspace/a.mp4", "events": ["y"]}], "listed twice"),
 ])
 def test_bad_items_are_refused_before_a_job_is_queued(env, items, message):
-    q, caller, _, _ = env
+    q, caller, _ = env
     with pytest.raises(ToolError, match=message):
         le.submit(q, caller, items)
 
@@ -214,18 +212,17 @@ def test_a_clip_that_cannot_be_decoded_is_its_error_and_the_server_still_stops(t
 
 
 def test_a_file_that_is_not_a_video_is_refused_at_submit(env, tmp_path):
-    q, caller, rec, run = env
+    q, caller, run = env
     (tmp_path / "ws" / "c.mp4").write_text("not a video")
     with pytest.raises(ToolError, match="not a readable video"):
         le.submit(q, caller, [{"video": "c.mp4", "events": ["Rain."]}])
 
 
 def test_a_cancel_before_the_server_is_ready_asks_nothing(tmp_path):
-    rec = Recorder(tmp_path / "run")
-    reg = TokenRegistry(rec)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
+    reg = TokenRegistry()
+    q = JobQueue(tmp_path / "run", threading.Lock(), wait_cap_s=120)
     q.register(FakeServer(fake_cfg(captioner={"extra_args": ["--fake-mode", "hang"]}), tmp_path / "run", [0, 1, 2, 3],
-                          reg, rec, gpu_memory=lambda gpus: {g: 100 for g in gpus}))
+                          reg, gpu_memory=lambda gpus: {g: 100 for g in gpus}))
     ws = tmp_path / "ws"
     make_mp4(ws / "a.mp4", seconds=1.0, fps=24, width=320, height=180)
     (tmp_path / "st").mkdir()
@@ -244,11 +241,10 @@ def test_a_cancel_before_the_server_is_ready_asks_nothing(tmp_path):
 
 
 def test_a_server_that_dies_while_loading_fails_every_clip_with_its_log(tmp_path):
-    rec = Recorder(tmp_path / "run")
-    reg = TokenRegistry(rec)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=120)
+    reg = TokenRegistry()
+    q = JobQueue(tmp_path / "run", threading.Lock(), wait_cap_s=120)
     q.register(FakeServer(fake_cfg(captioner={"extra_args": ["--fake-mode", "exit"]}), tmp_path / "run", [0, 1, 2, 3],
-                          reg, rec, gpu_memory=lambda gpus: {g: 100 for g in gpus}))
+                          reg, gpu_memory=lambda gpus: {g: 100 for g in gpus}))
     ws = tmp_path / "ws"
     make_mp4(ws / "a.mp4", seconds=1.0, fps=24, width=320, height=180)
     (tmp_path / "st").mkdir()

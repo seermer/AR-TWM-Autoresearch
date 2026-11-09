@@ -3,10 +3,21 @@ from pathlib import Path
 import pytest
 from ar_kernel.config import KernelConfig
 from ar_kernel.eval.score import DIMENSION_METRICS
-from ar_kernel.run import PreflightError, bootstrap_run, initial_expected_n, preflight_metrics
+from ar_kernel.guards import choose_gpus
+from ar_kernel.run import (PreflightError, attach_run, bootstrap_run, check_new_run, check_resume, initial_expected_n,
+                           preflight_metrics)
 
 CFG = KernelConfig.load()
 PROXY = CFG.eval_cases.read_text().strip().split(",")[:CFG.get("eval.proxy_size")]
+
+
+def _bootstrap(cfg, run_id, env):
+    """What `ar run` does for a new run: its checks, its GPUs, then the run."""
+    return bootstrap_run(cfg, check_new_run(cfg, run_id, env), choose_gpus(cfg, env))
+
+
+def _attach(cfg, run_id, env):
+    return attach_run(cfg, run_id, check_resume(cfg, run_id, env), choose_gpus(cfg, env))
 
 @pytest.mark.real_preflight
 def test_preflight_fails_when_vp_weights_missing(tmp_path, monkeypatch):
@@ -29,7 +40,7 @@ def test_a_skill_benchmark_scores_the_metrics_its_cases_list(tmp_path, monkeypat
     monkeypatch.setattr("ar_kernel.run.wbench_weight_problems", lambda cfg: [])
     monkeypatch.setattr("ar_kernel.run._uncommitted", lambda repo: False)
     cfg = KernelConfig.load(overlays=[CFG.repo_root / "configs" / "rain_start.yaml"])
-    ctx = bootstrap_run(cfg, run_id="rain", env={})
+    ctx = _bootstrap(cfg, run_id="rain", env={})
     assert ctx.case_ids == [str(i) for i in range(1001, 1061)]
     assert len(ctx.metric_set) == 17 and "event_edit_adherence" in ctx.metric_set
     assert "subject_action_adherence" not in ctx.metric_set
@@ -50,7 +61,7 @@ def test_a_metric_the_kernel_does_not_know_is_refused(tmp_path, monkeypatch):
 
 def test_bootstrap_creates_run_layout_and_records_versions(tmp_path, monkeypatch):
     monkeypatch.setattr(KernelConfig, "runs_dir", property(lambda self: tmp_path))
-    ctx = bootstrap_run(CFG, run_id="testrun", env={})
+    ctx = _bootstrap(CFG, run_id="testrun", env={})
     assert (ctx.run_dir / "archive.db").exists()
     assert (ctx.run_dir / "config" / "kernel.yaml").exists()
     versions = json.loads((ctx.run_dir / "config" / "versions.json").read_text())
@@ -65,7 +76,7 @@ def test_bootstrap_refuses_uncommitted_changes_and_creates_nothing(tmp_path, mon
     monkeypatch.setattr(KernelConfig, "runs_dir", property(lambda self: tmp_path))
     monkeypatch.setattr(run, "_uncommitted", lambda repo: repo == CFG.wbench)
     with pytest.raises(run.PreflightError, match=f"uncommitted changes in {CFG.wbench}; commit"):
-        bootstrap_run(CFG, run_id="dirty", env={})
+        _bootstrap(CFG, run_id="dirty", env={})
     assert not (tmp_path / "dirty").exists()
 
 
@@ -86,7 +97,7 @@ def test_a_repo_git_cannot_read_fails_the_start_and_the_resume_check(tmp_path, m
     monkeypatch.setattr(KernelConfig, "runs_dir", property(lambda self: tmp_path / "runs"))
     monkeypatch.setattr(KernelConfig, "wbench", property(lambda self: tmp_path / "missing"))
     with pytest.raises(subprocess.CalledProcessError):
-        bootstrap_run(CFG, run_id="r", env={})
+        _bootstrap(CFG, run_id="r", env={})
     assert not (tmp_path / "runs" / "r").exists()
     with pytest.raises(subprocess.CalledProcessError):
         run.code_changes(CFG, {})
@@ -98,7 +109,7 @@ def test_bootstrap_refuses_too_few_free_gpus(tmp_path, monkeypatch):
     monkeypatch.setattr(KernelConfig, "runs_dir", property(lambda self: tmp_path))
     monkeypatch.setattr(guards, "gpu_memory_used", lambda: {0: 1, 1: 1})
     with pytest.raises(GpuPolicyError, match="need 4 free GPUs"):
-        bootstrap_run(CFG, run_id="bad", env={})
+        _bootstrap(CFG, run_id="bad", env={})
     assert not (tmp_path / "bad").exists()
 
 
@@ -112,35 +123,23 @@ ENV4 = {}
 def test_attaching_to_a_missing_run_is_an_error_not_a_new_run(tmp_path, monkeypatch):
     """`ar status --run-id <typo>` must not silently create a run."""
     import pytest
-    from ar_kernel.run import RunNotFound, attach_run
+    from ar_kernel.run import RunNotFound
     _runs(tmp_path, monkeypatch)
     with pytest.raises(RunNotFound):
-        attach_run(CFG, "no_such_run", ENV4)
+        _attach(CFG, "no_such_run", ENV4)
     assert not (tmp_path / "no_such_run").exists()
 
 
 def test_attach_does_not_rewrite_the_run_snapshot(tmp_path, monkeypatch):
     """Every `ar status` re-copied configs over the snapshot and
     rewrote versions.json, erasing the record of what the run started on."""
-    from ar_kernel.run import attach_run
     _runs(tmp_path, monkeypatch)
-    ctx = bootstrap_run(CFG, run_id="r1", env=ENV4)
+    ctx = _bootstrap(CFG, run_id="r1", env=ENV4)
     versions = ctx.run_dir / "config" / "versions.json"
     versions.write_text('{"worldmodel_sha": "the-sha-the-run-started-on"}')
-    attached = attach_run(CFG, "r1", ENV4)
+    attached = _attach(CFG, "r1", ENV4)
     assert versions.read_text() == '{"worldmodel_sha": "the-sha-the-run-started-on"}'
     assert attached.case_ids == ctx.case_ids and attached.metric_set == ctx.metric_set
-    starts = [e for e in attached.recorder.read_events() if e["type"] == "run.start"]
-    assert len(starts) == 1
-
-
-def test_bootstrapping_an_existing_run_id_does_not_overwrite_it(tmp_path, monkeypatch):
-    _runs(tmp_path, monkeypatch)
-    bootstrap_run(CFG, run_id="r2", env=ENV4)
-    snap = tmp_path / "r2" / "config" / "base_recipe.yaml"
-    snap.write_text(snap.read_text() + "\n# edited after the run started\n")
-    bootstrap_run(CFG, run_id="r2", env=ENV4)
-    assert snap.read_text().endswith("# edited after the run started\n")
 
 
 def test_run_uses_its_own_config_snapshot(tmp_path, monkeypatch):
@@ -148,7 +147,7 @@ def test_run_uses_its_own_config_snapshot(tmp_path, monkeypatch):
     so a mid-run edit or pull cannot change what an in-flight run does."""
     from ar_kernel.config import run_config_path
     _runs(tmp_path, monkeypatch)
-    ctx = bootstrap_run(CFG, run_id="r3", env=ENV4)
+    ctx = _bootstrap(CFG, run_id="r3", env=ENV4)
     for name in ("kernel.yaml", "base_recipe.yaml", "proxy_cases.txt"):
         assert run_config_path(CFG, ctx.run_dir, name) == ctx.run_dir / "config" / name
         assert (ctx.run_dir / "config" / name).exists()
@@ -162,7 +161,7 @@ def test_bootstrap_refuses_to_start_when_wbench_weights_are_broken(tmp_path, mon
     monkeypatch.setattr(run_mod, "wbench_weight_problems",
                         lambda cfg: ["MegaSAM weights missing: /x/megasam_final.pth"])
     with pytest.raises(run_mod.PreflightError, match="MegaSAM"):
-        bootstrap_run(CFG, run_id="broken", env=ENV4)
+        _bootstrap(CFG, run_id="broken", env=ENV4)
     assert not (tmp_path / "broken" / "config" / "run.json").exists()
 
 
@@ -172,13 +171,13 @@ def test_score_node_cleans_up_the_eval_lora_even_when_wbench_fails(tmp_path, mon
     import pytest
     import ar_kernel.run as run_mod
     _runs(tmp_path, monkeypatch)
-    ctx = bootstrap_run(CFG, run_id="r-cleanup", env=ENV4)
+    ctx = _bootstrap(CFG, run_id="r-cleanup", env=ENV4)
     ctx.metric_set = ["aesthetic_quality"]
     ctx.expected_n = {}
     checkpoint = tmp_path / "checkpoint-2"
     checkpoint.mkdir()
 
-    def fake_concat(cfg, checkpoint, node_dir, recorder, node_id):
+    def fake_concat(cfg, checkpoint, node_dir):
         out = Path(node_dir) / "eval" / "lora"
         out.mkdir(parents=True)
         return out
@@ -190,12 +189,18 @@ def test_score_node_cleans_up_the_eval_lora_even_when_wbench_fails(tmp_path, mon
         raise RuntimeError("wbench gpu failed")
     monkeypatch.setattr(run_mod, "run_wbench_phases", fake_run_wbench_phases)
 
+    from ar_kernel import telemetry
+    from ar_kernel.telemetry import tree
+    from conftest import telemetry_records
+    telemetry.open(tmp_path / "trace")
+    telemetry.start("ar.run")
     with pytest.raises(RuntimeError, match="wbench gpu failed"):
         run_mod.score_node(CFG, ctx, "n1", checkpoint=checkpoint, rank=8)
 
     assert not (ctx.run_dir / "nodes" / "n1" / "eval" / "lora").exists()
-    cleanups = [e for e in ctx.recorder.read_events("n1") if e["type"] == "eval.cleanup"]
-    assert len(cleanups) == 1
+    assert [r["status"] for r in telemetry_records(tmp_path / "trace") if r["kind"] == "end" and r["name"] == "eval"] == [
+        "error"]
+    assert tree.check(tree.load(tmp_path / "trace")) == []
 
 
 def test_score_node_skips_cleanup_on_a_base_exception(tmp_path, monkeypatch):
@@ -206,13 +211,13 @@ def test_score_node_skips_cleanup_on_a_base_exception(tmp_path, monkeypatch):
     import pytest
     import ar_kernel.run as run_mod
     _runs(tmp_path, monkeypatch)
-    ctx = bootstrap_run(CFG, run_id="r-interrupt", env=ENV4)
+    ctx = _bootstrap(CFG, run_id="r-interrupt", env=ENV4)
     ctx.metric_set = ["aesthetic_quality"]
     ctx.expected_n = {}
     checkpoint = tmp_path / "checkpoint-2"
     checkpoint.mkdir()
 
-    def fake_concat(cfg, checkpoint, node_dir, recorder, node_id):
+    def fake_concat(cfg, checkpoint, node_dir):
         out = Path(node_dir) / "eval" / "lora"
         out.mkdir(parents=True)
         return out
@@ -228,8 +233,6 @@ def test_score_node_skips_cleanup_on_a_base_exception(tmp_path, monkeypatch):
         run_mod.score_node(CFG, ctx, "n1", checkpoint=checkpoint, rank=8)
 
     assert (ctx.run_dir / "nodes" / "n1" / "eval" / "lora").exists()
-    cleanups = [e for e in ctx.recorder.read_events("n1") if e["type"] == "eval.cleanup"]
-    assert len(cleanups) == 0
 
 
 def test_expected_n_known_before_the_root_is_scored():
@@ -247,26 +250,25 @@ def test_expected_n_known_before_the_root_is_scored():
 def test_proxy_is_the_first_n_cases_of_the_ordered_list(tmp_path, monkeypatch):
     _runs(tmp_path, monkeypatch)
     ordered = (CFG.repo_root / "configs" / "proxy_cases.txt").read_text().strip().split(",")
-    assert bootstrap_run(CFG, run_id="r50", env=ENV4).case_ids == ordered[:50]
+    assert _bootstrap(CFG, run_id="r50", env=ENV4).case_ids == ordered[:50]
     monkeypatch.setitem(CFG.raw["eval"], "proxy_size", 8)
-    assert bootstrap_run(CFG, run_id="r8", env=ENV4).case_ids == ordered[:8]
+    assert _bootstrap(CFG, run_id="r8", env=ENV4).case_ids == ordered[:8]
     monkeypatch.setitem(CFG.raw["eval"], "proxy_size", len(ordered) + 1)
     with pytest.raises(PreflightError, match="proxy_size"):
-        bootstrap_run(CFG, run_id="rbig", env=ENV4)
+        _bootstrap(CFG, run_id="rbig", env=ENV4)
 
 
 def test_bootstrap_records_universal_counts_and_attach_reads_them(tmp_path, monkeypatch):
     _runs(tmp_path, monkeypatch)
-    ctx = bootstrap_run(CFG, run_id="r_n", env=ENV4)
+    ctx = _bootstrap(CFG, run_id="r_n", env=ENV4)
     assert ctx.expected_n["geometric_consistency"] == 50 and ctx.expected_n["spatial_consistency"] == 6
-    from ar_kernel.run import attach_run
-    assert attach_run(CFG, "r_n", ENV4).expected_n == ctx.expected_n
+    assert _attach(CFG, "r_n", ENV4).expected_n == ctx.expected_n
 
 
 def test_score_reports_every_metrics_case_count_and_the_root_run_keeps_them(tmp_path, monkeypatch):
     import ar_kernel.run as run_mod
     _runs(tmp_path, monkeypatch)
-    ctx = bootstrap_run(CFG, run_id="r-root", env=ENV4)
+    ctx = _bootstrap(CFG, run_id="r-root", env=ENV4)
     ctx.metric_set = ["aesthetic_quality", "spatial_consistency"]
     ctx.expected_n = {"aesthetic_quality": 50}
     report = {"full": {"aesthetic_quality": {"mean": 0.5, "n": 50},
@@ -278,18 +280,17 @@ def test_score_reports_every_metrics_case_count_and_the_root_run_keeps_them(tmp_
     run_mod.record_root_counts(ctx, detail["counts"])
     saved = json.loads((ctx.run_dir / "config" / "run.json").read_text())["expected_n"]
     assert saved == {"aesthetic_quality": 50, "spatial_consistency": 8}
-    assert run_mod.attach_run(CFG, "r-root", ENV4).expected_n == saved
+    assert _attach(CFG, "r-root", ENV4).expected_n == saved
 
 
 def test_bootstrap_records_the_judge_and_attach_refuses_a_different_one(tmp_path, monkeypatch):
     _runs(tmp_path, monkeypatch)
-    ctx = bootstrap_run(CFG, run_id="r-judge", env=ENV4)
+    ctx = _bootstrap(CFG, run_id="r-judge", env=ENV4)
     assert ctx.judge.kind == "local"
     assert json.loads((ctx.run_dir / "config" / "run.json").read_text())["judge"]["kind"] == "local"
-    from ar_kernel.run import attach_run
-    assert attach_run(CFG, "r-judge", ENV4).judge == ctx.judge
+    assert _attach(CFG, "r-judge", ENV4).judge == ctx.judge
     with pytest.raises(PreflightError, match="local judge.*api judge"):
-        attach_run(CFG, "r-judge", {**ENV4, "VLM_API_KEY": "k"})
+        _attach(CFG, "r-judge", {**ENV4, "VLM_API_KEY": "k"})
 
 
 def _tree(root):
@@ -302,7 +303,7 @@ def test_rescoring_a_node_reads_the_run_and_writes_only_under_scores(tmp_path, m
     from ar_kernel.archive.nodes import NodeStore
     _runs(tmp_path / "runs", monkeypatch)
     monkeypatch.setattr(KernelConfig, "scores_dir", property(lambda self: tmp_path / "scores"))
-    ctx = bootstrap_run(CFG, run_id="r", env=ENV4)
+    ctx = _bootstrap(CFG, run_id="r", env=ENV4)
     nodes = NodeStore(ctx.conn)
     nodes.create("root", None, 0)
     nodes.create("n1", "root", 1)
@@ -316,7 +317,6 @@ def test_rescoring_a_node_reads_the_run_and_writes_only_under_scores(tmp_path, m
     def fake_score_node(cfg, sctx, node_id, ckpt, rank):
         seen.update(run_dir=sctx.run_dir, checkpoint=ckpt, rank=rank, cases=sctx.case_ids, n=sctx.expected_n,
                     weights=cfg.get("eval.score_weights"))
-        sctx.recorder.event("eval.scored", node=node_id)
         return 0.5, {"metrics": {"m": 0.5}, "aggregates": {}}
     monkeypatch.setattr(run_mod, "score_node", fake_score_node)
     before = _tree(ctx.run_dir)
@@ -326,7 +326,7 @@ def test_rescoring_a_node_reads_the_run_and_writes_only_under_scores(tmp_path, m
     assert seen["run_dir"] == out and seen["checkpoint"] == checkpoint and seen["rank"] == 32
     assert seen["cases"] == ctx.case_ids and seen["n"] == ctx.expected_n and seen["weights"]
     assert json.loads((out / "score.json").read_text())["score"] == 0.5
-    assert (out / "telemetry").exists()
+    assert not (out / "telemetry").exists()
     with pytest.raises(KeyError):
         run_mod.rescore_node(CFG, "r", "no-such-node", ENV4)
     with pytest.raises(ValueError, match="no checkpoint"):
@@ -347,3 +347,16 @@ def test_code_changes_names_a_moved_or_dirty_repo(monkeypatch):
     versions = {"worldmodel_sha": "a" * 40, "wbench_sha": "b" * 40, "kernel_sha": "d" * 40}
     assert run_mod.code_changes(CFG, versions) == ["wbench has uncommitted changes",
                                                    "kernel was at dddddddd, is at cccccccc"]
+
+
+def test_record_envs_lists_every_env_the_run_uses(monkeypatch):
+    import ar_kernel.run as run_mod
+    seen = []
+    monkeypatch.setattr(run_mod.subproc, "run", lambda argv, **kw: seen.append(argv))
+    run_mod.record_envs(CFG)
+    assert all(argv[:3] == ["conda", "list", "-p"] and argv[4] == "--json" for argv in seen)
+    envs = [Path(argv[3]).relative_to(CFG.repo_root / ".envs").as_posix() for argv in seen]
+    assert len(envs) == len(set(envs))
+    assert {"autoresearcher", "agent", "alayaworld", "wbench-main", "wbench-vp", CFG.get("captioner.env")} <= set(envs)
+    for block in CFG.get("generators").values():
+        assert (Path(block["env"]).name in envs) == bool(block["enabled"]) or block["env"] == "alayaworld"

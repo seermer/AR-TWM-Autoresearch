@@ -5,7 +5,6 @@ import time
 
 import pytest
 
-from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools import jobs as jobs_module
 from ar_kernel.tools.context import TokenRegistry
 from ar_kernel.tools.jobs import JobQueue, run_cancellable
@@ -49,14 +48,13 @@ class BrokenBackend:
 
 @pytest.fixture
 def env(tmp_path):
-    rec = Recorder(tmp_path)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=1.0)
+    q = JobQueue(tmp_path, threading.Lock(), wait_cap_s=1.0)
     q.register(SleepyBackend())
     q.register(BrokenBackend())
-    reg = TokenRegistry(rec)
+    reg = TokenRegistry()
     a = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=tmp_path, staging_host=tmp_path)
     b = reg.issue(node="n2", phase="improve_recipe", attempt=1, workspace_host=tmp_path, staging_host=tmp_path)
-    yield q, a, b, rec
+    yield q, a, b, tmp_path
     q.shutdown()
 
 
@@ -152,10 +150,9 @@ def test_shutdown_raises_if_the_worker_outlives_the_join_timeout(tmp_path, monke
             time.sleep(1.0)
             return {}
 
-    rec = Recorder(tmp_path)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=1.0)
+    q = JobQueue(tmp_path, threading.Lock(), wait_cap_s=1.0)
     q.register(StuckBackend())
-    reg = TokenRegistry(rec)
+    reg = TokenRegistry()
     a = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=tmp_path,
                  staging_host=tmp_path)
     q.submit(a, "stuck", {})
@@ -189,21 +186,14 @@ def test_run_cancellable_kills_the_whole_group(tmp_path):
         pytest.fail("grandchild survived the cancel")
 
 
-def test_run_cancellable_records_a_distinct_cancel_event_and_reports_minus_15(tmp_path):
-    """A cancelled GPU job must be distinguishable in telemetry from a normal
-    exit, and must always report -15 to the caller regardless of which signal
-    actually finished the process group off."""
+def test_run_cancellable_reports_minus_15_for_a_cancel(tmp_path):
+    """A cancelled GPU job always reports -15 to the caller, whichever signal finished the process group off."""
     pidfile = tmp_path / "child.pid"
     cancel = threading.Event()
     _cancel_once_child_appears(pidfile, cancel)
-    rec = Recorder(tmp_path)
     code = run_cancellable("autoresearcher", ["bash", "-c", f"sleep 600 & echo $! > {pidfile}; wait"],
-                           cwd=tmp_path, cancel=cancel, log_path=tmp_path / "job2.log",
-                           recorder=rec, node="n1", phase="rollout")
+                           cwd=tmp_path, cancel=cancel, log_path=tmp_path / "job2.log")
     assert code == -15
-    kinds = [e["type"] for e in rec.read_events("n1")]
-    assert "subproc.cancelled" in kinds, kinds
-    assert "subproc.end" not in kinds, kinds
 
 
 def test_job_waiting_for_the_gpu_lock_stays_queued_and_its_gpu_seconds_exclude_the_wait(env):
@@ -270,14 +260,14 @@ def test_a_short_or_ambiguous_prefix_is_refused(env):
 
 def test_a_job_fails_without_running_while_the_gpus_are_in_use(tmp_path):
     """The agent's container sees the run's GPUs: a job that starts beside its processes would run out of memory."""
-    rec, busy = Recorder(tmp_path), [True]
+    busy = [True]
 
     def require_free(caller):
         if busy[0]:
             raise RuntimeError("the GPUs are not free: GPU 0 has 3200 MiB in use")
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=5.0, require_free=require_free)
+    q = JobQueue(tmp_path, threading.Lock(), wait_cap_s=5.0, require_free=require_free)
     q.register(SleepyBackend())
-    a = TokenRegistry(rec).issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=tmp_path,
+    a = TokenRegistry().issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=tmp_path,
                                  staging_host=tmp_path)
     try:
         out = q.wait(a, q.submit(a, "sleepy", {"steps": 1}), 30)
@@ -320,26 +310,22 @@ class ScriptedBackend:
         return out
 
 
-def _queue(tmp_path, outcomes, alert_after=2):
-    from ar_kernel.tools.server import ToolHealth
-    rec = Recorder(tmp_path)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=30, health=ToolHealth(rec, alert_after))
+def _queue(tmp_path, outcomes):
+    q = JobQueue(tmp_path, threading.Lock(), wait_cap_s=30)
     q.register(ScriptedBackend(outcomes))
-    caller = TokenRegistry(rec).issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=tmp_path,
+    caller = TokenRegistry().issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=tmp_path,
                                       staging_host=tmp_path)
     run = lambda: q.wait(caller, q.submit(caller, "scripted", {}), 30)
-    alerts = lambda: [rec.load_payload(e["payload"]) for e in rec.read_events() if e["type"] == "alert"]
-    return q, caller, run, alerts
+    return q, caller, run
 
 
 def test_job_failures_count_per_tool_and_refusals_do_not(tmp_path):
-    q, caller, run, alerts = _queue(tmp_path, [ToolError("bad item"), ToolError("bad item"),
-                                               RuntimeError("vLLM exited during startup"), {"items": [{"error": "OOM"}]}])
+    q, caller, run = _queue(tmp_path, [ToolError("bad item"), ToolError("bad item"),
+                                       RuntimeError("vLLM exited during startup"), {"items": [{"error": "OOM"}]}])
     try:
-        assert [run()["state"] for _ in range(2)] == ["failed", "failed"] and alerts() == []
+        assert [run()["state"] for _ in range(2)] == ["failed", "failed"] and q.health._streak == {}
         assert run()["state"] == "failed" and run()["state"] == "done"
-        [alert] = alerts()
-        assert alert["kind"] == "tool_failing" and alert["tool"] == "rollout_scripted job"
+        assert q.health._streak == {"rollout_scripted job": 2}
         assert not caller.fault.event.is_set()
     finally:
         q.shutdown()
@@ -349,12 +335,12 @@ def test_input_errors_are_left_out_and_one_good_item_ends_the_streak(tmp_path):
     bad_input = {"items": [{"error": "input: no such file"}, {"error": "input: not 960x544"}]}
     mixed = {"items": [{"error": "worker crashed"}, {"clip": "c.mp4"}]}
     failed = {"items": [{"error": "input: no such file"}, {"error": "worker crashed"}]}
-    q, caller, run, alerts = _queue(tmp_path, [failed, mixed, failed, bad_input, bad_input, failed])
+    q, caller, run = _queue(tmp_path, [failed, mixed, failed, bad_input, bad_input, failed])
     try:
-        for _ in range(6):
+        for _ in range(5):
             assert run()["state"] == "done"
-        [alert] = alerts()                         # only the last failed job completes a streak of two
-        assert "worker crashed" in alert["message"]
+        assert q.health._streak == {"rollout_scripted job": 1}
+        assert run()["state"] == "done" and q.health._streak == {"rollout_scripted job": 2}
     finally:
         q.shutdown()
 
@@ -362,16 +348,15 @@ def test_input_errors_are_left_out_and_one_good_item_ends_the_streak(tmp_path):
 def test_a_disk_error_or_kernel_fault_in_a_job_stops_the_phase(tmp_path):
     from ar_kernel.faults import KernelFault
     for n, exc in enumerate((OSError(28, "No space left on device"), KernelFault("GPUs held by pid 9"))):
-        q, caller, run, alerts = _queue(tmp_path / str(n), [exc])
+        q, caller, run = _queue(tmp_path / str(n), [exc])
         try:
-            assert run()["state"] == "failed" and caller.fault.event.is_set() and alerts() == []
+            assert run()["state"] == "failed" and caller.fault.event.is_set() and q.health._streak == {}
         finally:
             q.shutdown()
 
 
 def test_a_cancelled_job_ends_canceled_whatever_it_raised(tmp_path):
-    rec = Recorder(tmp_path)
-    q = JobQueue(rec, threading.Lock(), wait_cap_s=30)
+    q = JobQueue(tmp_path, threading.Lock(), wait_cap_s=30)
     started = threading.Event()
 
     class Dying:
@@ -382,7 +367,7 @@ def test_a_cancelled_job_ends_canceled_whatever_it_raised(tmp_path):
             cancel.wait(30)
             raise RuntimeError("killed")
     q.register(Dying())
-    caller = TokenRegistry(rec).issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=tmp_path,
+    caller = TokenRegistry().issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=tmp_path,
                                       staging_host=tmp_path)
     try:
         job = q.submit(caller, "dying", {})
@@ -408,20 +393,17 @@ def _raise_once(exc, real):
 
 def test_a_publish_that_cannot_serialize_fails_the_job_and_the_next_job_runs(tmp_path, monkeypatch):
     monkeypatch.setattr(jobs_module, "publish", _raise_once(TypeError("not JSON serializable"), jobs_module.publish))
-    q, caller, run, _ = _queue(tmp_path, [{"items": [{"clip": "a.mp4"}]}, {"items": [{"clip": "b.mp4"}]}])
+    q, caller, run = _queue(tmp_path, [{"items": [{"clip": "a.mp4"}]}, {"items": [{"clip": "b.mp4"}]}])
     try:
         first = run()
         assert first["state"] == "failed" and first["error"] == "TypeError: not JSON serializable"
         assert run()["state"] == "done"
-        first_record = [e for e in q.recorder.read_events("n1") if e["type"] == "job.finished"][0]
-        assert first_record["state"] == "failed" and first_record["job_id"] == first["id"]
-        assert "TypeError" in q.recorder.load_payload(first_record["payload"])["traceback"]
     finally:
         q.shutdown()
 
 
 def test_a_raising_judge_fails_the_job_and_the_worker_lives(tmp_path):
-    q, caller, run, _ = _queue(tmp_path, [{"items": [{"clip": "a.mp4"}]}, {"items": [{"clip": "b.mp4"}]}])
+    q, caller, run = _queue(tmp_path, [{"items": [{"clip": "a.mp4"}]}, {"items": [{"clip": "b.mp4"}]}])
     q._judge = _raise_once(RuntimeError("judge broke"), q._judge)
     try:
         assert run()["state"] == "failed" and run()["state"] == "done"
@@ -429,29 +411,9 @@ def test_a_raising_judge_fails_the_job_and_the_worker_lives(tmp_path):
         q.shutdown()
 
 
-def test_a_raising_finished_record_leaves_the_job_done_and_the_worker_lives(tmp_path):
-    q, caller, run, _ = _queue(tmp_path, [{"items": [{"clip": "a.mp4"}]}, {"items": [{"clip": "b.mp4"}]}])
-    real = q.recorder.event
-    seen = []
-
-    def event(type, **kw):
-        if type == "job.finished" and not seen:
-            seen.append(type)
-            raise RuntimeError("disk full")
-        return real(type, **kw)
-    q.recorder.event = event
-    try:
-        first = run()
-        assert first["state"] == "done" and first["error"] is None and run()["state"] == "done"
-        records = [e for e in q.recorder.read_events("n1") if e["type"] == "job.finished"]
-        assert [(e["job_id"], e["state"]) for e in records][0] == (first["id"], "done")
-    finally:
-        q.shutdown()
-
-
 @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")     # the worker dies, as intended
 def test_a_base_exception_in_the_worker_still_ends_the_job_so_drain_returns(tmp_path):
-    q, caller, run, _ = _queue(tmp_path, [SystemExit(1)])
+    q, caller, run = _queue(tmp_path, [SystemExit(1)])
     try:
         job = q.submit(caller, "scripted", {})
         done = threading.Event()
@@ -461,3 +423,93 @@ def test_a_base_exception_in_the_worker_still_ends_the_job_so_drain_returns(tmp_
         assert not q._worker.is_alive()
     finally:
         q.shutdown()
+
+
+def _finished(q, caller, backend) -> str:
+    job_id = q.submit(caller, backend, {"steps": 1})
+    while (state := q.wait(caller, job_id, 30)["state"]) not in ("done", "failed"):     # waits are capped at 1 s
+        pass
+    return state
+
+
+def test_each_finished_job_is_an_activity_row(env):
+    from ar_kernel.archive.activity import activity
+    from ar_kernel.archive.db import open_db
+    q, a, _, run = env
+    for backend in ("sleepy", "broken"):
+        _finished(q, a, backend)
+    q.shutdown()                                         # the worker writes the row once the job is final
+    rows = [(r["phase"], r["attempt"], r["kind"], r["name"], r["ok"], r["detail"])
+            for r in activity(open_db(run), "n1")]
+    assert rows == [("improve_recipe", 1, "job", "rollout_fake", 1, "done"),
+                    ("improve_recipe", 1, "job", "rollout_broken", 0, "failed")]
+
+
+def test_a_job_row_that_cannot_be_written_stops_the_callers_phase(env, monkeypatch):
+    from ar_kernel.faults import KernelFault
+
+    def broken(*a, **k):
+        raise KernelFault("the archive could not record activity: disk I/O error")
+    monkeypatch.setattr(jobs_module, "add_activity", broken)
+    q, a, _, _ = env
+    assert _finished(q, a, "sleepy") == "done"
+    assert a.fault.event.wait(5) and a.fault.reason.startswith("rollout_fake job: the archive could not record")
+    assert _finished(q, a, "sleepy") == "done"                                           # the worker lives on
+
+
+def _traced(run):
+    from ar_kernel import telemetry
+    telemetry.open(run)
+    telemetry.start("ar.run")
+    return telemetry
+
+
+def _cancels_and_end(run, job_id):
+    from conftest import telemetry_payload, telemetry_records
+    records = telemetry_records(run)
+    [start] = [r for r in records if r["kind"] == "start" and r["name"] == "job.rollout_fake"
+               and telemetry_payload(run, r["inputs"])["job"] == job_id]
+    cancels = [r for r in records if r["kind"] == "start" and r["name"] == "job.cancel"
+               and telemetry_payload(run, r["inputs"])["job"] == job_id]
+    ends = [r for r in records if r["kind"] == "end" and r["span"] == start["span"]]
+    return start, cancels, ends
+
+
+def test_a_job_is_one_span_from_submit_to_its_end_and_each_cancel_is_a_span_under_the_canceller(env):
+    from ar_kernel.telemetry import tree
+    q, a, _, run = env
+    telemetry = _traced(run)
+    with telemetry.span("tool.rollout_fake") as submitter:
+        running = q.submit(a, "sleepy", {"steps": 500, "dt": 0.05})
+        queued = q.submit(a, "sleepy", {"steps": 500})
+        submitter.output = {}
+    time.sleep(0.2)
+    with telemetry.span("phase.close") as closer:
+        assert q.cancel_for_token(a.token) == 2
+        closer.output = {}
+    done = q.submit(a, "sleepy", {"steps": 1})
+    for job_id, state in ((running, "canceled"), (done, "done")):
+        deadline = time.monotonic() + 30                    # wait() returns after wait_cap_s (1 s) here
+        while q.status(a, job_id)["state"] != state and time.monotonic() < deadline:
+            q.wait(a, job_id, 1)
+        assert q.status(a, job_id)["state"] == state
+    with telemetry.span("tool.job_cancel") as late:
+        q.cancel(a, done)                                   # already final: no cancel recorded
+        late.output = {}
+    for job_id in (running, queued):
+        start, cancels, ends = _cancels_and_end(run, job_id)
+        assert start["parent"] == submitter.id
+        assert [c["parent"] for c in cancels] == [closer.id] and [e["status"] for e in ends] == ["cancelled"]
+    start, cancels, ends = _cancels_and_end(run, done)
+    assert cancels == [] and [e["status"] for e in ends] == ["ok"]
+    assert tree.check(tree.load(run)) == []
+
+
+def test_a_failed_job_ends_its_span_with_the_error(env):
+    from conftest import telemetry_records
+    q, a, _, run = env
+    _traced(run)
+    job_id = q.submit(a, "broken", {})
+    assert q.wait(a, job_id, 30)["state"] == "failed"
+    [end] = [r for r in telemetry_records(run) if r["kind"] == "end" and r["name"] == "job.rollout_broken"]
+    assert end["status"] == "error" and end["error"]

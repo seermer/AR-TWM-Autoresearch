@@ -2,12 +2,10 @@
 file in the caller's staging directory; the caller is told the path and a summary."""
 from __future__ import annotations
 
-import functools
 import math
 import queue
 import threading
 import time
-import traceback
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,9 +15,10 @@ from pydantic import Field
 
 from mcp.server.mcpserver import Context
 
-from ..faults import disk_fault
+from .. import telemetry
+from ..archive.activity import add_activity
+from ..faults import KernelFault, disk_fault
 from ..subproc import KILL_FORCE_GRACE_SECONDS, KILL_GRACE_SECONDS, run_in_env
-from ..telemetry import files
 from .server import SHOWN, ToolError, ToolHealth, fault_or_count, publish
 
 _DEFAULT_POLL_S = 1.0
@@ -56,9 +55,11 @@ class Job:
     created: float = field(default_factory=time.time)
     started: float | None = None
     finished: float | None = None
+    span: Any = None                  # job.<tool>, from submit to the final state
 
 
 _TERMINAL = {"done", "failed", "canceled"}
+_STATUS = {"done": "ok", "failed": "error", "canceled": "cancelled"}
 
 
 def attempt_jobs_dir(run_dir: Path, node: str, phase: str, attempt: int) -> Path:
@@ -92,17 +93,20 @@ class JobQueue:
     so an agent that disappears never keeps holding the GPUs.
     """
 
-    def __init__(self, recorder, gpu_lock: threading.Lock, wait_cap_s: float,
-                 require_free: Callable[[Any], None] = lambda caller: None, health: ToolHealth | None = None) -> None:
-        self.recorder, self.gpu_lock, self.wait_cap_s = recorder, gpu_lock, float(wait_cap_s)
+    def __init__(self, run_dir: Path, gpu_lock: threading.Lock, wait_cap_s: float,
+                 require_free: Callable[[Any], None] = lambda caller: None, health: ToolHealth | None = None,
+                 touch: Callable[[], None] = lambda: None) -> None:
+        """`touch`: called on each job's progress."""
+        self.gpu_lock, self.wait_cap_s = gpu_lock, float(wait_cap_s)
+        self.run_dir, self.touch = Path(run_dir), touch
         self.require_free = require_free          # raises when the GPUs are in use: the job then fails
-        self.health = health or ToolHealth(recorder)
+        self.health = health or ToolHealth()
         self._backends: dict[str, JobBackend] = {}
         self._jobs: dict[str, Job] = {}
         self._cancel: dict[str, threading.Event] = {}
         self._cond = threading.Condition()
         self._todo: "queue.Queue[str | None]" = queue.Queue()
-        self._worker = threading.Thread(target=self._loop, name="ar-gpu-jobs", daemon=True)
+        self._worker = telemetry.thread(self._loop, "ar-gpu-jobs")
         self._worker.start()
 
     def register(self, backend: JobBackend) -> None:
@@ -134,12 +138,11 @@ class JobQueue:
             raise ToolError(f"generator {backend_name!r} is not enabled on this run")
         job = Job(id=uuid.uuid4().hex, backend=backend_name, args=dict(args),
                   node=caller.node, token=caller.token, caller=caller, phase=caller.phase, attempt=caller.attempt)
+        job.span = telemetry.start(f"job.{self._backends[backend_name].tool}",
+                                   {"job": job.id, "backend": backend_name, "args": job.args})
         with self._cond:
             self._jobs[job.id] = job
             self._cancel[job.id] = threading.Event()
-        self.recorder.event("job.submitted", node=caller.node, phase=caller.phase,
-                            attempt=caller.attempt, component="tools", job_id=job.id,
-                            payload={"backend": backend_name, "args": args})
         self._todo.put(job.id)
         return job.id
 
@@ -181,10 +184,25 @@ class JobQueue:
                 self._cond.wait()
 
     def _cancel_locked(self, job: Job) -> None:
-        self._cancel[job.id].set()
-        if job.state == "queued":
-            job.state, job.finished = "canceled", time.time()
-            self._cond.notify_all()
+        """Under `_cond`. A queued job ends here; a running one ends when its backend returns."""
+        if job.state in _TERMINAL:
+            return
+        with telemetry.span("job.cancel", {"job": job.id}) as sp:
+            self._cancel[job.id].set()
+            if job.state == "queued":
+                self._finalize(job, "canceled")
+            sp.output = {"state": job.state}
+
+    def _finalize(self, job: Job, state: str, error: str | None = None, exc: BaseException | None = None,
+                  result: dict | None = None) -> None:
+        """Under `_cond`: make `job` final and end its span; a no-op for a job already final."""
+        if job.state in _TERMINAL:
+            return
+        job.state, job.error, job.finished = state, error, time.time()
+        self._cond.notify_all()
+        if job.span is not None:
+            job.span.end(_STATUS[state], {"state": state, "error": error, "result_file": job.result_file,
+                                          "summary": job.summary, "result": result}, exc)
 
     def shutdown(self) -> None:
         with self._cond:
@@ -206,23 +224,19 @@ class JobQueue:
                 return
             with self._cond:
                 job = self._jobs[job_id]
-            try:
-                self._run_one(job)
-            except Exception as exc:                      # noqa: BLE001 -- fail this job, keep the worker
-                error = f"{type(exc).__name__}: {exc}"
-                self._end(job, error)
-                self.recorder.event("job.finished", node=job.node, component="tools", job_id=job.id, state=job.state,
-                                    gpu_seconds=job.finished - job.started if job.started else None,
-                                    payload={"error": error, "traceback": traceback.format_exc()})
-            finally:
-                self._end(job, "the GPU job worker stopped")   # a BaseException ends the thread: drain() must return
+            with telemetry.use(job.span):
+                try:
+                    self._run_one(job)
+                except Exception as exc:                      # noqa: BLE001 -- fail this job, keep the worker
+                    self._end(job, f"{type(exc).__name__}: {exc}", exc)
+                    self._record(job)
+                finally:
+                    self._end(job, "the GPU job worker stopped")   # a BaseException ends the thread: drain() must return
 
-    def _end(self, job: Job, error: str) -> None:
+    def _end(self, job: Job, error: str, exc: BaseException | None = None) -> None:
         """Fail `job` unless it is already final."""
         with self._cond:
-            if job.state not in _TERMINAL:
-                job.state, job.error, job.finished = "failed", error, time.time()
-                self._cond.notify_all()
+            self._finalize(job, "failed", error, exc)
 
     def _run_one(self, job: Job) -> None:
         cancel = self._cancel[job.id]
@@ -231,11 +245,13 @@ class JobQueue:
             with self._cond:
                 job.progress = dict(progress)
                 self._cond.notify_all()
+            self.touch()
 
-        result, error, tb, failure = None, None, None, None
-        here = functools.partial(files.scope, self.recorder, node=job.node, phase=job.phase, attempt=job.attempt,
-                                 component="tools", tool=self._backends[job.backend].tool, job_id=job.id)
-        with self.gpu_lock:
+        result, error, failure, raised = None, None, None, None
+        with telemetry.span("job.gpu_lock") as sp:          # its start: when the worker took the job
+            self.gpu_lock.acquire()
+            sp.output = {"held": True}
+        try:
             # Running starts once the GPUs are held, so gpu_seconds excludes the lock
             # wait; a job cancelled before or during that wait is already final.
             with self._cond:
@@ -245,32 +261,38 @@ class JobQueue:
                 self._cond.notify_all()
             try:
                 self.require_free(job.caller)
-                with here():
-                    result = self._backends[job.backend].run(job, cancel, report)
+                result = self._backends[job.backend].run(job, cancel, report)
                 final = "done"
             except Exception as exc:                      # noqa: BLE001 -- a job failure, not a crash
-                final, error, tb, failure = "failed", f"{type(exc).__name__}: {exc}", traceback.format_exc(), exc
+                final, error, failure, raised = "failed", f"{type(exc).__name__}: {exc}", exc, exc
+        finally:
+            self.gpu_lock.release()
         result_file = summary = None
         if result is not None:
             summary = summarize(result)
             try:
-                with here():
-                    result_file = publish(job.caller, f"{job.backend}-{job.id}", result)
+                result_file = publish(job.caller, f"{job.backend}-{job.id}", result)
             except OSError as exc:                        # the phase ended and took its staging with it
-                final, error = "failed", f"the result could not be written: {type(exc).__name__}: {exc}"
+                final, error, raised = "failed", f"the result could not be written: {type(exc).__name__}: {exc}", exc
                 failure = exc if disk_fault(exc) else None
         if cancel.is_set():                               # its phase ended or the agent cancelled it
             final = "canceled"
         else:
             self._judge(job, final, failure, result)
         with self._cond:
-            job.state, job.error, job.finished = final, error, time.time()
             job.result_file, job.summary = result_file, summary
-            self._cond.notify_all()
-        self.recorder.event("job.finished", node=job.node, component="tools", job_id=job.id,
-                            state=final, gpu_seconds=job.finished - job.started,
-                            payload={"result": result, "error": error,
-                                     "traceback": tb if final == "failed" else None})
+            self._finalize(job, final, error, raised, result)
+        self._record(job)
+
+    def _record(self, job: Job) -> None:
+        """The finished job's activity row; a failed write stops the caller's phase."""
+        tool = self._backends[job.backend].tool
+        try:
+            add_activity(self.run_dir, node=job.node, phase=job.phase, attempt=job.attempt, kind="job", name=tool,
+                         ok=job.state == "done", detail=job.state)
+        except KernelFault as exc:
+            telemetry.error(exc, "the phase stops")
+            job.caller.fail(f"{tool} job: {exc}")
 
     def _judge(self, job: Job, final: str, failure: Exception | None, result: dict | None) -> None:
         """Counts toward "<tool> job" failures: a job that raised (not a ToolError), or one whose items all
@@ -280,20 +302,24 @@ class JobQueue:
             fault_or_count(job.caller, self.health, key, failure)
         rows = [row for row in (_rows(result) if final == "done" and result is not None else [])
                 if not str(row.get("error", "")).startswith("input:")]
-        if any("error" not in row for row in rows):
+        chosen = "ok" if any("error" not in row for row in rows) else "failed" if rows else "no verdict"
+        telemetry.decision("job.health", {"tool": key, "rows": len(rows), "failed": sum("error" in r for r in rows)},
+                           ["ok", "failed", "no verdict"], chosen,
+                           {"ok": "an item succeeded", "failed": "every item whose input was good failed",
+                            "no verdict": "no item with good input"}[chosen])
+        if chosen == "ok":
             self.health.ok(key)
-        elif rows:
+        elif chosen == "failed":
             self.health.failed(key, str(rows[0]["error"])[:300])
 
 
 def run_cancellable(env: str, args: list[str], *, cwd: Path, cancel: threading.Event,
-                    extra_env: dict | None = None, log_path: Path, poll_s: float = _DEFAULT_POLL_S,
-                    recorder=None, node: str = "run", phase: str = "-") -> int:
+                    extra_env: dict | None = None, log_path: Path, poll_s: float = _DEFAULT_POLL_S) -> int:
     """Run a GPU job's command via `run_in_env`, killing its whole process group on cancel.
     Backends launch every command through this. Returns the exit code, or -15 whenever `cancel`
     caused the kill (also when the job ignored SIGTERM and needed SIGKILL)."""
     result = run_in_env(env, args, cwd=cwd, extra_env=extra_env, log_path=log_path,
-                        cancel=cancel, poll_s=poll_s, recorder=recorder, node=node, phase=phase)
+                        cancel=cancel, poll_s=poll_s)
     return -15 if result.cancelled else result.returncode
 
 

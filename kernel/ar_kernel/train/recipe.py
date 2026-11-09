@@ -3,6 +3,8 @@ import math
 from pathlib import Path
 import yaml
 
+from .. import fs
+
 TUNABLE_KEYS = frozenset({
     "optimizer.lr", "optimizer.weight_decay", "optimizer.max_grad_norm",
     "optimizer.warmup_steps", "optimizer.max_steps", "optimizer.epochs",
@@ -110,6 +112,6 @@ def write_resolved_config(base_recipe: Path, recipe: dict, roots: dict[str, Path
                           node_id: str, node_dir: Path, run_dir: Path) -> Path:
     resolved = build_resolved_config(base_recipe, recipe, roots, manifest, node_id, node_dir, run_dir)
     target = Path(node_dir) / "train_config.yaml"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(yaml.safe_dump(resolved, sort_keys=True), encoding="utf-8")
+    fs.mkdir(target.parent)
+    fs.write_text(target, yaml.safe_dump(resolved, sort_keys=True))
     return target

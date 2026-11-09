@@ -14,9 +14,9 @@ published with its annotation (the planned start of each turn) and carries no po
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 
+from .. import fs, subproc
 from ..data.annotation import FIRST_TURN_FRAMES, FPS, SWITCH
 from ..data.probe import probe_video
 from ..faults import KernelFault
@@ -206,7 +206,7 @@ class H3Backend(GpuJob):
         for item in items:
             frames, starts = self._layout(item)
             requests[str(item["index"])] = {"prompt": build_prompt(item, starts), "frames": frames}
-        (work / "requests.json").write_text(json.dumps(requests, ensure_ascii=False), encoding="utf-8")
+        fs.write_text(work / "requests.json", json.dumps(requests, ensure_ascii=False))
         checked_repo(self.cfg, self.config_key, "LightX2V")
         config = json.loads((self.cfg.repo_root / self.block["config"]).read_text(encoding="utf-8"))
         cache = self.cfg.repo_root / config["adaln_cache_dir"]
@@ -215,7 +215,7 @@ class H3Backend(GpuJob):
         config["adaln_cache_dir"] = str(cache)
         config["attn_type"] = self.block["attn_type"]
         config["parallel"]["seq_p_size"] = len(self.gpus)
-        (work / "lightx2v.json").write_text(json.dumps(config), encoding="utf-8")
+        fs.write_text(work / "lightx2v.json", json.dumps(config))
         return {"bridge": H3_BRIDGE, "env": self.block["env"],
                 "env_vars": {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True", "DTYPE": "BF16",
                              "TOKENIZERS_PARALLELISM": "false", "HF_HUB_OFFLINE": "1"},
@@ -226,8 +226,8 @@ class H3Backend(GpuJob):
     def finish(self, job, item, outputs, info, out):
         frames, starts = self._layout(item)
         silent = out / f"{item['index']}.silent.mp4"
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(outputs["video"]), "-an",
-                        "-c:v", "copy", str(silent)], check=True)
+        subproc.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(outputs["video"]), "-an",
+                     "-c:v", "copy", str(silent)], check=True)
         info = probe_video(silent)
         if (info.width, info.height) != SIZE:
             raise ValueError(f"rendered clip is {info.width}x{info.height}, not {SIZE[0]}x{SIZE[1]}")

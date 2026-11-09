@@ -10,12 +10,10 @@ import pytest
 from ar_kernel.archive.db import open_db
 from ar_kernel.archive.nodes import NodeStore
 from ar_kernel.config import KernelConfig
-from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.tools.context import TokenRegistry
 from ar_kernel.tools.data_tools import DataTools
 from ar_kernel.tools.server import ToolError
-from conftest import DERIVED, make_mp4, recorded, staged_clip
-from ar_kernel.telemetry import files
+from conftest import DERIVED, make_mp4, staged_clip
 
 CFG = KernelConfig.load()
 
@@ -24,12 +22,11 @@ CFG = KernelConfig.load()
 def env(tmp_path_factory):
     """Build once: ingest runs WorldModel's checker (~5 s per clip)."""
     run = tmp_path_factory.mktemp("run")
-    rec = Recorder(run)
     nodes = NodeStore(open_db(run))
     nodes.create("root", None, 0)
     nodes.create("n1", "root", 1)
-    tools = DataTools(CFG, run, rec, [0, 1, 2, 3], threading.Lock())
-    reg = TokenRegistry(rec)
+    tools = DataTools(CFG, run, [0, 1, 2, 3], threading.Lock())
+    reg = TokenRegistry()
     ws = run / "nodes" / "n1" / "attempts" / "improve_recipe-1" / "workspace"
     st = run / "staging" / "n1" / "improve_recipe-1"
     ws.mkdir(parents=True), st.mkdir(parents=True)
@@ -114,10 +111,6 @@ def test_probe_reports_display_geometry(env):
     info = tools.probe(caller, "/workspace/staging/probe_me.mp4")
     assert info["width"] == 736 and info["rotation"] == 0 and abs(info["display_aspect"] - 736 / 414) < 1e-6
     assert tools.probe(caller, "staging/probe_me.mp4") == info      # relative to /workspace, like caption_videos
-    rec = Recorder(run)
-    with files.scope(rec, node="n1", tool="video_probe"):
-        tools.probe(caller, "staging/probe_me.mp4")
-    assert recorded(rec)[("in", "/workspace/staging/probe_me.mp4")] == (caller.staging_host / "probe_me.mp4").read_bytes()
 
 
 def test_probe_of_a_missing_non_video_or_damaged_file_is_a_tool_error(env):
@@ -202,9 +195,7 @@ def test_query_writes_every_match_to_a_file(env):
 def test_fetch_copies_pool_clips_into_staging(env):
     tools, caller, results, run = env
     wanted = results[0]["clip_id"]
-    rec = Recorder(run)
-    with files.scope(rec, node="n1", tool="data_fetch"):
-        out = tools.fetch(caller, [wanted, "nope"])
+    out = tools.fetch(caller, [wanted, "nope"])
     assert out == {"folder": "/workspace/staging/pool_clips", "copied": 1, "not_in_pool": ["nope"]}
     video = caller.staging_host / "pool_clips" / "videos" / f"{wanted}.mp4"
     assert video.stat().st_size > 0 and video.stat().st_nlink == 1          # a copy, not a link into the archive
@@ -212,10 +203,6 @@ def test_fetch_copies_pool_clips_into_staging(env):
     annotation = json.loads((caller.staging_host / "pool_clips" / "annotations" / f"{wanted}.json").read_text())
     assert annotation == {"scene_prompt": caption["caption"], "turns": [{"start_s": 0.0, "perspective": "first_person"}]}
     assert (caller.staging_host / "pool_clips" / "poses" / f"{wanted}.npz").is_file()
-    stored = {e["path"]: e["digest"] for e in rec.read_events("n1") if e["type"] == "file" and "pool_clips" in e["path"]}
-    assert len(stored) == 4
-    digest = stored[f"/workspace/staging/pool_clips/videos/{wanted}.mp4"]
-    assert (run / "telemetry" / "files" / digest).stat().st_ino == next((run / "store" / "blobs" / "video").glob(f"{digest}.*")).stat().st_ino
 
 
 def test_commit_validation_errors_become_tool_errors(env):
@@ -240,6 +227,13 @@ def test_every_bad_clip_of_a_commit_is_named_in_one_refusal_with_a_file(env):
     assert [r["item"] for r in rows] == ["nope"] and rows[-1]["error"] == "unknown clip"
 
 
+def _gate_rows(tools, caller):
+    from ar_kernel.archive.activity import activity
+    from ar_kernel.archive.db import open_db
+    return [(r["phase"], r["attempt"], r["ok"]) for r in activity(open_db(tools.run_dir), caller.node)
+            if r["kind"] == "gate"]
+
+
 def test_recipe_check_reports_gate_failures_without_leaving_a_view(env, monkeypatch):
     """The recipe clears every pre-materialize gate check (see
     tests/test_gate.py for the same arithmetic), so the gate genuinely builds a
@@ -254,6 +248,7 @@ def test_recipe_check_reports_gate_failures_without_leaving_a_view(env, monkeypa
                           "for check")["commit_id"]
 
     seen_populated_view = []
+    before = len(_gate_rows(tools, caller))                 # the module's env is shared
 
     def fake_run_in_env(env_name, args, **kwargs):
         views = list((caller.workspace_host.parent / "recipe_check").glob("*/view"))
@@ -275,13 +270,14 @@ def test_recipe_check_reports_gate_failures_without_leaving_a_view(env, monkeypa
     assert "check_dataset: monkeypatched finding" in out["failures"], out["failures"]
     leftovers = list((caller.workspace_host.parent / "recipe_check").glob("*"))
     assert leftovers == []
+    assert _gate_rows(tools, caller)[before:] == [(caller.phase, caller.attempt, 0)]
 
 
 def test_a_snapshot_skips_the_gate_recipe_check_passed_in_this_attempt(env, monkeypatch):
     tools, caller, results, _ = env
     commit = tools.commit(caller, {"cam": {"weight": 1.0, "clips": [r["clip_id"] for r in results]}},
                           "for check")["commit_id"]
-    runs = []
+    runs, before = [], len(_gate_rows(tools, caller))       # the module's env is shared
     monkeypatch.setattr("ar_kernel.train.gate.run_in_env",
                         lambda env_name, args, **kw: runs.append(args) or subprocess.CompletedProcess(args, 0, "", ""))
     recipe = {"optimizer.max_steps": 1, "optimizer.epochs": 1, "optimizer.grad_accum_steps": 1}
@@ -290,6 +286,7 @@ def test_a_snapshot_skips_the_gate_recipe_check_passed_in_this_attempt(env, monk
     assert tools.snapshot_gate(caller, {**recipe, "optimizer.epochs": 2}, commit) == [] and len(runs) == 6
     tools.forget(caller.token)                                                             # its phase ended
     assert tools.snapshot_gate(caller, dict(recipe), commit) == [] and len(runs) == 9
+    assert _gate_rows(tools, caller)[before:] == [(caller.phase, caller.attempt, 1)] * 3          # one per run of the gate
 
 
 def test_recipe_check_is_refused_at_once_while_a_gpu_job_holds_the_gpus(env):
@@ -307,7 +304,7 @@ def test_register_names_are_openai_safe():
     from ar_kernel.tools.data_tools import register_data_tools
     from ar_kernel.tools.server import ToolKit, new_mcp
     mcp = new_mcp()
-    register_data_tools(mcp, ToolKit(None, None), None)
+    register_data_tools(mcp, ToolKit(None, "."), None)
     names = [t.name for t in asyncio.run(mcp.list_tools())]
     assert len(names) == 6 and all(re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", n) for n in names)
 
@@ -324,23 +321,20 @@ def test_leakage_checker_is_built_once_across_concurrent_ingests(tmp_path, monke
 
     monkeypatch.setattr("ar_kernel.data.ingest.LeakageChecker", CountingChecker)
     monkeypatch.setattr("ar_kernel.tools.data_tools.LeakageChecker", CountingChecker)
-    rec = Recorder(tmp_path)
     NodeStore(open_db(tmp_path)).create("n1", None, 0)
-    tools = DataTools(CFG, tmp_path, rec, [0, 1, 2, 3], threading.Lock())
+    tools = DataTools(CFG, tmp_path, [0, 1, 2, 3], threading.Lock())
     ws, st = tmp_path / "ws", tmp_path / "staging" / "n1" / "a1"
     ws.mkdir(), st.mkdir(parents=True)
-    caller = TokenRegistry(rec).issue(node="n1", phase="improve_recipe", attempt=1,
+    caller = TokenRegistry().issue(node="n1", phase="improve_recipe", attempt=1,
                                       workspace_host=ws, staging_host=st)
     (st / "v.mp4").write_bytes(b"x"), (st / "c.json").write_text("{}"), (st / "p.npz").write_bytes(b"x")
     # An invalid derived_from is rejected before any file is touched: this exercises only setup.
-    # Distinct values keep the two rejection payloads distinct (the recorder writes identical
-    # payloads through one shared tmp name, a separate race).
     def ingest(kind):
         cand = {"video": "/workspace/staging/v.mp4", "annotation": "/workspace/staging/c.json",
                 "pose": "/workspace/staging/p.npz", "derived_from": {"kind": kind, "name": "x"}}
         results.extend(_rows(caller, tools.ingest(caller, [cand])))
     results = []
-    threads = [threading.Thread(target=contextvars.copy_context().run, args=(ingest, m))    # in the tests' file scope
+    threads = [threading.Thread(target=contextvars.copy_context().run, args=(ingest, m))
                for m in ("sideways", "upways")]
     for t in threads:
         t.start()
@@ -391,7 +385,7 @@ def test_recipe_and_dataset_numbers_are_typed():
     from ar_kernel.tools.data_tools import register_data_tools
     from ar_kernel.tools.server import ToolKit, new_mcp
     mcp = new_mcp()
-    register_data_tools(mcp, ToolKit(None, None), None)
+    register_data_tools(mcp, ToolKit(None, "."), None)
     listed = {t.name: t.input_schema for t in asyncio.run(mcp.list_tools())}
     assert listed["recipe_check"]["properties"]["recipe"]["additionalProperties"] == {
         "anyOf": [{"type": "integer"}, {"type": "number"}]}

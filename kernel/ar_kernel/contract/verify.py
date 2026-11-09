@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 import json
-import os
-import shutil
 import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from ar_contract.static import ENTRY_POINTS, mentions, static_check
 
+from .. import fs, telemetry
 from ..agent_phase import install_requirements, read_result, requirements_listed
 from ..gateway.app import create_gateway_app
 from ..gateway.mock import MockBook
@@ -109,12 +108,12 @@ class _MockLocate:
 
 
 class ContractHarness:
-    def __init__(self, cfg, run_dir: Path, recorder, repo) -> None:
-        self.cfg, self.recorder = cfg, recorder
+    def __init__(self, cfg, run_dir: Path, repo) -> None:
+        self.cfg, self.run_dir = cfg, Path(run_dir)
         self.snapshots = SnapshotStore(run_dir, repo, _MockData().usable)
-        self.registry = TokenRegistry(recorder)
+        self.registry = TokenRegistry()
         self.services = RunServices(socket_dir_for(Path(run_dir) / "contract-harness"))
-        self.queue = JobQueue(recorder, threading.Lock(), wait_cap_s=5.0)
+        self.queue = JobQueue(run_dir, threading.Lock(), wait_cap_s=5.0)
         self.queue.register(_MockCaption())
         self.queue.register(_MockLocate())
 
@@ -123,7 +122,7 @@ class ContractHarness:
         return self.services.socket_dir
 
     def start(self) -> None:
-        kit, mcp = ToolKit(self.registry, self.recorder), new_mcp()
+        kit, mcp = ToolKit(self.registry, self.run_dir), new_mcp()
         register_data_tools(mcp, kit, _MockData())
         register_snapshot_tool(mcp, kit, self.snapshots)
         register_hf_tools(mcp, kit, _MockHf())
@@ -132,7 +131,8 @@ class ContractHarness:
         register_locate_tool(mcp, kit, self.queue)
         register_ask_tool(mcp, kit, MockAsk())
         register_knowledge_tool(mcp, kit)
-        gateway = create_gateway_app(registry=self.registry, store=CallStore(self.recorder),
+        store = CallStore(self.run_dir, audit_patterns=self.cfg.get("isolation.audit_patterns") or [])
+        gateway = create_gateway_app(registry=self.registry, store=store,
                                      allowed_models={MOCK_MODEL}, upstream=None,
                                      mocks=MockBook.default())
         self.services.start(gateway, build_tool_app(mcp))
@@ -143,25 +143,30 @@ class ContractHarness:
 
 
 def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harness: ContractHarness,
-                    recorder, node: str, attempt: int, contexts: dict[str, dict],
+                    node: str, attempt: int, contexts: dict[str, dict],
                     runner=run_container) -> ContractReport:
     """`contexts`: per entry point, the dry-run context its smoke run receives (agent_phase.smoke_contexts)."""
     report = ContractReport(ok=False)
     work = Path(run_dir) / "nodes" / node / "contract" / f"attempt-{attempt}"
-    shutil.rmtree(work, ignore_errors=True)
+    fs.rmtree(work, ignore_errors="an earlier check's folder")
     snapshot.clear(run_dir, repo, node, "contract", attempt)
     code = work / "agent"
 
     def finish(ok: bool) -> ContractReport:
         report.ok = ok
-        recorder.event("contract.report", node=node, phase="contract", attempt=attempt,
-                       component="contract", ok=ok, payload=report.to_record())
         return report
+
+    def add(name: str, ok: bool, detail: str = "") -> None:
+        """One step of the check, as a decision."""
+        telemetry.decision("contract.step", {"step": name}, ["pass", "fail"], "pass" if ok else "fail",
+                           detail or "passed")
+        report.steps.append(ContractStep(name, ok, detail))
 
     try:
         repo.checkout(commit, code)
     except CheckoutError as exc:
-        report.steps.append(ContractStep("checkout", False, str(exc)))
+        telemetry.error(exc, "the checkout step fails")
+        add("checkout", False, str(exc))
         return finish(False)
 
     def folders(label: str) -> tuple:
@@ -169,14 +174,15 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
         ws, ctx_dir = run_dir_l / "workspace", run_dir_l / "context"
         staging = Path(run_dir) / "staging" / node / f"contract-{attempt}-{label.replace(':', '_')}"
         for d in (ws, ctx_dir, staging):
-            d.mkdir(parents=True, exist_ok=True)
+            fs.mkdir(d)
         return ws, ctx_dir, staging
 
     installed = work / "build" / "workspace" / ".home" / ".local"     # linked into every run's home
     try:
         listed = requirements_listed(code)
     except (OSError, UnicodeDecodeError) as exc:
-        report.steps.append(ContractStep("build", False, f"cannot read agent/requirements.txt: {exc}"))
+        telemetry.error(exc, "the build step fails")
+        add("build", False, f"cannot read agent/requirements.txt: {exc}")
         return finish(False)
     if listed:
         ws, ctx_dir, staging = folders("build")
@@ -184,42 +190,39 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
             runner, name=container_name(run_id, node, "contract-install", attempt),
             mounts=Mounts(agent=code, workspace=ws, staging=staging, context=ctx_dir,
                           contract=cfg.repo_root / "contract", sockets=harness.socket_dir, agent_readonly=True),
-            path="/agent/agent/requirements.txt", cfg=cfg, recorder=recorder, node=node, phase="contract",
-            attempt=attempt)
+            path="/agent/agent/requirements.txt", cfg=cfg)
         if result.exit_code != 0:
-            report.steps.append(ContractStep("build", False, f"agent/requirements.txt failed to install (exit code "
-                                                             f"{result.exit_code}):\n{result.stderr[-6000:]}"))
+            add("build", False, f"agent/requirements.txt failed to install (exit code "
+                                f"{result.exit_code}):\n{result.stderr[-6000:]}")
             return finish(False)
-    report.steps.append(ContractStep("build", True))
+    add("build", True)
 
     entry = code / "agent" / "entry.py"
     try:
         entry_source = entry.read_text(encoding="utf-8") if entry.exists() else ""
     except (OSError, UnicodeDecodeError) as exc:
-        step = ContractStep("static", False, f"cannot read agent/entry.py as UTF-8 text: {exc}")
+        telemetry.error(exc, "the static step fails")
+        problem = f"cannot read agent/entry.py as UTF-8 text: {exc}"
     else:
         problem = static_check(entry_source)
-        step = ContractStep("static", problem is None, problem or "")
-    report.steps.append(step)
-    if not step.ok:
+    add("static", problem is None, problem or "")
+    if problem is not None:
         return finish(False)
     hits = mentions(code)
-    report.steps.append(ContractStep("mentions", not hits, "\n".join(hits)))
+    add("mentions", not hits, "\n".join(hits))
     if hits:
         return finish(False)
 
     def run(label: str, command: list[str], context: dict | None) -> tuple:
         ws, ctx_dir, staging = folders(label)
         if installed.is_dir():
-            shutil.copytree(installed, ws / ".home" / ".local", symlinks=True, copy_function=os.link)
+            fs.copytree(installed, ws / ".home" / ".local", link=True, symlinks=True)
         if context is not None:
-            (ctx_dir / "context.json").write_text(json.dumps(context))
+            fs.write_text(ctx_dir / "context.json", json.dumps(context))
         edits = label == "smoke:edit_self"
         caller = harness.registry.issue(node=node, phase="contract", attempt=attempt,
                                         workspace_host=ws, staging_host=staging, mock_script="smoke",
                                         agent_host=code if edits else None, base_commit=commit if edits else None)
-        # issue() redacted the token only on harness.recorder, which is not `recorder`.
-        recorder.add_redaction(caller.token)
         try:
             result = runner(name=container_name(run_id, node, "contract", attempt),
                             mounts=Mounts(agent=code, workspace=ws, staging=staging, context=ctx_dir,
@@ -228,21 +231,20 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
                             command=command, env={"AR_TOKEN": caller.token, "AR_DEFAULT_MODEL": MOCK_MODEL,
                                                   "AR_CONTEXT_WINDOW": str(cfg.get("agents.context_window_tokens")),
                                                   "AR_COMPACT_AT": str(cfg.get("agents.compact_at"))},
-                            env_dir=cfg.repo_root / ".envs" / "agent", shm_gb=8, recorder=recorder,
-                            node=node, phase="contract", attempt=attempt)
+                            env_dir=cfg.repo_root / ".envs" / "agent", shm_gb=8)
         finally:
             harness.registry.revoke(caller.token)
             harness.queue.cancel_for_token(caller.token)   # as in the phase runner
         return result, ws
 
-    (Path(run_dir) / "store").mkdir(exist_ok=True)
+    fs.mkdir(Path(run_dir) / "store")
     probe = ("import sys; sys.path.insert(0, '/agent'); import agent.entry as e; "
              "assert callable(e.edit_self) and callable(e.improve_recipe)")
     result, _ = run("import", ["python", "-c", probe], None)
     if result.exit_code != 0:
-        report.steps.append(ContractStep("import", False, result.stderr[-6000:]))
+        add("import", False, result.stderr[-6000:])
         return finish(False)
-    report.steps.append(ContractStep("import", True))
+    add("import", True)
 
     for kind in ENTRY_POINTS:
         result, ws = run(f"smoke:{kind}", ["python", "-m", "ar_contract.run", kind], contexts[kind])
@@ -252,8 +254,7 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
         if result.exit_code != 0 or not body.get("ok"):
             tb = body.get("traceback")
             tb_tail = f"\n{tb[-6000:]}" if isinstance(tb, str) and tb else ""
-            report.steps.append(ContractStep(
-                name, False, f"{body.get('error')}\n{result.stderr[-6000:]}{tb_tail}"))
+            add(name, False, f"{body.get('error')}\n{result.stderr[-6000:]}{tb_tail}")
             return finish(False)
-        report.steps.append(ContractStep(name, True))
+        add(name, True)
     return finish(True)

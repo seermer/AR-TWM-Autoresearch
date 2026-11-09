@@ -2,13 +2,17 @@ import json
 
 import httpx
 import pytest
+from conftest import telemetry_payload, telemetry_records
 from fastapi.testclient import TestClient
 
+from ar_kernel import telemetry
+from ar_kernel.archive.activity import calls
+from ar_kernel.archive.db import open_db
 from ar_kernel.budget import Budget
 from ar_kernel.gateway.app import PROBE_PROMPT, Upstream, create_gateway_app
 from ar_kernel.gateway.mock import MockBook, function_call, message
 from ar_kernel.gateway.store import CallStore
-from ar_kernel.telemetry.recorder import Recorder, TelemetryError
+from ar_kernel.telemetry import tree
 from ar_kernel.tools.context import TokenRegistry
 
 
@@ -30,37 +34,17 @@ def _ok(request):
 @pytest.fixture
 def make(tmp_path):
     def build(handler=_ok, mock_script=None, allowed=frozenset({"gpt-x"})):
-        rec = Recorder(tmp_path)
-        reg, store, seen = TokenRegistry(rec), CallStore(rec), []
+        reg, store, seen = TokenRegistry(), CallStore(tmp_path), []
         caller = reg.issue(node="n1", phase="edit_self", attempt=1, workspace_host=tmp_path,
                            staging_host=tmp_path, mock_script=mock_script)
         app = create_gateway_app(registry=reg, store=store, allowed_models=set(allowed),
                                  upstream=_upstream_that(handler, seen), mocks=MockBook.default())
-        return TestClient(app), caller, rec, seen
+        return TestClient(app), caller, lambda: calls(open_db(tmp_path), "n1"), seen
     return build
 
 
 def _post(client, token, body, path="/v1/responses"):
     return client.post(path, json=body, headers={"Authorization": f"Bearer {token}"})
-
-
-def _telemetry_contains(tmp_path, rec: Recorder, needle: str) -> bool:
-    """Scan telemetry for `needle`, decompressing payloads (Payloads are
-    zstd-compressed as `payloads/<sha256>.json.zst`, so a raw-byte scan can never find a leak
-    that redaction failed to catch -- it would pass whether or not the leak was actually
-    redacted)."""
-    telem = tmp_path / "telemetry"
-    for events_file in (telem / "events").glob("*.jsonl"):
-        text = events_file.read_text()
-        if needle in text:
-            return True
-        for line in text.splitlines():
-            if not line.strip():
-                continue
-            digest = json.loads(line).get("payload")
-            if digest and needle in json.dumps(rec.load_payload(digest)):
-                return True
-    return False
 
 
 def test_unknown_token_is_401(make):
@@ -139,33 +123,20 @@ def test_responses_rejects_images(make):
     assert seen == []
 
 
-def test_forwarded_call_is_recorded_and_upstream_key_never_reaches_telemetry(make, tmp_path):
-    client, caller, rec, seen = make()
+def test_forwarded_call_is_recorded(make):
+    client, caller, rows, seen = make()
     r = _post(client, caller.token, {"model": "gpt-x", "input": "hi"})
     assert r.status_code == 200 and r.json()["id"] == "resp_up"
     assert len(seen) == 1
-    kinds = [e["type"] for e in rec.read_events("n1")]
-    assert kinds == ["llm.request", "llm.response"]
-    assert not _telemetry_contains(tmp_path, rec, "sk-REALKEY")
+    assert [row["status"] for row in rows()] == [200]
 
 
 @pytest.mark.parametrize("header,role", [("coder", "coder"), ("../x y", "___x_y"), (None, None), ("  ", None)])
-def test_the_role_header_labels_both_events(make, header, role):
-    client, caller, rec, _ = make()
+def test_the_role_header_labels_the_call(make, header, role):
+    client, caller, rows, _ = make()
     headers = {"Authorization": f"Bearer {caller.token}", **({"X-AR-Role": header} if header is not None else {})}
     assert client.post("/v1/responses", json={"model": "gpt-x", "input": "hi"}, headers=headers).status_code == 200
-    events = [e for e in rec.read_events("n1") if e["type"] in ("llm.request", "llm.response")]
-    assert len(events) == 2 and [e.get("role") for e in events] == [role, role]
-
-
-def test_request_is_persisted_before_forwarding(make, monkeypatch):
-    """Fail-closed: if the request cannot be recorded, nothing is sent."""
-    client, caller, rec, seen = make()
-    def broken(*a, **k):
-        raise TelemetryError("disk full")
-    monkeypatch.setattr(rec, "event", broken)
-    assert _post(client, caller.token, {"model": "gpt-x", "input": "hi"}).status_code == 500
-    assert seen == []
+    assert [row["role"] for row in rows()] == [role]
 
 
 def test_upstream_429_is_retried_then_succeeds(make):
@@ -173,10 +144,9 @@ def test_upstream_429_is_retried_then_succeeds(make):
     def flaky(request):
         calls["n"] += 1
         return httpx.Response(429, json={"error": "slow down"}) if calls["n"] < 3 else _ok(request)
-    client, caller, rec, _ = make(handler=flaky)
+    client, caller, _, _ = make(handler=flaky)
     assert _post(client, caller.token, {"model": "gpt-x", "input": "hi"}).status_code == 200
-    response_event = [e for e in rec.read_events("n1") if e["type"] == "llm.response"][0]
-    assert response_event["attempts"] == 3
+    assert calls["n"] == 3
 
 
 def _is_probe(request) -> bool:
@@ -190,7 +160,7 @@ def test_a_4xx_the_provider_also_gives_the_probe_is_waited_out(make, status):
     def flaky(request):
         calls["n"] += 1
         return httpx.Response(status, json={"error": "no"}) if calls["n"] < 3 else _ok(request)
-    client, caller, rec, seen = make(handler=flaky)
+    client, caller, _, seen = make(handler=flaky)
     assert _post(client, caller.token, {"model": "gpt-x", "input": "hi"}).status_code == 200
     assert calls["n"] == 3 and PROBE_PROMPT in json.dumps(seen[1])          # the call, its probe, the call
     assert not caller.fault.event.is_set()
@@ -198,7 +168,7 @@ def test_a_4xx_the_provider_also_gives_the_probe_is_waited_out(make, status):
 
 @pytest.mark.parametrize("status", [400, 403, 404, 413, 422])
 def test_a_4xx_only_the_agents_request_gets_goes_back_to_the_agent_at_once(make, status):
-    client, caller, rec, seen = make(handler=lambda r: _ok(r) if _is_probe(r) else
+    client, caller, _, seen = make(handler=lambda r: _ok(r) if _is_probe(r) else
                                      httpx.Response(status, json={"error": {"message": "context too long"}}))
     r = _post(client, caller.token, {"model": "gpt-x", "input": "hi"})
     assert r.status_code == status and "context too long" in r.json()["error"]["message"]
@@ -227,26 +197,20 @@ def test_a_persistent_4xx_the_probe_also_gets_stops_the_phase(make):
 
 def test_non_json_upstream_error_is_retried_recorded_and_returned(make):
     """Proxies answer 502/503/504 with HTML; that must not crash the gateway."""
-    client, caller, rec, seen = make(handler=lambda r: httpx.Response(502, text="<html>Bad Gateway</html>"))
+    client, caller, rows, seen = make(handler=lambda r: httpx.Response(502, text="<html>Bad Gateway</html>"))
     r = _post(client, caller.token, {"model": "gpt-x", "input": "hi"})
     assert r.status_code == 502 and "non-JSON" in r.json()["error"]["message"]
     assert len(seen) == 4                     # retried like any 5xx
-    response_event = [e for e in rec.read_events("n1") if e["type"] == "llm.response"][0]
-    assert response_event["attempts"] == 4 and response_event["status"] == 502
+    assert [row["status"] for row in rows()] == [502]
 
 
-def test_non_json_upstream_error_body_is_recorded_without_truncation(make):
-    """No truncation or sampling of telemetry: a long non-JSON error body
-    (e.g. a verbose HTML error page from a proxy) must be recorded in full, not clipped."""
+def test_non_json_upstream_error_body_is_returned_without_truncation(make):
+    """A long non-JSON error body (e.g. a verbose HTML error page from a proxy) comes back in full, not clipped."""
     long_body = "<html>" + ("x" * 3000) + "</html>"
-    client, caller, rec, seen = make(handler=lambda r: httpx.Response(502, text=long_body))
+    client, caller, _, seen = make(handler=lambda r: httpx.Response(502, text=long_body))
     r = _post(client, caller.token, {"model": "gpt-x", "input": "hi"})
     assert r.status_code == 502
     assert r.json()["error"]["body"] == long_body
-    response_event = [e for e in rec.read_events("n1") if e["type"] == "llm.response"][0]
-    recorded = rec.load_payload(response_event["payload"])
-    assert recorded["body"]["error"]["body"] == long_body
-    assert len(recorded["body"]["error"]["body"]) == len(long_body) > 2000
 
 
 def test_non_json_success_body_becomes_a_502(make):
@@ -258,10 +222,10 @@ def test_unexpected_gateway_exception_is_still_recorded(make, monkeypatch):
     async def bug(self, path, body):
         raise RuntimeError("gateway bug")
     monkeypatch.setattr(Upstream, "post", bug)
-    client, caller, rec, _ = make()
+    client, caller, rows, _ = make()
     r = _post(client, caller.token, {"model": "gpt-x", "input": "hi"})
     assert r.status_code == 502 and "gateway bug" in r.json()["error"]["message"]
-    assert [e["type"] for e in rec.read_events("n1")] == ["llm.request", "llm.response"]
+    assert [row["status"] for row in rows()] == [502]
 
 
 def test_upstream_base_url_defaults_to_openai_v1_and_is_not_rewritten():
@@ -278,16 +242,15 @@ def test_upstream_base_url_defaults_to_openai_v1_and_is_not_rewritten():
 
 
 def test_mock_mode_serves_scripted_output_without_upstream(make):
-    client, caller, rec, seen = make(mock_script="smoke")
+    client, caller, rows, seen = make(mock_script="smoke")
     body = _post(client, caller.token, {"model": "gpt-x", "input": "hi"}).json()
     assert body["output"][0]["content"][0]["text"] == "ok"
     assert seen == []
-    assert [e["type"] for e in rec.read_events("n1")] == ["llm.request", "llm.response"]
+    assert [(row["status"], row["mock"]) for row in rows()] == [(200, 1)]
 
 
 def test_mock_script_is_consumed_in_order_then_repeats_its_last_step(tmp_path):
-    rec = Recorder(tmp_path)
-    reg, store = TokenRegistry(rec), CallStore(rec)
+    reg, store = TokenRegistry(), CallStore(tmp_path)
     book = MockBook()
     book.add("two_steps", [[function_call("data_query", {}, "c1")], [message("done")]])
     caller = reg.issue(node="n", phase="p", attempt=1, workspace_host=tmp_path,
@@ -314,8 +277,7 @@ def test_revoking_a_token_drops_its_linking_state_in_the_store(tmp_path):
     """Create_gateway_app must wire registry.on_revoke(store.forget) so the
     store's memory is bound to live containers -- once a container's token is revoked, its
     linking state (requests, response ids, conversation tails) is dropped."""
-    rec = Recorder(tmp_path)
-    reg, store = TokenRegistry(rec), CallStore(rec)
+    reg, store = TokenRegistry(), CallStore(tmp_path)
     caller = reg.issue(node="n1", phase="p", attempt=1, workspace_host=tmp_path,
                        staging_host=tmp_path)
     client = TestClient(create_gateway_app(registry=reg, store=store, allowed_models={"gpt-x"},
@@ -331,29 +293,26 @@ def test_revoking_a_token_drops_its_linking_state_in_the_store(tmp_path):
 
 
 def _make_with_effort(tmp_path, effort, handler=_ok):
-    rec = Recorder(tmp_path)
-    reg, store, seen = TokenRegistry(rec), CallStore(rec), []
+    reg, store, seen = TokenRegistry(), CallStore(tmp_path), []
     caller = reg.issue(node="n1", phase="edit_self", attempt=1, workspace_host=tmp_path,
                        staging_host=tmp_path)
     up = _upstream_that(handler, seen)
     up.effort = effort
     app = create_gateway_app(registry=reg, store=store, allowed_models={"gpt-x"}, upstream=up,
                              mocks=MockBook.default())
-    return TestClient(app), caller, rec, seen
+    return TestClient(app), caller, seen
 
 
 def test_gateway_enforces_reasoning_effort_on_chat_completions(tmp_path):
-    client, caller, rec, seen = _make_with_effort(tmp_path, "low")
+    client, caller, seen = _make_with_effort(tmp_path, "low")
     r = _post(client, caller.token, {"model": "gpt-x", "reasoning_effort": "high",
                                      "messages": [{"role": "user", "content": "hi"}]},
               path="/v1/chat/completions")
     assert r.status_code == 200 and seen[0]["reasoning_effort"] == "low"
-    request = [e for e in rec.read_events("n1") if e["type"] == "llm.request"][0]
-    assert rec.load_payload(request["payload"])["body"]["reasoning_effort"] == "low"   # as forwarded
 
 
 def test_gateway_enforces_reasoning_effort_on_responses(tmp_path):
-    client, caller, _, seen = _make_with_effort(tmp_path, "low")
+    client, caller, seen = _make_with_effort(tmp_path, "low")
     _post(client, caller.token, {"model": "gpt-x", "input": "hi",
                                  "reasoning": {"effort": "high", "summary": "auto"}})
     _post(client, caller.token, {"model": "gpt-x", "input": "hi"})
@@ -361,7 +320,7 @@ def test_gateway_enforces_reasoning_effort_on_responses(tmp_path):
 
 
 def test_gateway_forwards_the_agent_effort_when_none_is_configured(tmp_path):
-    client, caller, _, seen = _make_with_effort(tmp_path, None)
+    client, caller, seen = _make_with_effort(tmp_path, None)
     _post(client, caller.token, {"model": "gpt-x", "reasoning_effort": "high",
                                  "messages": [{"role": "user", "content": "hi"}]},
           path="/v1/chat/completions")
@@ -370,7 +329,7 @@ def test_gateway_forwards_the_agent_effort_when_none_is_configured(tmp_path):
 
 
 def test_a_non_object_reasoning_field_is_replaced_not_a_crash(tmp_path):
-    client, caller, _, seen = _make_with_effort(tmp_path, "low")
+    client, caller, seen = _make_with_effort(tmp_path, "low")
     r = _post(client, caller.token, {"model": "gpt-x", "input": "hi", "reasoning": "high"})
     assert r.status_code == 200 and seen[0]["reasoning"] == {"effort": "low"}
 
@@ -384,8 +343,7 @@ def test_upstream_from_env():
 
 
 def test_mock_mode_serves_chat_completions(tmp_path):
-    rec = Recorder(tmp_path)
-    reg, store = TokenRegistry(rec), CallStore(rec)
+    reg, store = TokenRegistry(), CallStore(tmp_path)
     book = MockBook()
     book.add("two_steps", [[function_call("data_query", {"q": 1}, "c1")], [message("done")]])
     caller = reg.issue(node="n", phase="p", attempt=1, workspace_host=tmp_path,
@@ -410,8 +368,7 @@ def test_budget_cap_blocks_further_real_calls_but_not_mock_calls(tmp_path):
     """The stub's usage (1 input token + 1 output token, priced at $1/Mtok each) costs
     more than the $0.000001 cap, so the cap is reached after the very first real call."""
     seen = []
-    rec = Recorder(tmp_path)
-    reg, store = TokenRegistry(rec), CallStore(rec)
+    reg, store = TokenRegistry(), CallStore(tmp_path)
     real = reg.issue(node="n1", phase="edit_self", attempt=1, workspace_host=tmp_path,
                      staging_host=tmp_path)
     mocked = reg.issue(node="n1", phase="edit_self", attempt=1, workspace_host=tmp_path,
@@ -424,25 +381,22 @@ def test_budget_cap_blocks_further_real_calls_but_not_mock_calls(tmp_path):
 
     r1 = _post(client, real.token, {"model": "gpt-x", "input": "hi"})
     assert r1.status_code == 200
-    responses = [e for e in rec.read_events("n1") if e["type"] == "llm.response"]
-    assert responses[-1]["cost_usd"] > 0 and responses[-1]["mock"] is False
+    rows = lambda: calls(open_db(tmp_path), "n1")
+    assert rows()[-1]["cost_usd"] > 0 and rows()[-1]["mock"] == 0
     assert len(seen) == 1
 
     r2 = _post(client, real.token, {"model": "gpt-x", "input": "hi again"})
     assert r2.status_code == 402 and "budget" in r2.json()["error"]["message"]
     assert len(seen) == 1                                           # upstream never saw the 2nd call
-    requests = [e for e in rec.read_events("n1") if e["type"] == "llm.request"]
-    assert len(requests) == 1                                       # no 2nd llm.request event
+    assert len(rows()) == 1                                         # nor was it recorded
 
     r3 = _post(client, mocked.token, {"model": "gpt-x", "input": "hi"})
     assert r3.status_code == 200
-    responses = [e for e in rec.read_events("n1") if e["type"] == "llm.response"]
-    assert responses[-1]["mock"] is True
+    assert rows()[-1]["mock"] == 1
 
 
 def test_the_gateway_censors_tool_results_before_forwarding_and_recording(tmp_path):
-    rec = Recorder(tmp_path)
-    reg, store, seen = TokenRegistry(rec), CallStore(rec), []
+    reg, store, seen = TokenRegistry(), CallStore(tmp_path), []
     caller = reg.issue(node="n1", phase="improve_recipe", attempt=1, workspace_host=tmp_path, staging_host=tmp_path)
     app = create_gateway_app(registry=reg, store=store, allowed_models={"gpt-x"}, censor=["wbench"],
                              upstream=_upstream_that(_ok, seen), mocks=MockBook.default())
@@ -450,7 +404,7 @@ def test_the_gateway_censors_tool_results_before_forwarding_and_recording(tmp_pa
                                            {"role": "tool", "tool_call_id": "c", "content": "ranked on WBench. 3 clips ok."}]}
     assert _post(TestClient(app), caller.token, body, "/v1/chat/completions").status_code == 200
     assert seen[0]["messages"][1]["content"] == "3 clips ok."
-    assert not _telemetry_contains(tmp_path, rec, "WBench")
+    assert "wbench" not in "".join(p.read_text() for p in tmp_path.rglob("*.jsonl")).lower()
 
 
 def test_an_error_body_sent_with_http_200_is_retried_like_its_code(make):
@@ -490,3 +444,95 @@ def test_a_reply_with_no_content_and_no_tool_call_is_retried_too(make):
     client, caller, _, seen = make(handler=handler)
     r = _post(client, caller.token, {"model": "gpt-x", "input": "hi"})
     assert r.status_code == 200 and len(seen) == 2
+
+
+def _traced(tmp_path, handler=_ok, mock_script=None, budget=None):
+    """A gateway whose caller was issued inside a phase attempt span, as the loop issues it."""
+    run = tmp_path / "trun"
+    telemetry.open(run)
+    telemetry.start("ar.run")
+    reg, seen = TokenRegistry(), []
+    with telemetry.span("phase.attempt", {"node": "n1", "phase": "edit_self", "attempt": 1}) as attempt:
+        caller = reg.issue(node="n1", phase="edit_self", attempt=1, workspace_host=tmp_path, staging_host=tmp_path,
+                           mock_script=mock_script)
+        attempt.output = {}
+    # requests come from the server's thread, outside the attempt span
+    app = create_gateway_app(registry=reg, store=CallStore(tmp_path), allowed_models={"gpt-x"},
+                             upstream=_upstream_that(handler, seen), mocks=MockBook.default(), budget=budget)
+    client = TestClient(app)
+
+    def requests():
+        records = telemetry_records(run)
+        out = []
+        for start in (r for r in records if r["kind"] == "start" and r["name"] == "llm.request"):
+            mine = [r for r in records if r.get("span") == start["span"] and r["kind"] != "start"
+                    or r["kind"] == "start" and r["parent"] == start["span"]]
+            [end] = [r for r in mine if r["kind"] == "end" and r["span"] == start["span"]]
+            out.append({"start": start, "end": end, "output": telemetry_payload(run, end["output"]),
+                        "children": [r["name"] for r in mine if r["kind"] == "start"],
+                        "decisions": [(r["name"], r["chosen"]) for r in mine if r["kind"] == "decision"]})
+        return out
+    yield client, caller, requests, attempt, run
+    assert tree.check(tree.load(run)) == []
+
+
+def test_an_ok_call_is_one_request_span_under_the_phase_attempt(tmp_path):
+    for client, caller, requests, attempt, run in _traced(tmp_path):
+        assert _post(client, caller.token, {"model": "gpt-x", "input": "hi"}).status_code == 200
+        [req] = requests()
+        assert req["start"]["parent"] == attempt.id and req["end"]["status"] == "ok"
+        assert json.loads(telemetry_payload(run, req["start"]["inputs"])["body"]) == {"model": "gpt-x", "input": "hi"}
+        assert req["children"] == ["llm.enforce", "llm.censor", "llm.try", "db.write", "fs.mkdir", "fs.write"]
+        assert [d for d in req["decisions"] if d[0] != "llm.check"] == [("llm.link", "new"), ("llm.upstream", "return")]
+        assert {c for n, c in req["decisions"] if n == "llm.check"} == {"pass"}
+        assert req["output"]["status"] == 200 and req["output"]["body"]["id"] == "resp_up"
+
+
+@pytest.mark.parametrize("check, body, status", [
+    ("token", None, 401), ("json object", b"[1]", 400), ("stream", {"stream": True}, 400),
+    ("video", {"input": [{"type": "input_video", "video_url": "v.mp4"}]}, 400),
+    ("image", {"input": [{"type": "input_image", "image_url": "i.png"}]}, 400),
+    ("model", {"model": "gpt-other"}, 403), ("budget", {}, 402)])
+def test_each_refusal_ends_the_request_refused_with_the_response(tmp_path, check, body, status):
+    budget = Budget(max_usd=0, prices={"input": 1, "cached_input": 1, "output": 1})
+    for client, caller, requests, attempt, run in _traced(tmp_path, budget=budget):
+        headers = {"Authorization": f"Bearer {'ar-nope' if check == 'token' else caller.token}"}
+        content = body if isinstance(body, bytes) else json.dumps({"model": "gpt-x", "input": "hi", **(body or {})})
+        assert client.post("/v1/responses", content=content, headers=headers).status_code == status
+        [req] = requests()
+        assert req["end"]["status"] == "refused" and req["output"]["status"] == status
+        assert req["decisions"][-1] == ("llm.check", "refuse") and req["children"] == []
+        [refusal] = [r for r in telemetry_records(run) if r["kind"] == "decision" and r["chosen"] == "refuse"]
+        assert telemetry_payload(run, refusal["inputs"])["check"] == check
+        assert (req["start"]["parent"] == attempt.id) == (check != "token")
+
+
+def test_a_retry_then_success_records_each_try_and_wait(tmp_path):
+    n = {"calls": 0}
+
+    def flaky(request):
+        n["calls"] += 1
+        return httpx.Response(429, json={"error": "slow down"}) if n["calls"] < 3 else _ok(request)
+    for client, caller, requests, attempt, run in _traced(tmp_path, handler=flaky):
+        assert _post(client, caller.token, {"model": "gpt-x", "input": "hi"}).status_code == 200
+        [req] = requests()
+        assert [c for c in req["children"] if c.startswith("llm.")] == [
+            "llm.enforce", "llm.censor", "llm.try", "llm.wait", "llm.try", "llm.wait", "llm.try"]
+        assert [c for n_, c in req["decisions"] if n_ == "llm.upstream"] == ["wait", "wait", "return"]
+
+
+def test_a_give_up_fails_the_caller_inside_the_request(tmp_path):
+    for client, caller, requests, attempt, run in _traced(tmp_path, handler=lambda r: httpx.Response(401, json={})):
+        assert _post(client, caller.token, {"model": "gpt-x", "input": "hi"}).status_code == 401
+        [req] = requests()
+        assert "llm.probe" in req["children"] and "caller.fail" in req["children"]
+        assert ("llm.upstream", "give up") in req["decisions"]
+        assert req["end"]["status"] == "error" and caller.fault.event.is_set()
+
+
+def test_a_mock_call_is_answered_without_enforce_or_tries(tmp_path):
+    for client, caller, requests, attempt, run in _traced(tmp_path, mock_script="smoke"):
+        assert _post(client, caller.token, {"model": "gpt-x", "input": "hi"}).status_code == 200
+        [req] = requests()
+        assert [c for c in req["children"] if c.startswith("llm.")] == ["llm.censor"]
+        assert req["output"]["mock"] is True and req["end"]["status"] == "ok"

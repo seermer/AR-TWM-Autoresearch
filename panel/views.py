@@ -3,14 +3,14 @@ from __future__ import annotations
 
 import difflib
 import heapq
-import math
+import json
 import re
 import time
 from pathlib import Path
 
 from .chat import (_usage, call_turns, chains, chat_items, is_tool_error, item, message_items, request_messages,
-                   request_tools, tool_lines, tool_names, response_message, segments, text_of)
-from .events import EventLog, event_row, filter_events
+                   request_tools, response_message, segments, text_of, tool_lines, tool_names)
+from .records import Records, name_of, record_row
 from .runfiles import RunFiles, fmt_ts, loads
 
 HOST_PATH = re.compile(r"(?<![\w.:/-])/(?:workspace|agent)/[\w.\-/]+")
@@ -20,7 +20,7 @@ LOSS = re.compile(r"\[Train\] step=(\d+)\b.*?\bloss=([-+0-9.eE]+).*?\blr=([-+0-9
 class Run:
     def __init__(self, run_dir: Path | str) -> None:
         self.files = RunFiles(run_dir)
-        self.log = EventLog(self.files)
+        self.records = Records(self.files)
         self.cache: dict = {}                  # derived results keyed by what they were derived from
 
     @property
@@ -44,7 +44,6 @@ def unified(a: str, b: str, name_a: str, name_b: str) -> str:
 # ---- Overview ----
 
 def overview(run: Run) -> dict:
-    events = run.log.events()
     nodes = run.nodes()
     by_id = {n["node_id"]: n for n in nodes}
     rows = []
@@ -60,19 +59,38 @@ def overview(run: Run) -> dict:
                      "depth": n["depth"], "created": fmt_ts(n["created_at"]), "created_at": n["created_at"],
                      "subtree_value": n["subtree_value"], "lora_rank": n["lora_rank"], "lora_alpha": n["lora_alpha"],
                      "metrics": loads(n["metrics"], {}) or {}})
-    alerts = [e for e in events if e.get("type") == "alert"][-50:]
+    records = run.records.all()
+    alerts = [r for r in records if r["kind"] == "alert"][-50:]
+    latest = sorted(range(len(records)), key=lambda i: records[i]["ts"])[-50:]     # writers' records interleave
     return {
         "nodes": rows,
-        "alerts": [{"time": fmt_ts(a["ts_wall"]), "level": a.get("level"), "kind": a.get("kind"),
+        "alerts": [{"time": fmt_ts(a["ts"]), "level": a.get("level"), "kind": a.get("name"),
                     "message": a.get("message")} for a in reversed(alerts)],
-        "recent": [event_row(e) for e in reversed(events[-50:])],
+        "recent": [record_row(run.records, records[i], i) for i in reversed(latest)],
+        "open_spans": open_spans(run),
     }
+
+
+def open_spans(run: Run) -> list[dict]:
+    """Spans with no end: running while their writer's process runs, otherwise what the records say of them."""
+    out = []
+    for n in run.records.spans():
+        if n.end is None:
+            node, phase, attempt = run.records.where(n.id)
+            out.append({"time": fmt_ts(n.start["ts"]), "ts": n.start["ts"], "name": n.start["name"], "node": node,
+                        "phase": phase, "attempt": attempt, "span": n.id,
+                        "facts": "running" if run.records.running(n) else run.records.open_facts(n)})
+    return out
+
+
+def _samples(run: Run) -> list[dict]:
+    return [r for r in run.records.all() if r["kind"] == "sample"]
 
 
 def _gpu_summary(run: Run, lo: float, hi: float) -> list[dict]:
     acc: dict[str, dict] = {}
-    for e in run.log.events(files=["gpu"]):
-        if e.get("type") != "gpu.sample" or not lo <= e.get("ts_wall", 0) <= hi:
+    for e in _samples(run):
+        if not lo <= e["ts"] <= hi:
             continue
         for gpu, s in (e.get("gpus") or {}).items():
             a = acc.setdefault(str(gpu), {"n": 0, "util": 0.0, "peak": 0.0})
@@ -83,43 +101,64 @@ def _gpu_summary(run: Run, lo: float, hi: float) -> list[dict]:
             for g, a in sorted(acc.items())]
 
 
-# ---- Trace ----
+# ---- Records ----
+
+def _rows(run: Run, include_gpu: bool) -> list[dict]:
+    return [record_row(run.records, r, i) for i, r in enumerate(run.records.all())
+            if include_gpu or r["kind"] != "sample"]
+
 
 def trace_choices(run: Run) -> dict:
-    events = run.log.events(include_gpu=True)
-    pick = lambda key: sorted({str(e.get(key)) for e in events if e.get(key) is not None})
+    rows = _rows(run, True)
+    pick = lambda key: sorted({str(r[key]) for r in rows if r.get(key) is not None})
     return {"node": pick("node"), "phase": pick("phase"), "type": pick("type"), "component": pick("component"),
-            "attempt": sorted({str(e["attempt"]) for e in events if e.get("attempt") is not None}, key=int)}
+            "attempt": sorted({str(r["attempt"]) for r in rows if r.get("attempt") is not None}, key=int)}
 
 
-def trace(run: Run, *, node=None, phase=None, attempt=None, types=None, component=None, text=None,
+def trace(run: Run, *, node=None, phase=None, attempt=None, types=None, component=None, text=None, span=None,
           include_gpu=False, offset=0, limit=500) -> dict:
-    found = filter_events(run.log.events(include_gpu=include_gpu), node=node or None, phase=phase or None,
-                          attempt=attempt, types=types or None, component=component or None, text=text)
-    rows = []
-    for e in found[offset:offset + limit]:
-        rows.append({**event_row(e), "ts": e.get("ts_wall")})
-    return {"rows": rows, "total": len(found), "offset": offset}
+    """Free text matches the record itself, not its payloads; `span` keeps the records of that span's subtree."""
+    records = run.records.all()
+    inside = run.records.subtree(span) if span else None
+    needle = (text or "").strip().lower()
+    found = []
+    for r in _rows(run, include_gpu):
+        if (node and r["node"] != node) or (phase and r["phase"] != phase) \
+                or (attempt is not None and r["attempt"] != attempt) or (types and r["type"] not in types) \
+                or (component and r["component"] != component) or (inside is not None and r["span"] not in inside):
+            continue
+        if needle and needle not in json.dumps(records[r["seq"]], default=str).lower():
+            continue
+        found.append(r)
+    return {"rows": found[offset:offset + limit], "total": len(found), "offset": offset}
 
 
 def trace_detail(run: Run, seq: int) -> dict | None:
-    event = run.log.by_seq(int(seq))
-    if event is None:
+    """One record with its payloads; a span's start comes with its end. An LLM request is also shown as a chat."""
+    records = run.records.all()
+    if not 0 <= seq < len(records):
         return None
-    payload = run.log.payload(event.get("payload"))
+    r = records[seq]
+    node, phase, attempt = run.records.place(r)
+    load = run.records.payload
+    span = run.records.span(r["span"]) if r["kind"] in ("start", "end") else None
+    payload = {k: load(r[k]) for k in ("inputs", "output", "error") if r.get(k)}
+    if span is not None and span.end is not None and r["kind"] == "start":
+        payload.update({k: load(span.end[k]) for k in ("output", "error") if span.end.get(k)})
     chat: list[dict] = []
-    names: dict[str, str] = {}
-    if event.get("type") == "llm.request":
-        for m in request_messages(payload):
+    if span is not None and span.start["name"] == "llm.request" and (call := run.records.call(span)) is not None:
+        names: dict[str, str] = {}
+        for m in request_messages(load(call.request)):
             chat += message_items(m, names)
-        tools = request_tools(payload)
-        if tools:
-            chat.append({"kind": "tools", "title": f"Tools offered ({len(tools)})",
-                         "text": tool_lines(tools)})
-    elif event.get("type") == "llm.response":
-        reply = response_message(payload)
-        chat = message_items(reply, names) if reply else []
-    return {"event": {k: v for k, v in event.items() if not k.startswith("_")}, "payload": payload, "chat": chat}
+        if tools := request_tools(load(call.request)):
+            chat.append({"kind": "tools", "title": f"Tools offered ({len(tools)})", "text": tool_lines(tools)})
+        if call.response and (reply := response_message(load(call.response))):
+            chat += message_items(reply, names)
+    event = {**r, "type": name_of(r), "ts_wall": r["ts"], "_seq": seq, "node": node, "phase": phase,
+             "attempt": attempt, "span_id": r.get("span"),
+             "parent_span_id": span.start.get("parent") if span is not None else None,
+             "status": span.end.get("status") if span is not None and span.end else r.get("status")}
+    return {"event": event, "payload": payload or None, "chat": chat}
 
 
 # ---- Node ----
@@ -163,17 +202,14 @@ def node_detail(run: Run, node_id: str) -> dict | None:
 # ---- Conversations ----
 
 def agent_attempts(run: Run, node_id: str) -> list[tuple[str, int]]:
-    pairs = {(e.get("phase"), e.get("attempt")) for e in run.log.events(files=[node_id])
-             if e.get("type") in ("llm.request", "phase.start")}
-    return sorted(p for p in pairs if p[0] and p[1] is not None)
+    return sorted({(phase, attempt) for phase, attempt, _ in run.records.attempts(node_id)})
 
 
 def conversations(run: Run, node_id: str, phase: str, attempt: int) -> list[dict]:
     """Compactions and tool errors are inferred (chat.chains, chat.is_tool_error)."""
-    events = run.log.events(files=[node_id])
-    load = run.log.payload
+    load = run.records.payload
     out = []
-    for i, chain in enumerate(chains(segments(events, node_id, phase, attempt), load)):
+    for i, chain in enumerate(chains(segments(run.records.calls(node_id, phase, attempt)), load)):
         calls = [c for s in chain for c in s.calls]
         costs = [c.cost_usd for c in calls if c.cost_usd is not None]
         errors = sum(is_tool_error(text_of(m.get("content"))) for s in chain
@@ -186,9 +222,9 @@ def conversations(run: Run, node_id: str, phase: str, attempt: int) -> list[dict
 
 
 def _awaiting(run: Run, node_id: str, phase: str, attempt: int) -> bool:
-    ended = any(e.get("type") == "phase.end" and e.get("phase") == phase and e.get("attempt") == attempt
-                for e in run.log.events(files=[node_id]))
-    return run.files.loop_pid() is not None and not ended
+    """The attempt still runs: its newest span (a resume starts the attempt again) is running."""
+    spans = [s for p, a, s in run.records.attempts(node_id) if (p, a) == (phase, attempt)]
+    return bool(spans) and run.records.running(spans[-1])
 
 
 def _annotate(run: Run, node_id: str, phase: str, attempt: int, items: list[dict]) -> list[dict]:
@@ -215,7 +251,7 @@ def conversation_chat(run: Run, node_id: str, phase: str, attempt: int, index: i
     convs = conversations(run, node_id, phase, attempt)
     if not 0 <= index < len(convs):
         return []
-    items = chat_items(convs[index]["chain"], run.log.payload, _awaiting(run, node_id, phase, attempt))
+    items = chat_items(convs[index]["chain"], run.records.payload, _awaiting(run, node_id, phase, attempt))
     return _annotate(run, node_id, phase, attempt, items)
 
 
@@ -224,7 +260,7 @@ def _tasks(run: Run, node_id: str, phase: str, attempt: int) -> tuple[list[dict]
     it resumes after another conversation made a whole call while it was idle; that starts its next task. Each task
     comes after the task whose call was the last to end before its first call; tasks with a call still in flight
     then are listed as alongside."""
-    load = run.log.payload
+    load = run.records.payload
     convs = conversations(run, node_id, phase, attempt)
     conv_of = {s.conversation_id: i for i, conv in enumerate(convs) for s in conv["chain"]}
     turns = [call_turns(conv["chain"], load) for conv in convs]
@@ -283,7 +319,7 @@ def task_chat(run: Run, node_id: str, phase: str, attempt: int, index: int) -> l
     found, _, convs = _tasks(run, node_id, phase, attempt)
     if not 0 <= index < len(found):
         return []
-    load = run.log.payload
+    load = run.records.payload
     calls = found[index]["calls"]
     turns = call_turns(convs[found[index]["conversation"]]["chain"], load)
     first, final = request_messages(load(calls[0].request)), calls[-1]
@@ -323,6 +359,17 @@ def tool_logs(run: Run, node_id: str, phase: str, attempt: int) -> list[str]:
     return [str(p.relative_to(run.files.root)) for p in sorted(folder.iterdir()) if p.is_file()]
 
 
+def _decisions(run: Run, name: str, node_id: str, phase: str | None = None, attempt: int | None = None) -> list[dict]:
+    """The node's `name` decisions, each with its inputs, in record order; optionally of one phase attempt."""
+    out = []
+    for r in run.records.all():
+        if r["kind"] == "decision" and r["name"] == name:
+            node, p, a = run.records.place(r)
+            if node == node_id and (phase is None or (p, a) == (phase, attempt)):
+                out.append({**r, "inputs": run.records.payload(r.get("inputs"))})
+    return out
+
+
 # ---- Code edits ----
 
 def code_edits(run: Run, node_id: str) -> dict:
@@ -337,10 +384,14 @@ def code_edits(run: Run, node_id: str) -> dict:
         m = re.search(r"/edit_self-(\d+)$", ref)
         if m:
             committed[int(m.group(1))] = sha
-    reports = {e.get("attempt"): run.log.payload(e.get("payload")) for e in run.log.events(files=[node_id])
-               if e.get("type") == "contract.report"}
     outcomes = {a["idx"]: a for a in run.files.query(
         "SELECT * FROM attempts WHERE node_id = ? AND phase = 'edit_self'", (node_id,))}
+    reports: dict[int, dict] = {}
+    for d in _decisions(run, "contract.step", node_id):
+        attempt = run.records.place(d)[2]
+        report = reports.setdefault(attempt, {"ok": True, "steps": []})
+        report["steps"].append({"step": (d["inputs"] or {}).get("step"), "result": d["chosen"], "detail": d["reason"]})
+        report["ok"] = report["ok"] and d["chosen"] == "pass"
     attempts = []
     for k in sorted(set(committed) | set(outcomes) | set(reports)):
         sha = committed.get(k)
@@ -415,42 +466,34 @@ def loss_curve(path: Path) -> list[dict]:
     return out
 
 
-def _window(events: list[dict], node: str, phase: str, attempt: int) -> tuple[float, float]:
-    """From the attempt's phase.start to the next attempt's phase.start (the kernel's own
-    gate and training for an attempt run after its agent phase ends)."""
-    starts = sorted((e["ts_wall"], e.get("attempt")) for e in events if e.get("type") == "phase.start"
-                    and e.get("node") == node and e.get("phase") == phase)
-    begin = next((t for t, k in starts if k == attempt), None)
-    if begin is None:
-        return 0.0, -1.0
-    return begin, next((t for t, k in starts if k > attempt), math.inf)
-
-
 def training_attempts(run: Run, node_id: str) -> list[int]:
-    return sorted({e.get("attempt") for e in run.log.events(files=[node_id])
-                   if e.get("type") == "phase.start" and e.get("phase") == "improve_recipe"})
+    folder = run.files.path(f"nodes/{node_id}/attempts")
+    return sorted(int(p.name.split("-")[1]) for p in folder.glob("improve_recipe-*")) if folder.is_dir() else []
+
+
+def _train_span(run: Run, node_id: str, attempt: int):
+    """The latest `train` span of the node's train phase attempt `attempt` (a retry or a resume runs it again)."""
+    found = [n for n in run.records.named("train") if run.records.where(n.id) == (node_id, "train", attempt)]
+    return found[-1] if found else None
 
 
 def training(run: Run, node_id: str, attempt: int) -> dict:
     base = f"nodes/{node_id}/attempts/improve_recipe-{attempt}"
-    events = run.log.events(files=[node_id])
-    lo, hi = _window(events, node_id, "improve_recipe", attempt)
-    inside = [e for e in events if lo <= e.get("ts_wall", 0) < hi]
-    start = next((e for e in inside if e.get("type") == "train.start"), None)
-    end = next((e for e in inside if e.get("type") == "train.end"), None)
     outcome = run.files.query("SELECT * FROM attempts WHERE node_id = ? AND phase = 'improve_recipe' AND idx = ?",
                               (node_id, attempt))
+    span = _train_span(run, node_id, attempt)
+    start, end = (span.start["ts"], span.end["ts"] if span.end else None) if span else (None, None)
     return {
         "config": run.files.read_text(f"{base}/train_config.yaml"),
         "loss": loss_curve(run.files.path(f"{base}/train/train.log")),
-        "gates": [{"time": fmt_ts(e["ts_wall"]), "result": e["type"].split(".", 1)[1],
-                   "failures": (run.log.payload(e.get("payload")) or {}).get("failures")}
-                  for e in inside if e.get("type") in ("gate.passed", "gate.failed")],
-        "reached_training": start is not None,
-        "started": fmt_ts(start["ts_wall"]) if start else None,
-        "duration_min": round((end["ts_wall"] - start["ts_wall"]) / 60, 1) if start and end else None,
+        "gates": [{"time": fmt_ts(d["ts"]), "result": "passed" if d["chosen"] == "pass" else "failed",
+                   "failures": d["reason"] if d["chosen"] != "pass" else None}
+                  for d in _decisions(run, "recipe.gate", node_id, "improve_recipe", attempt)],
+        "reached_training": span is not None,
+        "started": fmt_ts(start) if span else None,
+        "duration_min": round((end - start) / 60, 1) if span and end else None,
         "outcome": outcome[0] if outcome else None,
-        "gpu": _gpu_summary(run, start["ts_wall"], end["ts_wall"] if end else time.time()) if start else [],
+        "gpu": _gpu_summary(run, start, end or time.time()) if span else [],
     }
 
 
@@ -462,32 +505,36 @@ def selection(run: Run) -> list[dict]:
             for r in run.files.query("SELECT * FROM selection_events ORDER BY id")]
 
 
+def _role(c) -> str:
+    return c.role or (f"kernel tool: {c.tool}" if c.tool else "unlabeled")
+
+
 def cost(run: Run) -> dict:
     by_phase: dict[tuple, dict] = {}
     errors = []
-    for e in run.log.events():
-        if e.get("type") != "llm.response":
+    for c in run.records.calls():
+        if c.done_ts is None:
             continue
-        key = (e.get("node"), e.get("phase"))
-        r = by_phase.setdefault(key, {"node": key[0], "phase": key[1], "calls": 0, "tokens": 0, "usd": 0.0,
-                                      "latency_s": 0.0, "errors": 0})
+        node, phase, _ = run.records.where(c.span)
+        r = by_phase.setdefault((node, phase), {"node": node, "phase": phase, "calls": 0, "tokens": 0, "usd": 0.0,
+                                                "latency_s": 0.0, "errors": 0})
         r["calls"] += 1
-        r["tokens"] += (e.get("usage") or {}).get("total_tokens") or 0
-        r["usd"] += e.get("cost_usd") or 0.0
-        r["latency_s"] += e.get("latency_s") or 0.0
-        if e.get("status") != 200:
+        r["tokens"] += c.usage.get("total_tokens") or 0
+        r["usd"] += c.cost_usd or 0.0
+        r["latency_s"] += c.latency_s or 0.0
+        if c.status != 200:
             r["errors"] += 1
-            errors.append({"time": fmt_ts(e["ts_wall"]), "node": key[0], "phase": key[1], "status": e.get("status")})
+            errors.append({"time": fmt_ts(c.done_ts), "node": node, "phase": phase, "status": c.status})
     roles: dict[str, dict] = {}
     for n in run.nodes():
         for phase, attempt in agent_attempts(run, n["node_id"]):
-            for c in conversations(run, n["node_id"], phase, attempt):
-                r = roles.setdefault(c["role"], {"role": c["role"], "conversations": 0, "calls": 0,
-                                                 "tokens": 0, "usd": 0.0})
+            for conv in conversations(run, n["node_id"], phase, attempt):
+                r = roles.setdefault(conv["role"], {"role": conv["role"], "conversations": 0, "calls": 0,
+                                                    "tokens": 0, "usd": 0.0})
                 r["conversations"] += 1
-                r["calls"] += c["calls"]
-                r["tokens"] += c["tokens"]
-                r["usd"] += c["usd"] or 0.0
+                r["calls"] += conv["calls"]
+                r["tokens"] += conv["tokens"]
+                r["usd"] += conv["usd"] or 0.0
     for r in [*by_phase.values(), *roles.values()]:
         r["usd"] = round(r["usd"], 4)
         if "latency_s" in r:
@@ -495,54 +542,54 @@ def cost(run: Run) -> dict:
     return {"by_phase": list(by_phase.values()), "by_role": list(roles.values()), "errors": errors}
 
 
+def llm_calls(run: Run) -> list[dict]:
+    """Every answered model call, in time order, for the cost and context charts."""
+    records = run.records.all()
+    index = {(r["writer"], r["seq"]): i for i, r in enumerate(records)}
+    out = []
+    for c in run.records.calls():
+        if c.done_ts is None:
+            continue
+        node, phase, attempt = run.records.where(c.span)
+        start = run.records.span(c.span).start
+        u = c.usage
+        out.append({"ts": c.done_ts, "node": node, "phase": phase, "attempt": attempt, "role": _role(c),
+                    "conversation_id": c.conversation_id, "turn_index": c.turn_index,
+                    "prompt_tokens": u.get("prompt_tokens"), "completion_tokens": u.get("completion_tokens"),
+                    "total_tokens": u.get("total_tokens"), "usd": c.cost_usd, "latency_s": c.latency_s,
+                    "status": c.status, "model": None, "seq": index.get((start["writer"], start["seq"]))})
+    return out
+
+
 # ---- Run-wide series ----
 
 def gpu_full(run: Run, buckets: int = 1000) -> dict:
     """Every GPU's utilization and memory over the whole run: per time bucket its lowest and highest
     sample (in time order), so peaks and dips survive; all samples when there are few."""
-    samples = [e for e in run.log.events(files=["gpu"]) if e.get("type") == "gpu.sample"]
-    gpus = sorted({str(g) for e in samples for g in (e.get("gpus") or {})}, key=lambda g: (len(g), g))
-    out = {"samples": len(samples), "buckets": 0, "first": samples[0]["ts_wall"] if samples else None,
-           "last": samples[-1]["ts_wall"] if samples else None,
+    samples = [e for e in _samples(run) if e.get("gpus")]
+    gpus = sorted({str(g) for e in samples for g in e["gpus"]}, key=lambda g: (len(g), g))
+    out = {"samples": len(samples), "buckets": 0, "first": samples[0]["ts"] if samples else None,
+           "last": samples[-1]["ts"] if samples else None,
            "gpus": {g: {"util": [], "memory_gib": []} for g in gpus}}
     if not samples:
         return out
-    t0, span = samples[0]["ts_wall"], max(samples[-1]["ts_wall"] - samples[0]["ts_wall"], 1e-9)
+    t0, span = samples[0]["ts"], max(samples[-1]["ts"] - samples[0]["ts"], 1e-9)
     n = buckets if len(samples) > 2 * buckets else len(samples)
     out["buckets"] = n
     groups: dict[int, list[dict]] = {}
     for k, e in enumerate(samples):
-        groups.setdefault(min(int((e["ts_wall"] - t0) / span * n), n - 1) if n < len(samples) else k, []).append(e)
+        groups.setdefault(min(int((e["ts"] - t0) / span * n), n - 1) if n < len(samples) else k, []).append(e)
     for g in gpus:
         for metric, read in (("util", lambda s: s.get("util")),
                              ("memory_gib", lambda s: round(s["memory_mib"] / 1024, 2) if s.get("memory_mib") is not None else None)):
             series = out["gpus"][g][metric]
             for group in groups.values():
-                points = [(round(e["ts_wall"], 1), read((e.get("gpus") or {}).get(g) or {}))
-                          for e in group]
+                points = [(round(e["ts"], 1), read(e["gpus"].get(g) or {})) for e in group]
                 points = [p for p in points if p[1] is not None]
                 if not points:
                     continue
                 low, high = min(points, key=lambda p: p[1]), max(points, key=lambda p: p[1])
                 series.extend(sorted({low, high}))
-    return out
-
-
-def llm_calls(run: Run) -> list[dict]:
-    """Every answered model call, in time order, for the cost and context charts."""
-    requests = {e.get("call_id"): e for e in run.log.events() if e.get("type") == "llm.request"}
-    out = []
-    for e in run.log.events():
-        if e.get("type") != "llm.response":
-            continue
-        req = requests.get(e.get("call_id")) or {}
-        u = e.get("usage") or {}
-        out.append({"ts": e["ts_wall"], "node": e.get("node"), "phase": e.get("phase"), "attempt": e.get("attempt"),
-                    "role": e.get("role") or req.get("role") or ("kernel tool: " + req["tool"] if req.get("tool") else "unlabeled"),
-                    "conversation_id": e.get("conversation_id"), "turn_index": req.get("turn_index"),
-                    "prompt_tokens": u.get("prompt_tokens"), "completion_tokens": u.get("completion_tokens"),
-                    "total_tokens": u.get("total_tokens"), "usd": e.get("cost_usd"), "latency_s": e.get("latency_s"),
-                    "status": e.get("status"), "model": req.get("model"), "seq": e["_seq"]})
     return out
 
 

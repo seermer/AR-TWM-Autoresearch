@@ -6,13 +6,13 @@ images), asks about every frame of every clip, and always stops it again.
 """
 from __future__ import annotations
 
-import shutil
 import threading
 from pathlib import Path
 from typing import Annotated, Any
 
 from mcp.server.mcpserver import Context
 
+from .. import fs, telemetry
 from ..data.annotation import FPS
 from ..data.probe import readable_video
 from ..subproc import free_port
@@ -74,9 +74,9 @@ class LocateEventsBackend:
     Result: {"clips": {video: {"events": [...]} | {"error"}}, "load_s", "gpu_memory_mib", "gpu_memory_released"}."""
     name = tool = TOOL
 
-    def __init__(self, cfg, run_dir: Path, gpus: list[int], registry, recorder, gpu_memory=gpu_memory_mib) -> None:
+    def __init__(self, cfg, run_dir: Path, gpus: list[int], registry, gpu_memory=gpu_memory_mib) -> None:
         self.cfg, self.run_dir, self.gpus = cfg, Path(run_dir), list(gpus)
-        self.registry, self.recorder, self.gpu_memory = registry, recorder, gpu_memory
+        self.registry, self.gpu_memory = registry, gpu_memory
         self.block = cfg.get(TOOL)
         self.max_items = self.block.get("max_items")
 
@@ -90,7 +90,7 @@ class LocateEventsBackend:
             raise RuntimeError("the phase that submitted this job has ended")
         work = job_dir(self.run_dir, job)
         media = work / "media"
-        media.mkdir(parents=True)
+        fs.mkdir(media)
         results: dict[str, dict] = {}
         items = []
         for i, item in enumerate(job.args["items"]):
@@ -100,9 +100,11 @@ class LocateEventsBackend:
                 stage_clip(caller, video, dst)
                 info = readable_video(dst)
             except (PathError, OSError) as exc:
+                telemetry.error(exc, "the item's input error")
                 results[video] = {"error": input_error(exc)[:500]}
                 continue
             except ValueError as exc:
+                telemetry.error(exc, "the item's error")
                 results[video] = {"error": f"{type(exc).__name__}: {exc}"[:500]}
                 continue
             items.append({"index": i, "video": str(dst), "width": info.width, "height": info.height,
@@ -120,13 +122,13 @@ class LocateEventsBackend:
 
                 def row(m: dict) -> dict:     # the agent gets the spans; each frame's answer stays in the messages
                     return {"events": spans(events[m["index"]], m["info"]["answers"])} if m["ok"] \
-                        else {"error": m["error"]}
+                        else {"error": m["error"][:500]}     # whole in telemetry
 
                 ran = run_bridge(self, job, work, spec, items, cancel, report, row, done=len(results))
                 for i, r in ran["rows"].items():
                     results[job.args["items"][i]["video"]] = {"error": r["error"]} if "index" in r else r
         finally:
-            shutil.rmtree(media, ignore_errors=True)
+            fs.rmtree(media, ignore_errors="the job's own links")
         ready = ran["ready"]
         return {"clips": {item["video"]: results[item["video"]] for item in job.args["items"]},
                 "load_s": ready["info"]["load_s"] if ready else None,
@@ -155,8 +157,10 @@ def submit(q, caller, items) -> dict:
             try:
                 readable_video(clip_host_path(caller, item["video"]))
             except PathError as exc:
+                telemetry.error(exc, "a bad item")
                 bad[n] = str(exc)
             except ValueError as exc:
+                telemetry.error(exc, "a bad item")
                 bad[n] = f"not a readable video: {exc}"[:300]
         seen.add(container_path(item["video"]))
     refuse(caller, TOOL, items, bad)

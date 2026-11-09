@@ -1,10 +1,9 @@
 import json
 
+from ar_kernel.archive.activity import add_call
 from ar_kernel.archive.db import open_db
 from ar_kernel.archive.nodes import NodeStore
-from ar_kernel.guards import alert
 from ar_kernel.status import format_status, run_status
-from ar_kernel.telemetry.recorder import Recorder
 
 
 def test_status_is_plain_json(tmp_path):
@@ -13,14 +12,15 @@ def test_status_is_plain_json(tmp_path):
         "budget: {max_usd: 10, usd_per_mtok: {input: 1, cached_input: 0.1, output: 4}}\n"
         "selection: {decay: 0.5, prior_weight: 1.0, subtree_share: 0.3, size_scale: 4, temperature: 2.0,"
         " noise_floor: 4.4e-4, epsilon: 0.2}\n")
-    conn, rec = open_db(tmp_path), Recorder(tmp_path)
+    conn = open_db(tmp_path)
     nodes = NodeStore(conn)
     nodes.create("root", None, 0), nodes.record_score("root", 0.78, ["m"], {"m": 0.78})
     nodes.create("n1", "root", 1), nodes.set_status("n1", "invalid_code")
     nodes.set_fields("n1", error="contract import failed")
     nodes.create("n2", "root", 1)                                  # left running by a stopped run
-    rec.event("llm.response", node="n1", usage={"prompt_tokens": 1000, "completion_tokens": 100}, mock=False)
-    alert(rec, "node_failed", "n1 ended invalid_code")
+    add_call(tmp_path, node="n1", phase="improve_recipe", attempt=1, role=None, tool=None, conversation_id="c", turn=0,
+             transcript=None, status=200, tokens=(1000, 0, 100), cost_usd=(1000 * 1 + 100 * 4) / 1e6, mock=False,
+             audit_hits=[])
     (tmp_path / "control").mkdir()
     (tmp_path / "control" / "run_args.json").write_text('{"max_nodes": 5}')
     d = run_status(tmp_path)
@@ -28,7 +28,6 @@ def test_status_is_plain_json(tmp_path):
     assert d["best"]["node_id"] == "root" and d["max_nodes"] == 5 and d["loop_pid"] is None
     assert {n["node_id"]: n["P"] for n in d["nodes"]} == {"root": 1.0, "n1": None, "n2": None}
     assert d["spend"]["usd"] == (1000 * 1 + 100 * 4) / 1e6
-    assert [a["kind"] for a in d["alerts"]] == ["node_failed"]
     text = format_status(d)
     assert "n1" in text and "invalid_code" in text and "contract import failed" in text
     assert "nodes: 2 of 5" in text                              # the running n2 is counted: resume finishes it
@@ -38,47 +37,13 @@ def test_a_node_is_listed_under_its_own_parent():
     """n4, a child of n2, is listed under n2, not below n3 at n3's child indent."""
     node = lambda i, parent, depth: {"node_id": i, "parent_id": parent, "depth": depth, "status": "scored",
                                      "score": 0.5, "P": None, "error": None}
-    d = {"run_id": "r", "judge": None, "loop_pid": None, "state": None, "max_nodes": 5, "best": None, "alerts": [],
+    d = {"run_id": "r", "judge": None, "loop_pid": None, "state": None, "max_nodes": 5, "best": None,
          "spend": {"usd": None, "max_usd": None, "tokens": 0, "calls": 0},
+         "alerts": [], "open_spans": [],
          "nodes": [node("root", None, 0), node("n1", "root", 1), node("n2", "n1", 2), node("n3", "root", 1),
                    node("n4", "n2", 3)]}
     listed = [line.split()[0] for line in format_status(d).splitlines() if line.startswith("  ")]
     assert listed == ["root", "n1", "n2", "n4", "n3"]
-
-
-def test_status_skips_a_torn_trailing_event_line(tmp_path):
-    (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "kernel.yaml").write_text("selection: {decay: 0.5, prior_weight: 1.0, subtree_share: 0.3,"
-                                                     " size_scale: 4, temperature: 2.0, noise_floor: 4.4e-4, epsilon: 0.2}\n")
-    open_db(tmp_path).close()
-    rec = Recorder(tmp_path)
-    alert(rec, "node_failed", "n1 ended invalid_code")
-    with open(tmp_path / "telemetry" / "events" / "run.jsonl", "a") as f:
-        f.write('{"type": "alert", "kind": "dis')                # kill -9 / ENOSPC mid-write
-    assert [a["kind"] for a in run_status(tmp_path)["alerts"]] == ["node_failed"]
-
-
-def test_alert_timestamp_in_format_status(tmp_path):
-    (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "kernel.yaml").write_text(
-        "budget: {max_usd: 10, usd_per_mtok: {input: 1, cached_input: 0.1, output: 4}}\n"
-        "selection: {decay: 0.5, prior_weight: 1.0, subtree_share: 0.3, size_scale: 4, temperature: 2.0,"
-        " noise_floor: 4.4e-4, epsilon: 0.2}\n")
-    conn, rec = open_db(tmp_path), Recorder(tmp_path)
-    nodes = NodeStore(conn)
-    nodes.create("root", None, 0), nodes.record_score("root", 0.78, ["m"], {"m": 0.78})
-    (tmp_path / "control").mkdir()
-    (tmp_path / "control" / "run_args.json").write_text('{"max_nodes": 5}')
-    alert(rec, "root_failed", "RuntimeError: something went wrong")
-    d = run_status(tmp_path)
-    text = format_status(d)
-    # The timestamp should appear in the alert line
-    assert "alerts (latest last):" in text
-    alert_lines = [line for line in text.split("\n") if "[" in line and "]" in line and "failed" in line]
-    assert len(alert_lines) > 0
-    # Check that the alert line contains a timestamp in the format YYYY-MM-DD HH:MM:SS
-    for alert_line in alert_lines:
-        assert any(c.isdigit() for c in alert_line[:19]), f"Timestamp not found in alert line: {alert_line}"
 
 
 def test_status_writes_nothing_into_the_run(tmp_path):
@@ -106,3 +71,25 @@ def test_status_writes_nothing_into_the_run(tmp_path):
     assert not (tmp_path / "archive.db-wal").exists()
     before = tree()
     assert run_status(tmp_path)["best"]["node_id"] == "root" and tree() == before
+
+
+def test_status_lists_the_runs_alerts_and_open_spans(tmp_path):
+    from ar_kernel import telemetry
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "kernel.yaml").write_text(
+        "selection: {decay: 0.5, prior_weight: 1.0, subtree_share: 0.3, size_scale: 4, temperature: 2.0,"
+        " noise_floor: 4.4e-4, epsilon: 0.2}\n")
+    open_db(tmp_path).close()
+    telemetry.open(tmp_path)
+    telemetry.start("ar.run")
+    with telemetry.span("loop") as sp:
+        sp.output = {}
+    telemetry.start("loop")                                       # left open, as a killed run leaves it
+    telemetry.alert("monitor.disk_low", "warning", "3 GB free")
+    d = run_status(tmp_path)
+    json.dumps(d)
+    assert [(a["name"], a["level"], a["message"]) for a in d["alerts"]] == [("monitor.disk_low", "warning", "3 GB free")]
+    assert [o["name"] for o in d["open_spans"]] == ["ar.run", "loop"]
+    assert "process alive" in d["open_spans"][1]["facts"]
+    text = format_status(d)
+    assert "[warning] monitor.disk_low: 3 GB free" in text and "open spans:" in text

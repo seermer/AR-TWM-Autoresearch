@@ -8,7 +8,6 @@ from ar_kernel.archive.db import open_db
 from ar_kernel.config import KernelConfig
 from ar_kernel.data.ingest import Candidate, Ingestor
 from ar_kernel.run import bootstrap_run, score_node
-from ar_kernel.telemetry.recorder import Recorder
 from ar_kernel.train.gate import Gate, resolve_config
 from ar_kernel.train.runner import TrainRunner
 from conftest import NAMED
@@ -43,7 +42,7 @@ def _ingest_examples(ing, node_id="m1"):
     return clip_ids
 
 def test_the_example_clips_ingest_and_keep_their_training_text(tmp_path):
-    ing = Ingestor(CFG, tmp_path, open_db(tmp_path), Recorder(tmp_path))
+    ing = Ingestor(CFG, tmp_path, open_db(tmp_path))
     clips = _ingest_examples(ing)
     assert len(clips) == 6
     for clip_id, source in zip(clips, sorted((EXAMPLES / "captions").glob("*.json"))):
@@ -53,19 +52,18 @@ def test_the_example_clips_ingest_and_keep_their_training_text(tmp_path):
 def test_two_step_training_writes_a_checkpoint(tmp_path):
     ctx = bootstrap_run(CFG, run_id="manual_train", env=os.environ)
     conn = ctx.conn
-    ing = Ingestor(CFG, ctx.run_dir, conn, ctx.recorder)
+    ing = Ingestor(CFG, ctx.run_dir, conn)
     clips = _ingest_examples(ing)
     commits = CommitStore(conn, ing.blobs, ing.clips)
     commit, _ = commits.commit({"cam": {"weight": 1.0, "clips": clips}}, "manual", node_id="m1")
     node_dir = ctx.run_dir / "nodes" / "m1"
     recipe = {"optimizer.max_steps": 2, "optimizer.grad_accum_steps": 1, "optimizer.epochs": 500}
-    failures = Gate(CFG, commits, ctx.recorder).check(recipe, commit, None, "m1", tmp_path / "check",
-                                                      ctx.run_dir, ctx.gpus)
+    failures = Gate(CFG, commits).check(recipe, commit, None, "m1", tmp_path / "check", ctx.run_dir, ctx.gpus)
     assert not failures, failures
     resolved = resolve_config(CFG, commits, ctx.run_dir, recipe, commit, "m1", node_dir)
-    runner = TrainRunner(CFG, ctx.recorder)
-    runner.precache(resolved, ctx.gpus, "m1")
-    checkpoint = runner.train(resolved, ctx.gpus, "m1", node_dir)
+    runner = TrainRunner(CFG)
+    runner.precache(resolved, ctx.gpus)
+    checkpoint = runner.train(resolved, ctx.gpus, node_dir)
     assert (checkpoint / "lora.safetensors").exists()
     assert (checkpoint / "history_encoder.pt").exists()
 

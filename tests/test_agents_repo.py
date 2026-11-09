@@ -116,3 +116,26 @@ def test_without_a_remote_nothing_is_pushed(tmp_path, seed, monkeypatch):
     monkeypatch.setattr(repo, "_git", lambda *a, **k: calls.append(a[0]) or real(*a, **k))
     repo.init(seed)
     assert "push" not in calls
+
+
+def test_ref_changes_record_the_commit_before_and_after_and_git_runs_as_processes(tmp_path, seed):
+    from conftest import telemetry_payload, telemetry_records
+    from ar_kernel import telemetry
+    telemetry.open(tmp_path / "run")
+    telemetry.start("ar.run")
+    repo = AgentsRepo(tmp_path / "agents.git")
+    root = repo.init(seed)
+    child = repo.commit_tree(seed, root, "child")
+    repo.set_ref(AgentsRepo.branch_ref("root"), child)
+    repo.delete_refs("refs/heads/node/")
+    records = telemetry_records(tmp_path / "run")
+    ends = {r["span"]: r for r in records if r["kind"] == "end"}
+    refs = [(telemetry_payload(tmp_path / "run", s["inputs"]), telemetry_payload(tmp_path / "run", ends[s["span"]]["output"]))
+            for s in records if s["kind"] == "start" and s["name"] == "git.ref"]
+    ref = "refs/heads/node/root"
+    assert refs == [({"ref": ref, "old": None, "new": root}, {"commit": root}),
+                    ({"ref": ref, "old": root, "new": child}, {"commit": child}),
+                    ({"ref": ref, "old": child, "new": None}, {"commit": None})]
+    gits = [telemetry_payload(tmp_path / "run", s["inputs"])["command"] for s in records
+            if s["kind"] == "start" and s["name"] == "process"]
+    assert gits[0][:3] == ["git", "init", "--bare"] and all(c[0] == "git" for c in gits)

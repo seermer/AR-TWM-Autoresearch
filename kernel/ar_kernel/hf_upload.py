@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import tarfile
 import tempfile
 from pathlib import Path
@@ -17,12 +18,14 @@ from pathlib import Path
 from huggingface_hub import CommitOperationAdd, CommitOperationDelete
 from huggingface_hub.utils import disable_progress_bars, enable_progress_bars
 
-from .guards import alert
+from . import fs, telemetry
 from .subproc import cache_dir
 
-# Not needed to view the run: caches, partial downloads, raw downloads, the agents' own installs.
-SKIP_DIRS = ("cache", "tmp", "hf_tmp", "sockets", "control/pgids", "staging/*/*/hf", "telemetry/files_hf",
+# Not needed to view the run: caches, partial downloads, the agents' own installs, staging, the rebuilt view.
+SKIP_DIRS = ("cache", "tmp", "hf_tmp", "sockets", "control/pgids", "staging", "view",
              "nodes/*/attempts/*/workspace/.home", "nodes/*/attempts/*/dataset_cache")
+# Attempt folders go up only once a sandbox mounted them (`add_mounted`).
+ATTEMPT_DIRS = tuple(f"nodes/*/attempts/*/{d}" for d in ("workspace", "agent", "code", "context"))
 # archive.db goes up as a consistent copy, never the live file and its WAL.
 SKIP_FILES = ("archive.db", "archive.db-wal", "archive.db-shm", "control/loop.pid", "control/hf_upload.json",
               "control/hf_fetch.json")
@@ -36,13 +39,19 @@ def _matches(rel: str, patterns) -> bool:
                for p in patterns)
 
 
-def run_files(run_dir: Path) -> dict[str, list[int]]:
-    """Relative path -> [size, mtime_ns] of every regular file that is uploaded."""
+def run_files(run_dir: Path, mounted=None) -> dict[str, list[int]]:
+    """Relative path -> [size, mtime_ns] of every regular file that is uploaded. `mounted`: the folders whose
+    attempt folders go up; None keeps every attempt folder (a fetched copy holds only what went up)."""
+    def kept(rel: str) -> bool:
+        if _matches(rel, SKIP_DIRS):
+            return False
+        return mounted is None or not _matches(rel, ATTEMPT_DIRS) or any(
+            rel == m or rel.startswith(f"{m}/") for m in mounted)
     out = {}
     for root, dirs, files in os.walk(run_dir):
         base = Path(root).relative_to(run_dir).as_posix()
         rel = lambda name: name if base == "." else f"{base}/{name}"
-        dirs[:] = [d for d in dirs if not _matches(rel(d), SKIP_DIRS)]
+        dirs[:] = [d for d in dirs if kept(rel(d))]
         for name in files:
             path = Path(root) / name
             if not _matches(rel(name), SKIP_FILES) and path.is_file() and not path.is_symlink():
@@ -52,28 +61,36 @@ def run_files(run_dir: Path) -> dict[str, list[int]]:
 
 
 class HfUpload:
-    def __init__(self, run_dir: Path, recorder, token: str, api=None) -> None:
+    def __init__(self, run_dir: Path, token: str, api=None) -> None:
         if api is None:
             from huggingface_hub import HfApi
             api = HfApi(token=token)
-        self.run_dir, self.recorder, self.api = Path(run_dir), recorder, api
+        self.run_dir, self.api = Path(run_dir), api
         self.state_path = self.run_dir / "control" / "hf_upload.json"
 
     def __call__(self, node: str, phase: str, attempt: int) -> None:
-        """A failed upload is an alert, not an error: its files go up with the next one."""
+        """A failed upload is a warning, not an error: its files go up with the next one."""
         try:
             self.upload(node, phase, attempt)
         except Exception as exc:                                  # noqa: BLE001 -- reported, the run goes on
-            alert(self.recorder, "hf_upload_failed", f"the upload after {node} {phase} failed: "
-                  f"{type(exc).__name__}: {exc}", level="warning", node_id=node)
+            message = f"the upload after {node} {phase} failed: {type(exc).__name__}: {exc}"
+            telemetry.alert("hf.upload_failed", "warning", message)
+            print(f"warning: {message}", file=sys.stderr)
 
     def upload(self, node: str, phase: str, attempt: int) -> None:
         state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {"seq": 0, "files": {}}
         seq = state["seq"] + 1
-        repo = upload_repo(self.api.whoami()["name"], self.run_dir.name, seq)
-        self.api.create_repo(repo, repo_type="dataset", private=True, exist_ok=True)   # a retry reuses it
+        with telemetry.span("hf.upload", {"node": node, "phase": phase, "attempt": attempt, "seq": seq}) as sp:
+            sp.output = self._upload(state, seq, f"{node} {phase}{f' {attempt}' if attempt else ''}")
+
+    def _upload(self, state: dict, seq: int, message: str) -> dict:
+        user = _call("whoami", {}, self.api.whoami, lambda r: {"name": r["name"]})["name"]
+        repo = upload_repo(user, self.run_dir.name, seq)
+        _call("create_repo", {"repo": repo}, lambda: self.api.create_repo(repo, repo_type="dataset", private=True,
+                                                                         exist_ok=True),   # a retry reuses it
+          lambda r: {"url": str(r)})
         stale = _tars(self.api, repo)                   # a retry after a commit that landed unnoticed replaces it
-        files = run_files(self.run_dir)
+        files = run_files(self.run_dir, state.get("mounted", []))
         changed = [rel for rel, stamp in files.items() if state["files"].get(rel) != stamp]
         parts, filled = [[]], 0
         for rel in changed:
@@ -83,7 +100,7 @@ class HfUpload:
             parts[-1].append(rel)
             filled += files[rel][0]
         tmp_root = cache_dir() / "tmp"
-        tmp_root.mkdir(parents=True, exist_ok=True)
+        fs.mkdir(tmp_root)
         with tempfile.TemporaryDirectory(dir=tmp_root) as tmp:
             db = Path(tmp) / "archive.db"
             with contextlib.closing(sqlite3.connect(f"{(self.run_dir / 'archive.db').resolve().as_uri()}?mode=ro", uri=True)) as src, \
@@ -100,32 +117,36 @@ class HfUpload:
                         out.add(db, arcname="archive.db")
                         out.add(Path(tmp) / MANIFEST, arcname=MANIFEST)
                 ops.append(CommitOperationAdd(path_in_repo=tar.name, path_or_fileobj=str(tar)))
-            size = sum(Path(op.path_or_fileobj).stat().st_size for op in ops)
             ops += [CommitOperationDelete(path_in_repo=p) for p in stale if p not in {op.path_in_repo for op in ops}]
+            tars = {op.path_in_repo: os.path.getsize(op.path_or_fileobj) for op in ops
+                    if isinstance(op, CommitOperationAdd)}
             disable_progress_bars()                     # they would flood the console log
             try:
-                self.api.create_commit(repo, ops, repo_type="dataset",
-                                       commit_message=f"{node} {phase}{f' {attempt}' if attempt else ''}")
+                _call("create_commit", {"repo": repo, "message": message, "add": tars,
+                                        "delete": [op.path_in_repo for op in ops if isinstance(op, CommitOperationDelete)]},
+                      lambda: self.api.create_commit(repo, ops, repo_type="dataset", commit_message=message), str)
             finally:
                 enable_progress_bars()
-        _write_synced(self.state_path, json.dumps({"seq": seq, "files": files}))
-        self.recorder.event("hf_upload", node=node, phase=phase, attempt=attempt,
-                            payload={"repo": repo, "upload": seq, "parts": len(parts), "files": len(changed), "bytes": size})
+        fs.write_text(self.state_path, json.dumps({**state, "seq": seq, "files": files}), atomic=True, sync=True)
+        return {"repo": repo, "files": [[rel, files[rel][0]] for rel in changed]}
 
 
-def _write_synced(path: Path, text: str) -> None:
-    """On disk before it returns: a network filesystem can lose what was only written."""
-    tmp = path.with_suffix(".tmp")
-    with tmp.open("w") as f:
-        f.write(text)
-        f.flush()
-        os.fsync(f.fileno())
-    tmp.replace(path)
-    fd = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+def add_mounted(run_dir: Path, folders) -> None:
+    """Folders a sandbox mounts read-only, kept in the upload state for the next upload to send."""
+    path = Path(run_dir) / "control" / "hf_upload.json"
+    state = json.loads(path.read_text()) if path.exists() else {"seq": 0, "files": {}}
+    mounted = sorted({*state.get("mounted", []), *(Path(f).relative_to(run_dir).as_posix() for f in folders)})
+    if mounted != state.get("mounted", []):
+        fs.mkdir(path.parent)
+        fs.write_text(path, json.dumps({**state, "mounted": mounted}), atomic=True)
+
+
+def _call(call: str, inputs: dict, fn, output=None):
+    """One Hugging Face API call as a span; `output` makes what it returned recordable."""
+    with telemetry.span("hf.call", {"call": call, **inputs}) as sp:
+        result = fn()
+        sp.output = output(result) if output else None
+        return result
 
 
 def upload_repo(user: str, run: str, seq: int) -> str:
@@ -151,8 +172,10 @@ def _hashes(path: Path) -> dict[str, str]:
 
 def _tars(api, repo: str) -> dict:
     from huggingface_hub.hf_api import RepoFile
-    return {f.path: f for f in api.list_repo_tree(repo, repo_type="dataset", recursive=True)
-            if isinstance(f, RepoFile) and f.path != ".gitattributes"}
+    return _call("list_repo_tree", {"repo": repo},
+                 lambda: {f.path: f for f in api.list_repo_tree(repo, repo_type="dataset", recursive=True)
+                          if isinstance(f, RepoFile) and f.path != ".gitattributes"},
+                 lambda tars: {p: f.size for p, f in tars.items()})
 
 
 def _same(there: dict, applied: dict) -> bool:
@@ -193,8 +216,8 @@ def fetch(run_dir: Path, token: str, delete: bool = False, api=None, download=No
         tars = sorted(there)
         if not tars:                                # its commit has not landed yet: the next fetch takes it
             break
-        run_dir.mkdir(parents=True, exist_ok=True)
-        tmp_root.mkdir(parents=True, exist_ok=True)
+        fs.mkdir(run_dir)
+        fs.mkdir(tmp_root)
         applied = {}
         with tempfile.TemporaryDirectory(dir=tmp_root) as tmp:
             for tar_name in tars:
@@ -204,16 +227,16 @@ def fetch(run_dir: Path, token: str, delete: bool = False, api=None, download=No
                 with tarfile.open(path) as tar:
                     tar.extractall(run_dir, filter="data")
         keep = set(json.loads((run_dir / MANIFEST).read_text()))
-        (run_dir / MANIFEST).unlink()
+        fs.remove(run_dir / MANIFEST)
         for rel in set(run_files(run_dir)) - keep:
-            (run_dir / rel).unlink()
+            fs.remove(run_dir / rel)
         if seq <= state["last"]:
             reapplied += 1
         else:
             fetched += 1
         state = {"last": max(seq, state["last"]), "applied": {**state["applied"], str(seq): applied}}
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(json.dumps(state))
+        fs.mkdir(state_path.parent)
+        fs.write_text(state_path, json.dumps(state))
     report = (f"fetched {fetched} uploads of {run} into {run_dir}" if fetched or reapplied else f"{run_dir} is up to date") \
         + (f" ({reapplied} applied again: changed on Hugging Face since)" if reapplied else "")
     if not delete:
