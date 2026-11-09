@@ -45,13 +45,13 @@ Check: `ls ../WBench/third_party/mega-sam/base/setup.py` prints the path.
 
 ## 2. Create the environments
 
-Ten conda environments, all created inside `AutoResearcher/.envs/`. Takes 30 to 60 minutes and about 62 GB.
+Eleven conda environments, all created inside `AutoResearcher/.envs/`. Takes 30 to 60 minutes and about 62 GB.
 
 ```bash
 scripts/setup_envs.sh
 ```
 
-Check: `ls .envs` lists `agent alayaworld autoresearcher gen-lightx2v gen-ltx25 gen-wan22 gen-zimage panel vllm wbench-main wbench-vp`.
+Check: `ls .envs` lists `agent alayaworld autoresearcher bwrap gen-lightx2v gen-ltx25 gen-wan22 gen-zimage panel vllm wbench-main wbench-vp`.
 If it stops on an error, fix the cause and run it again: environments that already exist are skipped.
 To rebuild one, delete `.envs/<name>` and run `scripts/setup_envs.sh <name>`.
 Last, it builds the run panel (step 8): Node in `.envs/panel` and the web app in `panel/web/dist`. If that fails, it prints a warning and carries on; runs do not need the panel. `scripts/setup_envs.sh panel` retries it.
@@ -169,6 +169,7 @@ python scripts/preflight.py --config configs/h100.yaml     # must end with "all 
 ```
 
 Each step prints its peak GPU memory per card and the job's host memory at its start and peak (`runs/preflight-<time>/preflight.json`).
+Preflight records its work like a run: `ar trace --run-id preflight-<time> --check` must print `no findings`.
 
 Host RAM and GPU counts are set in the config, never guessed at run time: each GPU tool's `workers`,
 `captioner.tensor_parallel`, and `host.ram_gib` (at most the job's memory limit, e.g. Slurm `--mem`). `ar run`
@@ -227,8 +228,9 @@ nvidia-smi                              # GPU use
 
 Everything the kernel does is recorded under `runs/$RUN/telemetry/`. `records/` holds spans (an action from its start
 to its end, nested), decisions (each choice with its inputs and reason), handled errors, output lines, alerts, and GPU
-and host samples; `payloads/` holds their inputs and outputs by content; `files/` holds the bytes of every file a kernel
-tool read from an agent or handed to one. A span with no end was still open when its process stopped; it is never
+and host samples; `payloads/` holds their inputs and outputs by content; `files/` holds the bytes of each file a kernel
+tool read from an agent or handed to one, except ingested clips (kept in the run's archive, `store/`) and Hugging Face
+downloads (recorded by their hashes). A span with no end was still open when its process stopped; it is never
 closed afterwards.
 
 `ar trace --run-id $RUN` prints the records as trees of spans, in order. `--node N` narrows it to one node (with
@@ -279,7 +281,7 @@ Do not delete files under `runs/$RUN` by hand.
 ## 10. Results
 
 - `ar status --run-id $RUN`: every node with its score and the best one.
-- `ar score-node --run-id $RUN --node <id>`: scores a node of the run again. It reads the run and writes only under `scores/`, and is refused while a loop is running (the loop holds the GPUs); besides `ar run` and `ar stop`, no command changes a run.
+- `ar score-node --run-id $RUN --node <id>`: scores a node of the run again. It reads the run and writes only under `scores/`, and is refused while a loop is running (the loop holds the GPUs); besides `ar run`, `ar stop` and `ar upload` (its upload state), no command changes a run.
 - Code of each node: the branches `$RUN/node/<id>` in the GitHub repo from `$REMOTE`.
 - Everything else (logs, conversations, checkpoints, videos): `runs/$RUN/`. Keep this folder; it is the record of the experiment.
 
