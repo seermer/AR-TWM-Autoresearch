@@ -7,7 +7,8 @@ from ar_kernel.archive.commits import CommitStore
 from ar_kernel.archive.db import open_db
 from ar_kernel.config import KernelConfig
 from ar_kernel.data.ingest import Candidate, Ingestor
-from ar_kernel.run import bootstrap_run, score_node
+from ar_kernel.guards import choose_gpus
+from ar_kernel.run import bootstrap_run, check_new_run, score_node
 from ar_kernel.train.gate import Gate, resolve_config
 from ar_kernel.train.runner import TrainRunner
 from conftest import NAMED
@@ -15,6 +16,10 @@ from conftest import NAMED
 pytestmark = pytest.mark.manual
 CFG = KernelConfig.load()
 EXAMPLES = CFG.worldmodel / "data" / "examples" / "video_timed_prompts_camera"
+
+
+def _run(run_id):
+    return bootstrap_run(CFG, check_new_run(CFG, run_id, os.environ), choose_gpus(CFG, os.environ))
 
 def _ingest_examples(ing, node_id="m1"):
     """WorldModel's timed-prompt example clips (960x544, with poses), each with the annotation its
@@ -50,7 +55,7 @@ def test_the_example_clips_ingest_and_keep_their_training_text(tmp_path):
         assert [s["prompt"] for s in stored["segments"]] == [s["prompt"] for s in json.loads(source.read_text())["segments"]]
 
 def test_two_step_training_writes_a_checkpoint(tmp_path):
-    ctx = bootstrap_run(CFG, run_id="manual_train", env=os.environ)
+    ctx = _run("manual_train")
     conn = ctx.conn
     ing = Ingestor(CFG, ctx.run_dir, conn)
     clips = _ingest_examples(ing)
@@ -98,7 +103,7 @@ def _tolerance(metric: str) -> float:
 
 
 def test_base_model_reproduces_the_recorded_proxy_score():
-    ctx = bootstrap_run(CFG, run_id="manual_root", env=os.environ)
+    ctx = _run("manual_root")
     score, detail = score_node(CFG, ctx, "root", None, 0)
     import json
     import statistics

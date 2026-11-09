@@ -1,10 +1,11 @@
 """Every telemetry name, with its component and what it records. Component None: the parent span's."""
 
-ROOTS = ("ar.run", "ar.stop")                     # an invocation's root: the parent of records with no current span
+ROOTS = ("ar.run", "ar.stop", "preflight")        # an invocation's root: the parent of records with no current span
 
 SPANS = {
     "ar.run": ("cli", "one `ar run` invocation, from the claim of the run to the exit"),
     "ar.stop": ("cli", "one `ar stop` invocation"),
+    "preflight": ("cli", "one scripts/preflight.py invocation, from its run's creation to the exit"),
     "run.shutdown": ("control", "the cleanup after the loop, for every ending"),
     "stop.wait": ("cli", "`ar stop --force` waiting for the loop's process to end"),
     "services": ("services", "the gateway and tool server on the run's sockets, from start to stop"),

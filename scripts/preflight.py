@@ -27,14 +27,17 @@ from pathlib import Path
 import yaml
 
 import download_weights
+from ar_kernel import telemetry
 from ar_kernel.archive.commits import CommitStore
 from ar_kernel.config import KernelConfig, load_dotenv
 from ar_kernel.data.ingest import Candidate, Ingestor
 from ar_kernel.doctor import gpu_checks, run_checks
 from ar_kernel.eval.lora import concat_eval_lora
 from ar_kernel.eval.render import build_render_config, render_proxy
-from ar_kernel.run import bootstrap_run
+from ar_kernel.guards import choose_gpus
+from ar_kernel.run import bootstrap_run, check_new_run
 from ar_kernel.subproc import cache_env, free_port, host_memory_gib
+from ar_kernel.telemetry import capture
 from ar_kernel.tools import captioner, locate_events
 from ar_kernel.tools.annotate import AnnotateBackend
 from ar_kernel.tools.context import TokenRegistry
@@ -67,7 +70,8 @@ def ffmpeg(*args) -> None:
 class Preflight:
     def __init__(self, cfg: KernelConfig) -> None:
         self.cfg = cfg
-        self.ctx = bootstrap_run(cfg, run_id=f"preflight-{time.strftime('%Y%m%d-%H%M%S')}", env=os.environ)
+        run_id = f"preflight-{time.strftime('%Y%m%d-%H%M%S')}"
+        self.ctx = bootstrap_run(cfg, check_new_run(cfg, run_id, os.environ), choose_gpus(cfg, os.environ))
         self.run_dir, self.gpus = self.ctx.run_dir, self.ctx.gpus
         self.ws, self.staging = self.run_dir / "workspace", self.run_dir / "staging"
         self.ws.mkdir(), self.staging.mkdir()
@@ -312,15 +316,29 @@ def main(argv: list[str] | None = None) -> int:
     cfg = KernelConfig.load(overlays=args.config)
     load_dotenv(cfg.repo_root / ".env", os.environ)
     pf = Preflight(cfg)
+    telemetry.open(pf.run_dir, cfg.dotenv_files)
+    capture.install()
+    root = telemetry.start("preflight", {"steps": args.steps, "overlays": args.config, "gpus": pf.gpus})
+    try:
+        code = run_steps(pf, args.steps)
+    except BaseException as exc:
+        root.fail(exc)
+        raise
+    root.end("ok" if code == 0 else "error", {"exit_code": code})
+    return code
+
+
+def run_steps(pf: Preflight, steps: list[str]) -> int:
     print(f"preflight run {pf.run_dir.name} on GPUs {pf.gpus}", flush=True)
     report = {}
-    for step in [s for s in STEPS if s in args.steps]:
+    for step in [s for s in STEPS if s in steps]:
         print(f"== {step}", flush=True)
         t0, sampler = time.monotonic(), Sampler(pf.gpus)
         try:
             with sampler:
                 entry = {"ok": True, "detail": getattr(pf, step)()}
         except Exception as exc:                         # noqa: BLE001 -- reported; the next step still runs
+            telemetry.error(exc, "a failed step; the next step runs")
             entry = {"ok": False, "error": f"{type(exc).__name__}: {exc}", "traceback": traceback.format_exc()}
         report[step] = {**entry, "seconds": round(time.monotonic() - t0), **sampler.stats}
         print(json.dumps({k: v for k, v in report[step].items() if k != "traceback"}, indent=1, default=str), flush=True)
