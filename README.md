@@ -147,7 +147,7 @@ CUDA_VISIBLE_DEVICES=0,1 ALAYA_GEMMA_MAX_MEMORY="0=13GiB,1=13GiB" \
 cd ../AutoResearcher
 ```
 
-Check: the last line says `[Precache] done` and `ls ../WorldModel/cache/text_embed_wbench | wc -l` prints `245`.
+Check: the last line says `[Precache] done`.
 
 ## 6. Pre-flight checks
 
