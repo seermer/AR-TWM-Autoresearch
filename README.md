@@ -248,6 +248,18 @@ Web panel (every conversation, tool call, record, code edit, training curve, vid
 Open http://<server>:7860 (the panel listens on every interface, without a login), or from another computer through
 `ssh -L 7860:127.0.0.1:7860 <user>@<server>` at http://127.0.0.1:7860. It updates live while the run goes on.
 
+Simple panel, to share a run: nodes, scores, alerts, up to 10 training clips and 10 eval renders per node, agent
+conversations and edit_self diffs, from a scrubbed snapshot (host paths, user and host names, keys and emails
+replaced), on a public gradio share link behind a login. It needs its own env (`scripts/setup_envs.sh simple-panel`),
+not the run panel's, and a login file:
+
+```bash
+printf 'user:password\n' > .simple_panel_auth && chmod 600 .simple_panel_auth
+.envs/simple-panel/bin/python -m simple_panel --run-id $RUN   # prints the share link; --no-share: this network only
+```
+
+The snapshot is taken at start; Refresh takes a new one.
+
 With `HFK` set, another machine with this setup (step 1, the `autoresearcher` and `panel` envs, and `.env`) can download the run
 and open the panel on it; run it again to catch up with later phases:
 

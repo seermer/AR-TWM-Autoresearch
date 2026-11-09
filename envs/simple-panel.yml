@@ -1,0 +1,8 @@
+# The simple panel (python -m simple_panel): gradio and the kernel, pinned in simple-panel.pip.txt.
+name: simple-panel
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12.14
+  - pip=26.2.1
+  - git=2.55.0

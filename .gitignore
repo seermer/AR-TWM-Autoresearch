@@ -14,3 +14,4 @@ third_party/
 root_cache/
 scores/
 .obsolete_runs/
+.simple_panel_auth

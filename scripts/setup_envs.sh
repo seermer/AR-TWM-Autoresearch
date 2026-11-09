@@ -6,6 +6,7 @@
 # gen-sglang compiles kernels on first use; launch it with `conda run -p .envs/gen-sglang` and
 #   CUDA_HOME=<env> CPATH=<env>/targets/x86_64-linux/include SGLANG_CACHE_DIR=.cache/sglang
 #   LIBRARY_PATH=<env>/targets/x86_64-linux/lib:<env>/targets/x86_64-linux/lib/stubs
+# The simple panel (python -m simple_panel), built only when named: simple-panel
 # An env that already exists is skipped; delete .envs/<name> to rebuild it. The panel's web app is rebuilt when its source changed.
 # Needs: conda and an NVIDIA driver (git comes from the autoresearcher env, built first); no CUDA toolkit (the envs that compile bring their own nvcc).
 # CUDA code is compiled for the detected card only: RTX 4090 (8.9), A100 (8.0) or H100 (9.0), one kind per machine.
@@ -56,7 +57,7 @@ build() {
   conda env create -y -q -p ".envs/$n" -f "envs/$n.yml"
   [ ! -f "envs/$n.pip.txt" ] || run "$n" pip install -q --no-deps -r "envs/$n.pip.txt"   # exact pins; --no-deps because the pins already contain every dependency
   case $n in
-    autoresearcher) run "$n" pip install -q --no-deps -e . ;;
+    autoresearcher|simple-panel) run "$n" pip install -q --no-deps -e . ;;
     gen-wan22) clone_pinned https://github.com/Wan-Video/Wan2.2.git third_party/Wan2.2 "$(pin wan22)" ;;
     gen-ltx25)
       clone_pinned https://github.com/Lightricks/LTX-2.git third_party/LTX-2 "$(pin ltx25)"
