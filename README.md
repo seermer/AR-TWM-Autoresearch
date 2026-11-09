@@ -55,6 +55,7 @@ Check: `ls .envs` lists `agent alayaworld autoresearcher bwrap gen-lightx2v gen-
 If it stops on an error, fix the cause and run it again: environments that already exist are skipped.
 To rebuild one, delete `.envs/<name>` and run `scripts/setup_envs.sh <name>`.
 Last, it builds the run panel (step 8): Node in `.envs/panel` and the web app in `panel/web/dist`. If that fails, it prints a warning and carries on; runs do not need the panel. `scripts/setup_envs.sh panel` retries it.
+The simple panel's env (step 8) is not built by default and needs neither the run panel nor Node: `scripts/setup_envs.sh simple-panel`.
 
 From here on, every terminal starts with:
 
@@ -249,7 +250,7 @@ Open http://<server>:7860 (the panel listens on every interface, without a login
 `ssh -L 7860:127.0.0.1:7860 <user>@<server>` at http://127.0.0.1:7860. It updates live while the run goes on.
 
 Simple panel, to share a run: nodes, scores, alerts, up to 10 training clips and 10 eval renders per node, agent
-conversations and edit_self diffs, from a scrubbed snapshot (host paths, user and host names, keys and emails
+conversations, their tokens (cached, uncached, output) per turn, conversation, node and run, and edit_self diffs, from a scrubbed snapshot (host paths, user and host names, keys and emails
 replaced), on a public gradio share link behind a login. It needs its own env (`scripts/setup_envs.sh simple-panel`),
 not the run panel's, and a login file:
 
@@ -261,7 +262,7 @@ printf 'user:password\n' > .simple_panel_auth && chmod 600 .simple_panel_auth
 The snapshot is taken at start; Refresh takes a new one.
 
 With `HFK` set, another machine with this setup (step 1, the `autoresearcher` and `panel` envs, and `.env`) can download the run
-and open the panel on it; run it again to catch up with later phases:
+and open the panel on it (or the simple panel, with the `simple-panel` env and its login file); run it again to catch up with later phases:
 
 ```bash
 ar fetch --run-id $RUN            # into runs/$RUN, from <HFK's user>/$RUN-00001, -00002, ... in order

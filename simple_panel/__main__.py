@@ -38,6 +38,9 @@ def fence(text: str, lang: str = "") -> str:
 def chat(items: list[dict]) -> list[dict]:
     out = []
     for it in items:
+        if it["kind"] == "tokens":
+            out.append({"role": "assistant", "content": f"*{it['text']}*"})
+            continue
         text = fence(it["text"]) if it["kind"] in CODE_KINDS else it["text"]
         message = {"role": "user" if it["kind"] in USER_KINDS else "assistant", "content": text or "(empty)"}
         if it["title"] and it["kind"] != "assistant":
@@ -74,7 +77,7 @@ def add_clip_route(app, snap: Path) -> None:
 
 def build(run_dir: Path, snap: Path):
     import gradio as gr
-    from .export import export
+    from .export import export, tokens_text
 
     summary = lambda: json.loads((snap / "summary.json").read_text())
 
@@ -85,7 +88,8 @@ def build(run_dir: Path, snap: Path):
     def show(current: str | None, version: int):
         s = summary()
         names = [n["node"] for n in s["nodes"]]
-        head = f"## Run {s['run']}\nSnapshot taken {s['exported']} · {len(names)} nodes"
+        head = (f"## Run {s['run']}\nSnapshot taken {s['exported']} · {len(names)} nodes · "
+                f"agent tokens: {tokens_text(s['tokens'])}")
         return (head, table([{k: v for k, v in n.items() if k != "file"} for n in s["nodes"]]),
                 table(s["scores"]), table(s["alerts"]),
                 gr.update(choices=names, value=current if current in names else (names[-1] if names else None)),

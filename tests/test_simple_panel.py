@@ -6,7 +6,7 @@ import pytest
 
 from fixtures.panel_run import make_run
 from simple_panel.__main__ import chat, fence, read_auth
-from simple_panel.export import PROJECT, Scrubber, export
+from simple_panel.export import PROJECT, Scrubber, _split, export
 
 
 def test_scrubber_hides_host_details_and_keeps_sandbox_paths():
@@ -51,13 +51,25 @@ def test_export_keeps_only_the_snapshot(tmp_path):
     assert len(n1["edits"]["attempts"]) == 2 and "+X = 3" in n1["edits"]["node_diff"]
     kinds = {i["kind"] for c in n1["conversations"] for i in c["items"]}
     assert "system" in kinds and "tool_call" in kinds and "usage" not in kinds
+    lines = [i["text"] for c in n1["conversations"] for i in c["items"] if i["kind"] == "tokens"]
+    assert lines and all(t.startswith("turn ") and "$" not in t and " s" not in t.split("output")[-1] for t in lines)
+    assert s["nodes"][1]["output"] == sum(c["tokens"]["output"] for c in n1["conversations"]) > 0
+    assert s["tokens"]["uncached"] == sum(n["uncached"] for n in s["nodes"]) > 0
     assert str(tmp_path) not in "".join(p.read_text() for p in snap.glob("*.json"))
+
+
+def test_token_split():
+    assert _split({"prompt_tokens": 100, "completion_tokens": 7, "prompt_tokens_details": {"cached_tokens": 60}}) \
+        == {"cached": 60, "uncached": 40, "output": 7}
+    assert _split({}) == {"cached": 0, "uncached": 0, "output": 0}
 
 
 def test_chat_and_fence():
     assert fence("a ```` b").startswith("`````\n")
     msgs = chat([{"kind": "system", "title": "System prompt", "text": "s"},
                  {"kind": "tool_output", "title": "Tool output: x", "text": "o"},
-                 {"kind": "user", "title": None, "text": ""}])
+                 {"kind": "user", "title": None, "text": ""},
+                 {"kind": "tokens", "title": None, "text": "turn 1: 5 cached · 2 uncached · 1 output"}])
     assert msgs[0] == {"role": "assistant", "content": "s", "metadata": {"title": "System prompt"}}
     assert msgs[1]["content"] == "```\no\n```" and msgs[2] == {"role": "user", "content": "(empty)"}
+    assert msgs[3] == {"role": "assistant", "content": "*turn 1: 5 cached · 2 uncached · 1 output*"}

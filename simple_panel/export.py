@@ -10,6 +10,7 @@ import socket
 import time
 from pathlib import Path
 
+from ar_kernel.budget import usage_tokens
 from ar_kernel.telemetry import env_secrets
 from panel import media, views
 from panel.runfiles import fmt_ts
@@ -18,7 +19,7 @@ REPO = Path(__file__).resolve().parents[1]
 PROJECT = REPO.parent
 MAX_VIDEOS = 10
 TOOL_TEXT = 2000
-DROPPED_ITEMS = {"usage"}                       # tokens, cost, latency
+TOKENS = ("cached", "uncached", "output")
 
 PATH = re.compile(r"(?<![\w.:/<>-])/(?!workspace\b|agent\b|dev/null\b)[\w.\-@+]+(?:/[\w.\-@+]*)+")
 SECRETS = [re.compile(p) for p in (r"\bsk-[\w-]{16,}", r"\bhf_[A-Za-z0-9]{20,}", r"\bgh[pousr]_[A-Za-z0-9]{20,}",
@@ -114,15 +115,32 @@ def _eval_videos(run: views.Run, node: str, root: Path, folder: str, scrub: Scru
     return out
 
 
+def tokens_text(t: dict) -> str:
+    return " · ".join(f"{t[k]:,} {k}" for k in TOKENS)
+
+
+def _split(usage: dict) -> dict:
+    """The ledger's split (budget.usage_tokens) of one call's usage."""
+    uncached, cached, output = usage_tokens(usage)
+    return {"cached": cached, "uncached": uncached, "output": output}
+
+
+def _item(it: dict, calls: dict, scrub: Scrubber) -> dict:
+    if it["kind"] == "usage":                    # tokens only: its cost and latency are left out
+        return {"kind": "tokens", "title": None, "text": f"turn {it['turn']}: {tokens_text(_split(calls[it['call_id']].usage))}"}
+    text = _clip(it["text"], TOOL_TEXT) if it["kind"] in ("tool_output", "tool_error") else it["text"]
+    return {"kind": it["kind"], "title": scrub(it["title"]), "text": scrub(text)}
+
+
 def _conversations(run: views.Run, node: str, scrub: Scrubber) -> list[dict]:
     out = []
     for phase, attempt in views.agent_attempts(run, node):
         for conv in views.conversations(run, node, phase, attempt):
-            items = [{"kind": it["kind"], "title": scrub(it["title"]),
-                      "text": scrub(_clip(it["text"], TOOL_TEXT) if it["kind"] in ("tool_output", "tool_error") else it["text"])}
-                     for it in views.conversation_chat(run, node, phase, attempt, conv["index"])
-                     if it["kind"] not in DROPPED_ITEMS]
-            out.append({"label": f"{phase}-{attempt} · {conv['role']} · {conv['index']}", "items": items})
+            calls = {c.call_id: c for s in conv["chain"] for c in s.calls}
+            total = {k: sum(_split(c.usage)[k] for c in calls.values()) for k in TOKENS}
+            items = [_item(it, calls, scrub) for it in views.conversation_chat(run, node, phase, attempt, conv["index"])]
+            out.append({"label": f"{phase}-{attempt} · {conv['role']} · {conv['index']} · {tokens_text(total)}",
+                        "tokens": total, "items": items})
     return out
 
 
@@ -149,8 +167,9 @@ def export(run_dir: Path, out: Path) -> Path:
         detail = {"training_videos": _training_videos(run, node, new, folder, scrub),
                   "eval_videos": _eval_videos(run, node, new, folder, scrub),
                   "conversations": _conversations(run, node, scrub), "edits": _edits(run, node, scrub)}
-        n["file"] = f"node_{i}.json"
+        n.update({k: sum(c["tokens"][k] for c in detail["conversations"]) for k in TOKENS}, file=f"node_{i}.json")
         (new / n["file"]).write_text(json.dumps(detail, ensure_ascii=False, default=str))
+    summary["tokens"] = {k: sum(n[k] for n in nodes) for k in TOKENS}
     (new / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, default=str))
     old = out.with_name(out.name + ".old")
     shutil.rmtree(old, ignore_errors=True)
