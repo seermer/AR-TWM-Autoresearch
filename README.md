@@ -1,5 +1,9 @@
 # AutoResearcher: setup and run guide
 
+This is the `live-11-08` branch. Use `live-11-08` in all three repositories.
+For the animal benchmark on H100 with uploads disabled and the simple panel, see
+[the short launch guide](docs/LIVE-11-08.md).
+
 Follow the steps in order, in one terminal, copying the commands as written.
 Every step ends with a check; do not continue if it fails.
 
@@ -32,13 +36,16 @@ The three folders must sit side by side, with exactly these names.
 
 ```bash
 mkdir WM-AutoResearch && cd WM-AutoResearch
-git clone git@github.com:seermer/AR-TWM-Autoresearch.git AutoResearcher
-git clone git@github.com:seermer/AlayaWorld-TWM-Autoresearch.git WorldModel
-git clone --recurse-submodules git@github.com:seermer/WBench-TWM-Autoresearch.git WBench
+git clone --branch live-11-08 git@github.com:seermer/AR-TWM-Autoresearch.git AutoResearcher
+git clone --branch live-11-08 git@github.com:seermer/AlayaWorld-TWM-Autoresearch.git WorldModel
+git clone --branch live-11-08 --recurse-submodules git@github.com:seermer/WBench-TWM-Autoresearch.git WBench
 git clone https://github.com/aigc3d/ViGeo WorldModel/third_party/ViGeo
 git -C WorldModel/third_party/ViGeo checkout 87ee8fb
 cd AutoResearcher
 ```
+
+For existing clones, run `git switch live-11-08` in each repository after
+`git fetch origin`. Check `git branch --show-current` prints `live-11-08` in all three.
 
 All later commands run in `WM-AutoResearch/AutoResearcher`.
 Check: `ls ../WBench/third_party/mega-sam/base/setup.py` prints the path.
