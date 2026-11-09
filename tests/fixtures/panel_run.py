@@ -83,7 +83,7 @@ class Scripted:
                     **({"role": role} if role else {}), **({"tool": tool} if tool else {})}
             telemetry.decision("llm.link", meta, LINKS, "new", "no earlier call of this caller matches")
             with telemetry.span("llm.censor") as step:
-                step.output = {"body": request}
+                step.output = {"set": {}, "removed": []}       # nothing censored
         return sp
 
     @staticmethod

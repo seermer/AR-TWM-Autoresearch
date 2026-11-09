@@ -8,12 +8,14 @@ from collections import OrderedDict
 
 import zstandard
 
+from ar_kernel.gateway.app import apply_changes
 from ar_kernel.telemetry import tree
 
 from .chat import Call
 from .runfiles import RunFiles, fmt_ts
 
 AGENT_PHASES = ("edit_self", "improve_recipe")
+FORWARDED = "forwarded:"                         # a payload key: an LLM request span's forwarded body, rebuilt
 
 
 class Records:
@@ -60,22 +62,40 @@ class Records:
         return self.trace.spans.get(span_id)
 
     def payload(self, digest: str | None):
+        """A stored payload by its digest, or `FORWARDED + span id`: what that LLM request forwarded."""
         if not digest:
             return None
         with self._lock:
             if digest in self._payloads:
                 self._payloads.move_to_end(digest)
                 return self._payloads[digest]
-        path = self.files.root / "telemetry" / "payloads" / f"{digest}.json.zst"
-        try:
-            data = json.loads(zstandard.ZstdDecompressor().decompress(path.read_bytes()))
-        except (OSError, ValueError, zstandard.ZstdError):
-            return None
+        if digest.startswith(FORWARDED):
+            data = self._forwarded(digest.removeprefix(FORWARDED))
+        else:
+            path = self.files.root / "telemetry" / "payloads" / f"{digest}.json.zst"
+            try:
+                data = json.loads(zstandard.ZstdDecompressor().decompress(path.read_bytes()))
+            except (OSError, ValueError, zstandard.ZstdError):
+                return None
         with self._lock:
             self._payloads[digest] = data
             while len(self._payloads) > self._cache_size:
                 self._payloads.popitem(last=False)
         return data
+
+    def _forwarded(self, span_id: str) -> dict | None:
+        """{"body": the request as forwarded}: its raw text, then what each gateway step changed."""
+        n = self.trace.spans.get(span_id)
+        try:
+            body = json.loads((self.payload(n.start.get("inputs")) or {})["body"])
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return None
+        for step in n.children:
+            if isinstance(step, tree.Node) and step.start["name"] in ("llm.enforce", "llm.censor"):
+                if step.end is None or (changed := self.payload(step.end.get("output"))) is None:
+                    return None
+                body = apply_changes(body, changed)
+        return {"body": body}
 
     def kept(self, sha256: str | None):
         """A JSON file the file store kept, or None."""
@@ -129,9 +149,8 @@ class Records:
         if link is None:
             return None
         meta = self.payload(link.get("inputs")) or {}
-        censor = next((c for c in n.children if isinstance(c, tree.Node) and c.start["name"] == "llm.censor"), None)
         call = Call(meta.get("call_id") or n.id, meta.get("conversation_id") or n.id, meta.get("turn_index") or 0,
-                    n.start["ts"], censor.end.get("output") if censor and censor.end else None,
+                    n.start["ts"], FORWARDED + n.id,
                     role=meta.get("role"), tool=meta.get("tool"), span=n.id)
         if n.end is not None:
             out = self.payload(n.end.get("output")) or {}

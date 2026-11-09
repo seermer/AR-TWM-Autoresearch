@@ -203,6 +203,19 @@ class Upstream:
                 slept, delay = slept + delay, min(delay * 2, MAX_SLEEP_S)
 
 
+def changes(before: dict, after: dict) -> dict:
+    """What a step changed at a request's top level: the keys it set (new or changed) and the keys it removed."""
+    return {"set": {k: v for k, v in after.items() if k not in before or before[k] != v},
+            "removed": [k for k in before if k not in after]}
+
+
+def apply_changes(body: dict, changed: dict) -> dict:
+    """`body` after a step that made `changed` (see `changes`), keys in the same order."""
+    out = {k: v for k, v in body.items() if k not in changed["removed"]}
+    out.update(changed["set"])
+    return out
+
+
 def _check(sp, name: str, refused: bool, status: int, message: str | None, **inputs) -> tuple[int, dict] | None:
     """One check of a request, as a decision; a refusal ends `sp` refused with the response."""
     telemetry.decision("llm.check", {"check": name, **inputs}, ["pass", "refuse"], "refuse" if refused else "pass",
@@ -264,12 +277,13 @@ def create_gateway_app(*, registry, store: CallStore, allowed_models: set[str],
             if r := _check(sp, "budget", why is not None, 402, why, usd=budget.usd, max_usd=budget.max_usd):
                 return r
         if not mock:
+            # each step records what it changed: the request's raw text and these rebuild what is forwarded
             with telemetry.span("llm.enforce", {"effort": upstream.effort}) as step:
-                body = upstream.enforce(upstream_path, body)   # before begin: record what is forwarded
-                step.output = {"body": body}
+                before, body = body, upstream.enforce(upstream_path, body)
+                step.output = changes(before, body)
         with telemetry.span("llm.censor") as step:
-            body = censor_request(body, list(censor))    # before begin: the model and the record get the same
-            step.output = {"body": body}
+            before, body = body, censor_request(body, list(censor))    # the model and the record get the same
+            step.output = changes(before, body)
         meta = store.begin(caller, endpoint, body, role=role_label(role))
         touch()
         gave_up = False

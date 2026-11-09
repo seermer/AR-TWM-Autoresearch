@@ -536,3 +536,34 @@ def test_a_mock_call_is_answered_without_enforce_or_tries(tmp_path):
         [req] = requests()
         assert [c for c in req["children"] if c.startswith("llm.")] == ["llm.censor"]
         assert req["output"]["mock"] is True and req["end"]["status"] == "ok"
+
+
+@pytest.mark.parametrize("path, effort", [("/v1/chat/completions", "high"), ("/v1/responses", "low"),
+                                          ("/v1/chat/completions", None)])
+def test_the_forwarded_request_is_rebuilt_from_the_raw_one_and_each_steps_changes(tmp_path, path, effort):
+    """The record holds the agent's request once; the effort and censor steps record only what they changed."""
+    from panel.records import FORWARDED, Records
+    from panel.runfiles import RunFiles
+    run = tmp_path / "trun"
+    telemetry.open(run)
+    telemetry.start("ar.run")
+    reg, seen = TokenRegistry(), []
+    caller = reg.issue(node="n1", phase="edit_self", attempt=1, workspace_host=tmp_path, staging_host=tmp_path)
+    upstream = _upstream_that(_ok, seen)
+    upstream.effort = effort
+    app = create_gateway_app(registry=reg, store=CallStore(run), allowed_models={"gpt-x"}, censor=["wbench"],
+                             upstream=upstream, mocks=MockBook.default())
+    said = "Read the wbench cases. Then train."
+    body = ({"model": "gpt-x", "messages": [{"role": "user", "content": said}]} if "chat" in path else
+            {"model": "gpt-x", "input": [{"role": "user", "content": said}], "reasoning": {"summary": "auto"}})
+    assert _post(TestClient(app), caller.token, body, path).status_code == 200
+    [sent] = seen
+    assert "wbench" not in json.dumps(sent) and (effort is None or effort in json.dumps(sent))
+    (run / "config").mkdir()
+    (run / "config" / "run.json").write_text("{}")
+    records = Records(RunFiles(run))
+    [span] = records.named("llm.request")
+    assert records.payload(FORWARDED + span.id)["body"] == sent
+    steps = {c.start["name"]: records.payload(c.end["output"]) for c in span.children if hasattr(c, "start")
+             and c.start["name"] in ("llm.enforce", "llm.censor")}
+    assert len(json.dumps(steps)) < len(json.dumps(body)) + 200            # changes, never a second whole body

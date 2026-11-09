@@ -277,8 +277,8 @@ def test_a_conversation_without_a_role_label_is_unlabeled(run):
 def test_a_missing_request_payload_does_not_break_the_chat(run_dir):
     run = views.Run(run_dir)
     _, chs = _chat(run)
-    digest = chs[1][0].calls[-1].request
-    (run_dir / "telemetry" / "payloads" / f"{digest}.json.zst").unlink()
+    span = run.records.span(chs[1][0].calls[-1].span)
+    (run_dir / "telemetry" / "payloads" / f"{span.start['inputs']}.json.zst").unlink()    # the raw request
     run = views.Run(run_dir)
     _, chs = _chat(run)
     items = [i for ch in chs for i in chat_items(ch, run.records.payload, awaiting=False)]
@@ -620,7 +620,8 @@ def test_open_spans_run_only_while_their_writer_runs(run_dir):
     from ar_kernel import telemetry
     from fixtures.panel_run import Scripted
     from panel import timeline
-    rec = Scripted(run_dir, t=round(time.time()), alive=True)        # its own writer id: a later start
+    time.sleep(1.05 - time.time() % 1)            # a writer's id is its start second and pid: a new one here
+    rec = Scripted(run_dir, t=round(time.time()), alive=True)
     telemetry.start("loop")
     rec.close(end=False)
     r = views.Run(run_dir)

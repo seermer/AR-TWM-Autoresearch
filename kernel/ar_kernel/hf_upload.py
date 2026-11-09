@@ -141,11 +141,11 @@ def add_mounted(run_dir: Path, folders) -> None:
         fs.write_text(path, json.dumps({**state, "mounted": mounted}), atomic=True)
 
 
-def _call(call: str, inputs: dict, fn, output=None):
+def _call(call: str, inputs: dict, fn, output):
     """One Hugging Face API call as a span; `output` makes what it returned recordable."""
     with telemetry.span("hf.call", {"call": call, **inputs}) as sp:
         result = fn()
-        sp.output = output(result) if output else None
+        sp.output = output(result)
         return result
 
 
