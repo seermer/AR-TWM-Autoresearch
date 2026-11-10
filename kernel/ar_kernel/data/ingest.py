@@ -20,10 +20,12 @@ from .leakage import LeakageChecker
 from .probe import probe_video
 
 SIZE = (960, 544)       # the only frame size ingest takes
-# A cut: a jump of the measured camera and a jump of the picture no more than CUT_NEAR frames apart. A picture
-# jump is also CUT_SPIKE times the changes CUT_SPIKE_GAP frames before and after it, so motion that starts and
-# goes on is not one.
+# A picture jump: CUT_PICTURE_RATIO times the clip's median change and CUT_SPIKE times the changes CUT_SPIKE_GAP
+# frames before and after it, so motion that starts and goes on is not one. It is a cut when it changes the picture
+# by CUT_GREY_ALONE grey levels, or by CUT_GREY_WITH_CAMERA with a jump of the measured camera no more than
+# CUT_NEAR frames away (below that it is flicker in a nearly still clip).
 CUT_STEP_RATIO, CUT_TURN_DEG, CUT_PICTURE_RATIO, CUT_NEAR, CUT_SPIKE, CUT_SPIKE_GAP = 12.0, 10.0, 5.0, 3, 3.0, 2
+CUT_GREY_WITH_CAMERA, CUT_GREY_ALONE = 1.0, 6.0
 
 
 def picture_steps(video: Path) -> np.ndarray:
@@ -36,7 +38,7 @@ def picture_steps(video: Path) -> np.ndarray:
 
 
 def find_cut(cam_c2w: np.ndarray, video: Path) -> str | None:
-    """Where the clip cuts to another shot, or None when it is one shot."""
+    """Where the clip has a cut, detected from jumps of the picture and of the measured camera; None when none is."""
     poses = np.asarray(cam_c2w, dtype=np.float64)
     steps = np.linalg.norm(np.diff(poses[:, :3, 3], axis=0), axis=1)
     relative = np.einsum("nij,nik->njk", poses[:-1, :3, :3], poses[1:, :3, :3])
@@ -53,8 +55,11 @@ def find_cut(cam_c2w: np.ndarray, video: Path) -> str | None:
     spike = picture >= CUT_SPIKE * around
     pose_jumps = np.flatnonzero(over(steps, CUT_STEP_RATIO) | (turns >= CUT_TURN_DEG))
     for at in np.flatnonzero(over(picture, CUT_PICTURE_RATIO) & spike):
-        if len(pose_jumps) and np.abs(pose_jumps - at).min() <= CUT_NEAR:
-            return f"a cut between frames {at} and {at + 1}: the picture and the measured camera both jump there"
+        camera = len(pose_jumps) and np.abs(pose_jumps - at).min() <= CUT_NEAR
+        if camera and picture[at] >= CUT_GREY_WITH_CAMERA:
+            return f"a cut between frames {at} and {at + 1}: picture and camera jump"
+        if picture[at] >= CUT_GREY_ALONE:
+            return f"a cut between frames {at} and {at + 1}: picture jumps"
     return None
 
 
@@ -261,7 +266,7 @@ class Ingestor:
             cut = find_cut(arrays["cam_c2w"], video)
         if not self._passes("one shot", {"has_intrinsics": has_intrinsics}, [cut] if cut else []):
             return self._reject(node_id, attempt,
-                                [f"the clip has {cut}; a training clip is one continuous shot"])
+                                [f"{cut}; a training clip must be one continuous shot"])
         return {"metadata": {"frames": info.frames, "fps": info.fps, "width": info.width,
                              "height": info.height, "duration": info.duration,
                              "turns": len(annotation["turns"]), "has_intrinsics": has_intrinsics},

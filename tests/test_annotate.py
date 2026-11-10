@@ -74,7 +74,7 @@ def test_the_result_carries_the_cut_verdict_for_the_clip_and_its_pose(env, monke
 
     def found(cam_c2w, video):
         seen.append((cam_c2w.shape, video.suffix))
-        return "a cut between frames 23 and 24: the picture and the measured camera both jump there"
+        return "a cut between frames 23 and 24: picture and camera jump"
 
     monkeypatch.setattr(annotate, "find_cut", found)
     _, by = run(q, caller, [{"video": "a.mp4"}])

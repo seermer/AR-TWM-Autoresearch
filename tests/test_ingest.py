@@ -363,26 +363,43 @@ def _joined(path, at=57, n=120):
     return path
 
 
-def test_a_cut_is_a_pose_jump_and_a_picture_jump_together(tmp_path):
+def _stepped(path, add, share=1.0):
+    """A slowly drifting picture whose first `share` of columns gets `add` grey levels brighter from frame 57 on:
+    one jump of about `add * share` grey levels between frames 56 and 57."""
+    import subprocess
+    import numpy as np
+    x = np.arange(320)
+    frames = np.stack([np.repeat((127 + 10 * np.sin((x + 0.5 * n) / 30.0))[None, :], 180, axis=0) for n in range(120)])
+    frames[57:, :, :int(320 * share)] += add
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "gray", "-s", "320x180",
+                    "-r", "24", "-i", "-", "-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv420p", str(path)],
+                   input=np.round(frames).astype(np.uint8).tobytes(), check=True)
+    return path
+
+
+def test_a_cut_is_a_large_picture_jump_or_a_smaller_one_with_a_camera_jump(tmp_path):
     import numpy as np
     from ar_kernel.data.ingest import find_cut
     one_shot = _joined(tmp_path / "one.mp4", at=0)
-    joined = _joined(tmp_path / "joined.mp4")
+    joined = _joined(tmp_path / "joined.mp4")                 # another picture: a jump of tens of grey levels
+    small = _stepped(tmp_path / "small.mp4", 3)               # about 3 grey levels
+    flicker = _stepped(tmp_path / "flicker.mp4", 1, 0.6)      # under 1 grey level
     jumped = _path()
     jumped[57:, 2, 3] += 1.0
     turned = _path()
     c, s = np.cos(np.radians(40)), np.sin(np.radians(40))
     turned[57:, :3, :3] = [[c, 0, s], [0, 1, 0], [-s, 0, c]]
-    still = np.tile(np.eye(4), (120, 1, 1))
-    assert find_cut(_path(), one_shot) is None
-    assert find_cut(jumped, one_shot) is None                 # the camera estimate jumps, the picture does not
-    assert find_cut(_path(), joined) is None                  # the picture jumps, the camera does not
-    assert find_cut(still, joined) is None                    # a camera that never moves has no jump
-    assert find_cut(jumped, joined).startswith("a cut between frames 56 and 57")
-    assert find_cut(turned, joined).startswith("a cut between frames 56 and 57")
     late = _path()
     late[61:, 2, 3] += 1.0                                    # four frames after the picture jump
-    assert find_cut(late, joined) is None
+    both = "a cut between frames 56 and 57: picture and camera jump"
+    assert find_cut(_path(), one_shot) is None
+    assert find_cut(jumped, one_shot) is None                 # the camera estimate jumps, the picture does not
+    assert find_cut(_path(), joined) == "a cut between frames 56 and 57: picture jumps"
+    assert find_cut(jumped, joined) == find_cut(turned, joined) == both
+    assert find_cut(_path(), small) is None                   # too small to count alone
+    assert find_cut(jumped, small) == find_cut(turned, small) == both
+    assert find_cut(late, small) is None
+    assert find_cut(jumped, flicker) is None                  # flicker, even with a camera jump
 
 
 def test_motion_that_starts_and_goes_on_is_not_a_cut(tmp_path):
@@ -412,8 +429,8 @@ def test_a_clip_with_a_cut_is_rejected(tmp_path):
     np.savez(candidate.pose, cam_c2w=poses.astype(np.float32))
     [result] = ing.ingest([candidate], node_id="n1", attempt=1)
     assert not result.accepted
-    assert result.reasons == ["the clip has a cut between frames 56 and 57: the picture and the measured camera "
-                              "both jump there; a training clip is one continuous shot"]
+    assert result.reasons == ["a cut between frames 56 and 57: picture and camera jump; "
+                              "a training clip must be one continuous shot"]
 
 
 import json
