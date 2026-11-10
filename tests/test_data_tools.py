@@ -303,7 +303,7 @@ def test_register_names_are_openai_safe():
     import re
     from ar_kernel.tools.data_tools import register_data_tools
     from ar_kernel.tools.server import ToolKit, new_mcp
-    mcp = new_mcp()
+    mcp = new_mcp(None)
     register_data_tools(mcp, ToolKit(None, "."), None)
     names = [t.name for t in asyncio.run(mcp.list_tools())]
     assert len(names) == 6 and all(re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", n) for n in names)
@@ -384,7 +384,7 @@ def test_recipe_and_dataset_numbers_are_typed():
     import asyncio
     from ar_kernel.tools.data_tools import register_data_tools
     from ar_kernel.tools.server import ToolKit, new_mcp
-    mcp = new_mcp()
+    mcp = new_mcp(None)
     register_data_tools(mcp, ToolKit(None, "."), None)
     listed = {t.name: t.input_schema for t in asyncio.run(mcp.list_tools())}
     assert listed["recipe_check"]["properties"]["recipe"]["additionalProperties"] == {

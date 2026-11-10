@@ -385,6 +385,23 @@ def test_a_cut_is_a_pose_jump_and_a_picture_jump_together(tmp_path):
     assert find_cut(late, joined) is None
 
 
+def test_motion_that_starts_and_goes_on_is_not_a_cut(tmp_path):
+    """A camera that holds nearly still, then moves to the end: both signals rise far above their medians."""
+    import subprocess
+    import numpy as np
+    from ar_kernel.data.ingest import find_cut
+    x = np.arange(320)
+    shift = np.concatenate([np.arange(80) * 0.25, 20 + np.arange(1, 41) * 4.0])      # pixels moved by each frame
+    frames = np.stack([np.repeat((127 + 100 * np.sin((x + s) / 9.0))[None, :], 180, axis=0) for s in shift])
+    video = tmp_path / "onset.mp4"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "gray", "-s", "320x180",
+                    "-r", "24", "-i", "-", "-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv420p", str(video)],
+                   input=frames.astype(np.uint8).tobytes(), check=True)
+    poses = np.tile(np.eye(4), (120, 1, 1))
+    poses[:, 0, 3] = shift * 0.01
+    assert find_cut(poses, video) is None
+
+
 def test_a_clip_with_a_cut_is_rejected(tmp_path):
     import numpy as np
     ing = _ingestor(tmp_path)

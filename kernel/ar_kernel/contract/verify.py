@@ -122,7 +122,7 @@ class ContractHarness:
         return self.services.socket_dir
 
     def start(self) -> None:
-        kit, mcp = ToolKit(self.registry, self.run_dir), new_mcp()
+        kit, mcp = ToolKit(self.registry, self.run_dir), new_mcp(self.registry)
         register_data_tools(mcp, kit, _MockData())
         register_snapshot_tool(mcp, kit, self.snapshots)
         register_hf_tools(mcp, kit, _MockHf())

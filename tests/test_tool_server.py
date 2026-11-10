@@ -20,7 +20,7 @@ from ar_kernel.tools.server import ToolError, ToolKit, build_tool_app, new_mcp
 def _server(tmp_path):
     reg = TokenRegistry()
     kit = ToolKit(reg, tmp_path / "run")
-    mcp = new_mcp()
+    mcp = new_mcp(reg)
 
     @mcp.tool(name="echo_caller")
     async def echo_caller(word: str, ctx: Context) -> dict:
@@ -354,6 +354,26 @@ def test_a_call_is_a_request_span_under_the_attempt_and_a_work_span_under_it(tmp
     [(work, work_end)] = [c for c in children if c[0]["name"] == "tool.t"]
     assert work_end["status"] == "ok" and telemetry_payload(run, work_end["output"]) == {"done": 1}
     assert "db.write" in [c[0]["name"] for c in children]                  # the activity row
+    assert tree.check(tree.load(run)) == []
+
+
+def test_a_call_the_server_refuses_before_the_tool_runs_is_a_refused_request(tmp_path):
+    from mcp.server.mcpserver.exceptions import ToolError as MCPToolError
+    kit, caller, ctx, attempt, run, spans = _traced(tmp_path)
+    mcp = new_mcp(kit.registry)
+
+    @mcp.tool(name="echo")
+    async def echo(word: str, ctx: Context) -> dict:
+        return await kit.call(ctx, "echo", {"word": word}, lambda c: {"word": word})
+
+    for name, args in (("echo", {"word": {"not": "text"}}), ("no_such_tool", {})):
+        with pytest.raises(MCPToolError):
+            asyncio.run(mcp.call_tool(name, args, ctx))
+    got = [(s["parent"], telemetry_payload(run, s["inputs"]), e["status"], telemetry_payload(run, e["output"])["error"])
+           for s, e, _ in spans()]
+    assert [g[:3] for g in got] == [(attempt.id, {"tool": "echo", "args": {"word": {"not": "text"}}}, "refused"),
+                                    (attempt.id, {"tool": "no_such_tool", "args": {}}, "refused")]
+    assert "word" in got[0][3] and "no_such_tool" in got[1][3]
     assert tree.check(tree.load(run)) == []
 
 

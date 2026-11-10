@@ -332,7 +332,7 @@ def test_caption_videos_over_mcp_queues_a_job_and_reports_path_errors(tmp_path):
     from ar_kernel.tools.server import ToolKit, build_tool_app, new_mcp
     reg, q = TokenRegistry(), JobQueue(tmp_path / "run", threading.Lock(), wait_cap_s=5)
     q.register(_MockCaption())
-    kit, mcp = ToolKit(reg, tmp_path / "run"), new_mcp()
+    kit, mcp = ToolKit(reg, tmp_path / "run"), new_mcp(reg)
     register_job_tools(mcp, kit, q)
     register_caption_tool(mcp, kit, q)
     services = RunServices(socket_dir_for(tmp_path / "run"))

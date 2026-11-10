@@ -83,10 +83,31 @@ def publish(caller, name: str, result) -> str:
     return str(STAGING / rel)
 
 
-def new_mcp() -> MCPServer:
-    return MCPServer("ar-kernel-tools",
-                      instructions="Privileged AutoResearcher kernel tools. Paths are container "
-                                   "paths under /workspace; write candidates under /workspace/staging.")
+class KernelMCP(MCPServer):
+    """Records a call the server refuses before the tool runs (arguments that fail validation, an unknown
+    tool) as a refused tool.request; ToolKit records every call that reaches the tool."""
+
+    def __init__(self, registry, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.registry = registry
+
+    async def call_tool(self, name: str, arguments: dict[str, Any], context: Context | None = None):
+        try:
+            return await super().call_tool(name, arguments, context)
+        except _MCPToolError as exc:
+            if not isinstance(exc.__cause__, ToolError):
+                request = getattr(getattr(context, "request_context", None), "request", None)
+                caller = self.registry.lookup(bearer(request.headers.get("authorization")) if request else None)
+                with telemetry.span("tool.request", {"tool": name, "args": arguments},
+                                    parent=caller.span if caller is not None else None) as sp:
+                    sp.status, sp.output = "refused", {"error": str(exc)}
+            raise
+
+
+def new_mcp(registry) -> MCPServer:
+    return KernelMCP(registry, "ar-kernel-tools",
+                     instructions="Privileged AutoResearcher kernel tools. Paths are container "
+                                  "paths under /workspace; write candidates under /workspace/staging.")
 
 
 def build_tool_app(mcp: MCPServer):

@@ -180,7 +180,7 @@ def _agent_visible_texts(tmp_path):
     try:
         for backend in build_gpu_backends(CFG, tmp_path, [0, 1, 2, 3], reg):
             queue.register(backend)
-        kit, mcp = ToolKit(reg, tmp_path), new_mcp()
+        kit, mcp = ToolKit(reg, tmp_path), new_mcp(reg)
         register_data_tools(mcp, kit, _MockData())
         register_hf_tools(mcp, kit, _MockHf())
         register_job_tools(mcp, kit, queue)

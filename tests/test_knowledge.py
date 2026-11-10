@@ -19,7 +19,8 @@ AGENT_TEXT_NEVER_SAYS = ("window", "per_chunk", "prompt_mode", "camera_motion", 
 def _tools(tmp_path):
     queue = JobQueue(tmp_path, threading.Lock(), wait_cap_s=5.0)
     try:
-        kit, mcp = ToolKit(TokenRegistry(), tmp_path), new_mcp()
+        reg = TokenRegistry()
+        kit, mcp = ToolKit(reg, tmp_path), new_mcp(reg)
         register_data_tools(mcp, kit, _MockData())
         register_hf_tools(mcp, kit, _MockHf())
         register_job_tools(mcp, kit, queue)
@@ -93,7 +94,7 @@ def test_nothing_an_agent_reads_speaks_of_training_windows_rounds_or_removed_fie
     try:
         for backend in build_gpu_backends(KernelConfig.load(), tmp_path / "run", [0, 1, 2, 3], reg):
             queue.register(backend)
-        kit, mcp = ToolKit(reg, tmp_path / "run"), new_mcp()
+        kit, mcp = ToolKit(reg, tmp_path / "run"), new_mcp(reg)
         register_gpu_tools(mcp, kit, queue)
         register_locate_tool(mcp, kit, queue)
         gpu_tools = {t.name: t for t in asyncio.run(mcp.list_tools())}

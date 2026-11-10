@@ -718,7 +718,7 @@ def kernel(tmp_path_factory):
             return super().begin(caller, endpoint, body, tool=tool, role=role)
 
     registry, queue = TokenRegistry(), JobQueue(run, threading.Lock(), wait_cap_s=5.0)
-    kit, mcp = ToolKit(registry, run), new_mcp()
+    kit, mcp = ToolKit(registry, run), new_mcp(registry)
     register_data_tools(mcp, kit, _MockData())
     register_snapshot_tool(mcp, kit, NamingStore(run, repo, _MockData().usable))
     register_hf_tools(mcp, kit, _MockHf())

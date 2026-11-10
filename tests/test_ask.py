@@ -136,7 +136,7 @@ def test_live_ask_over_the_tool_socket(tmp_path):
     reg = TokenRegistry()
     caller = reg.issue(node="n1", phase="edit_self", attempt=1, workspace_host=tmp_path,
                        staging_host=tmp_path / "staging")
-    mcp = new_mcp()
+    mcp = new_mcp(reg)
     register_ask_tool(mcp, ToolKit(reg, tmp_path / "run"), Ask(REAL, Upstream.from_env(env, timeout_s=600, wait_s=3),
                                                   CallStore(tmp_path / "run"), Budget(), env["OPENAI_MODEL"]))
     im = Image.new("RGB", (2000, 2000), "white")

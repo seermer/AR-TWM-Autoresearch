@@ -32,7 +32,7 @@ def live(tmp_path):
     repo = AgentsRepo(run / "agents.git")
     root = repo.init(tmp_path / "seed")
     reg = TokenRegistry()
-    mcp = new_mcp()
+    mcp = new_mcp(reg)
     register_snapshot_tool(mcp, ToolKit(reg, run), SnapshotStore(run, repo, _usable))
     services = RunServices(socket_dir_for(run))
     services.start(FastAPI(), build_tool_app(mcp))
@@ -83,6 +83,14 @@ def test_a_recipe_snapshot_is_stored_for_its_attempt(live):
     error, text = _call(services, recipe, {})
     assert not error and snapshot.recipe_snapshot(
         run, "n1", "improve_recipe", 1, json.loads(text)["snapshot_id"])["has_result"] is False
+
+
+def test_a_rationale_that_holds_json_stays_text(live):
+    services, _, run, _, recipe, *_ = live
+    why = '{"lr": "higher, since the data is larger"}'
+    error, text = _call(services, recipe, {"data_commit": KNOWN, "recipe": {"lr": 0.5}, "rationale": why})
+    assert not error, text
+    assert snapshot.recipe_snapshot(run, "n1", "improve_recipe", 1, json.loads(text)["snapshot_id"])["rationale"] == why
 
 
 @pytest.mark.parametrize("args,fragment", [

@@ -102,7 +102,9 @@ def register_snapshot_tool(mcp, kit, store: SnapshotStore) -> None:
             ctx: Context,
             data_commit: Annotated[str | None, Field(description="improve_recipe: the data commit id to train on")] = None,
             recipe: Annotated[dict[str, Any] | None, Field(description="improve_recipe: tunable key -> value")] = None,
-            rationale: Annotated[str | None, Field(description="improve_recipe: why the recipe and data are as they are")] = None) -> dict:
+            # str alone: the MCP server parses a string that holds JSON into JSON for any other type
+            rationale: Annotated[str, Field(description="improve_recipe: why the recipe and data are as they are")] = "") -> dict:
+        rationale = rationale or None
         args = {k: v for k, v in dict(data_commit=data_commit, recipe=recipe, rationale=rationale).items()
                 if v is not None}
         def take(caller) -> dict:

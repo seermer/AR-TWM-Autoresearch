@@ -254,7 +254,8 @@ def test_registration_exposes_only_tools_for_backends_on_the_queue(env):
 
     q.register(Wan22Fake(KernelConfig.load(), run, [0, 1, 4, 5], TokenRegistry(),
                          gpu_memory=lambda g: {i: 100 for i in g}))
-    kit, mcp = ToolKit(TokenRegistry(), run), new_mcp()
+    reg = TokenRegistry()
+    kit, mcp = ToolKit(reg, run), new_mcp(reg)
     register_gpu_tools(mcp, kit, q)
     names = {t.name for t in asyncio.run(mcp.list_tools())}
     assert "rollout_wan22" in names                     # registered backend: the tool appears
@@ -327,7 +328,7 @@ def test_listed_tools_show_only_enabled_tools(tmp_path):
         for b in build_gpu_backends(toggled_cfg(images=False, wan=False, h3=False),
                                     tmp_path / "run", [0, 1, 2, 3], reg):
             q.register(b)
-        kit, mcp = ToolKit(reg, tmp_path / "run"), new_mcp()
+        kit, mcp = ToolKit(reg, tmp_path / "run"), new_mcp(reg)
         register_gpu_tools(mcp, kit, q)
         register_caption_tool(mcp, kit, q)
         tools = {t.name: t for t in asyncio.run(mcp.list_tools())}
@@ -347,7 +348,7 @@ def _listed_tools(tmp_path):
         backends = build_gpu_backends(toggled_cfg(), tmp_path / "run", [0, 1, 2, 3], reg)
         for b in backends:
             q.register(b)
-        kit, mcp = ToolKit(reg, tmp_path / "run"), new_mcp()
+        kit, mcp = ToolKit(reg, tmp_path / "run"), new_mcp(reg)
         register_gpu_tools(mcp, kit, q)
         return {t.name: t for t in asyncio.run(mcp.list_tools())}, {b.name: b for b in backends}
     finally:
@@ -548,7 +549,7 @@ def test_no_tool_description_names_another_generator_or_optional_tool(tmp_path):
     try:
         for b in build_gpu_backends(toggled_cfg(), tmp_path / "run", [0, 1, 2, 3], reg):
             q.register(b)
-        kit, mcp = ToolKit(reg, tmp_path / "run"), new_mcp()
+        kit, mcp = ToolKit(reg, tmp_path / "run"), new_mcp(reg)
         register_gpu_tools(mcp, kit, q)
         register_caption_tool(mcp, kit, q)
         tools = {t.name: t.description for t in asyncio.run(mcp.list_tools())}

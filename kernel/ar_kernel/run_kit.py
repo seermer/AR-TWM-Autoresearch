@@ -100,7 +100,7 @@ def build_run_kit(cfg, run_dir: Path, gpus: list[int], environ, repo) -> RunKit:
                      require_free=require_free, health=health, touch=last.touch)
     for backend in build_gpu_backends(cfg, run_dir, gpus, registry):
         queue.register(backend)
-    kit, mcp = ToolKit(registry, run_dir, health, touch=last.touch), new_mcp()
+    kit, mcp = ToolKit(registry, run_dir, health, touch=last.touch), new_mcp(registry)
     data = DataTools(cfg, run_dir, gpus, gpu_lock, require_free)
     registry.on_revoke(data.forget)
     register_data_tools(mcp, kit, data)

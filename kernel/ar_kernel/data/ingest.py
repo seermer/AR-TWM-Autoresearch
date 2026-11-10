@@ -20,8 +20,10 @@ from .leakage import LeakageChecker
 from .probe import probe_video
 
 SIZE = (960, 544)       # the only frame size ingest takes
-# A cut: a jump of the measured camera and a jump of the picture no more than CUT_NEAR frames apart.
-CUT_STEP_RATIO, CUT_TURN_DEG, CUT_PICTURE_RATIO, CUT_NEAR = 12.0, 10.0, 5.0, 3
+# A cut: a jump of the measured camera and a jump of the picture no more than CUT_NEAR frames apart. A picture
+# jump is also CUT_SPIKE times the changes CUT_SPIKE_GAP frames before and after it, so motion that starts and
+# goes on is not one.
+CUT_STEP_RATIO, CUT_TURN_DEG, CUT_PICTURE_RATIO, CUT_NEAR, CUT_SPIKE, CUT_SPIKE_GAP = 12.0, 10.0, 5.0, 3, 3.0, 2
 
 
 def picture_steps(video: Path) -> np.ndarray:
@@ -45,8 +47,12 @@ def find_cut(cam_c2w: np.ndarray, video: Path) -> str | None:
         median = float(np.median(signal)) if len(signal) else 0.0
         return signal >= ratio * median if median > 0 else np.zeros(len(signal), dtype=bool)
 
+    gap = np.full(CUT_SPIKE_GAP, np.nan)
+    padded = np.concatenate([gap, picture, gap])
+    around = np.fmax(padded[:-2 * CUT_SPIKE_GAP], padded[2 * CUT_SPIKE_GAP:])   # NaN at an edge: the other side
+    spike = picture >= CUT_SPIKE * around
     pose_jumps = np.flatnonzero(over(steps, CUT_STEP_RATIO) | (turns >= CUT_TURN_DEG))
-    for at in np.flatnonzero(over(picture, CUT_PICTURE_RATIO)):
+    for at in np.flatnonzero(over(picture, CUT_PICTURE_RATIO) & spike):
         if len(pose_jumps) and np.abs(pose_jumps - at).min() <= CUT_NEAR:
             return f"a cut between frames {at} and {at + 1}: the picture and the measured camera both jump there"
     return None

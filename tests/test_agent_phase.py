@@ -481,7 +481,7 @@ def test_container_commits_data_through_the_real_tool_server(tmp_path):
     nodes = NodeStore(conn)
     nodes.create("root", None, 0), nodes.set_fields("root", agent_commit=commit), nodes.create("n1", "root", 1)
     reg, queue = TokenRegistry(), JobQueue(run, threading.Lock(), wait_cap_s=5)
-    kit, mcp = ToolKit(reg, run), new_mcp()
+    kit, mcp = ToolKit(reg, run), new_mcp(reg)
     data = DataTools(CFG, run, [0, 1, 2, 3], threading.Lock())
     register_data_tools(mcp, kit, data)
     register_snapshot_tool(mcp, kit, SnapshotStore(run, repo, data.usable))

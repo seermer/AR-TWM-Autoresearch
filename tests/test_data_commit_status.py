@@ -141,7 +141,7 @@ def test_settling_an_unknown_commit_raises(env):
 
 
 def test_only_data_commit_states_the_limit():
-    mcp = new_mcp()
+    mcp = new_mcp(None)
     register_data_tools(mcp, ToolKit(None, CFG.repo_root), DataTools(CFG, CFG.repo_root, [0], threading.Lock()))
     register_snapshot_tool(mcp, ToolKit(None, CFG.repo_root), SnapshotStore(CFG.repo_root, None, lambda c: None))
     tools = {t.name: t for t in asyncio.run(mcp.list_tools())}
@@ -162,7 +162,7 @@ def test_only_data_commit_states_the_limit():
 
 
 def test_without_a_limit_data_commit_states_none():
-    mcp = new_mcp()
+    mcp = new_mcp(None)
     register_data_tools(mcp, ToolKit(None, CFG.repo_root), None)
     text = {t.name: t.description for t in asyncio.run(mcp.list_tools())}["data_commit"]
     assert "new clips" not in text and text.endswith("Returns the commit id, each dataset's weight and clip counts.")
