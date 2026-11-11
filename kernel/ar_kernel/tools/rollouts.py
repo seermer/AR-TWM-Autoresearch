@@ -1,19 +1,9 @@
-"""rollout_alayaworld: clips rendered by AlayaWorld from the agent's own items, through WorldModel's
-turn-based render path (scripts/tools/run_wbench.py, configs/wbench_full.yaml).
-
-The agent writes items (first frame, scene and subject text, seed, per-turn action, event and
-perspective). The kernel stages them in the render script's input schema, pre-encodes their prompts,
-renders them, and publishes each whole clip with its annotation: the item's texts and the frame each
-turn starts on. Nothing the agent sees names that script, its schema or the evaluation.
-
-No pose is published: the renders follow the commanded translation
-but only weakly the commanded turns and orbits, so the commanded camera path is
-not a pose label. It is published as metadata (`commanded_camera`); the agent runs
-annotate_camera (ViGeo) on the clip for the pose it ingests with.
-"""
+"""Render AlayaWorld training clips with turn annotations and commanded-camera metadata.
+Poses require annotate_camera; commands alone are not pose labels."""
 from __future__ import annotations
 
 import json
+from contextlib import closing
 from pathlib import Path
 
 import numpy as np
@@ -224,13 +214,11 @@ class AlayaWorldBackend(GpuJob):
 
     def _node(self, node_id) -> dict:
         """The archive row of a node whose fine-tune can be rendered."""
-        conn = open_db(self.run_dir)
-        try:
-            node = NodeStore(conn).get(node_id)
-        except KeyError:
-            raise ToolError(f"node {node_id!r} is not a node of this run") from None
-        finally:
-            conn.close()
+        with closing(open_db(self.run_dir)) as conn:
+            try:
+                node = NodeStore(conn).get(node_id)
+            except KeyError:
+                raise ToolError(f"node {node_id!r} is not a node of this run") from None
         if node["status"] != "scored" or not node["checkpoint_path"]:
             raise ToolError(f"node {node_id!r} has no fine-tune to render (status {node['status']}); give a "
                             f"scored node other than the root, or omit `node` for the released model")
@@ -312,11 +300,7 @@ class AlayaWorldBackend(GpuJob):
 
 
 class Wan22Backend(GpuJob):
-    """rollout_wan22: training clips from Wan2.2 TI2V-5B, the official
-    code in its own env. Text-to-video, or image-to-video when the item
-    carries a first frame (the bridge fits it to 1280x704). Every render is 1280x704; the published
-    clip is center-cropped to 1248x704 and carries no pose and no annotation: the agent adds both,
-    like a clip it found itself."""
+    """Wan2.2 TI2V backend: fit inputs to 1280x704 and publish a centered 1248x704 crop without labels."""
     name = tool = "rollout_wan22"
     kind = "rollout"
     generator = "wan2.2-ti2v-5b"
@@ -373,10 +357,7 @@ class Wan22Backend(GpuJob):
 
 
 class Ltx25Backend(GpuJob):
-    """rollout_ltx25: training clips from LTX-2.5 (Lightricks'
-    ltx-pipelines in its own env): the dev model (TI2VidTwoStagesPipeline + the distilled LoRA
-    for stage 2). One GPU per worker, `workers` of them. The clip carries no pose and no annotation,
-    like Wan's."""
+    """LTX-2.5 dev/two-stage backend with the distilled second-stage LoRA; publish clips without pose or annotation."""
     name = tool = "rollout_ltx25"
     kind = "rollout"
     config_key = "generators.ltx25"
@@ -433,13 +414,11 @@ class Ltx25Backend(GpuJob):
 
     def finish(self, job, item, outputs, info, out):
         a = job.args
-        silent = out / f"{item['index']}.silent.mp4"
-        subproc.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(outputs["video"]), "-an",
-                     "-c:v", "copy", str(silent)], check=True)
-        info = probe_video(silent)
+        video = outputs["video"]
+        info = probe_video(video)
         if (info.width, info.height) != (a["width"], a["height"]):
             raise ValueError(f"rendered clip is {info.width}x{info.height}, not {a['width']}x{a['height']}")
         check_published(info)
         if info.frames != a["frames"]:
             raise ValueError(f"rendered clip has {info.frames} frames, not {a['frames']}")
-        return {"video": silent, "prompt": item["prompt"], "frames": info.frames}
+        return {"video": video, "prompt": item["prompt"], "frames": info.frames}

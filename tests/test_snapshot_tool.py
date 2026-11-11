@@ -1,5 +1,5 @@
 """The snapshot tool over the socket, as a container calls it."""
-from conftest import client_dir
+from conftest import client_dir, git_file
 import asyncio
 import json
 
@@ -60,7 +60,7 @@ def test_an_edit_snapshot_commits_the_tree_under_an_attempt_ref(live):
     (agent / "agent" / "entry.py").write_text("v2\n")
     error, text = _call(services, edit, {})
     sha = json.loads(text)["snapshot_id"]
-    assert not error and repo.read_file(sha, "agent/entry.py") == "v2\n"
+    assert not error and git_file(repo, sha, "agent/entry.py") == "v2\n"
     assert snapshot.edit_snapshot(repo, "n1", "edit_self", 2, sha) == sha
     assert snapshot.edit_snapshot(repo, "n1", "edit_self", 1, sha) is None
     assert [(r["kind"], r["name"]) for r in activity(open_db(run), "n1")] == [("snapshot", sha), ("tool", "snapshot")]

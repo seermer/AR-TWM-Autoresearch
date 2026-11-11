@@ -44,9 +44,9 @@ class AnnotateBackend(GpuJob):
         pose = outputs["pose"]
         frames = probe_video(Path(item["video"])).frames
         with np.load(pose) as z:
-            n = len(z["cam_c2w"])
+            cam_c2w = z["cam_c2w"]
+        n = len(cam_c2w)
         if n != frames:
             raise ValueError(f"pose has {n} frames, the video {frames}")
-        with np.load(pose) as z:
-            cut = find_cut(z["cam_c2w"], Path(item["video"]))
+        cut = find_cut(cam_c2w, Path(item["video"]))
         return {"pose": pose, "frames": frames, "intrinsics": info["intrinsics"], "cut": cut}

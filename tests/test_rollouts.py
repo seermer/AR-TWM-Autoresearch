@@ -1,8 +1,4 @@
-"""rollout_alayaworld: case/config writers, submit checks, finish (CPU), the real produce with a
-fake worker, plus one real AlayaWorld gpu smoke. Also rollout_wan22 (Wan2.2 TI2V-5B):
-submit checks, finish (crop/probe, CPU), the real produce with a fake worker, plus one real Wan
-gpu smoke. And rollout_ltx25 (LTX-2.5 dev): submit checks, the host-RAM worker rule,
-finish (audio strip/probe, CPU), the real produce with a fake worker, plus one real gpu smoke."""
+"""Rollout admission, CPU finishing, fake workers, and opt-in GPU checks."""
 from conftest import NAMED, job_result, job_folder
 import copy
 import json
@@ -1098,7 +1094,7 @@ def test_ltx_produces_and_publishes_a_silent_24fps_candidate_with_its_prompt(ltx
         import subprocess
         streams = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0",
                                   str(path)], capture_output=True, text=True, check=True).stdout.split()
-        assert streams == ["video"]                      # the fake's audio track is stripped
+        assert streams == ["video"]
         assert not list((staging / "rollouts" / job).glob("*.json"))
         wk = item["worker"]
         assert wk["weights"] == str(REAL.repo_root / REAL.get("generators.ltx25.weights"))

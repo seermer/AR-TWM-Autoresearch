@@ -138,6 +138,12 @@ def client_dir(services) -> Path:
     return Path(f"/proc/{os.getpid()}/fd/{services._fd}")
 
 
+def git_file(repo, commit, path):
+    result = subprocess.run(["git", "--git-dir", str(repo.path), "show", f"{commit}:{path}"],
+                            capture_output=True)
+    return result.stdout.decode() if result.returncode == 0 else None
+
+
 def telemetry_records(run) -> list[dict]:
     """Every telemetry record of the run, in file order (one writer's segments in order)."""
     out = []

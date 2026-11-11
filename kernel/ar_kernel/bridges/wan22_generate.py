@@ -1,19 +1,4 @@
-"""rollout_wan22 worker (runs in the gen-wan22 conda-prefix env): official Wan2.2 code, loaded
-once, renders each item's shard with the ti2v-5B pipeline (text-to-video, or image-to-video when
-the item carries a first frame).
-
-python wan22_generate.py --job <work>/job.json (bridges/protocol.py): one worker per GPU group; per item
-<out>/<index>.mp4. Job file: paths.repo (the Wan2.2 checkout), paths.ckpt_dir, args.frames,
-config.extra_args (offload_model, t5_cpu; both default true). The model loads once per worker.
-
-Imports and the constructor/generate()/save_video() arguments are copied from generate.py's ti2v
-branch at the commit pinned in configs/kernel.yaml (generators.wan22.commit); Wan22Backend refuses
-to run against a clone that has moved off it.
-
-A first frame is center-cropped and resized to exactly 1280x704 first (fit_first_frame): WanTI2V.i2v
-keeps the input image's own aspect within the 1280*704 area (best_output_size), so a 1280x720
-generate_images frame would otherwise render at 1248x704 and a portrait one at 800x1088.
-"""
+"""Generate Wan2.2 TI2V clips with one pipeline per worker, fitting first frames to 1280x704."""
 from __future__ import annotations
 
 import gc
@@ -70,8 +55,7 @@ def main() -> int:
                                      "peak_allocated_gib": round(torch.cuda.max_memory_allocated() / 2**30, 2),
                                      "peak_reserved_gib": round(torch.cuda.max_memory_reserved() / 2**30, 2)}
         finally:
-            # the 24 GB card has no headroom at 1280x704x121 (peak ~22.9 GiB): the previous clip
-            # (1.3 GB fp32 on the GPU) must not survive into the next item
+            # Release GPU output tensors before generating the next clip.
             del video
             gc.collect()
             torch.cuda.empty_cache()

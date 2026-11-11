@@ -58,6 +58,22 @@ def test_export_keeps_only_the_snapshot(tmp_path):
     assert str(tmp_path) not in "".join(p.read_text() for p in snap.glob("*.json"))
 
 
+def test_training_video_export_keeps_its_budget_across_datasets(tmp_path, monkeypatch):
+    from panel import media, views
+    from simple_panel.export import MAX_VIDEOS, _training_videos
+    run = views.Run(make_run(tmp_path))
+    manifest = {"datasets": {"a": {"clips": ["clip1"] * 2},
+                             "b": {"clips": ["missing"] + ["clip1"] * (MAX_VIDEOS + 5)},
+                             "c": {"clips": ["clip1"] * (MAX_VIDEOS + 5)}}}
+    monkeypatch.setattr(media, "_manifest", lambda *args: (None, manifest))
+    snapshot = tmp_path / "snapshot"
+    videos = _training_videos(run, "n1", snapshot, "node", lambda text: text)
+    assert len(videos) == MAX_VIDEOS
+    assert [v["label"].split(" · ")[0] for v in videos] == ["a"] * 2 + ["b"] * (MAX_VIDEOS - 3) + ["c"]
+    assert all((snapshot / v["file"]).is_file() for v in videos)
+    assert len(list(snapshot.rglob("*.mp4"))) == MAX_VIDEOS
+
+
 def test_token_split():
     assert _split({"prompt_tokens": 100, "completion_tokens": 7, "prompt_tokens_details": {"cached_tokens": 60}}) \
         == {"cached": 60, "uncached": 40, "output": 7}

@@ -1,8 +1,7 @@
-"""Training data, eval and file views (tabs 6, 8 and 11)."""
+"""Training data, evaluation, and file views."""
 from __future__ import annotations
 
 import json
-import math
 import re
 import zipfile
 
@@ -34,14 +33,12 @@ def training_data(run: Run, node_id: str) -> dict:
             "ingests": ingest_calls(run, node_id), "staging": staging_files(run, node_id)}
 
 
-def clips(run: Run, node_id: str, dataset: str, page: int = 0, page_size: int = 24) -> dict:
+def clips(run: Run, node_id: str, dataset: str, limit: int | None = None) -> list[dict]:
     _, manifest = _manifest(run, node_id)
     ids = ((manifest.get("datasets") or {}).get(dataset) or {}).get("clips", [])
-    pages = max(1, math.ceil(len(ids) / page_size))
-    page = min(max(0, int(page or 0)), pages - 1)
     leakage = leakage_index(run)
-    rows = [clip_detail(run, cid, leakage) for cid in ids[page * page_size:(page + 1) * page_size]]
-    return {"rows": [r for r in rows if r], "total": len(ids), "pages": pages}
+    rows = [clip_detail(run, cid, leakage) for cid in ids[:limit]]
+    return [r for r in rows if r]
 
 
 def clip_detail(run: Run, clip_id: str, leakage: dict | None = None) -> dict | None:

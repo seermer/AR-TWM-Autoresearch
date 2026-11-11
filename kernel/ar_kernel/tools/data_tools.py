@@ -5,6 +5,7 @@ import json
 import re
 import threading
 import uuid
+from contextlib import closing
 from pathlib import Path
 from typing import Annotated, Any, TypedDict
 
@@ -49,8 +50,7 @@ class DataTools:
         self._passed: dict[str, set] = {}          # token -> (recipe, data commit) recipe_check passed
 
     def _leakage_checker(self) -> LeakageChecker:
-        """Built on first ingest and shared: it hashes every WBench case image (7.5 s warm,
-        72 s cold). check() only reads it, so concurrent ingests may share it."""
+        """Lazily build one shared, read-only held-out image index under the initialization lock."""
         with self._leakage_lock:
             if self._leakage is None:
                 self._leakage = LeakageChecker(self.cfg)
@@ -114,12 +114,9 @@ class DataTools:
             built.append(Candidate(video=host["video"], annotation=host["annotation"], pose=host["pose"],
                                    derived_from=c["derived_from"], named={k: c[k] for k in host}))
         refuse(caller, "data_ingest", candidates, bad)
-        conn = open_db(self.run_dir)
-        try:
+        with closing(open_db(self.run_dir)) as conn:
             ingestor = Ingestor(self.cfg, self.run_dir, conn, self._leakage_checker())
             results = ingestor.ingest(built, node_id=caller.node, attempt=caller.attempt)
-        finally:
-            conn.close()
         if results and all(r.checker_failed for r in results):     # a counted tool error, not the agent's
             raise RuntimeError(f"the clip checker failed on every candidate: {results[0].reasons[0]}")
         rows = [{"index": i, "video": c["video"], "accepted": r.accepted, "clip_id": r.clip_id,
@@ -130,12 +127,9 @@ class DataTools:
                 "result_file": publish(caller, f"data_ingest-{uuid.uuid4().hex[:8]}", rows)}
 
     def query(self, caller, filter: dict) -> dict:
-        conn = open_db(self.run_dir)
-        try:
+        with closing(open_db(self.run_dir)) as conn:
             clips = pool_clips(conn)
             usage = scores_by_clip(conn)
-        finally:
-            conn.close()
         wanted = set(clip_id_list(caller, filter.get("clip_ids")))
         in_commit = None
         if filter.get("data_commit"):
@@ -157,8 +151,7 @@ class DataTools:
 
     def fetch(self, caller, clip_ids) -> dict:
         wanted = list(dict.fromkeys(clip_id_list(caller, clip_ids)))
-        conn = open_db(self.run_dir)
-        try:
+        with closing(open_db(self.run_dir)) as conn:
             pool = {clip["clip_id"]: clip for clip in pool_clips(conn)}
             blobs = BlobStore(self.run_dir, conn)
             for clip in (pool[i] for i in wanted if i in pool):
@@ -168,8 +161,6 @@ class DataTools:
                     data = Path(blob).read_bytes()
                     fs.place_bytes(data, caller.staging_host, f"pool_clips/{rel}")
                     telemetry.keep(str(STAGING / "pool_clips" / rel), data, "handed")
-        finally:
-            conn.close()
         return {"folder": str(STAGING / "pool_clips"), "copied": sum(i in pool for i in wanted),
                 "not_in_pool": [i for i in wanted if i not in pool]}
 
@@ -184,8 +175,7 @@ class DataTools:
                                     "pass it in `datasets` as it should be")
                 inherited[name] = d
         datasets = {**inherited, **datasets}
-        conn = open_db(self.run_dir)
-        try:
+        with closing(open_db(self.run_dir)) as conn:
             store = CommitStore(conn, BlobStore(self.run_dir, conn), ClipStore(conn))
             try:
                 commit_id, new = store.commit(datasets, message, node_id=caller.node, attempt=caller.attempt,
@@ -196,21 +186,17 @@ class DataTools:
             except CommitError as exc:
                 raise ToolError(str(exc)) from exc
             stats = dataset_stats(store.manifest(commit_id), ClipStore(conn).all())
-        finally:
-            conn.close()
         return {"commit_id": commit_id, "datasets": stats, "new_clips": new}
 
     def usable(self, commit_id: str) -> dict:
         """The data commit's row; ToolError when it is unknown, obsolete or failed."""
-        conn = open_db(self.run_dir)
-        try:
-            return CommitStore(conn, None, None).usable(commit_id)
-        except KeyError:
-            raise ToolError(f"unknown data commit {commit_id!r}") from None
-        except CommitError as exc:
-            raise ToolError(str(exc)) from None
-        finally:
-            conn.close()
+        with closing(open_db(self.run_dir)) as conn:
+            try:
+                return CommitStore(conn, None, None).usable(commit_id)
+            except KeyError:
+                raise ToolError(f"unknown data commit {commit_id!r}") from None
+            except CommitError as exc:
+                raise ToolError(str(exc)) from None
 
     def forget(self, token: str) -> None:
         self._passed.pop(token, None)
@@ -231,21 +217,20 @@ class DataTools:
 
     def _gate(self, caller, recipe: dict, data_commit: str) -> list[str]:
         scratch = caller.workspace_host.parent / "recipe_check" / uuid.uuid4().hex
-        conn = open_db(self.run_dir)
         try:
-            store = CommitStore(conn, BlobStore(self.run_dir, conn), ClipStore(conn))     # callers checked usable
-            parent_commit = _parent_commit(conn, caller.node)
-            if not self.gpu_lock.acquire(blocking=False):       # the describe step is a GPU job
-                raise ToolError("a GPU job is running and the check needs the GPUs: "
-                                "call again once your jobs have finished (job_wait).")
-            try:
-                self.require_free(caller)
-                failures = Gate(self.cfg, store).check(
-                    recipe, data_commit, parent_commit, caller.node, scratch, self.run_dir, self.gpus)
-            finally:
-                self.gpu_lock.release()
+            with closing(open_db(self.run_dir)) as conn:
+                store = CommitStore(conn, BlobStore(self.run_dir, conn), ClipStore(conn))     # callers checked usable
+                parent_commit = _parent_commit(conn, caller.node)
+                if not self.gpu_lock.acquire(blocking=False):       # the describe step is a GPU job
+                    raise ToolError("a GPU job is running and the check needs the GPUs: "
+                                    "call again once your jobs have finished (job_wait).")
+                try:
+                    self.require_free(caller)
+                    failures = Gate(self.cfg, store).check(
+                        recipe, data_commit, parent_commit, caller.node, scratch, self.run_dir, self.gpus)
+                finally:
+                    self.gpu_lock.release()
         finally:
-            conn.close()
             fs.rmtree(scratch, ignore_errors="a check's scratch folder")
         telemetry.decision("recipe.gate", {"recipe": recipe, "data_commit": data_commit, "parent_commit": parent_commit},
                            ["pass", "refuse"], "refuse" if failures else "pass", "\n".join(failures) or "no findings")

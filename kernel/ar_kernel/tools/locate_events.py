@@ -1,9 +1,4 @@
-"""locate_events: when each of a clip's events happens, from a local vision model, as a GPU job.
-
-The model answers one question per event and frame, at every frame of the clip on the training grid (24
-a second). Each job runs a bridge (bridges/locate_vllm.py) that starts `vllm serve` (the `captioner` model, serving
-images), asks about every frame of every clip, and always stops it again.
-"""
+"""Locate clip events on a 24-fps grid through a fresh local vision server per job."""
 from __future__ import annotations
 
 import threading
@@ -16,10 +11,8 @@ from .. import fs, telemetry
 from ..data.annotation import FPS
 from ..data.probe import readable_video
 from ..subproc import free_port
-from .captioner import clip_host_path, container_path, input_error, stage_clip
-from .context import PathError
-from .gpu_jobs import items_schema
-from .jobs import job_dir
+from .context import PathError, clip_host_path, container_path, input_error, stage_clip
+from .gpu_jobs import clip_result, items_schema, prepare_media, run_bridge
 from .server import ToolError, listed, refuse
 from .vllm_server import gpu_memory_mib, serve_command
 
@@ -85,12 +78,7 @@ class LocateEventsBackend:
 
     def run(self, job, cancel: threading.Event, report) -> dict:
         c = self.cfg.get("captioner")
-        caller = self.registry.lookup(job.token)
-        if caller is None:
-            raise RuntimeError("the phase that submitted this job has ended")
-        work = job_dir(self.run_dir, job)
-        media = work / "media"
-        fs.mkdir(media)
+        caller, work, media = prepare_media(self, job)
         results: dict[str, dict] = {}
         items = []
         for i, item in enumerate(job.args["items"]):
@@ -112,7 +100,6 @@ class LocateEventsBackend:
         ran = {"ready": None, "gpu_memory_mib": None, "gpu_memory_released": None}
         try:
             if items:
-                from .gpu_jobs import run_bridge
                 port = free_port()
                 spec = {"bridge": BRIDGE, "env": c["env"], "job": {
                     "serve": {"argv": self.server_command(port), "env": {"HF_HUB_OFFLINE": "1"}, "port": port},
@@ -129,10 +116,7 @@ class LocateEventsBackend:
                     results[job.args["items"][i]["video"]] = {"error": r["error"]} if "index" in r else r
         finally:
             fs.rmtree(media, ignore_errors="the job's own links")
-        ready = ran["ready"]
-        return {"clips": {item["video"]: results[item["video"]] for item in job.args["items"]},
-                "load_s": ready["info"]["load_s"] if ready else None,
-                "gpu_memory_mib": ran["gpu_memory_mib"], "gpu_memory_released": ran["gpu_memory_released"]}
+        return clip_result({item["video"]: results[item["video"]] for item in job.args["items"]}, ran)
 
 
 def submit(q, caller, items) -> dict:

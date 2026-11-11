@@ -41,10 +41,9 @@ class NodeStore:
             (float(score), json.dumps(list(metric_set)), json.dumps(metrics), node_id), node_id)
 
     def set_fields(self, node_id: str, **fields: object) -> None:
-        allowed = {"agent_commit", "data_commit", "recipe_hash", "resolved_config_path",
+        allowed = {"agent_commit", "data_commit", "resolved_config_path",
                    "checkpoint_path", "lora_rank", "lora_alpha", "subtree_value",
-                   "phase_timings", "rationale_path", "recipe_path",
-                   "attempt_counts", "error"}
+                   "phase_timings", "attempt_counts", "error"}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"unknown node fields: {sorted(unknown)}")
@@ -52,7 +51,7 @@ class NodeStore:
             self._update(f"UPDATE nodes SET {key}=? WHERE node_id=?", (value, node_id), node_id)
 
     def _update(self, sql: str, params: tuple, node_id: str) -> None:
-        """An UPDATE matching no row would lose the write silently, so it raises."""
+        """Update an existing node; raise when its row is missing."""
         if write(self.conn, sql, params) == 0:
             raise KeyError(f"no node {node_id!r}")
 

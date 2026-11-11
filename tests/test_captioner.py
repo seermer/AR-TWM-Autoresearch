@@ -147,20 +147,22 @@ def test_a_clip_the_server_rejects_is_a_per_clip_error_not_a_failed_job(make):
     assert out["summary"]["failed"] == 1 and out["summary"]["errors"][0]["item"] == "/workspace/bad.mp4"
 
 
-def test_a_clip_swapped_for_a_link_after_submit_is_a_per_clip_error(make, tmp_path):
+@pytest.mark.parametrize("paths", [["a.mp4", "b.mp4"], ["b.mp4", "a.mp4"]])
+def test_a_clip_swapped_for_a_link_after_submit_is_a_per_clip_error(make, tmp_path, paths):
     q, caller, ws, _ = make()
     (ws / "a.mp4").write_bytes(b"ok")
     (ws / "b.mp4").write_bytes(b"ok")
     outside = tmp_path / "secret.mp4"
     outside.write_bytes(b"secret")
     with q.gpu_lock:                                  # hold the job queued while the agent swaps the file
-        job = submit(q, caller, ["a.mp4", "b.mp4"], "Caption.")["job_id"]
+        job = submit(q, caller, paths, "Caption.")["job_id"]
         (ws / "b.mp4").unlink()
         (ws / "b.mp4").symlink_to(outside)
     out = q.wait(caller, job, 120)
     assert out["state"] == "done", out
     assert "caption" in job_result(out)["clips"]["/workspace/a.mp4"]
     assert "escapes its mount" in job_result(out)["clips"]["/workspace/b.mp4"]["error"]
+    assert list(job_result(out)["clips"]) == [f"/workspace/{p}" for p in paths]
 
 
 def test_a_parent_directory_swapped_for_a_link_after_the_check_is_refused(make, tmp_path, monkeypatch):
@@ -171,7 +173,8 @@ def test_a_parent_directory_swapped_for_a_link_after_the_check_is_refused(make, 
     host = tmp_path / "host_videos"
     host.mkdir()
     (host / "a.mp4").write_bytes(b"HOST VIDEO")
-    checked = captioner.clip_host_path
+    from ar_kernel.tools import context
+    checked = context.clip_host_path
 
     def check_then_swap(c, path):
         src = checked(c, path)                      # the job's check passes on the real directory
@@ -181,7 +184,7 @@ def test_a_parent_directory_swapped_for_a_link_after_the_check_is_refused(make, 
 
     with q.gpu_lock:                                # submit (and its check) before the swap hook
         job = submit(q, caller, ["clips/a.mp4"], "Caption.")["job_id"]
-        monkeypatch.setattr(captioner, "clip_host_path", check_then_swap)
+        monkeypatch.setattr(context, "clip_host_path", check_then_swap)
     out = q.wait(caller, job, 120)
     assert out["state"] == "done", out
     assert "not inside this caller's workspace" in job_result(out)["clips"]["/workspace/clips/a.mp4"]["error"]

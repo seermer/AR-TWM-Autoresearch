@@ -1,7 +1,4 @@
-# Example stage2b LoRA fine-tune on a standard-format dataset: Videos with one caption each and per-frame camera poses.
-# Derived from configs/stage2b_arsft_lowcompute.yaml; only run.*, data.*, the
-# validation dataset, runtime.text_embed_cache_dir and optimizer lr, warmup_steps and
-# max_steps differ.
+# Stage2b LoRA recipe for standard video datasets with captions and per-frame camera poses.
 run:
   name: finetune_video_caption_camera
   seed: 42
@@ -9,7 +6,7 @@ run:
   log_dir: ./logs/finetune_video_caption_camera
 paths:
   base_transformer: weights/ltx-2.3/ltx-2.3-22b-dev.safetensors
-  # Start from the released v1.1 stage2b checkpoint rather than a stage2a run.
+  # Released v1.1 stage2b checkpoint.
   resume_checkpoint: weights/alaya-world-ar
   history_encoder: weights/alaya-world-ar/history_encoder.pt
   vae: weights/ltx-2.3/ltx-2.3-22b-dev.safetensors
@@ -37,9 +34,7 @@ data:
   sekai_game_jsonl: null
   sekai_game_pose_subdir: null
 sample:
-  # The checkpoint's own resolution. On 4x 24GB cards it peaks at 20.1GB allocated per
-  # rank (416x736: 19.0GB) and a step takes ~30% longer. Both values divisible by the
-  # VAE's 32x spatial factor.
+  # Checkpoint resolution; both dimensions are multiples of the VAE's 32-pixel spatial factor.
   height: 544
   width: 960
   fps: 24.0
@@ -83,8 +78,7 @@ spatial_memory:
   vigeo_device: auto
   vigeo_num_tokens: 1369
   vigeo_stream_chunk_size: 16
-  # 262144 is sized for 80GB cards; ViGeo's KV cache alone then wants ~12GB on top
-  # of the sharded DiT. 65536 is the value validated on 24 GB cards.
+  # Bounded ViGeo KV cache for 24 GB GPU memory budgets.
   vigeo_cache_budget: 65536
   vigeo_single_frame_scale: 1.0
   vigeo_generated_source_pose_mode: aligned_vigeo
@@ -109,8 +103,7 @@ control:
   - 1.0
   action_learning_rate: null
 training:
-  # LoRA, not sft: full-parameter Adam state for a 13B model is 20.8GB per rank
-  # even sharded over five ranks.
+  # LoRA weights are the trainable parameters.
   mode: lora
   adaptive_sigma_shift: true
   adaptive_shift_m_lo: 3.0

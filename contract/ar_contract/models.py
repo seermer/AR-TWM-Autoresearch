@@ -16,11 +16,10 @@ class _Ctx(BaseModel):
 
 
 class EditContext(_Ctx):
-    agent_dir: str = "/agent"
+    pass
 
 
 class RecipeContext(_Ctx):
-    workspace: str = "/workspace"
     node_id: str = ""                                               # the node being built
     clip_pool_size: int = 0                                         # all clips in the archive
     clip_pool_stats: dict[str, Any] = Field(default_factory=dict)   # clips per ingesting node and source

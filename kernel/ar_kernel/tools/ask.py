@@ -1,8 +1,5 @@
-"""ask: one stateless question to the agent's model, with optional images.
-
-The only way an image reaches the model: the gateway refuses images in agent conversations, and
-this tool downscales each image and counts it against the caller's allowance (per phase attempt).
-The call is recorded and charged to the run budget like a gateway call."""
+"""Answer a stateless model question with downscaled images, charged to the run budget.
+Image allowance is per phase attempt; agent conversations cannot carry images."""
 from __future__ import annotations
 
 import asyncio
@@ -19,8 +16,7 @@ from pydantic import Field
 from .. import telemetry
 from ..faults import KernelFault
 from ..gateway.app import upstream_error
-from .captioner import clip_host_path
-from .context import PathError, open_file
+from .context import PathError, clip_host_path, open_file
 from .server import ToolError
 
 ENDPOINT = "/v1/chat/completions"

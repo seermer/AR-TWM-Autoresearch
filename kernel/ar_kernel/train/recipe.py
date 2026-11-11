@@ -5,41 +5,30 @@ import yaml
 
 from .. import fs
 
-TUNABLE_KEYS = frozenset({
-    "optimizer.lr", "optimizer.weight_decay", "optimizer.max_grad_norm",
-    "optimizer.warmup_steps", "optimizer.max_steps", "optimizer.epochs",
-    "optimizer.grad_accum_steps",
-    "lora.rank", "lora.alpha",
-})
-
-# Validity only -- type, sign, finiteness, range of a probability. These are NOT
-# tuning limits: how long to train and at what learning rate is the agent's
-# decision. They exist so that a malformed value is a gate failure the agent can
-# retry, rather than an exception that crashes the node.
+# Rules define numeric validity; agents choose training duration and scale.
 _INT, _FLOAT = "int", "float"
 RECIPE_RULES = {
-    "optimizer.max_steps": (_INT, 1, None),
-    "optimizer.epochs": (_INT, 1, None),
-    "optimizer.grad_accum_steps": (_INT, 1, None),
-    "optimizer.warmup_steps": (_INT, 0, None),
-    "optimizer.lr": (_FLOAT, 0.0, None),            # strictly positive, see below
-    "optimizer.weight_decay": (_FLOAT, 0.0, None),
-    "optimizer.max_grad_norm": (_FLOAT, 0.0, None),  # strictly positive
-    "lora.rank": (_INT, 1, None),
-    "lora.alpha": (_INT, 1, None),
+    "optimizer.max_steps": (_INT, 1, False),
+    "optimizer.epochs": (_INT, 1, False),
+    "optimizer.grad_accum_steps": (_INT, 1, False),
+    "optimizer.warmup_steps": (_INT, 0, False),
+    "optimizer.lr": (_FLOAT, 0.0, True),
+    "optimizer.weight_decay": (_FLOAT, 0.0, False),
+    "optimizer.max_grad_norm": (_FLOAT, 0.0, True),
+    "lora.rank": (_INT, 1, False),
+    "lora.alpha": (_INT, 1, False),
 }
-_STRICTLY_POSITIVE = {"optimizer.lr", "optimizer.max_grad_norm"}
+TUNABLE_KEYS = frozenset(RECIPE_RULES)
 
 
 def validate_recipe_values(recipe: dict) -> list[str]:
-    """Return one failure message per malformed tunable value (unknown keys are
-    reported separately by the gate's allowlist check)."""
+    """Report malformed tunable values; the gate checks unknown keys separately."""
     failures = []
     for key, value in recipe.items():
         rule = RECIPE_RULES.get(key)
         if rule is None:
             continue
-        kind, low, high = rule
+        kind, low, exclusive = rule
         if isinstance(value, bool):
             failures.append(f"{key} must be a number, got a boolean {value!r}")
             continue
@@ -52,12 +41,10 @@ def validate_recipe_values(recipe: dict) -> list[str]:
         if kind == _FLOAT and not math.isfinite(value):
             failures.append(f"{key} must be finite, got {value!r}")
             continue
-        if key in _STRICTLY_POSITIVE and value <= 0:
+        if exclusive and value <= low:
             failures.append(f"{key} must be > 0, got {value!r}")
         elif value < low:
             failures.append(f"{key} must be >= {low}, got {value!r}")
-        elif high is not None and value > high:
-            failures.append(f"{key} must be <= {high}, got {value!r}")
     return failures
 
 

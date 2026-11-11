@@ -1,5 +1,4 @@
-"""`ar doctor`: everything that has made this tree non-portable in practice, checked in one
-place (e.g. WBench weight links left dangling by a moved checkout silently dropped five metrics)."""
+"""Check checkout paths, environments, weights, and GPU readiness for portability."""
 from __future__ import annotations
 
 import ctypes
@@ -12,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import GpuPolicyError, KernelConfig
+from .config import GpuPolicyError, KernelConfig, tool_blocks
 from .guards import check_tools_fit, choose_gpus, device_minors, smi
 from .sandbox.runner import Mounts, bwrap_args
 from .subproc import cache_env, conda_command, project_env
@@ -78,7 +77,7 @@ def _wbench_weights(cfg: KernelConfig) -> list[Finding]:
 
 def _rel_paths(cfg: KernelConfig) -> list[Finding]:
     out = []
-    for key in ("paths.worldmodel", "paths.wbench", "paths.runs_dir"):
+    for key in ("paths.worldmodel", "paths.wbench"):
         raw = str(cfg.get(key))
         if Path(raw).is_absolute():
             out.append(Finding("fail", key,
@@ -104,10 +103,7 @@ def _siblings(cfg: KernelConfig) -> list[Finding]:
 
 
 def _symlinks(cfg: KernelConfig) -> list[Finding]:
-    """Broken links are the concrete way a move has broken this tree before. The package cache
-    under `.cache/` is skipped: conda's extracted packages hold relative links whose targets exist
-    only once a package is linked into an env. Runs are skipped too: agents leave links in their
-    workspaces that point at container paths."""
+    """Check checkout symlinks, excluding conda package caches and runs."""
     skip = (Path(cfg.repo_root) / ".cache", cfg.runs_dir, Path(cfg.repo_root) / ".obsolete_runs")
     out = [Finding("fail", "symlink", f"broken: {link} -> {target} "
                                       f"(typical after moving the tree; re-run the tool that creates it)")
@@ -116,31 +112,14 @@ def _symlinks(cfg: KernelConfig) -> list[Finding]:
 
 
 def _envs(cfg: KernelConfig) -> list[Finding]:
-    """Every env the project runs in must live in `<repo>/.envs/<name>`.
-    A named env of the conda installation still works but is reported, so the tree is not
-    quietly depending on something outside it."""
-    try:
-        raw = subprocess.run(["conda", "env", "list"], capture_output=True, text=True).stdout
-    except (OSError, subprocess.SubprocessError) as exc:
-        raw, listing_error = "", str(exc)
-    else:
-        listing_error = None
-    names = {line.split()[0] for line in raw.splitlines()
-             if line.strip() and not line.startswith("#")}
+    """Check required project-local conda prefixes."""
     out = []
     for e in dict.fromkeys((*ENVS, str(cfg.get("captioner.env") or ""))):
         if not e or "/" in e:
             continue
         local = project_env(e, cfg.repo_root)
-        if local:
-            out.append(Finding("ok", f"env.{e}", str(local)))
-        elif e in names:
-            out.append(Finding("warn", f"env.{e}", "a named conda env outside the project; "
-                                                   "move it to .envs/"))
-        elif listing_error:
-            out.append(Finding("warn", f"env.{e}", f"not in .envs/ and conda could not list environments: {listing_error}"))
-        else:
-            out.append(Finding("fail", f"env.{e}", "missing; create it in .envs/ before running"))
+        out.append(Finding("ok", f"env.{e}", str(local)) if local else
+                   Finding("fail", f"env.{e}", "missing; create it in .envs/ before running"))
     return out
 
 
@@ -229,10 +208,8 @@ def _dotenv(cfg: KernelConfig) -> list[Finding]:
 
 def _prefix_envs(cfg: KernelConfig) -> list[Finding]:
     """Enabled tools whose `env` is a conda-prefix path inside the repo."""
-    blocks = {"annotate": cfg.get("annotate") or {}, "images": cfg.get("images") or {},
-              **{f"generators.{k}": v for k, v in (cfg.get("generators") or {}).items()}}
     out = []
-    for name, block in blocks.items():
+    for name, block in tool_blocks(cfg).items():
         env = str(block.get("env") or "")
         enabled = bool(block.get("enabled"))
         if "/" not in env or not enabled:

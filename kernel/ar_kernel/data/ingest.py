@@ -20,10 +20,7 @@ from .leakage import LeakageChecker
 from .probe import probe_video
 
 SIZE = (960, 544)       # the only frame size ingest takes
-# A picture jump: CUT_PICTURE_RATIO times the clip's median change and CUT_SPIKE times the changes CUT_SPIKE_GAP
-# frames before and after it, so motion that starts and goes on is not one. It is a cut when it changes the picture
-# by CUT_GREY_ALONE grey levels, or by CUT_GREY_WITH_CAMERA with a jump of the measured camera no more than
-# CUT_NEAR frames away (below that it is flicker in a nearly still clip).
+# Cuts require a picture spike plus an absolute grey-level change, optionally corroborated by a nearby camera jump.
 CUT_STEP_RATIO, CUT_TURN_DEG, CUT_PICTURE_RATIO, CUT_NEAR, CUT_SPIKE, CUT_SPIKE_GAP = 12.0, 10.0, 5.0, 3, 3.0, 2
 CUT_GREY_WITH_CAMERA, CUT_GREY_ALONE = 1.0, 6.0
 
@@ -115,10 +112,7 @@ class Ingestor:
         return not Path(path).resolve().is_relative_to((self.run_dir / "staging").resolve())
 
     def _take(self, src: Path, dst: Path) -> Path:
-        """Copy the staged file to `dst` without trusting its path between check and use: the file is
-        opened without following a link, and the open file must be a regular file that still lies in
-        staging (a directory on the path may have been swapped for a link to a host folder). A copy,
-        never a rename: the agent may hold a hard link to the staged file and rewrite it later."""
+        """Copy a regular staging file through a checked descriptor; never share the agent's writable inode."""
         fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)      # NONBLOCK: a swapped-in FIFO
         with open(fd, "rb") as fin:
             real = Path(os.readlink(f"/proc/self/fd/{fd}"))

@@ -1,8 +1,4 @@
-"""run_in_env must be safe to use from an unattended multi-day loop.
-
-Killing only the `conda run` process orphans torchrun ranks and WBench multiprocessing workers,
-which keep holding GPUs. A cancel therefore stops the whole process group.
-"""
+"""Process-group cleanup for unattended conda jobs and their descendants."""
 import os
 import threading
 import time

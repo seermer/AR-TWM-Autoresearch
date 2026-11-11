@@ -1,4 +1,5 @@
 import pytest
+from conftest import git_file
 
 from ar_kernel.vcs.agents_repo import AgentsRepo
 
@@ -16,7 +17,7 @@ def test_init_commits_the_seed_on_the_root_branch(tmp_path, seed):
     repo = AgentsRepo(tmp_path / "agents.git")
     root = repo.init(seed)
     assert repo.resolve(repo.branch_ref("root")) == root
-    assert "def edit_self" in repo.read_file(root, "agent/entry.py")
+    assert "def edit_self" in git_file(repo, root, "agent/entry.py")
 
 
 def test_checkout_then_commit_attempt_records_parent_and_ref(tmp_path, seed):
@@ -30,7 +31,7 @@ def test_checkout_then_commit_attempt_records_parent_and_ref(tmp_path, seed):
     child = repo.commit_tree(work, root, "edit_self attempt 1")
     repo.set_ref(repo.attempt_ref("n1", "edit_self", 1), child)
     assert repo.resolve("refs/attempts/n1/edit_self-1") == child
-    assert repo.read_file(child, "agent/__pycache__/x.pyc") is None       # .gitignore honored
+    assert git_file(repo, child, "agent/__pycache__/x.pyc") is None       # .gitignore honored
     stats = repo.diff_stats(root, child)
     assert stats == [{"path": "agent/entry.py", "added": 1, "removed": 0}]
 

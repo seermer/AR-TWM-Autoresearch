@@ -1,10 +1,4 @@
-"""Error text from a failed shell-out must include stderr.
-
-Every phase helper built its RuntimeError from proc.stdout alone. Python
-tracebacks go to stderr, so a render that died in a ValueError reported only
-the progress banner it had printed before failing -- in the loop that means the
-archive records a cause-free failure the meta-agent cannot reason about.
-"""
+"""Failed subprocess errors include stderr and traceback details."""
 from types import SimpleNamespace
 from ar_kernel.subproc import output_tail
 

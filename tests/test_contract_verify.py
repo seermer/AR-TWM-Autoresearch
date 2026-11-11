@@ -85,11 +85,7 @@ def test_non_utf8_entry_py_fails_static_instead_of_raising(tmp_path, monkeypatch
 ])
 def test_malformed_result_json_fails_the_smoke_step_instead_of_raising(
         tmp_path, monkeypatch, write_result_json, fragment):
-    """A smoke run's /workspace/result.json is agent-controlled output (written by
-    ar_contract.run, but the agent code inside the container could in principle
-    corrupt or replace it): malformed JSON (JSONDecodeError) or valid JSON that
-    isn't an object (body.get would raise AttributeError) must fail the
-    smoke:<kind> step, not raise out of verify_contract. The runner is faked."""
+    """Malformed or non-object agent results fail the smoke step with a faked runner."""
     run = tmp_path / "run"
     repo = AgentsRepo(tmp_path / "agents.git")
     h = ContractHarness(CFG, run, repo)

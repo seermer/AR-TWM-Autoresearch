@@ -10,8 +10,7 @@ CFG = KernelConfig.load()
 
 @pytest.fixture(scope="module")
 def _gate_store(tmp_path_factory):
-    """Ingesting 8 real clips costs ~40 s; the gate only reads the store, so build
-    it once per module. Each test still gets its own node dir."""
+    """Ingest eight distinct clips once; each gate test gets its own node directory."""
     tmp_path = tmp_path_factory.mktemp("gate_store")
     conn = open_db(tmp_path)
     ing = Ingestor(CFG, tmp_path, conn)
@@ -105,8 +104,8 @@ def test_fewer_clips_than_gpus_is_rejected(tmp_path):
 
 
 @pytest.mark.parametrize("key,value,fragment", [
-    ("optimizer.grad_accum_steps", 0, "grad_accum_steps"),      # was ZeroDivisionError
-    ("optimizer.grad_accum_steps", "four", "grad_accum_steps"), # was ValueError from int()
+    ("optimizer.grad_accum_steps", 0, "grad_accum_steps"),
+    ("optimizer.grad_accum_steps", "four", "grad_accum_steps"),
     ("optimizer.max_steps", -5, "max_steps"),
     ("optimizer.max_steps", 2.5, "max_steps"),
     ("optimizer.epochs", True, "epochs"),                       # bool is an int subclass

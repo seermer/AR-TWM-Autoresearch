@@ -175,10 +175,10 @@ def create_app(run_dir: Path | str) -> FastAPI:
 
     @app.get("/api/clips/{node}/{dataset}")
     def get_clips(node: str, dataset: str):
-        got = media.clips(run, node, dataset, page=0, page_size=10 ** 9)
+        rows = media.clips(run, node, dataset)
         return reply([{"clip_id": r["clip_id"], "video": r["video"], "derived_from": r["derived_from"],
                        "origin": media.origin(r["derived_from"]), "metadata": r["metadata"], "warnings": r["warnings"],
-                       "leakage": r["leakage"], "ingested_by": r["ingested_by"]} for r in got["rows"]])
+                       "leakage": r["leakage"], "ingested_by": r["ingested_by"]} for r in rows])
 
     @app.get("/api/clip/{clip_id}")
     def get_clip(clip_id: str):

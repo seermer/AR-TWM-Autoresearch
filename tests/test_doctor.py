@@ -1,8 +1,4 @@
-"""Portability checks must FAIL on a non-portable tree.
-
-A check that only ever passes proves nothing, so every case here builds the
-broken condition and asserts it is caught.
-"""
+"""Portability checks against deliberately broken checkout fixtures."""
 import os
 import subprocess
 
@@ -20,7 +16,7 @@ def _tree(tmp_path, *, worldmodel="../WorldModel", wbench="../WBench"):
     (tmp_path / "WorldModel").mkdir()
     (tmp_path / "WBench").mkdir()
     (root / "configs" / "kernel.yaml").write_text(yaml.safe_dump({
-        "paths": {"worldmodel": worldmodel, "wbench": wbench, "runs_dir": "runs"},
+        "paths": {"worldmodel": worldmodel, "wbench": wbench},
         "gpus": {"num_gpus": 4, "min_count": 4, "free_below_mib": 512},
         "host": {"ram_gib": 1, "kernel_reserve_gib": 0}, "captioner": {"tensor_parallel": 1},
     }))
@@ -148,18 +144,20 @@ def test_missing_prefix_env_of_an_enabled_tool_is_a_failure(tmp_path):
     assert {f.check: f.level for f in _prefix_envs(cfg)} == {"env.images": "ok"}
 
 
-def test_env_in_the_project_is_ok_a_named_one_warns_and_a_missing_one_fails(tmp_path, monkeypatch):
-    import subprocess
+def test_project_environments_are_required_without_conda_discovery(tmp_path, monkeypatch):
+    from unittest.mock import Mock
     from types import SimpleNamespace
     from ar_kernel.doctor import _envs
     cfg = KernelConfig(raw={"captioner": {"env": "vllm-env"}}, repo_root=tmp_path)
     (tmp_path / ".envs" / "alayaworld" / "conda-meta").mkdir(parents=True)
     listing = "# conda environments:\nbase  /x\nwbench-main  /y\n"
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=listing))
+    list_envs = Mock(return_value=SimpleNamespace(stdout=listing))
+    monkeypatch.setattr(subprocess, "run", list_envs)
     found = {f.check: f.level for f in _envs(cfg)}
     assert found["env.alayaworld"] == "ok"                 # lives in <repo>/.envs
-    assert found["env.wbench-main"] == "warn"              # only a named env of the conda install
+    assert found["env.wbench-main"] == "fail"
     assert found["env.wbench-vp"] == "fail" and found["env.vllm-env"] == "fail"
+    list_envs.assert_not_called()
 
 
 def test_dangling_links_in_the_package_cache_are_not_reported(tmp_path):

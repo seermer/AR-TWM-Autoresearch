@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ar_kernel.subproc import proc_start_time
+from ar_kernel.control import Control
 
 HEAD_TAIL = 256 * 1024
 
@@ -48,11 +48,7 @@ class RunFiles:
         return target
 
     def _db_uri(self, db: Path) -> str:
-        """How to open archive.db without writing to the run folder:
-        - loop alive: plain `mode=ro` (SQLite then shares the writer's -shm; unavoidable);
-        - no writer and no WAL content: `immutable=1`, which creates no side files;
-        - no writer but a non-empty -wal (a killed writer's committed rows): a private copy of
-          db + wal outside the run, refreshed when either file changes."""
+        """Read archives without modifying the run: share a live WAL, use immutable files, or copy orphaned WAL files."""
         if self.loop_pid() is not None:
             return f"{db.as_uri()}?mode=ro"
         wal = db.with_name("archive.db-wal")
@@ -86,7 +82,6 @@ class RunFiles:
                 if "locked" not in str(exc) or tries == 4:
                     raise
                 time.sleep(0.2)
-        return []
 
     def git(self, *args: str) -> str | None:
         """stdout of a read-only git command on agents.git, or None when it fails."""
@@ -133,11 +128,5 @@ class RunFiles:
         return None
 
     def loop_pid(self) -> int | None:
-        """The loop's pid if it is alive: the recorded start time must match /proc (the
-        kernel's Control.alive_pid rule), so a stale pid file never reads as running."""
-        try:
-            pid_s, started = (self.root / "control" / "loop.pid").read_text().split()
-            pid = int(pid_s)
-        except (OSError, ValueError):
-            return None
-        return pid if proc_start_time(pid) == started else None
+        """The live loop PID, verified by its recorded start time."""
+        return Control(self.root).alive_pid()

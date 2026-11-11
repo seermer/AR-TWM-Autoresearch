@@ -175,7 +175,7 @@ def build_recipe_context(*, cfg, conn, run_dir: Path, repo, node_id: str, parent
         metric_guide=metric_guide(NodeStore(conn).get("root")["metric_set"],     # the run's: the root is scored first
                                   cfg.get("eval.score_weights")),
         target_skill=cfg.get("eval.target_skill") or {},
-        tunable_rules={k: {"type": RECIPE_RULES[k][0], "min": RECIPE_RULES[k][1], "max": RECIPE_RULES[k][2]}
+        tunable_rules={k: {"type": RECIPE_RULES[k][0], "min": RECIPE_RULES[k][1], "min_exclusive": RECIPE_RULES[k][2]}
                        for k in sorted(TUNABLE_KEYS)},
         lora_allowlist=[list(p) for p in cfg.get("train.lora_allowlist")],
         n_gpus=n_gpus, tools=list(tools), new_clips_per_commit=int(cfg.get("improve_recipe.new_clips_per_commit")),
@@ -183,8 +183,7 @@ def build_recipe_context(*, cfg, conn, run_dir: Path, repo, node_id: str, parent
 
 
 def write_bundle(ctx, dest: Path, censor: list[str] = (), roots=()) -> Path:
-    """`censor`: names replaced in everything written, as are the host folders `roots`. The context carries node and tool error
-    texts, and it reaches the model as a user message, which the gateway does not censor."""
+    """Write a context bundle with private names and host folders censored from every string."""
     dest = Path(dest)
     fs.mkdir(dest)
     data = scrub(ctx.model_dump(mode="json"), list(censor), roots)

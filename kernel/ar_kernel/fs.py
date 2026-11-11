@@ -139,10 +139,7 @@ def mkdir(path) -> None:
 
 
 def _place(place, base: Path, rel: str) -> list[str]:
-    """`place(name, dir_fd)` in base/rel's folder without following any link under `base`: each directory is
-    opened with O_NOFOLLOW and the file is placed relative to that directory's fd, so a link an agent plants
-    or swaps in (it owns staging, and its sandbox runs meanwhile) raises instead of redirecting. Returns the
-    folders it made."""
+    """Place files through O_NOFOLLOW directory descriptors; return created directories."""
     *dirs, name = PurePosixPath(rel).parts
     made = []
     fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)

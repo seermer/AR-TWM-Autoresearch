@@ -37,10 +37,8 @@ def _matched(log: str, signatures) -> tuple[str, int, str] | None:
 
 
 def outcome(log: str, returncode: int, checkpoint: Path | None, log_name: str) -> Path:
-    """A finished run's checkpoint, or the fault, in this order: a clean exit with a checkpoint and no
-    diverged loss succeeded (a stray "Killed" from a helper does not undo it); a diverged loss is the
-    node's (whatever else the log says); a known machine error, or a clean exit without a checkpoint, is
-    the kernel's; any other crash is the node's. Recorded as a decision."""
+    """Classify checkpoint success, diverged loss, machine errors, and other crashes, in that order.
+    Machine errors and clean exits without a checkpoint are kernel faults; divergence and other crashes are the node's."""
     diverged = _matched(log, DIVERGENCE_SIGNATURES)
     machine = None if diverged or (returncode == 0 and checkpoint is not None) else _matched(log, MACHINE_SIGNATURES)
     if returncode == 0 and checkpoint is not None and not diverged:

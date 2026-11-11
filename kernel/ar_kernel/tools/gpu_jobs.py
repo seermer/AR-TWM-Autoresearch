@@ -1,11 +1,5 @@
-"""Shared plumbing for the GPU data-source jobs: rollout_*, annotate_camera and
-generate_images.
-
-A backend stages the agent's input files into a kernel-private job dir (never trusting the
-path between check and use), runs the tool's bridge (bridges/) in its own conda env, and publishes each finished
-item into the caller's staging dir as it is reported, by hard links placed through O_NOFOLLOW directory fds, so a
-link the agent plants cannot redirect a kernel write. A per-item failure is an item error, not a failed job.
-"""
+"""Stage checked inputs, run isolated GPU bridges, and publish results through directory descriptors.
+Item failures remain local to their item."""
 from __future__ import annotations
 
 import json
@@ -25,17 +19,32 @@ from ..data.probe import TARGET_ASPECT
 from ..faults import disk_fault
 from ..isolation import EXCLUDED_PROMPT, copies_held_out, strings
 from ..subproc import file_tail
-from .captioner import clip_host_path, container_path, input_error, stage_clip
-from .context import STAGING, PathError
+from .context import STAGING, PathError, clip_host_path, container_path, input_error, stage_clip
 from .jobs import job_dir, run_cancellable
 from .server import FROM_FILE, ToolError, listed, refuse
 from .vllm_server import gpu_memory_mib, wait_gpu_release
 
 
+def prepare_media(backend, job):
+    """Resolve the live caller and create the job's private media directory."""
+    caller = backend.registry.lookup(job.token)
+    if caller is None:
+        raise RuntimeError("the phase that submitted this job has ended")
+    work = job_dir(backend.run_dir, job)
+    media = work / "media"
+    fs.mkdir(media)
+    return caller, work, media
+
+
+def clip_result(clips: dict, ran: dict) -> dict:
+    """Combine per-clip output with bridge loading and GPU-release information."""
+    ready = ran["ready"]
+    return {"clips": clips, "load_s": ready["info"]["load_s"] if ready else None,
+            "gpu_memory_mib": ran["gpu_memory_mib"], "gpu_memory_released": ran["gpu_memory_released"]}
+
+
 def items_schema(description: str, properties: dict, required: list[str]) -> WithJsonSchema:
-    """The listed JSON schema of an `items` list. Only the schema: the values still reach the tool
-    as plain dicts and each backend's check_args validates them, so a bad value is a recorded
-    tool.error rather than a failure inside the MCP layer."""
+    """Advertise typed item fields while passing plain values to backend validation and recorded aggregate refusals."""
     return WithJsonSchema({"description": f"{description}, {FROM_FILE}", "anyOf": [
         {"type": "array", "items": {"type": "object", "properties": properties, "required": required,
                                     "additionalProperties": False}},
@@ -244,11 +253,9 @@ def _unfinished(work: Path, items: list[dict], rows: dict, started: dict, codes:
 
 def run_bridge(backend, job, work: Path, spec: dict, items: list[dict], cancel, report, on_item,
                done: int = 0, poll=None) -> dict:
-    """Writes `work/job.json` and runs `spec["bridge"]` in `spec["env"]` on the backend's GPUs; each `item` message
-    becomes `on_item(message)`, the item's row. Items with no `item` message get an error row. Returns {"rows":
-    {index: row}, "ready": the first `ready` message or None, "gpu_memory_mib": {"before", "after"},
-    "gpu_memory_released"}. `done`: rows the caller already has, for progress; `poll`: called every 2 s while
-    the bridge runs. If handling a message raises, the bridge is killed and waited for before the error goes on."""
+    """Run a GPU bridge, mapping item messages through on_item and missing results to error rows.
+    Return rows, readiness, GPU memory and release status; done seeds progress and poll runs every two seconds.
+    Reap the bridge before propagating message-handler errors."""
     total = done + len(items)
     job_file = {"tool": backend.tool, "args": {k: v for k, v in job.args.items() if k != "items"}, "items": items,
                 "gpus": backend.gpus, "work": str(work), "out": str(work / "out"),
@@ -328,11 +335,8 @@ def run_bridge(backend, job, work: Path, spec: dict, items: list[dict], cancel, 
 
 
 class GpuJob:
-    """Base JobQueue backend. Subclasses set name/tool, kind ("rollout" | "annotation" | "image"),
-    generator (the name in `derived_from`), file_keys (item fields naming workspace files), frame_keys
-    (those of them holding an image that must have the job's size, with `frame_size`),
-    optionally config_key (the kernel.yaml block, `self.block`) and implement check_args, prepare and finish. A job takes any number of items, or at most the block's
-    `max_items`."""
+    """GPU backend: subclasses define item/file fields and implement check_args, prepare, and finish.
+    config_key selects settings; frame_keys enforce frame_size; max_items limits job size."""
     name = tool = kind = generator = description = config_key = ""
     file_keys: tuple[str, ...] = ()
     frame_keys: tuple[str, ...] = ()
@@ -596,9 +600,7 @@ def register_gpu_tools(mcp, kit, q) -> None:
 
 
 def build_gpu_backends(cfg, run_dir: Path, gpus: list[int], registry) -> list:
-    """Every GPU data backend a run gets: the captioner and locate_events always, the others only when
-    their `annotate`/`images`/`generators` config enables them. The caller registers each on the run's JobQueue, then calls `register_gpu_tools`
-    `register_caption_tool` and `register_locate_tool`."""
+    """Build caption/location backends and each enabled annotation, image, or generator backend."""
     from .annotate import AnnotateBackend          # imports this module
     from .captioner import CaptionBackend
     from .h3 import H3Backend

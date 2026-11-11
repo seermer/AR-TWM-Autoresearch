@@ -375,8 +375,7 @@ from panel import media
 def test_training_data_and_clips(run):
     d = media.training_data(run, "n1")
     assert d["datasets"] == [{"dataset": "ds1", "clips": 1}] and d["commit"]["message"] == "ds1: one clip"
-    got = media.clips(run, "n1", "ds1")
-    [clip] = got["rows"]
+    [clip] = media.clips(run, "n1", "ds1")
     assert clip["video"] == "store/blobs/video/vd1.mp4" and clip["caption"]["caption"] == "a hallway"
     assert clip["annotation"]["turns"] == [{"start_s": 0.0, "perspective": "first_person"}] and clip["derived_from"] == {"kind": "dataset", "name": "org/ds"}
     assert clip["leakage"] == {"matches": [], "near": [{"case_id": "7"}]}

@@ -1,6 +1,7 @@
 import pytest, yaml
 from ar_kernel.config import KernelConfig
 from ar_kernel.train.recipe import build_resolved_config, steps_per_epoch, lora_of
+from ar_kernel.train.recipe import TUNABLE_KEYS, validate_recipe_values
 
 CFG = KernelConfig.load()
 BASE = CFG.repo_root / "configs" / "base_recipe.yaml"
@@ -35,3 +36,20 @@ def test_lora_of_reads_the_resolved_config(tmp_path):
     p = tmp_path / "train_config.yaml"
     p.write_text("lora: {rank: 32, alpha: 16}\n")
     assert lora_of(p) == (32, 16)
+
+
+@pytest.mark.parametrize("key", sorted(TUNABLE_KEYS))
+def test_tunable_numeric_boundaries(key):
+    check = lambda value: validate_recipe_values({key: value})
+    assert check(1) == []
+    assert check(-1) and check(True) and check("1")
+    if key in {"optimizer.lr", "optimizer.weight_decay", "optimizer.max_grad_norm"}:
+        assert check(0.5) == []
+        assert check(float("nan")) and check(float("inf"))
+    else:
+        assert check(0.5)
+    assert bool(check(0)) == (key not in {"optimizer.weight_decay", "optimizer.warmup_steps"})
+
+
+def test_unknown_recipe_keys_are_left_to_the_gate():
+    assert validate_recipe_values({"unknown": None}) == []

@@ -71,10 +71,9 @@ def wan(job, item, out):
 
 
 def ltx(job, item, out):
-    """ltx25_generate.py without a model: an mp4 of the job's size and frames WITH an audio track, as LTX-2.5's
-    own output has one (item "fps" overrides the rate)."""
+    """A silent LTX clip at the requested size/frame count; item fps overrides the rate."""
     a, c = job["args"], job["config"]
-    dst = mp4(out / f"{item['index']}.mp4", a["width"], a["height"], a["frames"], item.get("fps", 24), audio=True)
+    dst = mp4(out / f"{item['index']}.mp4", a["width"], a["height"], a["frames"], item.get("fps", 24))
     return {"video": dst}, {**job["paths"], "frames": a["frames"], "height": a["height"], "width": a["width"],
                             "quantization": c.get("quantization", "fp8-cast"), "offload": c.get("offload", "cpu"),
                             "keyframes": item.get("keyframes")}

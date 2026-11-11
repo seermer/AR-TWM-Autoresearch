@@ -1,9 +1,4 @@
-"""Who is calling, and which host paths their container paths may name.
-
-Every container gets its own token. The gateway and the tool server resolve it
-to a Caller, which attributes each call (node, phase, attempt) and bounds every
-path argument to that container's workspace. Anything else is refused.
-"""
+"""Caller tokens attribute requests and restrict file access to each container's workspace and staging."""
 from __future__ import annotations
 
 import os
@@ -14,7 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Callable
 
-from .. import telemetry
+from .. import fs, telemetry
+from ..faults import disk_fault
 
 WORKSPACE = PurePosixPath("/workspace")
 STAGING = WORKSPACE / "staging"
@@ -114,10 +110,7 @@ class TokenRegistry:
                 listener(token)
 
     def on_revoke(self, fn: Callable[[str], None]) -> None:
-        """Register a callback invoked with the token whenever revoke() actually revokes it.
-
-        Listeners run outside any registry lock.
-        """
+        """Register a token-revocation callback; invoke listeners outside the registry lock."""
         self._on_revoke.append(fn)
 
 
@@ -129,11 +122,7 @@ def bearer(header: str | None) -> str | None:
 
 
 def to_host(caller: Caller, container_path: str) -> Path:
-    """Map a container path to the host, refusing anything outside the workspace, as a decision.
-
-    Resolution follows symlinks, so a link the agent planted inside /workspace
-    cannot point the kernel at a host file.
-    """
+    """Resolve a container path inside the caller's mounts and record the resolution decision."""
     try:
         host = _to_host(caller, container_path)
     except PathError as exc:
@@ -162,13 +151,11 @@ def _to_host(caller: Caller, container_path: str) -> Path:
 
 
 def open_file(caller: Caller, host: Path) -> int:
-    """A read-only fd on `host` (a path `to_host` gave), without trusting the path between check and use: the
-    agent keeps running, so any directory on it can be swapped for a link meanwhile. The file is opened with
-    O_NOFOLLOW (and O_NONBLOCK, against a swapped-in FIFO), and the open file must be a regular file still
-    inside the caller's mounts."""
+    """Open a regular file without following its final link; verify its descriptor remains inside caller mounts.
+    O_NONBLOCK also refuses swapped-in FIFOs without waiting."""
     fd = os.open(host, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
-        to_container(caller, Path(os.readlink(f"/proc/self/fd/{fd}")))   # PathError if it now lies outside the mounts
+        to_container(caller, Path(os.readlink(f"/proc/self/fd/{fd}")))   # refuse descriptors outside caller mounts
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise PathError(f"{to_container(caller, host)} is not a file")
     except BaseException:
@@ -183,3 +170,47 @@ def to_container(caller: Caller, host_path: Path) -> str:
         if host.is_relative_to(base.resolve()):
             return str(root / host.relative_to(base.resolve()))
     raise PathError(f"{host} is not inside this caller's workspace")
+
+
+def container_path(path: str) -> str:
+    """Relative paths resolve against /workspace, like the agent's own working directory."""
+    return path if path.startswith("/") else str(WORKSPACE / path)
+
+
+def clip_host_path(caller, path: str) -> Path:
+    host = to_host(caller, container_path(path))
+    if not host.is_file():
+        raise PathError(f"{path} is not a file")
+    return host
+
+
+def input_error(exc: Exception) -> str:
+    """An item's staging error for its result; a disk fault raises."""
+    if disk_fault(exc):
+        raise exc
+    return f"input: {exc}"
+
+
+def stage_clip(caller, path: str, dst: Path) -> None:
+    """Stage a clip from a checked descriptor, verifying the linked inode or copying across filesystems.
+    Record bytes through that descriptor; agent path replacements cannot redirect access."""
+    fd = open_file(caller, clip_host_path(caller, path))
+    try:
+        info = os.fstat(fd)
+        real = os.readlink(f"/proc/self/fd/{fd}")
+        try:
+            fs.link(real, dst, follow_symlinks=False)
+        except OSError as exc:                         # e.g. another filesystem: copy the open file
+            telemetry.error(exc, "a copy instead")
+            with open(os.dup(fd), "rb") as fin:
+                fs.write_bytes(dst, fin.read())
+        else:
+            linked = os.stat(dst, follow_symlinks=False)
+            if (linked.st_dev, linked.st_ino) != (info.st_dev, info.st_ino):
+                fs.remove(dst)
+                raise PathError(f"{path} changed while it was being staged")
+        with open(os.dup(fd), "rb") as fin:
+            fin.seek(0)
+            telemetry.keep(path, fin, "read")
+    finally:
+        os.close(fd)

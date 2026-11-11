@@ -85,13 +85,13 @@ def test_a_memory_limit_below_host_ram_is_refused():
 
 
 def test_a_config_without_the_explicit_keys_names_them():
-    """e.g. the frozen config of a run started before the keys existed."""
+    """Required integer settings are named when null."""
     with pytest.raises(GpuPolicyError, match=r"needs an int for host.ram_gib, captioner.tensor_parallel, "
-                                             r"generators.ltx25.workers \(a run started before"):
+                                             r"generators.ltx25.workers$"):
         _fit(_fit_cfg(host={"ram_gib": None}, captioner={"tensor_parallel": None},
                       ltx25={"enabled": True, "workers": None}, wan22={"enabled": False}), [0, 1, 2, 3])
     with pytest.raises(GpuPolicyError, match=r"needs an int for captioner.min_gpu_gib, generators.h3.min_total_gpu_gib, "
-                                             r"generators.h3.min_gpu_gib \(a run started before"):
+                                             r"generators.h3.min_gpu_gib$"):
         _fit(_fit_cfg(captioner={"min_gpu_gib": None}, h3={"enabled": True, "min_total_gpu_gib": None,
                                                            "min_gpu_gib": None},
                       wan22={"enabled": False, "min_gpu_gib": None}), [0, 1, 2, 3])

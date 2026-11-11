@@ -135,7 +135,6 @@ def make_run(base: Path, name: str = "r1") -> Path:
     nodes.record_score("root", 0.70, ["m1", "m2"], {"m1": 0.6, "m2": 0.8})
     nodes.create("n1", "root", 1)
     nodes.set_fields("n1", agent_commit=edit2, data_commit="dc1",
-                     recipe_path="nodes/n1/recipe.yaml", rationale_path="nodes/n1/rationale.md",
                      phase_timings=json.dumps({"total_s": 600.0}),
                      attempt_counts=json.dumps({"edit_self": 2, "improve_recipe": 1}))
     nodes.record_score("n1", 0.75, ["m1", "m2"], {"m1": 0.7, "m2": 0.8})

@@ -1,21 +1,5 @@
-"""rollout_ltx25 worker (runs in the gen-ltx25 conda-prefix env): Lightricks' ltx-pipelines, one
-pipeline built once, renders each item's shard (text-to-video, or pinned to the item's
-keyframe: its image at its frame, -1 = the last, strength 1.0).
-
-python ltx25_generate.py --job <work>/job.json (bridges/protocol.py): one worker per GPU group; per item
-<out>/<index>.mp4 (24 fps, video only). Job file: paths.weights (weights/ltx-2.5), args.frames, args.height,
-args.width, config.quantization (default fp8-cast), config.offload (default cpu). The pipeline is built once per
-worker.
-
-The pipeline is configured by the module's own CLI parser (`upstream_args`), fed the flags its
-`main()` takes, and constructed and called exactly as that `main()` does at the commit pinned in
-configs/kernel.yaml (generators.ltx25.commit): ltx_pipelines.ti2vid_two_stages
-(TI2VidTwoStagesPipeline, dev transformer + the distilled LoRA at 1.0 for stage 2). So the
-quantization policy, offload mode, split ModelPaths and every sampling default (steps, guidance,
-negative prompt) are upstream's own.
-
-The audio LTX-2.5 generates alongside is not muxed (encode_video(audio=None)).
-"""
+"""Generate silent 24-fps LTX-2.5 clips with the dev model and distilled second-stage LoRA.
+Each worker uses upstream CLI defaults for sampling, quantization, and offload; keyframes pin images to frames."""
 from __future__ import annotations
 
 import sys

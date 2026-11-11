@@ -1,9 +1,4 @@
-"""Run WorldModel's standard-dataset checker for one clip root.
-
-Executed inside the `alayaworld` env:
-    python check_clip.py --config <recipe> --root <clip root>
-Writes a JSON report to stdout between the markers so conda banners cannot corrupt it.
-"""
+"""Run WorldModel's dataset checker in alayaworld and emit a marker-delimited JSON report."""
 from __future__ import annotations
 import argparse, json, sys
 

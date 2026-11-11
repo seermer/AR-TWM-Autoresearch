@@ -1,10 +1,5 @@
-"""The bridge side of a GPU job (stdlib only: bridges run in their tools' envs).
-
-A bridge is run as `python <bridge>.py --job <work>/job.json` and appends one JSON line per message to
-`<work>/messages.jsonl` (a spawned worker: `messages-<rank>.jsonl`): `ready`, `item_started`, `item`,
-`job_done`, `worker_exit` (a spawned worker's or a run command's exit code). Each item's output goes to
-`<work>/logs/<index>.log`.
-"""
+"""Stdlib-only GPU bridge protocol: --job loads inputs; JSONL reports readiness, item results, and worker exits.
+Per-item logs live under logs/<index>.log."""
 from __future__ import annotations
 
 import argparse

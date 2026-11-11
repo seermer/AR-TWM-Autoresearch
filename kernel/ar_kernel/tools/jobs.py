@@ -22,11 +22,7 @@ from ..subproc import KILL_FORCE_GRACE_SECONDS, KILL_GRACE_SECONDS, run_in_env
 from .server import SHOWN, ToolError, ToolHealth, fault_or_count, publish
 
 _DEFAULT_POLL_S = 1.0
-# Worst case a worker thread can be stuck inside a real backend's run_cancellable:
-# one poll interval before a cancel is even noticed, then run_in_env's own
-# SIGTERM grace and SIGKILL grace. shutdown()'s join must outlast this, or a
-# still-running kill sequence gets cut off when the process (its daemon thread
-# included) exits.
+# Shutdown waits for cancellation polling and both process-group kill grace periods.
 _SHUTDOWN_JOIN_S = _DEFAULT_POLL_S + KILL_GRACE_SECONDS + KILL_FORCE_GRACE_SECONDS + 5
 
 
@@ -86,12 +82,8 @@ def summarize(result: dict) -> dict:
 
 
 class JobQueue:
-    """Runs at most one job at a time on the run's GPUs, under `gpu_lock`.
-
-    A caller only ever sees or cancels jobs its own token submitted (`_own`);
-    `cancel_for_token` is how a phase's container exit sweeps its orphaned jobs
-    so an agent that disappears never keeps holding the GPUs.
-    """
+    """Serialize GPU jobs under gpu_lock and expose results/cancellation only to the submitting token.
+    Token revocation cancels that phase's jobs."""
 
     def __init__(self, run_dir: Path, gpu_lock: threading.Lock, wait_cap_s: float,
                  require_free: Callable[[Any], None] = lambda caller: None, health: ToolHealth | None = None,

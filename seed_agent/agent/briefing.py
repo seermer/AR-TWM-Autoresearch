@@ -234,7 +234,8 @@ def subphases_section(subphases: list[dict]) -> str:
 def _node_and_recipe(ctx, scratch: str, kept: bool = False) -> list[str]:
     """This node's facts for the data roles."""
     guide = ctx.recipe_guide or {}
-    keys = [[k, r.get("type"), r.get("min"), r.get("max"), (guide.get(k) or {}).get("base"),
+    keys = [[k, r.get("type"), f"{'>' if r.get('min_exclusive') else '>='} {r['min']:g}" if "min" in r else None,
+             (guide.get(k) or {}).get("base"),
              ctx.parent_recipe.get(k), (guide.get(k) or {}).get("meaning")]
             for k, r in (ctx.tunable_rules or {}).items()]
     pairs = lambda allowed, sep: ", ".join(f"{a}{sep}{b}" for a, b in allowed)
@@ -253,7 +254,7 @@ def _node_and_recipe(ctx, scratch: str, kept: bool = False) -> list[str]:
         skill_section(ctx.target_skill),
         folders_section(ctx.folders, scratch, kept),
         "## Recipe\n\nTunable keys, with the base recipe's and the parent's values:\n\n"
-        + table(["key", "type", "min", "max", "base", "parent", "meaning"], keys)
+        + table(["key", "type", "lower bound", "base", "parent", "meaning"], keys)
         + f"\n\nLoRA (rank/alpha): {pairs(ctx.lora_allowlist, '/')}. The full base recipe is `base_recipe` "
           f"in /context/context.json.",
         metric_section(ctx.metric_guide)]

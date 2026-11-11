@@ -1,11 +1,4 @@
-"""locate_events bridge (runs in the vllm env): starts `vllm serve`, asks about every event in every frame of every
-clip, and stops it.
-
-python locate_vllm.py --job <work>/job.json (bridges/protocol.py). Job file: serve (as caption_vllm.py's), system,
-frame_width, fps, concurrent_requests, request_timeout_s, reasoning_effort; items {index, video, width, height,
-events}. The frames are decoded while the server loads. One item message per clip: every frame's answer and
-reasoning per event, or the first error; every item's log is the server's.
-"""
+"""Locate events across decoded frames with one local server per job; retain answers and reasoning."""
 from __future__ import annotations
 
 import base64

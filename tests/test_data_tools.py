@@ -235,14 +235,7 @@ def _gate_rows(tools, caller):
 
 
 def test_recipe_check_reports_gate_failures_without_leaving_a_view(env, monkeypatch):
-    """The recipe clears every pre-materialize gate check (see
-    tests/test_gate.py for the same arithmetic), so the gate genuinely builds a
-    view under the scratch directory, and monkeypatches only the GPU-job steps
-    (check_dataset / precache_dry_run / describe, all routed through
-    ar_kernel.train.gate.run_in_env) so the test needs no GPU or alayaworld env.
-    The fake run_in_env itself asserts the view was populated with real hardlinked
-    clip files -- proving recipe_check's cleanup has something real to remove.
-    """
+    """Build a real clip view with fake GPU steps; failures remove the populated view."""
     tools, caller, results, _ = env
     commit = tools.commit(caller, {"cam": {"weight": 1.0, "clips": [r["clip_id"] for r in results]}},
                           "for check")["commit_id"]
@@ -296,6 +289,33 @@ def test_recipe_check_is_refused_at_once_while_a_gpu_job_holds_the_gpus(env):
     with tools.gpu_lock, pytest.raises(ToolError, match="a GPU job is running"):
         tools.recipe_check(caller, {}, commit)
     assert tools.gpu_lock.acquire(blocking=False)          # and the refusal left the lock alone
+
+
+def test_gate_failure_closes_connection_and_releases_resources(tmp_path, monkeypatch):
+    import sqlite3
+    from types import SimpleNamespace
+    from ar_kernel.tools import data_tools
+
+    opened = []
+    def connect(run):
+        conn = open_db(run)
+        opened.append(conn)
+        return conn
+    def fail(self, recipe, commit, parent, node, scratch, run, gpus):
+        scratch.mkdir(parents=True)
+        (scratch / "partial").write_text("view")
+        raise RuntimeError("gate failed")
+
+    monkeypatch.setattr(data_tools, "open_db", connect)
+    monkeypatch.setattr(data_tools.Gate, "check", fail)
+    tools = DataTools(CFG, tmp_path, [0], threading.Lock())
+    caller = SimpleNamespace(workspace_host=tmp_path / "workspace", node="n1")
+    with pytest.raises(RuntimeError, match="gate failed"):
+        tools._gate(caller, {}, "c1")
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        opened[0].execute("SELECT 1")
+    assert not tools.gpu_lock.locked()
+    assert list((tmp_path / "recipe_check").iterdir()) == []
 
 
 def test_register_names_are_openai_safe():

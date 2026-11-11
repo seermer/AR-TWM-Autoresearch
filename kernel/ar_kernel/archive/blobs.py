@@ -28,13 +28,7 @@ class BlobStore:
         return self.root / kind / f"{digest}{KINDS[kind]}"
 
     def put(self, path: Path, kind: str) -> str:
-        """Move `path` into the store under its SHA-256 and return the digest.
-
-        Consumes the source file (the store keeps the only copy). Writes are
-        temp-file + fsync + rename, so a crash never leaves a truncated file under
-        a final content-addressed name, and an existing target is only trusted if
-        its size matches -- a torn earlier write is replaced, not kept forever.
-        """
+        """Consume a file into the SHA-256 store using fsync and atomic rename; replace size-mismatched targets."""
         path = Path(path)
         # A source inside the store is either a stored blob (put would unlink it
         # as the "duplicate source", destroying the only copy while the DB still

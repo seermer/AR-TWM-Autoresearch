@@ -507,7 +507,7 @@ def keyed(env):
     ([{"image": "a.png", "frame": 0}, {"image": "b.png", "frame": 5}], "at most one keyframe"),
     ([{"image": "a.mp4", "frame": 0}], "must be an image"),
     ([{"image": "../outside.png", "frame": 0}], "keyframes"),
-    ([{"image": "missing.png", "frame": 0}], "keyframes"),      # as a missing top-level file is refused today
+    ([{"image": "missing.png", "frame": 0}], "keyframes"),
 ])
 def test_bad_keyframes_are_refused_at_submit(keyed, keyframes, match):
     q, caller, backend, _ = keyed

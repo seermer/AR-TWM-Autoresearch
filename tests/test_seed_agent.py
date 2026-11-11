@@ -1,7 +1,7 @@
 """The seed agent: pure helpers in-process, then both entry points run the way a
 container runs them (python -m ar_contract.run in a subprocess) against the kernel's
 real gateway (scripted mock mode) and the mock tool server, over Unix sockets."""
-from conftest import client_dir
+from conftest import client_dir, git_file
 import asyncio
 import json
 import os
@@ -59,7 +59,7 @@ def _recipe_ctx(**over):
     from ar_contract.models import RecipeContext
     return RecipeContext(**{**dict(
         n_gpus=4, metric_guide=GUIDE,
-        tunable_rules={"optimizer.lr": {"type": "float", "min": 0, "max": None}},
+        tunable_rules={"optimizer.lr": {"type": "float", "min": 0, "min_exclusive": True}},
         recipe_guide={"optimizer.lr": {"base": 1e-4, "meaning": "peak rate"}},
         lora_allowlist=[[64, 64]]), **over})
 
@@ -72,6 +72,8 @@ def test_the_data_digest_has_scores_the_metric_guide_and_the_recent_lineage():
     text = recipe_planner_context(ctx, "/workspace/scratch/recipe_planner-1")
     assert text.index("## Recipe") < text.index("## Metrics") < text.index("## Siblings") < text.index("## Lineage")
     assert "## Retry" not in text and "Kernel tools" not in text and "data_query" not in text
+    assert "| optimizer.lr | float | > 0 |" in text
+    assert "| key | type | lower bound | base | parent | meaning |" in text
     assert "| cause_and_effect | physics | 4.5 | physics holds |" in text
     assert "|  | root | n90 | n91 |" in text                    # score tables: the root, then the last 10
     assert "| viewpoint: first_person / quality | 0.7 |" in text and "Urban" not in text
@@ -273,6 +275,9 @@ class FakeRole:
             raise result
         return result
 
+    async def handoff(self):
+        pass
+
     def close(self):
         self.closed = True
 
@@ -287,14 +292,14 @@ def test_the_delegate_tool_runs_the_builder_then_a_fresh_reviewer_and_hands_back
     def reviewer():
         reviewers.append(FakeRole([{"verdict": "falls_short", "findings": "f"}], log, "edit_reviewer"))
         return reviewers[-1]
-    tool = o.delegate(builder, reviewer, o.EditPlan, handbacks, lambda briefing, b: f"REVIEW {b['snapshot_id']}")
+    tool = o.delegate(builder, reviewer, o.EditPlan, handbacks, lambda briefing, b: f"REVIEW {b['snapshot_id']}", caller=lambda: FakeRole([], []))
     plan = dict(problem="p", evidence="e", mechanism="m", check="c")
     out = json.loads(asyncio.run(tool.ainvoke(plan)))
     assert out == {"snapshot_id": "s0", "report": "r0", "review": {"verdict": "falls_short", "findings": "f"}}
     assert log[0][1].startswith("<plan>\n") and log[1] == ("edit_reviewer", "REVIEW s0") and reviewers[0].closed
     asyncio.run(tool.ainvoke(plan))
     assert log[2][1].startswith("The planner revised the plan.\n\n<plan>") and len(reviewers) == 2
-    assert tool.metadata == {"ends_batch": True, "delegates": True} and tool.name == "coder"
+    assert tool.metadata == {"ends_batch": True} and tool.name == "coder"
     for _ in range(MAX_ROUNDS - 2):
         asyncio.run(tool.ainvoke(plan))
     with pytest.raises(ToolException, match=f"No calls left: coder was called {MAX_ROUNDS} times"):
@@ -309,7 +314,7 @@ def test_a_builder_that_fails_reaches_the_planner_as_an_error_and_uses_a_call(or
                         {"report": "r", "snapshot_id": "s"}], [])
     reviewer = lambda: FakeRole([{"verdict": "carries_out_plan", "findings": "f"}], [])
     handbacks = []
-    tool = o.delegate(builder, reviewer, o.EditPlan, handbacks, lambda b, s: "x")
+    tool = o.delegate(builder, reviewer, o.EditPlan, handbacks, lambda b, s: "x", caller=lambda: FakeRole([], []))
     call = {"name": "coder", "args": dict(problem="p", evidence="e", mechanism="m", check="c"), "id": "c1"}
     message = asyncio.run(run_tool({"coder": tool}, call, "edit_planner", None))
     assert message.status == "error" and message.content == (
@@ -334,7 +339,7 @@ def test_a_builder_with_compaction_on_delegation_compacts_after_it_submits_befor
     def reviewer():
         log.append([m.type for m in builder.messages])
         return FakeRole([{"verdict": "carries_out_plan", "findings": "f"}], [], "edit_reviewer")
-    tool = o.delegate(builder, reviewer, o.EditPlan, [], lambda briefing, b: "x")
+    tool = o.delegate(builder, reviewer, o.EditPlan, [], lambda briefing, b: "x", caller=lambda: FakeRole([], []))
     plan = dict(problem="p", evidence="e", mechanism="m", check="c")
     asyncio.run(tool.ainvoke(plan))
     assert log == [["human"]] and builder.messages[0].content == (
@@ -345,7 +350,7 @@ def test_a_builder_with_compaction_on_delegation_compacts_after_it_submits_befor
     builder.close()
 
 
-def test_only_the_builders_compact_on_delegation_and_a_reviewer_may_not(orch, monkeypatch):
+def test_seed_flag_defaults_and_reviewers_may_enable_delegation_compaction(orch, monkeypatch):
     o = orch[0]
     built = {}
     real = o.Role.__init__
@@ -362,8 +367,131 @@ def test_only_the_builders_compact_on_delegation_and_a_reviewer_may_not(orch, mo
         record(self, name, *a, **{**k, "compact_on_delegation": name.endswith("reviewer") or
                                   k.get("compact_on_delegation", False)})
     monkeypatch.setattr(o.Role, "__init__", reviewer_too)
-    with pytest.raises(ValueError, match="a reviewer is new for every review"):
-        o.check_roles()
+    o.check_roles()
+    assert built["recipe_reviewer"] and built["edit_reviewer"]
+
+
+
+@pytest.mark.parametrize("flags", [(a, b, c) for a in (False, True) for b in (False, True) for c in (False, True)])
+@pytest.mark.parametrize("rounds", [1, 2])
+def test_every_handoff_honors_the_outgoing_role_flag(orch, flags, rounds):
+    o, replies, seen = orch
+    planner_flag, builder_flag, reviewer_flag = flags
+    plan = dict(problem="p", evidence="e", mechanism="m", check="c")
+    replies["edit_planner"], replies["coder"], replies["edit_reviewer"] = [], [], []
+    for i in range(rounds):
+        replies["edit_planner"].append(("plan", [("future_builder", plan)]))
+        if planner_flag:
+            replies["edit_planner"].append(("PLANNER SUMMARY", []))
+        replies["coder"].append(("", [("submit_coder", {"report": f"built {i}"})]))
+        if builder_flag:
+            replies["coder"].append(("BUILDER SUMMARY", []))
+        replies["edit_reviewer"].append(("", [("submit_review", {"verdict": "carries_out_plan", "findings": "checked"})]))
+        if reviewer_flag:
+            replies["edit_reviewer"].append(("REVIEW SUMMARY", []))
+    replies["edit_planner"].append(("", [("finish", {"report": "done"})]))
+    async def built(value):
+        return {"snapshot_id": "s"}
+    builder = o.Role("coder", lambda s: "builder context", [], "submit_coder", Schema.Report, built,
+                     compact_on_delegation=builder_flag)
+    builder.name = "future_builder"
+    reviews = []
+    def reviewer():
+        role = o.Role("edit_reviewer", lambda s: "review context", [], "submit_review", o.Review,
+                      compact_on_delegation=reviewer_flag)
+        reviews.append(role)
+        return role
+    handbacks = []
+    tool = o.delegate(builder, reviewer, o.EditPlan, handbacks, lambda p, b: "review", caller=lambda: planner)
+    planner = o.Role("edit_planner", lambda s: "planner context", [tool], "finish", Schema.Report,
+                     compact_on_delegation=planner_flag)
+    assert asyncio.run(planner.run("work")) == {"report": "done"}
+    assert len(handbacks) == rounds and len(reviews) == rounds
+    expected = []
+    for _ in range(rounds):
+        expected += ["edit_planner"] * (1 + planner_flag)
+        expected += ["coder"] * (1 + builder_flag)
+        expected += ["edit_reviewer"] * (1 + reviewer_flag)
+    assert [name for name, _ in seen] == [*expected, "edit_planner"]
+    assert all(not role.scratch.exists() for role in reviews)
+    assert sum("PLANNER SUMMARY" in m.text for m in planner.messages) == int(planner_flag)
+    for role in (planner, builder):
+        role.close()
+
+
+@pytest.mark.parametrize("failure_role", ["edit_planner", "coder", "edit_reviewer"])
+def test_compaction_failure_is_a_tool_error_and_prevents_the_next_handoff(orch, failure_role):
+    o, replies, seen = orch
+    plan = dict(problem="p", evidence="e", mechanism="m", check="c")
+    replies.update({"edit_planner": [("", [("coder", plan)])],
+                    "coder": [("", [("submit_coder", {"report": "built"})])],
+                    "edit_reviewer": [("", [("submit_review", {"verdict": "falls_short", "findings": "f"})])]})
+    replies[failure_role].append(RuntimeError("provider unavailable"))
+    replies["edit_planner"].append(("", [("finish", {"report": "recovered"})]))
+    async def built(value):
+        return {"snapshot_id": "s"}
+    builder = o.Role("coder", lambda s: "C", [], "submit_coder", Schema.Report, built,
+                     compact_on_delegation=failure_role == "coder")
+    reviews = []
+    def reviewer():
+        role = o.Role("edit_reviewer", lambda s: "C", [], "submit_review", o.Review,
+                      compact_on_delegation=failure_role == "edit_reviewer")
+        reviews.append(role)
+        return role
+    handbacks = []
+    tool = o.delegate(builder, reviewer, o.EditPlan, handbacks, lambda p, b: "review", caller=lambda: planner)
+    planner = o.Role("edit_planner", lambda s: "C", [tool], "finish", Schema.Report,
+                     compact_on_delegation=failure_role == "edit_planner")
+    assert asyncio.run(planner.run("go"))["report"] == "recovered"
+    assert handbacks == []
+    errors = [m for m in planner.messages if m.type == "tool" and m.status == "error"]
+    assert len(errors) == 1 and errors[0].text == "Error: RuntimeError: provider unavailable"
+    assert len([m for m in planner.messages if m.type == "tool"]) == 2
+    assert bool(reviews) == (failure_role == "edit_reviewer")
+    assert bool(builder.messages) == (failure_role != "edit_planner")
+    assert all(not role.scratch.exists() for role in reviews)
+    planner.close(), builder.close()
+
+
+def test_threshold_and_delegation_share_one_summary_and_mixed_batches_stay_valid(orch, monkeypatch):
+    o, replies, seen = orch
+    from langchain_core.tools import StructuredTool
+    monkeypatch.setattr(o, "CONTEXT_WINDOW", 1000)
+    original = FakeModel.ainvoke
+    async def with_usage(self, messages):
+        reply = await original(self, messages)
+        if self.role == "edit_planner":
+            reply.usage_metadata = {"input_tokens": 800, "output_tokens": 100, "total_tokens": 900}
+        return reply
+    monkeypatch.setattr(FakeModel, "ainvoke", with_usage)
+    plan = dict(problem="p", evidence="e", mechanism="m", check="c")
+    replies["edit_planner"] = [("whole batch", [("echo", {"text": "before"}), ("coder", plan),
+                                                ("echo", {"text": "after"})]), ("SUMMARY", []), ("done", [])]
+    builder = FakeRole([{"report": "built", "snapshot_id": "s"}], [])
+    reviewer = lambda: FakeRole([{"verdict": "falls_short", "findings": "f"}], [])
+    tool = o.delegate(builder, reviewer, o.EditPlan, [], lambda p, b: "review", caller=lambda: planner)
+    ran = []
+    async def echo(text: str) -> str:
+        ran.append(text)
+        return text
+    echo_tool = StructuredTool.from_function(coroutine=echo, name="echo", description="Echo.")
+    planner = o.Role("edit_planner", lambda s: "C", [echo_tool, tool], "finish", Schema.Report,
+                     compact_on_delegation=True)
+    planner.pinned = "PINNED"
+    planner.messages.append(o.HumanMessage("go"))
+    replies["edit_planner"][-1] = ("", [("finish", {"report": "done"})])
+    replies["edit_planner"].append(("FINAL SUMMARY", []))
+    assert asyncio.run(planner.run("go"))["report"] == "done"
+    assert ran == ["before"]
+    assert len(seen) == 4
+    continuing = seen[2][1]
+    batch = next(m for m in continuing if m.type == "ai")
+    results = [m for m in continuing if m.type == "tool"]
+    assert batch.text == "whole batch" and len(batch.tool_calls) == 3
+    assert [m.tool_call_id for m in results] == [c["id"] for c in batch.tool_calls]
+    assert results[0].text == "before" and results[2].text.startswith("Not run: coder ran")
+    assert all("Not run yet" not in m.text for _, messages in seen for m in messages)
+    planner.close()
 
 
 def test_submit_result_accepts_only_a_handed_back_snapshot_and_lists_the_valid_ones(orch):
@@ -870,7 +998,7 @@ def test_edit_self_plans_builds_reviews_and_accepts_a_snapshot(kernel, tmp_path)
     sid = body["result"]["snapshot_id"]
     assert body["result"]["summary"] == "Fewer siblings in the planner's context."
     assert snapshot.edit_snapshot(repo, "n-edit", "edit_self", 1, sid) == sid
-    assert "SIBLINGS_SHOWN = 8" in repo.read_file(sid, "agent/briefing.py")
+    assert "SIBLINGS_SHOWN = 8" in git_file(repo, sid, "agent/briefing.py")
     assert not (agent / "agent" / "stray.py").exists() and "SIBLINGS_SHOWN = 8" in (agent / "agent" / "briefing.py").read_text()
     assert not any("belongs to coder: agent/briefing.py" in o for o in _tool_outputs(store, "n-edit"))
     outputs = _tool_outputs(store, "n-edit")
@@ -909,7 +1037,7 @@ def test_seed_agent_passes_contract_verification(tmp_path):
         edit = EditContext(**common, lineage=_edit_lineage(3), siblings=_edit_lineage(3)[1:])
         recipe = RecipeContext(**common, lineage=_data_lineage(3), siblings=_data_lineage(3)[1:], metric_guide=GUIDE,
                                n_gpus=4, clip_pool_size=7,
-                               tunable_rules={"optimizer.lr": {"type": "float", "min": 0, "max": None}},
+                               tunable_rules={"optimizer.lr": {"type": "float", "min": 0, "min_exclusive": True}},
                                recipe_guide={"optimizer.lr": {"base": 1e-4, "meaning": "peak rate"}},
                                lora_allowlist=[[64, 64]])
         report = verify_contract(cfg=KernelConfig.load(), run_dir=tmp_path / "run", run_id="seed", repo=repo,

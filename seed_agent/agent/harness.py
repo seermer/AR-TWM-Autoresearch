@@ -11,9 +11,9 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool, ToolException
 from pydantic import ValidationError
 
@@ -21,9 +21,6 @@ COMPACT_PROMPT = Path(__file__).resolve().parent / "prompts" / "compact.md"
 TOOL_BLOCK_TYPES = {"text", "image_url", "image", "json", "search_result", "custom_tool_call_output",
                     "document", "file"}
 SHOW_WHOLE, SHOWN = 100_000, 10_000        # chars of a tool result
-CHARS_PER_TOKEN = 4
-IMAGE_TOKENS = 1_500                       # tokens per image
-IMAGE_BLOCK_TYPES = {"image_url", "image", "input_image"}
 CONTINUATION = (
     "This session is being continued from a previous conversation. "
     "The summary below covers the earlier portion of the conversation.\n\n"
@@ -31,7 +28,6 @@ CONTINUATION = (
     "Continue the work from where it left off without asking any further questions. "
     "Resume directly: do not acknowledge the summary or recap what was happening."
 )
-PENDING = "Not run yet: {name} runs after this summary; its result follows it."
 GUARDED_TOOLS = ("run_command", "write_file", "edit_file")
 GUARD_TIMEOUT_S = 3600
 
@@ -188,34 +184,6 @@ async def run_batch(tools: dict[str, BaseTool], calls: list[dict], role: str,
     return out, submitted
 
 
-def _chars(message: AnyMessage) -> int:
-    if isinstance(message.content, str):
-        size = len(message.content)
-    else:
-        size = sum(IMAGE_TOKENS * CHARS_PER_TOKEN
-                   if isinstance(block, dict) and block.get("type") in IMAGE_BLOCK_TYPES
-                   else len(block if isinstance(block, str) else json.dumps(block, default=str))
-                   for block in message.content)
-    calls = getattr(message, "tool_calls", None) or []
-    return size + (len(json.dumps(calls, default=str)) if calls else 0)
-
-
-def estimate_tokens(messages: list[AnyMessage], system_prompt: str | None = None) -> int:
-    """The last reported usage plus an estimate of what came after."""
-    for i in range(len(messages) - 1, -1, -1):
-        message = messages[i]
-        if isinstance(message, AIMessage) and message.usage_metadata:
-            tail = sum(_chars(m) for m in messages[i + 1:])
-            return message.usage_metadata["total_tokens"] + tail // CHARS_PER_TOKEN
-    head = len(system_prompt or "")
-    return (head + sum(_chars(m) for m in messages)) // CHARS_PER_TOKEN
-
-
-def needs_compaction(messages: list[AnyMessage], system_prompt: str | None, context_window: int,
-                     compact_at: float) -> bool:
-    return len(messages) > 1 and estimate_tokens(messages, system_prompt) >= compact_at * context_window
-
-
 async def summarize(model, bound, tools: list[BaseTool], prompt: list[AnyMessage]) -> str:
     """The compaction summary."""
     prompt = [*prompt, HumanMessage(content=COMPACT_PROMPT.read_text())]
@@ -231,48 +199,20 @@ def bind(model, tools: list[BaseTool]):
     return model.bind_tools(tools, tool_choice=None) if tools else model.bind()
 
 
-async def compact(model, bound, tools: list[BaseTool], system: str | None, messages: list[AnyMessage],
-                  pinned: str) -> None:
-    """Replaces `messages` with `pinned` and a summary of them."""
-    head = [SystemMessage(content=system)] if system is not None else []
-    summary = await summarize(model, bound, tools, [*head, *messages])
-    messages[:] = [HumanMessage(content=f"{pinned}\n\n{CONTINUATION.format(summary=summary)}")]
-
-
-def _as_user(results: list[ToolMessage]) -> HumanMessage:
-    """Tool results whose call was compacted away."""
-    blocks = []
-    for r in results:
-        blocks.append({"type": "text", "text": f"{r.name} returned:"})
-        blocks += [{"type": "text", "text": r.content}] if isinstance(r.content, str) else r.content
-    return HumanMessage(content=blocks)
-
-
 async def run_loop(model, tools: list[BaseTool], system: str | None, messages: list[AnyMessage], *, role: str,
-                   pinned: str, compact_at: float, context_window: int, guard: Guard | None = None,
-                   compact_on_delegation: bool = False) -> list[AnyMessage]:
-    """Runs until a reply has no tool call or a submit is accepted; extends `messages` in place.
-    `compact_on_delegation`: compact when a reply calls a delegating tool, before it runs."""
+                   compact_at: float, context_window: int, guard: Guard | None = None,
+                   compact: Callable[[], Awaitable[None]] | None = None) -> list[AnyMessage]:
+    """Extend history until an ordinary reply or an accepted submission."""
     by_name = {t.name: t for t in tools}
     head = [SystemMessage(content=system)] if system is not None else []
     while True:
-        bound = bind(model, tools)
-        if needs_compaction(messages, system, context_window, compact_at):
-            await compact(model, bound, tools, system, messages, pinned)
-        reply = await bound.ainvoke([*head, *messages])
+        reply = await bind(model, tools).ainvoke([*head, *messages])
         messages.append(reply)
+        if compact and reply.usage_metadata and reply.usage_metadata["total_tokens"] >= compact_at * context_window:
+            await compact()
         if not tools or not reply.tool_calls:
             return messages
-        delegating = compact_on_delegation and any(
-            (getattr(by_name.get(c["name"]), "metadata", None) or {}).get("delegates") for c in reply.tool_calls)
-        if delegating:
-            messages += [ToolMessage(PENDING.format(name=c["name"]), name=c["name"], tool_call_id=c["id"])
-                         for c in reply.tool_calls]
-            await compact(model, bound, tools, system, messages, pinned)
         results, submitted = await run_batch(by_name, reply.tool_calls, role, guard)
-        if delegating:
-            messages.append(_as_user(results))
-        else:
-            messages += results
+        messages += results
         if submitted:
             return messages

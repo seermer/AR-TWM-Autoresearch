@@ -237,7 +237,6 @@ def verify_contract(*, cfg, run_dir: Path, run_id: str, repo, commit: str, harne
             harness.queue.cancel_for_token(caller.token)   # as in the phase runner
         return result, ws
 
-    fs.mkdir(Path(run_dir) / "store")
     probe = ("import sys; sys.path.insert(0, '/agent'); import agent.entry as e; "
              "assert callable(e.edit_self) and callable(e.improve_recipe)")
     result, _ = run("import", ["python", "-c", probe], None)

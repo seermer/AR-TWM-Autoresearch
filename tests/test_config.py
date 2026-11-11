@@ -41,8 +41,7 @@ def test_gpu_choice_raises_when_nvidia_smi_fails(monkeypatch):
 
 
 def test_dotenv_fills_missing_keys_without_overriding_the_shell(tmp_path):
-    """Nothing loaded .env, so filling it in did not enable VLM metrics
-    even though the docs said it would. Shell variables must still win."""
+    """Dotenv fills nonempty keys while shell values take precedence."""
     from ar_kernel.config import load_dotenv
     env_file = tmp_path / ".env"
     env_file.write_text("# comment\nVLM_API_KEY=from-file\nOPENAI_MODEL='gpt-x'\n"
@@ -64,10 +63,23 @@ def test_missing_dotenv_is_not_an_error(tmp_path):
 
 def test_for_run_reads_the_frozen_snapshot_with_this_checkout_as_root(tmp_path):
     (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "kernel.yaml").write_text("budget: {max_usd: 5}\npaths: {runs_dir: runs}\n")
+    (tmp_path / "config" / "kernel.yaml").write_text("budget: {max_usd: 5}\n")
     cfg = KernelConfig.for_run(tmp_path)
     assert cfg.get("budget.max_usd") == 5
     assert cfg.repo_root == REPO_ROOT                       # not runs/<id>: sibling paths still resolve
+    assert cfg.runs_dir == REPO_ROOT / "runs"
+
+
+@pytest.mark.parametrize("paths", [{}, {"runs_dir": "elsewhere"}, {"runs_dir": "/elsewhere"}])
+def test_runs_use_the_checkout_directory(tmp_path, paths):
+    assert KernelConfig(raw={"paths": paths}, repo_root=tmp_path).runs_dir == tmp_path / "runs"
+
+
+def test_an_overlay_cannot_redirect_run_storage(tmp_path):
+    overlay = tmp_path / "overlay.yaml"
+    overlay.write_text("paths: {runs_dir: /elsewhere}\n")
+    cfg = KernelConfig.load(overlays=[overlay])
+    assert cfg.runs_dir == REPO_ROOT / "runs"
 
 
 def test_overlays_apply_in_order_and_keep_keys_they_leave_out(tmp_path):

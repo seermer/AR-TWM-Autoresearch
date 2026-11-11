@@ -92,7 +92,7 @@ def _alerts(run: views.Run, scrub: Scrubber) -> list[dict]:
 def _training_videos(run: views.Run, node: str, root: Path, folder: str, scrub: Scrubber) -> list[dict]:
     out = []
     for ds in media.training_data(run, node)["datasets"]:
-        for c in media.clips(run, node, ds["dataset"], page_size=MAX_VIDEOS - len(out))["rows"]:
+        for c in media.clips(run, node, ds["dataset"], limit=MAX_VIDEOS - len(out)):
             caption = (c["caption"] or {}).get("caption") if isinstance(c["caption"], dict) else None
             out.append({"file": _copy(run, c["video"], root, f"{folder}/train_{len(out)}.mp4"),
                         "label": f"{ds['dataset']} · clip {len(out) + 1}", "caption": scrub(caption or "")})

@@ -1,18 +1,5 @@
-"""Preconfigured clients for the two kernel services, reached over Unix sockets.
-
-The gateway and tool server listen on sockets in SOCKET_DIR. Agent containers may also have
-internet access, but model calls and kernel tools go only through these sockets. Details
-verified on this stack:
-- the chat model uses httpx over the gateway socket; the MCP 2.x client REQUIRES httpx2;
-- the chat model speaks Chat Completions, the most widely supported OpenAI-compatible
-  endpoint, and round-trips a reply's reasoning when it returns one (see `reasoning_of`);
-- the host is 'localhost' (the MCP server's rebinding guard rejects anything else);
-- MCP calls such as data_ingest run the dataset checker, recipe_check can wait on the GPU
-  lock then run the gate steps, and hf_download fetches large files, so the session read
-  timeout is long -- a client timeout shorter than a server op still
-  in progress would just make the agent retry work that hasn't failed;
-- the gateway owns upstream retries, so clients never retry.
-"""
+"""Socket clients use localhost: httpx for model calls, httpx2 for MCP.
+Model replies retain reasoning; the gateway owns retries and tool reads allow long operations."""
 from __future__ import annotations
 
 import os
@@ -49,10 +36,7 @@ def reasoning_of(message: dict) -> str | None:
 
 
 class ReasoningChatOpenAI(ChatOpenAI):
-    """ChatOpenAI (Chat Completions) that keeps a reply's reasoning (`reasoning_of`) in
-    `additional_kwargs["reasoning"]` and sends it back as `reasoning` with that assistant message,
-    so the model keeps its earlier reasoning across turns. Stock langchain-openai drops it both
-    ways. A no-op for replies that carry no reasoning."""
+    """Round-trip Chat Completions reasoning in additional_kwargs['reasoning'] and outgoing assistant messages."""
 
     def _create_chat_result(self, response, generation_info=None):
         result = super()._create_chat_result(response, generation_info)

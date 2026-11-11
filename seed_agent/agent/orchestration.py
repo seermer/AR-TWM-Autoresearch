@@ -13,14 +13,14 @@ from typing import Literal
 from ar_contract.client import chat_model, mcp_session
 from ar_contract.models import EditContext, EditResult, RecipeContext, RecipeResult
 from ar_contract.static import mentions, static_check
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import StructuredTool, ToolException
 from pydantic import BaseModel, Field
 
 from .briefing import (coder_context, data_engineer_context, edit_planner_context, edit_reviewer_context,
                        recipe_planner_context, recipe_reviewer_context)
 from .entry import AGENT_ROOT, BRIEF_CHARS, COMPACT_AT, CONTEXT_WINDOW, MAX_ROUNDS, MODEL, WORKSPACE
-from .harness import Guard, bind, compact, remove_tree, run_loop
+from .harness import CONTINUATION, Guard, bind, remove_tree, run_loop, summarize
 from .tools import kernel_tools, local_tools, result_text
 
 AGENT_PKG = Path(__file__).resolve().parent
@@ -61,7 +61,7 @@ class Role:
     def __init__(self, name: str, context, tools: list, submit: str, schema: type[BaseModel], check=None, *,
                  owns: str | None = None, papers: bool = False, guard: Guard | None = None,
                  compact_on_delegation: bool = False) -> None:
-        """`compact_on_delegation`: compact when the work passes to another role (stateful roles only)."""
+        """`compact_on_delegation` summarizes this role before handing control to another."""
         self.name, self.context_fn, self.submit, self.guard = name, context, submit, guard
         self.compact_on_delegation = compact_on_delegation
         self.scratch = SCRATCH / f"{name}-{next(Role._ids)}"
@@ -69,6 +69,7 @@ class Role:
         self.messages: list = []
         self.context: str | None = None
         self.pinned = ""
+        self._compacted_tail = None
         self.value: dict | None = None
 
         async def accept(**kwargs) -> str:
@@ -95,14 +96,28 @@ class Role:
             if k:
                 self.messages.append(HumanMessage(content=REMIND.format(tool=self.submit)))
             self.messages = await run_loop(self.model, self.tools, self.system, self.messages, role=self.name,
-                                           pinned=self.pinned, compact_at=COMPACT_AT, context_window=CONTEXT_WINDOW,
-                                           guard=self.guard, compact_on_delegation=self.compact_on_delegation)
+                                           compact_at=COMPACT_AT, context_window=CONTEXT_WINDOW,
+                                           guard=self.guard, compact=self.compact)
             if self.value is not None:
                 return self.value
         raise NoSubmission(f"{self.name} ended its turn without calling {self.submit}, after {REMINDERS} reminders")
 
     async def compact(self) -> None:
-        await compact(self.model, bind(self.model, self.tools), self.tools, self.system, self.messages, self.pinned)
+        """Atomically summarize once per history tail, retaining a pending call or final user message."""
+        last = self.messages[-1]
+        if last is self._compacted_tail:
+            return
+        pending = isinstance(last, HumanMessage) or isinstance(last, AIMessage) and last.tool_calls
+        history, kept = (self.messages[:-1], [last]) if pending else (self.messages, [])
+        head = [SystemMessage(content=self.system)] if self.system is not None else []
+        summary = await summarize(self.model, bind(self.model, self.tools), self.tools, [*head, *history])
+        self.messages[:] = [HumanMessage(content=f"{self.pinned}\n\n{CONTINUATION.format(summary=summary)}"), *kept]
+        self._compacted_tail = self.messages[-1]
+
+    async def handoff(self) -> None:
+        """Prepare this role's history before another role takes control."""
+        if self.compact_on_delegation:
+            await self.compact()
 
     def close(self) -> None:
         remove_tree(self.scratch)
@@ -111,7 +126,7 @@ class Role:
 async def ping() -> str:
     """One model call, for the dry run."""
     messages = await run_loop(chat_model(MODEL, role="ping"), [], "Reply with the single word ok.",
-                              [HumanMessage(content="ping")], role="ping", pinned="ping", compact_at=COMPACT_AT,
+                              [HumanMessage(content="ping")], role="ping", compact_at=COMPACT_AT,
                               context_window=CONTEXT_WINDOW)
     return messages[-1].text
 
@@ -128,9 +143,8 @@ class Review(BaseModel):
 
 
 def delegate(builder: Role, reviewer, schema: type[BaseModel], handbacks: list, describe,
-             described: list = ()) -> StructuredTool:
-    """The planner's tool for `builder`: build, review, hand back. `described`: builder tools listed with their
-    descriptions."""
+             described: list = (), *, caller) -> StructuredTool:
+    """Build, review, and hand back; resolve the calling role when invoked."""
     calls = 0
 
     async def call(**kwargs) -> str:
@@ -140,13 +154,14 @@ def delegate(builder: Role, reviewer, schema: type[BaseModel], handbacks: list, 
                                 "Finish with submit_result.")
         calls += 1
         plan = schema.model_validate(kwargs)
+        await caller().handoff()
         briefing = f"<plan>\n{plan.model_dump_json(indent=1)}\n</plan>"
         built = await builder.run(briefing if calls == 1 else f"The planner revised the plan.\n\n{briefing}")
-        if builder.compact_on_delegation:
-            await builder.compact()
+        await builder.handoff()
         review_role = reviewer()
         try:
             review = await review_role.run(describe(briefing, built))
+            await review_role.handoff()
         finally:
             review_role.close()
         handback = {"snapshot_id": built["snapshot_id"], "report": built["report"], "review": review}
@@ -159,7 +174,7 @@ def delegate(builder: Role, reviewer, schema: type[BaseModel], handbacks: list, 
         description += (f"\n\nThe {builder.name} tools you cannot call yourself:\n"
                         + "\n".join(f"- {t.name}: {t.description}" for t in described))
     return StructuredTool(name=builder.name, description=description, args_schema=schema,
-                          coroutine=call, metadata={"ends_batch": True, "delegates": True})
+                          coroutine=call, metadata={"ends_batch": True})
 
 
 def result_check(handbacks: list, needs_result: bool):
@@ -242,7 +257,7 @@ def recipe_roles(ctx: RecipeContext | None, session, ktools: list) -> tuple:
     reviewer = lambda: Role("recipe_reviewer", lambda s: recipe_reviewer_context(ctx, s), read_only, "submit_review",
                             Review)
     planner = Role("recipe_planner", lambda s: recipe_planner_context(ctx, s),
-                   [delegate(engineer, reviewer, DataPlan, handbacks, describe, others), *read_only], "submit_result",
+                   [delegate(engineer, reviewer, DataPlan, handbacks, describe, others, caller=lambda: planner), *read_only], "submit_result",
                    RecipeSubmit, result_check(handbacks, needs_result=True), papers=True)
     return planner, engineer, reviewer
 
@@ -344,7 +359,7 @@ def edit_roles(ctx: EditContext | None, session, ktools: list, guard: Guard | No
     reviewer = lambda: Role("edit_reviewer", lambda s: edit_reviewer_context(ctx, COMPONENTS, s),
                             [*kernel, SELF_TEST], "submit_review", Review, guard=guard)
     planner = Role("edit_planner", lambda s: edit_planner_context(ctx, COMPONENTS, s),
-                   [delegate(coder, reviewer, EditPlan, handbacks, describe), *kernel], "submit_result",
+                   [delegate(coder, reviewer, EditPlan, handbacks, describe, caller=lambda: planner), *kernel], "submit_result",
                    EditSubmit, result_check(handbacks, needs_result=False), papers=True, guard=guard)
     return planner, coder, reviewer
 
@@ -369,6 +384,4 @@ async def run_meta(ctx: EditContext) -> EditResult:
 def check_roles() -> None:
     """Builds every role without a model call."""
     for _, _, reviewer in (recipe_roles(None, None, []), edit_roles(None, None, [], None)):
-        if reviewer().compact_on_delegation:
-            raise ValueError("compact_on_delegation needs a role that keeps its conversation; a reviewer is new "
-                             "for every review")
+        reviewer()

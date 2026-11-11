@@ -17,7 +17,7 @@ SEED = Path(__file__).resolve().parents[1] / "seed_agent"
 sys.path.insert(0, str(SEED))
 
 from agent import harness  # noqa: E402
-from agent.harness import CONTINUATION, Guard, error_text, estimate_tokens, needs_compaction, run_loop  # noqa: E402
+from agent.harness import CONTINUATION, Guard, error_text, run_loop  # noqa: E402
 
 BIG = 10 ** 9      # a context window compaction never reaches
 
@@ -112,11 +112,16 @@ def workspace(tmp_path, monkeypatch):
 
 class _Ours:
     def __init__(self, model, tools, system, **kw):
-        self.args, self.kw = (model, tools, system), {"role": "r", "pinned": "PINNED", "compact_at": 0.85,
-                                                     "context_window": BIG, **kw}
+        from agent.orchestration import Role
+        self.role = Role.__new__(Role)
+        self.role.model, self.role.tools, self.role.system = model, tools, system
+        self.role.pinned, self.role._compacted_tail = kw.pop("pinned", "PINNED"), None
+        self.args, self.kw = (model, tools, system), {"role": "r", "compact_at": 0.85,
+                                                     "context_window": BIG, "compact": self.role.compact, **kw}
 
     async def ainvoke(self, state):
-        return {"messages": await run_loop(*self.args, state["messages"], **self.kw)}
+        self.role.messages = state["messages"]
+        return {"messages": await run_loop(*self.args, self.role.messages, **self.kw)}
 
 
 async def _run(builder, script, tools, system, history, **kw):
@@ -251,96 +256,85 @@ def test_a_delegate_call_ends_its_batch_but_not_the_run():
 
 # ---- compaction ----
 
-def test_estimate_uses_last_reported_usage_plus_tail():
-    msgs = [HumanMessage("x" * 400), _ai("hi", total=1000), ToolMessage("y" * 80, tool_call_id="c")]
-    assert estimate_tokens(msgs) == 1000 + 20
-    assert estimate_tokens([HumanMessage("x" * 400)], system_prompt="s" * 40) == 110
-
-
-def test_images_count_as_a_fixed_estimate_not_their_base64_length():
-    from agent.harness import IMAGE_TOKENS
-    image = {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + "A" * 400_000}}
-    msgs = [HumanMessage(content=[{"type": "text", "text": "x" * 40}, image])]
-    assert IMAGE_TOKENS <= estimate_tokens(msgs) < IMAGE_TOKENS + 100      # not 400_000 / 4
-
-
-def test_a_single_message_is_never_compacted():
-    assert not needs_compaction([HumanMessage("x" * 10 ** 6)], None, 1000, 0.85)
-
-
 def _compacting(script, monkeypatch, history=None):
     monkeypatch.setattr(harness, "COMPACT_PROMPT", type("P", (), {"read_text": lambda self: "COMPACT NOW"})())
     return asyncio.run(_run(_Ours, script, TOOLS, "sys", history or [HumanMessage("CONTEXT\n\nBRIEFING")],
                             context_window=1000, pinned="CONTEXT\n\nBRIEFING"))
 
 
-def test_compaction_keeps_the_context_and_briefing_verbatim_with_the_summary_in_the_first_user_message(monkeypatch):
-    # call 1 asks for a tool and reports 900 tokens >= 0.85 * 1000, so the harness compacts
-    # before call 2 (the summarizer); call 3 continues from context, briefing and summary.
-    script = [_ai("", [("add", {"a": 1, "b": 2}, "c1")], total=900), _ai("SUMMARY TEXT"), _ai("done", total=50)]
+def test_threshold_preserves_the_whole_pending_call_and_uses_normal_results(monkeypatch):
+    script = [_ai("thinking", [("add", {"a": 1, "b": 2}, "c1"), ("add", {"a": 3, "b": 4}, "c2")], total=900),
+              _ai("SUMMARY TEXT", total=950), _ai("done", total=50)]
     messages, log = _compacting(script, monkeypatch)
     summarizer = log["prompts"][1]
-    assert [m["type"] for m in summarizer] == ["system", "human", "ai", "tool", "human"]
+    assert [m["type"] for m in summarizer] == ["system", "human", "human"]
     assert summarizer[0]["content"] == "sys" and summarizer[-1]["content"] == "COMPACT NOW"
-    assert len(log["bind"]) == 2 and log["bind"][1][1] == {"tool_choice": None}     # the summarizer reuses the bind
-    first = "CONTEXT\n\nBRIEFING\n\n" + CONTINUATION.format(summary="SUMMARY TEXT")
-    assert [m["type"] for m in messages] == ["human", "ai"]
-    assert messages[0]["content"] == first and log["prompts"][2][1]["content"] == first
-    assert messages[-1]["content"] == "done"
+    assert [m["type"] for m in messages] == ["human", "ai", "tool", "tool", "ai"]
+    assert messages[0]["content"] == "CONTEXT\n\nBRIEFING\n\n" + CONTINUATION.format(summary="SUMMARY TEXT")
+    assert messages[1]["content"] == "thinking" and [c["id"] for c in messages[1]["tool_calls"]] == ["c1", "c2"]
+    assert [(m["tool_call_id"], m["content"]) for m in messages if m["type"] == "tool"] == [("c1", "3"), ("c2", "7")]
+    assert len(log["prompts"]) == 3
 
 
-def test_below_the_threshold_messages_append_linearly(monkeypatch):
-    script = [_ai("", [("add", {"a": 1, "b": 2}, "c1")], total=800), _ai("done", total=820)]
-    messages, log = _compacting(script, monkeypatch)
-    assert [m["type"] for m in messages] == ["human", "ai", "tool", "ai"] and len(log["prompts"]) == 2
+def test_threshold_checks_ordinary_text_responses_too(monkeypatch):
+    messages, log = _compacting([_ai("answer", total=900), _ai("SUMMARY")], monkeypatch)
+    assert [m["type"] for m in messages] == ["human"]
+    assert [m["content"] for m in log["prompts"][1]][-2:] == ["answer", "COMPACT NOW"]
 
 
-def test_compaction_sees_every_result_of_a_batch_together(monkeypatch):
-    # Neither output alone reaches the threshold (700 + 350/4 = 787 < 850); together they do.
-    script = [_ai("", [("slow_echo", {"text": "A" * 350, "delay": 0.0}, "c1"),
-                       ("slow_echo", {"text": "B" * 350, "delay": 0.0}, "c2")], total=700),
-              _ai("SUMMARY TEXT"), _ai("done")]
-    messages, log = _compacting(script, monkeypatch)
-    assert len(log["prompts"]) == 3 and [m["type"] for m in messages] == ["human", "ai"]
+def test_below_threshold_and_unreported_usage_do_not_estimate_tool_growth(monkeypatch):
+    script = [_ai("", [("slow_echo", {"text": "A" * 100_000, "delay": 0.0}, "c1")], total=800), _ai("done")]
+    messages, log = _compacting(script, monkeypatch, [HumanMessage("x" * 100_000), _ai("old", total=900)])
+    assert len(log["prompts"]) == 2 and [m["type"] for m in messages] == ["human", "ai", "ai", "tool", "ai"]
 
 
-def test_compaction_falls_back_to_tool_choice_none_when_the_model_calls_a_tool_instead(monkeypatch):
+def test_compaction_falls_back_to_tool_choice_none(monkeypatch):
     script = [_ai("", [("add", {"a": 1, "b": 2}, "c1")], total=900),
-              _ai("", [("add", {"a": 9, "b": 9}, "cX")]),   # summarizer attempt: tool call, no text
-              _ai("SUMMARY TEXT"),                          # fallback retry: plain text
-              _ai("done", total=50)]
+              _ai("", [("add", {"a": 9, "b": 9}, "cX")]), _ai("SUMMARY TEXT"), _ai("done", total=50)]
     messages, log = _compacting(script, monkeypatch)
     assert len(log["prompts"]) == 4 and log["prompts"][1] == log["prompts"][2]
-    assert log["bind"][1][1] == {"tool_choice": None} and log["bind"][2][1] == {"tool_choice": "none"}
+    assert any(kw == {"tool_choice": "none"} for _, kw in log["bind"])
     assert messages[0]["content"].endswith(CONTINUATION.format(summary="SUMMARY TEXT"))
 
 
-def test_compaction_on_delegation_runs_before_the_delegate_and_its_results_come_as_a_user_message(monkeypatch):
-    async def builder(briefing: str) -> str:
-        return f"built {briefing}"
-    delegate = StructuredTool.from_function(coroutine=builder, name="coder", description="Brief the coder.",
-                                            metadata={"ends_batch": True, "delegates": True})
-    monkeypatch.setattr(harness, "COMPACT_PROMPT", type("P", (), {"read_text": lambda self: "COMPACT NOW"})())
-    script = [_ai("", [("add", {"a": 1, "b": 2}, "c1"), ("coder", {"briefing": "x"}, "c2")]),
-              _ai("SUMMARY TEXT"), _ai("done")]
-    messages, log = asyncio.run(_run(_Ours, script, [add, delegate], "sys", [HumanMessage("PINNED")],
-                                     compact_on_delegation=True))
-    summarizer = log["prompts"][1]
-    assert [m["type"] for m in summarizer] == ["system", "human", "ai", "tool", "tool", "human"]
-    assert summarizer[3]["content"] == harness.PENDING.format(name="add")
-    assert [m["type"] for m in messages] == ["human", "human", "ai"]
-    assert messages[0]["content"] == "PINNED\n\n" + CONTINUATION.format(summary="SUMMARY TEXT")
-    assert [b["text"] for b in messages[1]["content"]] == ["add returned:", "3", "coder returned:", "built x"]
-
-
-def test_without_compaction_on_delegation_a_delegate_call_is_not_compacted():
-    async def builder(briefing: str) -> str:
-        return "built"
-    delegate = StructuredTool.from_function(coroutine=builder, name="coder", description="Brief the coder.",
-                                            metadata={"ends_batch": True, "delegates": True})
-    script = [_ai("", [("coder", {"briefing": "x"}, "c1")]), _ai("done")]
-    messages, log = asyncio.run(_run(_Ours, script, [delegate], None, [HumanMessage("go")]))
-    assert [m["type"] for m in messages] == ["human", "ai", "tool", "ai"] and len(log["prompts"]) == 2
+@pytest.mark.parametrize("last,preserved", [
+    (HumanMessage("pending briefing"), True),
+    (_ai("text", [("add", {"a": 1, "b": 2}, "c1")]), True),
+    (ToolMessage("3", tool_call_id="c1"), False),
+    (_ai("ordinary response"), False),
+])
+@pytest.mark.parametrize("failure", [False, True])
+def test_compaction_commits_atomically_and_preserves_pending_messages(last, preserved, failure):
+    from agent.orchestration import Role
+    role = Role.__new__(Role)
+    history = [HumanMessage("earlier"), last]
+    prompts = []
+    class Model:
+        def bind(self):
+            return self
+        async def ainvoke(self, messages):
+            prompts.append(list(messages))
+            if failure:
+                raise RuntimeError("provider unavailable")
+            return _ai("SUMMARY", total=999_999)
+    role.model, role.tools, role.system, role.messages = Model(), [], "system", history
+    role.pinned, role._compacted_tail = "PINNED", None
+    before = list(history)
+    async def run():
+        if failure:
+            with pytest.raises(RuntimeError, match="provider unavailable"):
+                await role.compact()
+            assert history == before
+        else:
+            await role.compact()
+            assert role.messages is history and len(history) == 1 + preserved
+            if preserved:
+                assert history[-1] is last
+            await role.compact()
+            assert len(prompts) == 1
+    asyncio.run(run())
+    assert (last in prompts[0]) is not preserved
+    assert before == [HumanMessage("earlier"), last]
 
 
 def test_an_empty_summary_raises(monkeypatch):

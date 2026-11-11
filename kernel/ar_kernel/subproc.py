@@ -108,15 +108,9 @@ def run_in_env(env: str, args: list[str], *, cwd: Path, extra_env: dict | None =
                log_path: Path | None = None,
                cancel: "threading.Event | None" = None,
                poll_s: float = 1.0) -> subprocess.CompletedProcess:
-    """Run `args` inside conda env `env`, in its own session.
-
-    `cancel`, any exception and the leader's exit kill the WHOLE process group:
-    killing only `conda run` orphaned torchrun ranks that kept holding GPUs. With `log_path`,
-    output streams to that file and comes back as stdout; without it, to two temporary files (never a
-    pipe: a child the leader leaves running would hold it open). The result's `.cancelled` tells a
-    cancel apart from an exit code that happens to match. With `AR_PGID_DIR` set, the group
-    is recorded there until the wait ends, so a resume can kill what a dead kernel left.
-    """
+    """Run in a conda environment; kill and reap its process group on cancellation, failure, or leader exit.
+    Output goes to log_path or temporary files; AR_PGID_DIR records groups for resume cleanup.
+    The result.cancelled flag distinguishes cancellation from exit status."""
     command = conda_command(env, args)
     process_env = {**os.environ, **cache_env(), **(extra_env or {})}
     sinks = []

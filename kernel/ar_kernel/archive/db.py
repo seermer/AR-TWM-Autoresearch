@@ -12,12 +12,11 @@ CREATE TABLE IF NOT EXISTS nodes (
   depth INTEGER NOT NULL,
   created_at REAL NOT NULL,
   status TEXT NOT NULL,
-  agent_commit TEXT, data_commit TEXT, recipe_hash TEXT,
+  agent_commit TEXT, data_commit TEXT,
   resolved_config_path TEXT, checkpoint_path TEXT,
   lora_rank INTEGER, lora_alpha INTEGER,
   score REAL, metric_set TEXT, metrics TEXT, subtree_value REAL,
-  phase_timings TEXT, rationale_path TEXT,
-  recipe_path TEXT, attempt_counts TEXT, error TEXT
+  phase_timings TEXT, attempt_counts TEXT, error TEXT
 );
 CREATE TABLE IF NOT EXISTS attempts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -126,11 +125,8 @@ def write(conn: sqlite3.Connection, sql: str, params=()) -> int:
 
 
 def open_db_readonly(run_dir: Path, writer_alive: bool) -> sqlite3.Connection:
-    """The archive of a run, opened without writing anything into the run folder.
-
-    While the loop is writing, a plain read-only open (SQLite shares the writer's -shm). With no
-    writer and no WAL content, `immutable=1`, which creates no side files. With no writer but a
-    non-empty -wal (a killed writer's committed rows), an in-memory copy made outside the run."""
+    """Open a read-only archive using the live writer's shared WAL or a private copy of an orphaned WAL.
+    Quiescent archives without WAL content use immutable mode."""
     db = Path(run_dir) / "archive.db"
     wal = db.with_name("archive.db-wal")
     if writer_alive:

@@ -1,9 +1,4 @@
-"""Agent conversations from the gateway's llm.request spans (records.Records.calls).
-
-The gateway links a request to an earlier call when it resends that call's history, so a
-conversation id holds one uninterrupted history. Compaction replaces the history, so the
-continuation arrives under a new id; `chains` stitches it back for display only.
-A chat is a list of items {"kind", "title", "text"} that the UI turns into chat bubbles."""
+"""Display gateway conversation records, joining compaction continuations into chat bubbles."""
 from __future__ import annotations
 
 import json
@@ -135,10 +130,7 @@ def carries(segs: list[Segment], load: Load) -> tuple[dict[str, str], dict[str, 
 
 
 def chains(segs: list[Segment], load: Load) -> list[list[Segment]]:
-    """B continues A when both have the same role label, B starts after A's last call and B's
-    first user message contains A's last reply (whitespace-stripped; the harness pastes
-    `reply.text.strip()`). The wording of the compaction prompt is never relied on. The same
-    carry between different roles is not a compaction."""
+    """Join nonoverlapping same-role histories when a later first user message contains the earlier final reply, ignoring whitespace."""
     last_reply, first_user = carries(segs, load)
     prev: dict[str, Segment] = {}
     taken: set[str] = set()

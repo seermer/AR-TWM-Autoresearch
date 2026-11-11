@@ -27,9 +27,7 @@ def arguments(schema: dict, depth: int = 0) -> list[str]:
 
 
 def load_knowledge(tools: dict | None = None) -> dict[str, dict]:
-    """name -> {description, text}. A knowledge file starts with front matter: `name:` and `description:`.
-    One with `tool:` is that kernel tool's file: it exists only when the tool is in `tools`
-    (name -> the registered tool), and its text starts with the tool's own description and arguments."""
+    """Load front-matter knowledge files; prefix enabled tool files with their descriptions and argument fields."""
     files = {}
     for path in sorted(KNOWLEDGE_DIR.glob("*.md")):
         head, text = path.read_text(encoding="utf-8").removeprefix("---\n").split("\n---\n", 1)

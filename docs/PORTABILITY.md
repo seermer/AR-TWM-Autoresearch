@@ -15,9 +15,11 @@ the other two relatively:
   WBench/             <- benchmark and metrics
 ```
 
-`paths.worldmodel: ../WorldModel`, `paths.wbench: ../WBench`, `paths.runs_dir: runs`.
+`paths.worldmodel: ../WorldModel`, `paths.wbench: ../WBench`.
 Keep them relative. An absolute path here pins the tree to one machine, and
 `ar doctor` reports it as a failure.
+
+Runs are stored under `AutoResearcher/runs/<run_id>/`.
 
 ## What is path-independent already
 
@@ -98,9 +100,9 @@ CUDA version, and runs a small op of every compiled or driver-dependent package 
 `pip freeze` is identical to the working env's (`gen-wan22` differs only in how flash-attn and eva-decord are spelled).
 
 `ar_kernel.subproc.conda_command()` picks how an env value is run: a value containing "/" (`".envs/gen-zimage"`) is a
-prefix path, repo-relative unless absolute (`conda run -p`); a plain name (`"alayaworld"`) runs `conda run -p
-.envs/alayaworld` when that folder is a conda env (`project_env()`), otherwise `conda run -n <name>`. `ar doctor` reports
-`ok` for an env in `.envs/`, `warn` for a named env outside the project, `fail` for a missing one.
+prefix path, repo-relative unless absolute (`conda run -p`); a plain name (`"alayaworld"`) requires
+the project prefix `.envs/alayaworld`. `ar doctor` reports `ok` for required project environments
+that exist and `fail` for missing ones.
 
 **Refreshing the pin files after changing an env:** `conda env export -p .envs/<name> --no-builds` gives the conda part;
 `.envs/<name>/bin/pip freeze` the pip part (drop the `@ file:` lines, keep the index lines that were added by hand).

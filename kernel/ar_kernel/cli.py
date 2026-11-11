@@ -9,7 +9,7 @@ from .guards import check_tools_fit, choose_gpus
 from .hf_upload import HfUpload, fetch, run_uploads
 from .loop import NATURAL_END, Loop
 from .run import (PreflightError, RunNotFound, attach_run, bootstrap_run, check_new_run, check_resume,
-                  code_changes, record_envs, rescore_node)
+                  code_changes, existing_run_dir, record_envs, rescore_node)
 from .run_kit import build_run_kit
 from .status import format_status, run_status
 from .subproc import cache_env, proc_running, proc_start_time, terminate
@@ -77,9 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.run_id:
             if overlays:
                 raise ValueError("--config and --run-id: a run is checked under its own frozen config")
-            if not (cfg.runs_dir / args.run_id / "config" / "run.json").exists():
-                raise RunNotFound(f"no run {args.run_id!r} under {cfg.runs_dir}")
-            cfg = KernelConfig.for_run(cfg.runs_dir / args.run_id)
+            cfg = KernelConfig.for_run(existing_run_dir(cfg, args.run_id))
         return report(run_checks(cfg) + (gpu_checks(cfg) if args.gpu else []), strict=args.strict)
     if args.command == "fetch":
         if not os.environ.get("HFK", "").strip():
@@ -110,16 +108,12 @@ def main(argv: list[str] | None = None) -> int:
     # status / trace / score-node read an EXISTING run and never write into it.
     try:
         if args.command == "status":
-            run_dir = cfg.runs_dir / args.run_id
-            if not (run_dir / "config" / "run.json").exists():
-                raise RunNotFound(f"no run {args.run_id!r} under {cfg.runs_dir}")
+            run_dir = existing_run_dir(cfg, args.run_id)
             d = run_status(run_dir)
             print(json.dumps(d, indent=1) if args.json else format_status(d))
             return 0
         if args.command == "trace":
-            run_dir = cfg.runs_dir / args.run_id
-            if not (run_dir / "config" / "run.json").exists():
-                raise RunNotFound(f"no run {args.run_id!r} under {cfg.runs_dir}")
+            run_dir = existing_run_dir(cfg, args.run_id)
             trace = tree.load(run_dir)
             if args.check:
                 findings = tree.check(trace)
@@ -164,9 +158,7 @@ def _stop(control: Control, force: bool) -> int:
 
 
 def _upload(cfg, run_id: str) -> int:
-    run_dir = cfg.runs_dir / run_id
-    if not (run_dir / "config" / "run.json").exists():
-        raise RunNotFound(f"no run {run_id!r} under {cfg.runs_dir}")
+    run_dir = existing_run_dir(cfg, run_id)
     if (pid := Control(run_dir).alive_pid()) is not None:
         raise RuntimeError(f"the loop is still running (pid {pid}); `ar upload` is for a stopped run")
     if not os.environ.get("HFK", "").strip():

@@ -1,23 +1,5 @@
-"""LLM call records with conversation linking.
-
-Linking, in order: an explicit previous_response_id; a Responses API conversation
-id; otherwise the request's history begins with a prior call's request + response
-(how ChatOpenAI continues a run). Prefix matching only looks at calls from the
-same container token. A Chat Completions assistant message is compared by what a client
-sends back (content, tool call ids/names/parsed arguments, reasoning), because
-upstream replies carry extra fields (`refusal`, `annotations`, tool-call `index`) and may
-format the arguments JSON differently.
-
-CallStore keeps every call's full normalized history for the whole run, so memory
-grows with calls x history. forget() bounds that growth: once a caller token is
-revoked, its linking state (requests, response ids, conversation tails) is dropped.
-A response for a call that arrived after its token was forgotten is still recorded;
-only the linking-state bookkeeping is skipped.
-
-Each finished call is also an `llm_calls` row, and each agent conversation (not ask) a transcript file
-under nodes/<node>/transcripts/<phase>-<attempt>/<NN>-<role>.jsonl, rewritten as each of its calls ends, with
-`secrets` and the caller's token replaced by [REDACTED].
-"""
+"""Record LLM calls and redacted transcripts; link by response parent, conversation ID, then token-local history.
+Normalize client-visible assistant fields; drop revoked tokens' linking state while recording late replies."""
 from __future__ import annotations
 
 import json
@@ -158,8 +140,7 @@ class CallStore:
             mock: bool = False) -> None:
         with self._lock:
             messages = self._messages.pop(meta["call_id"], None)
-            # None: the caller's token was forgotten (revoked) while this call was in flight;
-            # there is no linking state left to update.
+            # Revoked tokens have no linking state; in-flight responses are still recorded.
             call = self._calls.get(meta["call_id"])
             if call is not None:
                 endpoint = call["endpoint"]
@@ -188,14 +169,7 @@ class CallStore:
                 raise KernelFault(f"the transcript {transcript} could not be written: {exc}") from exc
 
     def forget(self, token: str) -> None:
-        """Drop all linking state for `token`'s calls.
-
-        Bounds CallStore's memory growth: once a caller token is revoked, calls
-        made with it can no longer be linked to (as a previous_response_id parent
-        or a prefix match) and are removed from `_calls`, `_by_response` and
-        `_last_in_conv`. Any response that still arrives for one of these calls is
-        recorded by `end()` without error; linking-state updates are just skipped.
-        """
+        """Drop a token's linking state; record in-flight replies without recreating that state."""
         with self._lock:
             dead = {call_id for call_id, call in self._calls.items() if call["token"] == token}
             if not dead:

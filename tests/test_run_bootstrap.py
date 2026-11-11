@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import pytest
+import yaml
 from ar_kernel.config import KernelConfig
 from ar_kernel.eval.score import DIMENSION_METRICS
 from ar_kernel.guards import choose_gpus
@@ -39,6 +40,7 @@ def test_a_skill_benchmark_scores_the_metrics_its_cases_list(tmp_path, monkeypat
     monkeypatch.setattr(KernelConfig, "runs_dir", property(lambda self: tmp_path / "runs"))
     monkeypatch.setattr("ar_kernel.run.wbench_weight_problems", lambda cfg: [])
     monkeypatch.setattr("ar_kernel.run._uncommitted", lambda repo: False)
+    monkeypatch.setattr("ar_kernel.run._head", lambda repo: "test-revision")
     cfg = KernelConfig.load(overlays=[CFG.repo_root / "configs" / "rain_start.yaml"])
     ctx = _bootstrap(cfg, run_id="rain", env={})
     assert ctx.case_ids == [str(i) for i in range(1001, 1061)]
@@ -131,8 +133,7 @@ def test_attaching_to_a_missing_run_is_an_error_not_a_new_run(tmp_path, monkeypa
 
 
 def test_attach_does_not_rewrite_the_run_snapshot(tmp_path, monkeypatch):
-    """Every `ar status` re-copied configs over the snapshot and
-    rewrote versions.json, erasing the record of what the run started on."""
+    """Attach preserves the frozen configuration and revision record."""
     _runs(tmp_path, monkeypatch)
     ctx = _bootstrap(CFG, run_id="r1", env=ENV4)
     versions = ctx.run_dir / "config" / "versions.json"
@@ -151,6 +152,29 @@ def test_run_uses_its_own_config_snapshot(tmp_path, monkeypatch):
     for name in ("kernel.yaml", "base_recipe.yaml", "proxy_cases.txt"):
         assert run_config_path(CFG, ctx.run_dir, name) == ctx.run_dir / "config" / name
         assert (ctx.run_dir / "config" / name).exists()
+
+
+@pytest.mark.parametrize("names", [[], ["h100.yaml"], ["h100.yaml", "rain_start.yaml"]])
+def test_effective_snapshot_is_the_only_resume_input(tmp_path, monkeypatch, names):
+    _runs(tmp_path, monkeypatch)
+    cfg = KernelConfig.load(overlays=[CFG.repo_root / "configs" / name for name in names])
+    ctx = _bootstrap(cfg, run_id="effective", env=ENV4)
+    config = ctx.run_dir / "config"
+    assert yaml.safe_load((config / "kernel.yaml").read_text()) == cfg.raw
+    assert (config / "base_recipe.yaml").read_bytes() == cfg.base_recipe.read_bytes()
+    assert (config / "provenance" / "kernel.yaml").read_bytes() == (CFG.repo_root / "configs" / "kernel.yaml").read_bytes()
+    if names:
+        assert yaml.safe_load((config / "provenance" / "overlay.yaml").read_text()) == cfg.overlay
+        (config / "provenance" / "overlay.yaml").write_text("budget: {max_usd: -1}")
+    frozen = KernelConfig.for_run(ctx.run_dir)
+    assert frozen.raw == cfg.raw and frozen.repo_root == cfg.repo_root
+    before = {p.relative_to(config): p.read_bytes() for p in config.rglob("*") if p.is_file()}
+    attached = _attach(frozen, "effective", ENV4)
+    assert attached.case_ids == ctx.case_ids
+    assert before == {p.relative_to(config): p.read_bytes() for p in config.rglob("*") if p.is_file()}
+    (config / "kernel.yaml").unlink()
+    with pytest.raises(FileNotFoundError):
+        KernelConfig.for_run(ctx.run_dir)
 
 
 def test_bootstrap_refuses_to_start_when_wbench_weights_are_broken(tmp_path, monkeypatch):

@@ -1,5 +1,4 @@
-"""generate_images: Z-Image-Turbo images for rollouts to start or end on. Images carry no ingest candidate (they are inputs, not training clips); a rollout made
-from one folds the image's hash into its own inputs_hash instead."""
+"""generate_images: Z-Image-Turbo inputs for video rollouts."""
 from __future__ import annotations
 
 from pathlib import Path

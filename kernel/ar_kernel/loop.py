@@ -3,7 +3,6 @@ next one starts clean. A phase that fails otherwise runs once more after a clean
 the run (KernelFault, or any other exception), or ends the node when either failure was a NodeFault."""
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import shutil
@@ -135,10 +134,6 @@ class Loop:
         current, self._current = self._current, None
         if self.upload is not None:
             self.upload(*current)
-
-    def _process(self, node: str, phase: str, attempt: int) -> dict:
-        """The failed attempt's process, for the record."""
-        return attempt_process(self.ctx.conn, node, phase, attempt)
 
     def _children(self) -> int:
         """Nodes counted toward max_nodes: every child."""
@@ -407,9 +402,6 @@ class Loop:
             self._state(child, "eval")
             scored = self._phase(child, "eval", 0, lambda: self._evaluate(child, checkpoint, resolved),
                                  lambda: self._clean_eval(child), _scored, "eval_failed")
-        except StopRun:
-            status = None                                         # left running: restarted on resume
-            raise
         except Quarantined as exc:
             telemetry.error(exc, "the node ends quarantined")
             status, error = "quarantined", f"quarantined: {exc}"
@@ -480,7 +472,8 @@ class Loop:
                 if not out.ok:
                     sp.output = {"outcome": "failed"}
                     self._check_budget()                     # a spent budget is not the agent's: stop, not charge
-                    failure = {"kind": "edit_self", "error": out.error, "process": self._process(child, "edit_self", k)}
+                    failure = {"kind": "edit_self", "error": out.error,
+                               "process": attempt_process(self.ctx.conn, child, "edit_self", k)}
                     self.nodes.add_attempt(child, "edit_self", k, "failed", failure)
                     return out
                 sp.output = {"outcome": "passed"}
@@ -527,7 +520,7 @@ class Loop:
                     sp.output = {"outcome": "failed"}
                     self._check_budget()                     # a spent budget is not the agent's: stop, not charge
                     failure = {"kind": "improve_recipe", "error": out.error,
-                               "process": self._process(child, "improve_recipe", k)}
+                               "process": attempt_process(self.ctx.conn, child, "improve_recipe", k)}
                     with transaction(self.ctx.conn):
                         self.nodes.add_attempt(child, "improve_recipe", k, "failed", failure)
                         self._commits.fail(child, k)
@@ -581,9 +574,6 @@ class Loop:
         with transaction(self.ctx.conn):
             self.nodes.set_fields(
                 child, data_commit=res["data_commit"],
-                recipe_hash=hashlib.sha256(json.dumps(res["recipe"], sort_keys=True).encode()).hexdigest(),
-                recipe_path=run_rel(self.ctx.run_dir, d / "recipe.yaml"),
-                rationale_path=run_rel(self.ctx.run_dir, d / "rationale.md"),
                 resolved_config_path=run_rel(self.ctx.run_dir, resolved), lora_rank=rank, lora_alpha=alpha)
             self._commits.settle(child, k, res["data_commit"])
 

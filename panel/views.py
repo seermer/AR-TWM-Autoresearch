@@ -256,10 +256,7 @@ def conversation_chat(run: Run, node_id: str, phase: str, attempt: int, index: i
 
 
 def _tasks(run: Run, node_id: str, phase: str, attempt: int) -> tuple[list[dict], list[dict], list[dict]]:
-    """Delegated tasks, from timing alone, whatever the orchestration: a conversation's calls form one task until
-    it resumes after another conversation made a whole call while it was idle; that starts its next task. Each task
-    comes after the task whose call was the last to end before its first call; tasks with a call still in flight
-    then are listed as alongside."""
+    """Derive delegated tasks from conversation call intervals, including resumptions and overlapping work."""
     load = run.records.payload
     convs = conversations(run, node_id, phase, attempt)
     conv_of = {s.conversation_id: i for i, conv in enumerate(convs) for s in conv["chain"]}

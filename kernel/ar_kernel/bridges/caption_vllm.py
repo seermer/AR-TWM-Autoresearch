@@ -1,11 +1,4 @@
-"""caption_videos bridge (runs in the vllm env): starts `vllm serve`, captions every clip through its
-OpenAI-compatible endpoint, and stops it.
-
-python caption_vllm.py --job <work>/job.json (bridges/protocol.py). Job file: serve ({"argv", "env", "port"}: the
-command the kernel built), system, prompt, concurrent_requests, clip_timeout_s, reasoning_effort; items {index,
-path}. One item message per clip with its caption and reasoning, or its error; requests run in threads, so every
-item's log is the server's.
-"""
+"""Caption clips through one local server per job; retain captions, reasoning, and per-item errors."""
 from __future__ import annotations
 
 import os

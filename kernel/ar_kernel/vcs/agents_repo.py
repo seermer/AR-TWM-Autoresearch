@@ -118,10 +118,6 @@ class AgentsRepo:
         except tarfile.TarError as exc:
             raise CheckoutError(f"cannot check out {commit[:12]}: {exc}") from exc
 
-    def read_file(self, commit: str, path: str) -> str | None:
-        r = self._git("show", f"{commit}:{path}", check=False)
-        return r.stdout.decode() if r.returncode == 0 else None
-
     def diff_stats(self, a: str, b: str) -> list[dict]:
         out = []
         for line in self._git("diff", "--numstat", a, b).stdout.decode().splitlines():

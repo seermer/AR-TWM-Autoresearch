@@ -1,22 +1,5 @@
-"""annotate_camera worker (runs in `alayaworld`): mp4 -> per-frame camera poses via ViGeo.
-
-python vigeo_poses.py --job <work>/job.json (bridges/protocol.py): one worker per GPU group; per item
-<out>/<index>.npz (cam_c2w [N,4,4] float32, OpenCV camera-to-world, frame 0 = identity; intrinsics [3,3] in mp4
-pixels). Job file: paths.repo (ViGeo), paths.checkpoint (ViGeo1.1), config.max_frames.
-
-ViGeo facts used (third_party/ViGeo): frames are resized to a patch-14 grid of ~1369 tokens
-(vigeo.py `_resolve_model_size`); `pose_pred` is [T,3,4] camera-to-world; the focal
-is normalized so that fx = fy = f * sqrt(w^2 + h^2) / 2 at the model resolution
-(vigeo/utils.py `normalized_uv`); long clips run in chunk mode, 16 frames per call, carrying
-`kv_caches`; `total_budget` bounds that cache (layers/attention.py
-`eviction`), otherwise it grows ~170 MB per frame.
-
-Two choices measured on WorldModel's example clips: the cache budget is
-3x WorldModel's 262144 (still fits a 24 GB card, peak ~18.3 GB; the smaller budget drifted to
-27% ATE on one clip), and the focal comes from the first chunk only, which ViGeo sees with full
-attention: in chunk mode the per-frame focal drifts as the cache is evicted (881 -> 1140 px
-over one 450-frame clip whose true fx is 793).
-"""
+"""Estimate OpenCV camera-to-world poses and pixel intrinsics with chunked ViGeo inference.
+Frame zero is identity; cache size is bounded and focal length comes from the first chunk."""
 from __future__ import annotations
 
 import sys

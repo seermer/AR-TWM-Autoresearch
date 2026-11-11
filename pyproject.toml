@@ -36,6 +36,5 @@ markers = [
     "sandbox: starts real bwrap sandboxes; run with -m sandbox",
     "real_preflight: uses the real eval prerequisite check instead of the test stub",
 ]
-# The default unit suite uses no GPU. A GPU test running alongside a
-# real job has already produced a spurious gate failure through contention.
+# The default unit suite excludes real GPU jobs and bwrap sandboxes.
 addopts = "-q --basetemp=.cache/pytest -m 'not manual and not gpu and not sandbox'"

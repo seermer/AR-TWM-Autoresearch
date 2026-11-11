@@ -1,13 +1,5 @@
-"""rollout_alayaworld bridge (runs in the alayaworld env): WorldModel's prompt precache, then its run_wbench.py,
-both as they are.
-
-python alayaworld_render.py --job <work>/job.json (bridges/protocol.py). Job file: precache and render ({"argv",
-"cwd", "env"}: the two commands), videos (WorldModel's output folder). A `[Validation] case_start case=<id>` line
-of the render starts that case; a case is done when its `case_<id>_combined.json` exists (WorldModel writes it
-after the video and the camera path). The files stay where WorldModel wrote them: run_wbench checks at its end
-that every video is there. A `worker_exit` message (worker 0) gives the failed precache's or the render's exit code;
-when a case has no video, the render log's tail goes to stderr (bridge.log), for the kernel's error rows.
-"""
+"""Run WorldModel prompt precache and rendering commands; publish completed cases and worker exit codes.
+Keep renderer outputs in place until exit and include log tails for cases without videos."""
 from __future__ import annotations
 
 import os

@@ -1,7 +1,4 @@
-"""Parent selection: a softmax
-over each scored node's value -- mostly its own score, partly its subtree mean shrunk toward that
-score -- with a temperature set by the spread of values (floored at proxy noise), a penalty for
-large subtrees, and a uniform floor. Continuous in the scores."""
+"""Select parents by score/subtree softmax with spread-based temperature, size penalty, and uniform exploration."""
 from __future__ import annotations
 
 import bisect

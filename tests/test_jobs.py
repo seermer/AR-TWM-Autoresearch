@@ -12,12 +12,7 @@ from ar_kernel.tools.server import ToolError
 
 
 def _cancel_once_child_appears(pidfile, cancel: threading.Event, deadline_s: float = 60) -> None:
-    """Trigger `cancel` once `pidfile` shows up, bounded by `deadline_s`.
-
-    Waiting for the actual readiness signal (rather than a fixed timer) avoids
-    racing `conda run`'s own startup latency; the bounded deadline still fails
-    the test promptly if the launch never happens at all.
-    """
+    """Cancel when the child readiness file appears, bounded by deadline_s."""
     def watch() -> None:
         deadline = time.monotonic() + deadline_s
         while time.monotonic() < deadline and not pidfile.exists():
@@ -126,10 +121,7 @@ def test_unknown_backend_is_a_tool_error(env):
 
 
 def test_wait_caps_a_non_finite_timeout(env):
-    """A lax-parsing client (e.g. JSON-RPC "nan") can hand job_wait a non-finite
-    timeout_s. min(nan, cap) is nan whenever nan sorts first, which never
-    satisfies `remaining <= 0`, so this must not be allowed to busy-spin past
-    the cap -- both NaN and +inf must still return at the cap."""
+    """NaN and infinite waits return within the configured cap."""
     q, a, _, _ = env
     job_id = q.submit(a, "sleepy", {"steps": 200, "dt": 0.05})
     for timeout_s in (float("nan"), float("inf")):

@@ -1,7 +1,4 @@
-"""Kernel code changes state only through the recording functions (subproc, fs, archive, vcs), starts threads
-only through telemetry.thread/submit, and every `except` re-raises or writes a record (P6). The *_TODO lists
-name the sites still to convert, each with its plan task; they empty by the end of Part G (status.py in H1).
-PERMANENT holds the exceptions, each with its reason."""
+"""Recorded state changes, managed threads, and observable exception handling; PERMANENT lists explicit exceptions."""
 from raw_effects import scan
 
 EFFECTS_TODO = {

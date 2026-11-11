@@ -23,14 +23,7 @@ from .context import STAGING, WORKSPACE, PathError, bearer, open_file, to_host
 
 
 class ToolError(_MCPToolError):
-    """A failure the agent should see and may act on.
-
-    Subclasses the SDK's own `ToolError` (not merely `Exception`): the SDK
-    treats that class, and only that class, as an anticipated failure whose
-    message reaches the client. Any other exception type is masked to a
-    generic "Error executing tool <name>" (see `Tool.run`), which would hide
-    the message this class exists to deliver.
-    """
+    """An anticipated tool failure whose message the MCP SDK passes to the agent."""
 
 
 FROM_FILE = "or the path of a .json file under /workspace that holds the list as a JSON array"

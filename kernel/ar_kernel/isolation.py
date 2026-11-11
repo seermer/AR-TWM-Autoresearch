@@ -82,7 +82,7 @@ def host_roots(cfg) -> tuple[tuple[str, str], ...]:
 
 
 def scrub(value, names: list[str], roots=()):
-    """`value` as an agent may read it: without the blocked `names` and without the host folders `roots`."""
+    """Replace blocked names and host paths in string values."""
     if isinstance(value, str):
         for root, shown in roots:
             value = value.replace(root, shown)
@@ -120,9 +120,7 @@ _MARKED = re.compile(rf"(?:\A|(?<=\n)){_SENTENCE}[ \t]*|{_SENTENCE}")
 
 
 def drop_sentences(value, names: list[str]):
-    """`value` without any sentence that holds one of `names`. For text from outside (search results,
-    papers, web pages): no word could stand in for the name there, and the sentence around it is about
-    what the agent must not read. A sentence ends at . ! ? a newline or a double quote."""
+    """Drop sentences containing blocked names from string values."""
     if isinstance(value, str):
         marked = _matcher(tuple(names)).sub(_MARK, value) if names else value
         # only where a name was found: on a long text without sentence ends the pattern is quadratic
@@ -138,10 +136,7 @@ MODEL_ITEMS = ("function_call", "reasoning")       # Responses input items the m
 
 
 def censor_request(body: dict, names: list[str]) -> dict:
-    """An LLM request body without the sentences that hold one of `names`, in everything the model did
-    not write: tool results and user and system messages (Chat Completions `messages`, Responses
-    `input`). What the model wrote (assistant messages, its tool calls and reasoning) is left as it is:
-    the audit reads that. So a mention the agent only came across never reaches the model or a transcript."""
+    """Remove named sentences from system/user/tool inputs; preserve assistant outputs for auditing."""
     def own(item) -> bool:
         return not isinstance(item, dict) or item.get("role") == "assistant" or item.get("type") in MODEL_ITEMS
 
@@ -156,11 +151,8 @@ def censor_request(body: dict, names: list[str]) -> dict:
 
 
 def audit(conn, node: str, phase: str | None = None, attempt: int | None = None) -> list[str]:
-    """The audit patterns the model itself wrote in one attempt (or, without phase and attempt, anywhere
-    in the node), as the gateway found them in every string of every model response, whatever its shape:
-    reasoning, replies and tool-call arguments (commands, files written through tools, queries, plans). Ask
-    answers are left out. Empty when clean. Tool results are not read: the gateway censors them before the
-    model sees them."""
+    """Collect gateway audit hits from model outputs, reasoning, and tool arguments for a node or attempt.
+    Ask responses are excluded."""
     hits: set[str] = set()
     for call in calls(conn, node):
         if call["tool"] is None and (phase is None or (call["phase"], call["attempt"]) == (phase, attempt)):

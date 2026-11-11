@@ -7,7 +7,7 @@ from collections import Counter
 
 from .archive.activity import activity, calls
 
-# Safety caps: the longest real error message so far is 469 characters.
+# Bounds for distinct errors, example text, and total output bytes.
 MAX_ERRORS, EXAMPLE_CHARS, MAX_BYTES = 8, 1000, 10_000
 _HEX = re.compile(r"\b[0-9a-f]{16,}\b")
 _PATH = re.compile(r"/(?:mnt|home|tmp|workspace)/[^\s'\"]*")

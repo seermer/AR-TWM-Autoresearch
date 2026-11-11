@@ -1,15 +1,12 @@
 paths:
   worldmodel: ../WorldModel
   wbench: ../WBench
-  runs_dir: runs
   root_cache: root_cache           # scored roots shared across runs, one dir per run.root_key
   scores_dir: scores               # `ar score-node` output, one dir per <run>-<node>-<time>; never inside a run
 gpus:
   num_gpus: 4                     # the run takes the first num_gpus free cards; a positive multiple of min_count
   min_count: 4
-  # Each GPU tool's block has `min_total_gpu_gib`: the memory it needs across the run's cards, an
-  # estimate of 96 (4 x 24 GB) or 48 (2 x 24 GB), and `min_gpu_gib`: the memory each card needs (24: every
-  # tool was measured on 24 GB cards only). A run does not start while an enabled tool needs more.
+  # Tools specify aggregate and per-card GPU-memory requirements in GiB.
   free_below_mib: 512            # a kernel GPU job an agent asked for is refused while a GPU holds more than
                                  # this (the agent sandbox sees the same GPUs; a display server uses less)
 host:                            # host RAM, checked once at start (`ar run`, `ar doctor`); nothing scales at run time
@@ -89,7 +86,7 @@ ask:                             # the ask tool: one stateless question to the a
   max_image_side: 1024           # px; larger images are downscaled before they are sent
 captioner:                       # caption_videos GPU job: a local vLLM server, never the paid agent model
   env: vllm             # conda env with vLLM (0.32.0), lives in .envs/vllm
-  min_total_gpu_gib: 96          # the launch below was tuned on 4 x 24 GB
+  min_total_gpu_gib: 96          # aggregate GPU memory in GiB
   min_gpu_gib: 24
   model: Qwen/Qwen3.8-27B-FP8    # resolved by id through the HF cache (HF_HUB_OFFLINE=1: never downloads)
   tensor_parallel: 4             # vLLM shards this model across powers of two only; data parallel fills the GPUs
@@ -99,9 +96,7 @@ captioner:                       # caption_videos GPU job: a local vLLM server, 
   gpu_memory_utilization: 0.90
   max_num_seqs: 20
   concurrent_requests: 20        # clips (locate_events: frames) sent at once; the server batches them
-  # vLLM sizes the encoder cache as max(max_num_batched_tokens, its estimate of one video's tokens); the
-  # estimate (12288) is exceeded by clips with an odd sampled frame count (1080p, 13 frames: 14280 tokens),
-  # which vLLM rejects with HTTP 400.
+  # The encoder cache must cover a full sampled video, including odd frame counts.
   max_num_batched_tokens: 32768
   reasoning_parser: qwen3        # the model reasons; its reasoning is recorded per clip, not returned
   reasoning_effort: low          # sent with each request (the chat template takes low / medium / xhigh)
@@ -145,8 +140,7 @@ images:                           # generate_images GPU job (Z-Image-Turbo first
   revision: f332072aa78be7aecdf3ee76d5c247082da564a6
   steps: 9
   default_size: [544, 960]        # [height, width]
-  offload: model                  # from the fit spike: `none` OOMs at 1920x1088 (peaks > 24 GB);
-                                   # `model` (enable_model_cpu_offload) fits every allowed size, peak 12.8 GB
+  offload: model                  # CPU offload keeps every allowed size within the GPU budget
 generators:                       # rollout_* GPU jobs; switched on only after a smoke run
   alayaworld:
     env: alayaworld
@@ -163,13 +157,11 @@ generators:                       # rollout_* GPU jobs; switched on only after a
     commit: 1ea34ff48f87168174e12956e200b1d908b1c5ff   # pinned; the backend refuses to run off this commit
     weights: weights/wan2.2-ti2v-5b
     enabled: false
-    # Not under the size rule of the other tools: it still crops a first frame to 1280x704 and crops its
-    # render to 1248x704. Bring it under the rule (gpu_jobs.check_size, frame_keys) before switching it on.
+    # Fixed crops: 1280x704 input and 1248x704 output, independent of dynamic size rules.
     gpus_per_worker: 1
     workers: 4
     frames: [121, 121]            # [default, max]; 4k+1
-    # Fit test (1280x704, 121 frames, 50 steps, 24 GB card): no-offload OOMs in the VAE
-    # decode; T5 on GPU is no faster (9:41 vs 9:24 wall). Peak 22.9 GiB allocated: the whole card.
+    # Offload both model and T5 to fit 24 GB GPUs.
     extra_args: {offload_model: true, t5_cpu: true}
   ltx25:
     env: .envs/gen-ltx25           # a conda-prefix env inside the repo
@@ -178,10 +170,7 @@ generators:                       # rollout_* GPU jobs; switched on only after a
     repo: third_party/LTX-2       # relative to the AutoResearcher repo; gitignored
     commit: a95ab856bf29407b6b066ede0abe1846050db56c   # pinned; the backend refuses to run off this commit
     weights: weights/ltx-2.5
-    # The dev model (the distilled one dissolved between scenes; live-animal-10-19). Measured at
-    # 1024x576x121: peak RSS ~72 GiB per worker, half of it the mmapped weight files (page cache,
-    # shared by every worker); the private (RssAnon) peak 36.8 GiB.
-    # 1024x576x145-169 with 2-3 workers: 150-190 s/clip each, 12-14 GiB GPU peak.
+    # Two-stage dev pipeline; workers share memory-mapped weights.
     enabled: true
     quantization: fp8-cast        # 24 GB cards: fp8-cast + CPU offload, one GPU per worker
     offload: cpu

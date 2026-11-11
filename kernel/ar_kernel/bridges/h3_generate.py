@@ -1,14 +1,5 @@
-"""rollout_h3 bridge (runs in the gen-lightx2v conda-prefix env): MiniMax H3 through LightX2V's shared block
-offload recipe, one rank per GPU.
-
-python h3_generate.py --job <work>/job.json (bridges/protocol.py) starts torchrun on itself with a rank per GPU.
-Job file: paths.weights, paths.requests ({index: {"prompt": the model prompt, "frames": the clip's frame count}}),
-paths.config (the LightX2V json), paths.size ([height, width]).
-
-The ranks render every item together (sequence parallel over one host copy of the weights), in index order;
-each rank's output goes to logs/<index>.rank<r>.log, and rank 0 writes <out>/<index>.mp4 and sends the messages.
-An error ends the job: the ranks cannot stay in step past it.
-"""
+"""Run MiniMax H3 with one torchrun rank per GPU and a shared block-offloaded model.
+Rank zero publishes outputs; any rank failure ends the job."""
 from __future__ import annotations
 
 import json

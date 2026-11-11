@@ -1,12 +1,6 @@
-"""caption_videos: caption clips with a local video model, as a GPU job.
-
-Each job runs a bridge (bridges/caption_vllm.py) that starts `vllm serve` (the `captioner` config) on the node's
-GPUs, sends every clip file to it through the OpenAI-compatible endpoint, and always stops it again. No video bytes
-pass through the agent or the paid agent model.
-"""
+"""Caption clips through a fresh local vision server per job; video bytes stay outside agent model calls."""
 from __future__ import annotations
 
-import os
 import threading
 from pathlib import Path
 from typing import Annotated, Any
@@ -14,11 +8,10 @@ from typing import Annotated, Any
 from mcp.server.mcpserver import Context
 from pydantic import Field
 
-from .context import WORKSPACE, PathError, open_file, to_host
 from .. import fs, telemetry
-from ..faults import disk_fault
 from ..subproc import free_port
-from .jobs import job_dir
+from .context import PathError, clip_host_path, container_path, input_error, stage_clip
+from .gpu_jobs import clip_result, prepare_media, run_bridge
 from .server import FROM_FILE, ToolError, listed, refuse
 from .vllm_server import gpu_memory_mib, serve_command
 
@@ -28,55 +21,6 @@ SYSTEM = (
     "You are the video reader of a research pipeline. Each request gives one video clip and says what to "
     "say about it. Answer that request about this clip, in plain text: no preamble, no markdown, no mention "
     "of these instructions. Your text is used as it stands, so write exactly what the request asks for.")
-
-
-def container_path(path: str) -> str:
-    """Relative paths resolve against /workspace, like the agent's own working directory."""
-    return path if path.startswith("/") else str(WORKSPACE / path)
-
-
-def clip_host_path(caller, path: str) -> Path:
-    host = to_host(caller, container_path(path))
-    if not host.is_file():
-        raise PathError(f"{path} is not a file")
-    return host
-
-
-def input_error(exc: Exception) -> str:
-    """An item's staging error for its result; a disk fault raises."""
-    if disk_fault(exc):
-        raise exc
-    return f"input: {exc}"
-
-
-def stage_clip(caller, path: str, dst: Path) -> None:
-    """Hard-link (or copy) the caller's clip to `dst` without trusting the path between check and use.
-
-    The agent keeps running while the job runs, so any directory on the path can be swapped for
-    a link to a host directory after `clip_host_path` checked it. The file is opened with
-    O_NOFOLLOW, the open file's real path must still be inside the caller's mounts, and what
-    lands at `dst` must be that same inode (or a copy read from that open file). The bytes are recorded
-    from that open file once staged."""
-    fd = open_file(caller, clip_host_path(caller, path))
-    try:
-        info = os.fstat(fd)
-        real = os.readlink(f"/proc/self/fd/{fd}")
-        try:
-            fs.link(real, dst, follow_symlinks=False)
-        except OSError as exc:                         # e.g. another filesystem: copy the open file
-            telemetry.error(exc, "a copy instead")
-            with open(os.dup(fd), "rb") as fin:
-                fs.write_bytes(dst, fin.read())
-        else:
-            linked = os.stat(dst, follow_symlinks=False)
-            if (linked.st_dev, linked.st_ino) != (info.st_dev, info.st_ino):
-                fs.remove(dst)
-                raise PathError(f"{path} changed while it was being staged")
-        with open(os.dup(fd), "rb") as fin:
-            fin.seek(0)
-            telemetry.keep(path, fin, "read")
-    finally:
-        os.close(fd)
 
 
 class CaptionBackend:
@@ -95,12 +39,7 @@ class CaptionBackend:
 
     def run(self, job, cancel: threading.Event, report) -> dict:
         c = self.cfg.get("captioner")
-        caller = self.registry.lookup(job.token)
-        if caller is None:
-            raise RuntimeError("the phase that submitted this job has ended")
-        work = job_dir(self.run_dir, job)
-        media = work / "media"                    # the only directory the server may read
-        fs.mkdir(media)
+        caller, work, media = prepare_media(self, job)
         clips: dict[str, Path] = {}
         results: dict[str, dict] = {}
         for i, path in enumerate(job.args["paths"]):
@@ -114,7 +53,6 @@ class CaptionBackend:
 
         if not clips:
             return {"clips": results, "load_s": None, "gpu_memory_mib": None, "gpu_memory_released": None}
-        from .gpu_jobs import run_bridge           # imports this module
         port, peak = free_port(), {}
 
         def sample() -> None:
@@ -138,10 +76,7 @@ class CaptionBackend:
         for i, r in ran["rows"].items():
             results[paths[i]] = {"error": r["error"]} if "index" in r else r
         results = {p: results[p] for p in job.args["paths"] if p in results}     # the submitted order
-        ready = ran["ready"]
-        return {"clips": results, "load_s": ready["info"]["load_s"] if ready else None,
-                "gpu_memory_mib": {**ran["gpu_memory_mib"], "peak": peak or None},
-                "gpu_memory_released": ran["gpu_memory_released"]}
+        return {**clip_result(results, ran), "gpu_memory_mib": {**ran["gpu_memory_mib"], "peak": peak or None}}
 
 
 def submit(q, caller, paths, prompt: str) -> dict:
@@ -166,8 +101,7 @@ def submit(q, caller, paths, prompt: str) -> dict:
 
 
 def register_caption_tool(mcp, kit, q) -> None:
-    """caption_videos queues a job for the queue's `caption_videos` backend (the real
-    CaptionBackend, or a fake in smoke runs)."""
+    """Register caption job submission using the configured backend and item limit."""
     cap = getattr(q.backends.get(TOOL), "max_items", None)
 
     @mcp.tool(name=TOOL, description="Caption video clips with the kernel's local video model, which sees frames "

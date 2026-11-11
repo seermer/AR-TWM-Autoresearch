@@ -79,10 +79,7 @@ def _names(pids) -> str:
 
 def require_free_gpus(gpus: list[int], limit_mib: int, gpu_memory=gpu_memory_mib, waits=(), sleep=time.sleep,
                       own=set, processes=gpu_processes) -> None:
-    """Raise when a GPU holds more than `limit_mib`, checking again after each of `waits` seconds: the
-    agent's container sees the same GPUs, and a kernel job that starts beside the agent's own processes
-    runs out of memory. ToolError when only `own()` processes (the caller's sandbox) hold them; KernelFault
-    when another process does."""
+    """Require free GPUs, retrying waits; raise ToolError for caller-owned occupancy and KernelFault otherwise."""
     with telemetry.span("gpu.free_check", {"gpus": gpus, "limit_mib": limit_mib}) as sp:
         readings = []
         for wait in (*waits, None):
@@ -165,11 +162,8 @@ def serve_command(c: dict, gpus: list[int], port: int, served_name: str,
 
 
 class VllmServer:
-    """Runs `command` (from `serve_command`) in conda env `env` on `gpus` and waits for /health.
-    Requests need `api_key`: the agent's sandbox shares the host network.
-
-    `start` returns the load time in seconds, or None when `cancel` was set first. `stop` kills the
-    process group, waits for it, and returns its exit code."""
+    """Manage an API-key-protected local server in its own process group; return load time after health checks.
+    Cancellation returns no load time; stop kills and reaps the group."""
 
     def __init__(self, env: str, command: list[str], gpus: list[int], port: int, *, cwd: Path,
                  log_path: Path, poll_s: float = 2.0, label: str = "vLLM server") -> None:

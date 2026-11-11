@@ -61,6 +61,14 @@ def test_every_endpoint_answers_and_the_run_stays_untouched(client, run_dir):
     assert _snapshot(run_dir) == before
 
 
+def test_clips_endpoint_returns_all_rows_without_a_paging_envelope(client, monkeypatch):
+    [clip] = client.get("/api/clips/n1/ds1").json()
+    manifest = {"datasets": {"ds1": {"clips": ["clip1"] * 25 + ["missing"]}}}
+    monkeypatch.setattr(server.media, "_manifest", lambda *args: (None, manifest))
+    response = client.get("/api/clips/n1/ds1")
+    assert response.status_code == 200 and response.json() == [clip] * 25
+
+
 def test_node_agents_code_and_cost_carry_the_new_fields(client):
     n1 = client.get("/api/node/n1").json()
     assert n1["parent_recipe"] is None and n1["recipe"] and n1["children"] == ["n2"]

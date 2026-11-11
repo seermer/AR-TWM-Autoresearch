@@ -1,16 +1,5 @@
-"""rollout_h3: clips rendered by MiniMax H3 (through LightX2V, in its own env) from the agent's
-scene, subject and turns.
-
-The kernel writes the whole prompt: one continuous shot in MiniMax's prompt format, the scene and
-subject, the first turn's perspective, then each turn announced by the time it starts ("About 4.0
-seconds in, in the same continuous shot, ...") with its event, the camera sentence of its action and,
-when the perspective changes, the switch sentence. An item with a first frame whose turns are all first
-person and only move or stop gets the game-camera form instead: a gameplay style line, a player's-eye
-view, and each turn's camera move as what it does on screen, before its event. The clip is split into
-equal turns. MiniMax's guide documents a timestamp only at a cut ("[Shot 2] At ..."); that keeps the
-timing but changes the scene, so the in-shot form is our own and its timing is loose. The clip is
-published with its annotation (the planned start of each turn) and carries no pose.
-"""
+"""Render H3 clips with scene/subject and equal-duration turn instructions in one continuous shot.
+Eligible first-person movement uses gameplay phrasing; planned turn annotations carry approximate timing and no pose."""
 from __future__ import annotations
 
 import json

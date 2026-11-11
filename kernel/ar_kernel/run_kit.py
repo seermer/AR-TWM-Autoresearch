@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from contextlib import closing
 from pathlib import Path
 
 from . import telemetry
@@ -83,11 +84,8 @@ class RunKit:
 
 def build_run_kit(cfg, run_dir: Path, gpus: list[int], environ, repo) -> RunKit:
     budget = Budget.from_config(cfg)
-    conn = open_db(run_dir)
-    try:
+    with closing(open_db(run_dir)) as conn:
         budget.load(conn)
-    finally:
-        conn.close()
     registry = TokenRegistry(cfg.get("isolation.blocked_names") or [], host_roots(cfg))
     gpu_lock = threading.Lock()
     last = LastActivity()
@@ -112,12 +110,9 @@ def build_run_kit(cfg, run_dir: Path, gpus: list[int], environ, repo) -> RunKit:
 
     def verify(caller, commit: str):
         """The contract on an edit_self snapshot, with the contexts this node's phases get."""
-        conn = open_db(run_dir)                  # a tool thread: not the loop's connection
-        try:
+        with closing(open_db(run_dir)) as conn:
             contexts = smoke_contexts(env, conn=conn, node=caller.node,
                                       parent_id=NodeStore(conn).get(caller.node)["parent_id"])
-        finally:
-            conn.close()
         return verify_contract(cfg=cfg, run_dir=run_dir, run_id=Path(run_dir).name, repo=repo, commit=commit,
                                harness=harness, node=caller.node, attempt=caller.attempt,
                                contexts=contexts)

@@ -106,7 +106,6 @@ def _run(env: PhaseEnv, *, phase: str, node: str, attempt: int, code_commit: str
         env.repo.checkout(code_commit, running)
     for key in ("workspace", "context", "staging"):
         fs.mkdir(dirs[key])
-    fs.mkdir(Path(env.run_dir) / "store")
     write_bundle(ctx, dirs["context"], env.cfg.get("isolation.blocked_names") or [], host_roots(env.cfg))
     mounts = Mounts(agent=dirs["agent"], workspace=dirs["workspace"], staging=dirs["staging"], context=dirs["context"],
                     contract=env.cfg.repo_root / "contract", sockets=env.socket_dir, agent_readonly=agent_readonly,

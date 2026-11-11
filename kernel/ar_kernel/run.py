@@ -12,7 +12,7 @@ from .archive.db import open_db, open_db_readonly
 from .archive.nodes import NodeStore
 from .control import Control
 from .doctor import ENVS, wbench_weight_problems
-from .config import OVERLAY_SNAPSHOT, SNAPSHOT_FILES, KernelConfig, live_config_path
+from .config import KernelConfig, live_config_path, tool_blocks
 from .eval.judge import Judge, resolve_judge
 from .eval.lora import concat_eval_lora
 from .eval.render import build_render_config, render_proxy
@@ -105,11 +105,14 @@ def bootstrap_run(cfg: KernelConfig, new: NewRun, gpus: list[int]) -> RunContext
     run_dir = cfg.runs_dir / new.run_id
     fs.mkdir(run_dir / "config")
     fs.mkdir(run_dir / "cache" / "text_embed")
-    for name in SNAPSHOT_FILES:
-        fs.copy(live_config_path(cfg, name), run_dir / "config" / name)
+    fs.write_text(run_dir / "config" / "kernel.yaml", yaml.safe_dump(cfg.raw, sort_keys=False))
+    fs.copy(cfg.base_recipe, run_dir / "config" / "base_recipe.yaml")
     fs.copy(cfg.eval_cases, run_dir / "config" / "proxy_cases.txt")
+    provenance = run_dir / "config" / "provenance"
+    fs.mkdir(provenance)
+    fs.copy(live_config_path(cfg, "kernel.yaml"), provenance / "kernel.yaml")
     if cfg.overlay is not None:
-        fs.write_text(run_dir / "config" / OVERLAY_SNAPSHOT, yaml.safe_dump(cfg.overlay, sort_keys=False))
+        fs.write_text(provenance / "overlay.yaml", yaml.safe_dump(cfg.overlay, sort_keys=False))
     fs.write_text(run_dir / "config" / "versions.json", json.dumps(new.versions, indent=2))
     # run.json is written last: its presence is what marks the run as created.
     fs.write_text(run_dir / "config" / "run.json", json.dumps(
@@ -122,9 +125,8 @@ def bootstrap_run(cfg: KernelConfig, new: NewRun, gpus: list[int]) -> RunContext
 
 def record_envs(cfg: KernelConfig) -> None:
     """`conda list` of every env the run uses, each a process span with the list as its output."""
-    tools = [cfg.get(k) or {} for k in ("annotate", "images")] + list((cfg.get("generators") or {}).values())
     envs = dict.fromkeys(("autoresearcher", "agent", *ENVS, cfg.get("captioner.env"),
-                          *(b["env"] for b in tools if b.get("enabled") and b.get("env"))))
+                          *(b["env"] for b in tool_blocks(cfg).values() if b.get("enabled") and b.get("env"))))
     for env in envs:
         subproc.run(["conda", "list", "-p", str(subproc.env_path(env)), "--json"])
 
@@ -175,11 +177,16 @@ def root_key_fields(ctx: RunContext, cfg: KernelConfig) -> dict:
     return fields
 
 
-def _meta(cfg: KernelConfig, run_id: str) -> dict:
-    """A missing run is an error, so a mistyped run id cannot make a fresh run."""
-    meta_path = cfg.runs_dir / run_id / "config" / "run.json"
-    if not meta_path.exists():
+def existing_run_dir(cfg: KernelConfig, run_id: str) -> Path:
+    run_dir = cfg.runs_dir / run_id
+    if not (run_dir / "config" / "run.json").exists():
         raise RunNotFound(f"no run {run_id!r} under {cfg.runs_dir}")
+    return run_dir
+
+
+def _meta(cfg: KernelConfig, run_id: str) -> dict:
+    """Read an existing run's metadata."""
+    meta_path = existing_run_dir(cfg, run_id) / "config" / "run.json"
     return json.loads(meta_path.read_text())
 
 

@@ -119,6 +119,22 @@ def test_a_job_asks_about_every_event_in_every_frame_and_returns_spans_only(env)
     assert not (job_folder(run, out["id"]) / "media").exists()
 
 
+def test_staging_failure_keeps_original_indices_and_result_order(env):
+    q, caller, run = env
+    with q.gpu_lock:
+        job = le.submit(q, caller, [{"video": p, "events": ["Rain."]} for p in ["a.mp4", "b.mp4"]])["job_id"]
+        (caller.workspace_host / "a.mp4").unlink()
+    out = q.wait(caller, job, 120)
+    assert out["state"] == "done"
+    clips = job_result(out)["clips"]
+    assert list(clips) == ["/workspace/a.mp4", "/workspace/b.mp4"]
+    assert "error" in clips["/workspace/a.mp4"]
+    assert clips["/workspace/b.mp4"]["events"][0]["event"] == "Rain."
+    assert out["progress"] == {"done": 2, "total": 2}
+    assert [m["index"] for m in messages(run, job) if m["type"] == "item"] == [1]
+    assert not (job_folder(run, job) / "media").exists()
+
+
 def test_an_answer_off_the_asked_shape_is_that_clips_error_and_kept(env):
     q, caller, run = env
     out = q.wait(caller, le.submit(q, caller, [{"video": "a.mp4", "events": ["BROKEN."]},

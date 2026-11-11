@@ -3,7 +3,7 @@ import subprocess
 import threading
 
 import pytest
-from conftest import telemetry_payload, telemetry_records
+from conftest import git_file, telemetry_payload, telemetry_records
 
 from ar_kernel import telemetry
 from ar_kernel.agent_phase import PhaseEnv, attempt_dirs, run_edit_self, run_improve_recipe
@@ -96,7 +96,7 @@ def test_edit_self_commits_the_edited_code_to_an_attempt_ref(env):
     out = run_edit_self(penv, conn=conn, node="n1", parent_id="root", agent_commit=root, attempt=1)
     assert out.ok and out.result == {"snapshot_id": out.commit, "summary": "tightened prompts"}
     assert penv.repo.resolve("refs/attempts/n1/edit_self-1") == out.commit
-    assert "# v2" in penv.repo.read_file(out.commit, "agent/entry.py")
+    assert "# v2" in git_file(penv.repo, out.commit, "agent/entry.py")
     assert runner.calls[0]["mounts"].agent_readonly is False
 
 
@@ -551,7 +551,7 @@ def test_the_accepted_edit_is_the_snapshot_not_the_tree_at_the_end(env):
     assert penv.repo.resolve("refs/attempts/n1/edit_self-1") == out.commit
     assert [(r["phase"], r["attempt"], r["kind"], r["name"]) for r in activity(conn, "n1")] == [
         ("edit_self", 1, "accepted", out.commit)]
-    assert penv.repo.read_file(out.commit, "agent/entry.py").startswith("# snapshotted")
+    assert git_file(penv.repo, out.commit, "agent/entry.py").startswith("# snapshotted")
 
 
 @pytest.mark.parametrize("snapshot", ["0" * 40, "../../heads/node/root", "another attempt's"])
@@ -565,7 +565,7 @@ def test_an_edit_result_naming_no_snapshot_of_this_attempt_fails_and_commits_the
     out = run_edit_self(penv, conn=conn, node="n1", parent_id="root", agent_commit=root,
                         attempt=2)
     assert not out.ok and out.result is None and "snapshot" in out.error
-    assert penv.repo.read_file(out.commit, "agent/entry.py") == "# end tree\n"
+    assert git_file(penv.repo, out.commit, "agent/entry.py") == "# end tree\n"
     assert penv.repo.resolve("refs/attempts/n1/edit_self-2") == out.commit
 
 

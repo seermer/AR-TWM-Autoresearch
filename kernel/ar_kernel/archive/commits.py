@@ -151,18 +151,8 @@ class CommitStore:
         return json.loads(self.get(commit_id)["manifest"])
 
     def materialize(self, commit_id: str, dest: Path) -> dict[str, Path]:
-        """Build a hardlink view of `commit_id` at `dest`, REPLACING anything there.
-
-        The view is assembled in a sibling temp directory and swapped in, so the
-        result holds exactly the commit's clips. Adding into an existing view was
-        wrong: WorldModel's loader lists videos/ directly, so a clip dropped
-        between gate attempts stayed in the view and the node trained on data its
-        recorded commit did not contain.
-
-        Replacing deletes the old destination, so it only ever deletes a directory
-        carrying VIEW_MARKER (written here) -- never an arbitrary path. Removing a
-        view unlinks hardlinks only; the blob store keeps its own link.
-        """
+        """Atomically replace a marked view with exactly this commit's hardlinked clips.
+        Only marked destinations may be removed; the blob store retains its own links."""
         dest = Path(dest)
         if dest.exists() and any(dest.iterdir()) and not (dest / VIEW_MARKER).is_file():
             raise CommitError(f"{dest} exists and is not a kernel-built view; refusing to replace it")

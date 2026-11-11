@@ -47,7 +47,8 @@ def test_edit_context_validates_and_round_trips(world, tmp_path):
     path = write_bundle(ctx, tmp_path / "ctx")
     loaded = json.loads(path.read_text())
     assert loaded["lineage"][0]["node_id"] == "root"
-    assert not {"nodes_remaining", "attempt", "max_attempts"} & set(loaded)
+    assert not {"nodes_remaining", "attempt", "max_attempts", "agent_dir"} & set(loaded)
+    assert "/agent" in loaded["folders"]
     assert "retry" not in loaded and [f.name for f in (tmp_path / "ctx").iterdir()] == ["context.json"]
 
 
@@ -55,7 +56,12 @@ def test_recipe_context_carries_rules_and_allowlists(world):
     conn, repo, run = world
     ctx = build_recipe_context(cfg=CFG, conn=conn, run_dir=run, repo=repo, node_id="n1",
                                parent_id="root", n_gpus=4, tools=["data_query", "data_commit"])
+    assert "workspace" not in ctx.model_dump() and "/workspace" in ctx.folders
     assert "optimizer.max_steps" in ctx.tunable_rules
+    assert ctx.tunable_rules["optimizer.lr"] == {"type": "float", "min": 0.0, "min_exclusive": True}
+    assert ctx.tunable_rules["optimizer.max_grad_norm"]["min_exclusive"] is True
+    assert ctx.tunable_rules["optimizer.weight_decay"]["min_exclusive"] is False
+    assert all("max" not in rule for rule in ctx.tunable_rules.values())
     assert not hasattr(ctx, "resolution_allowlist")
     assert ctx.base_recipe["optimizer"]["batch_size"] == 1
     assert not hasattr(ctx, "format_rules")

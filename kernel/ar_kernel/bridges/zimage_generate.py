@@ -1,14 +1,4 @@
-"""generate_images worker (runs in the gen-zimage conda-prefix env): text prompt -> first-frame
-image via Z-Image-Turbo (Tongyi-MAI/Z-Image-Turbo, Apache-2.0, diffusers ZImagePipeline).
-
-python zimage_generate.py --job <work>/job.json (bridges/protocol.py): one worker per GPU group; per item
-<out>/<index>.png. Job file: paths.weights, args.width, args.height, config.steps, config.offload ("none" or
-"model"). The model loads once per worker. Turbo runs `num_inference_steps` DiT steps with `guidance_scale=0.0`
-(model card, pinned revision).
-
-`offload: model` (the kernel default) calls `enable_model_cpu_offload()`: every allowed size fits
-(peak 12.8 GB). `offload: none` keeps the pipeline on the GPU and OOMs at 1920x1088.
-"""
+"""Generate images with one Z-Image-Turbo pipeline per GPU worker, using model offload or resident weights."""
 from __future__ import annotations
 
 import sys

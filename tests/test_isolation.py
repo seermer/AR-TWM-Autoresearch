@@ -38,8 +38,7 @@ def test_scrub_removes_this_machines_folders_wherever_the_project_sits(tmp_path,
     """ffprobe's command line in a rejection, a log tail in a gate failure: they name kernel files by host
     path. The folders come from the config and the environment, never from a fixed path."""
     from ar_kernel.isolation import host_roots
-    raw = {**CFG.raw, "paths": {**CFG.raw["paths"], "worldmodel": str(tmp_path / "elsewhere" / "WM"),
-                                "runs_dir": "runs"}}
+    raw = {**CFG.raw, "paths": {**CFG.raw["paths"], "worldmodel": str(tmp_path / "elsewhere" / "WM")}}
     moved = KernelConfig(raw=raw, repo_root=tmp_path / "proj" / "AR")
     monkeypatch.setenv("HOME", str(tmp_path / "home" / "someone"))
     roots = host_roots(moved)
